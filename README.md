@@ -15,7 +15,7 @@ cargo install cruise
 ### Homebrew
 
 ```sh
-brew install takumi3488/tap/cruise
+brew install smartcrabai/tap/cruise
 ```
 
 ## Usage

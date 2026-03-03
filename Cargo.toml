@@ -36,7 +36,7 @@ ci = "github"
 install-path = "CARGO_HOME"
 installers = ["shell", "homebrew"]
 publish-jobs = ["homebrew"]
-tap = "takumi3488/homebrew-tap"
+tap = "smartcrabai/homebrew-tap"
 targets = [
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
