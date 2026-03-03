@@ -5,14 +5,35 @@ use std::path::PathBuf;
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkflowConfig {
-    /// LLM invocation command (e.g. ["claude", "-p"]).
+    /// LLM invocation command (e.g. ["claude", "--model", "{model}", "-p"]).
     pub command: Vec<String>,
+
+    /// Default model for prompt steps (e.g. "sonnet"). Per-step model overrides this.
+    pub model: Option<String>,
 
     /// File path bound to the `plan` variable.
     pub plan: Option<PathBuf>,
 
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
+}
+
+/// A command value that can be either a single string or a list of strings.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+/// Skip condition: static boolean or a variable reference.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum SkipCondition {
+    /// Always skip (true) or never skip (false).
+    Static(bool),
+    /// Skip if the named variable resolves to "true".
+    Variable(String),
 }
 
 /// Per-step configuration. All fields are optional.
@@ -24,7 +45,7 @@ pub struct StepConfig {
     /// Prompt body (prompt steps only).
     pub prompt: Option<String>,
 
-    /// System prompt (prompt steps only).
+    /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
 
     /// Variable name to store LLM output into (prompt steps only).
@@ -34,43 +55,33 @@ pub struct StepConfig {
     pub description: Option<String>,
 
     /// List of choices (option steps only).
-    pub option: Option<Vec<OptionConfig>>,
+    pub option: Option<Vec<OptionItem>>,
 
-    /// Free-text input configuration (option steps only).
-    #[serde(rename = "text-input")]
-    pub text_input: Option<TextInputConfig>,
-
-    /// Shell command to run (command steps only).
-    pub command: Option<String>,
+    /// Shell command(s) to run (command steps only).
+    pub command: Option<StringOrVec>,
 
     /// Explicit next step name, overriding sequential order.
     pub next: Option<String>,
 
-    /// When true, always skip this step.
-    pub skip: Option<bool>,
+    /// Skip condition: static bool or variable reference.
+    pub skip: Option<SkipCondition>,
 
     /// Conditional execution rule.
     #[serde(rename = "if")]
     pub if_condition: Option<IfCondition>,
 }
 
-/// A single choice in an option step.
+/// A single item in an option step.
 #[derive(Debug, Deserialize, Clone)]
-pub struct OptionConfig {
-    /// Display label shown to the user.
-    pub label: String,
+pub struct OptionItem {
+    /// Selector label shown in the menu.
+    pub selector: Option<String>,
 
-    /// Step to go to when selected (None = end of workflow).
-    pub next: Option<String>,
-}
+    /// Free-text input label (shows a text prompt when selected).
+    #[serde(rename = "text-input")]
+    pub text_input: Option<String>,
 
-/// Free-text input configuration for an option step.
-#[derive(Debug, Deserialize, Clone)]
-pub struct TextInputConfig {
-    /// Prompt label shown to the user.
-    pub label: String,
-
-    /// Step to go to after input.
+    /// Step to go to when this item is selected (None = end of workflow).
     pub next: Option<String>,
 }
 
@@ -110,13 +121,12 @@ steps:
   review_plan:
     description: "Review the plan"
     option:
-      - label: "Approve and continue"
+      - selector: "Approve and continue"
         next: implement
-      - label: "Revise the plan"
+      - selector: "Revise the plan"
         next: planning
-    text-input:
-      label: "Other (text input)"
-      next: planning
+      - text-input: "Other (text input)"
+        next: planning
 
   implement:
     prompt: "Implement based on the plan: {plan}"
@@ -134,6 +144,7 @@ steps:
     fn test_parse_workflow_config() {
         let config = WorkflowConfig::from_yaml(SAMPLE_YAML).unwrap();
         assert_eq!(config.command, vec!["claude", "-p"]);
+        assert_eq!(config.model, None);
         assert_eq!(config.plan, Some(PathBuf::from("plan.md")));
     }
 
@@ -167,10 +178,35 @@ steps:
     }
 
     #[test]
-    fn test_command_step_fields() {
+    fn test_command_step_single() {
         let config = WorkflowConfig::from_yaml(SAMPLE_YAML).unwrap();
         let run_tests = config.steps.get("run_tests").unwrap();
-        assert_eq!(run_tests.command, Some("cargo test".to_string()));
+        match run_tests.command.as_ref().unwrap() {
+            StringOrVec::Single(s) => assert_eq!(s, "cargo test"),
+            _ => panic!("Expected Single command"),
+        }
+    }
+
+    #[test]
+    fn test_command_list_field() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  multi:
+    command:
+      - cargo fmt
+      - cargo test
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let step = config.steps.get("multi").unwrap();
+        match step.command.as_ref().unwrap() {
+            StringOrVec::Multiple(cmds) => {
+                assert_eq!(cmds.len(), 2);
+                assert_eq!(cmds[0], "cargo fmt");
+                assert_eq!(cmds[1], "cargo test");
+            }
+            _ => panic!("Expected Multiple commands"),
+        }
     }
 
     #[test]
@@ -178,14 +214,18 @@ steps:
         let config = WorkflowConfig::from_yaml(SAMPLE_YAML).unwrap();
         let review = config.steps.get("review_plan").unwrap();
         let options = review.option.as_ref().unwrap();
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[0].label, "Approve and continue");
+        assert_eq!(options.len(), 3);
+        assert_eq!(
+            options[0].selector,
+            Some("Approve and continue".to_string())
+        );
         assert_eq!(options[0].next, Some("implement".to_string()));
         assert_eq!(options[1].next, Some("planning".to_string()));
-
-        let text_input = review.text_input.as_ref().unwrap();
-        assert_eq!(text_input.label, "Other (text input)");
-        assert_eq!(text_input.next, Some("planning".to_string()));
+        assert_eq!(
+            options[2].text_input,
+            Some("Other (text input)".to_string())
+        );
+        assert_eq!(options[2].next, Some("planning".to_string()));
     }
 
     #[test]
@@ -197,7 +237,7 @@ steps:
     }
 
     #[test]
-    fn test_skip_field() {
+    fn test_skip_static_field() {
         let yaml = r#"
 command: [claude, -p]
 steps:
@@ -207,7 +247,24 @@ steps:
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         let step = config.steps.get("optional_step").unwrap();
-        assert_eq!(step.skip, Some(true));
+        assert!(matches!(step.skip, Some(SkipCondition::Static(true))));
+    }
+
+    #[test]
+    fn test_skip_variable_field() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  conditional_skip:
+    command: cargo fmt
+    skip: prev.success
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let step = config.steps.get("conditional_skip").unwrap();
+        match &step.skip {
+            Some(SkipCondition::Variable(name)) => assert_eq!(name, "prev.success"),
+            _ => panic!("Expected Variable skip condition"),
+        }
     }
 
     #[test]
@@ -221,5 +278,15 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.plan, None);
         assert_eq!(config.steps.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_cruise_yaml() {
+        let yaml = include_str!("../cruise.yaml");
+        let config = WorkflowConfig::from_yaml(yaml).expect("failed to parse cruise.yaml");
+        assert_eq!(config.command, vec!["claude", "--model", "{model}", "-p"]);
+        assert_eq!(config.model, Some("sonnet".to_string()));
+        assert_eq!(config.plan, Some(PathBuf::from(".cruise/plan.md")));
+        assert!(!config.steps.is_empty(), "steps is empty");
     }
 }

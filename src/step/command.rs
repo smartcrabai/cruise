@@ -11,6 +11,24 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Execute a list of shell commands sequentially.
+/// Stops immediately on the first failure and returns that result.
+pub async fn run_commands(cmds: &[String], max_retries: usize) -> Result<CommandResult> {
+    let mut last_result = CommandResult {
+        success: true,
+        stderr: String::new(),
+    };
+
+    for cmd in cmds {
+        last_result = run_command(cmd, max_retries).await?;
+        if !last_result.success {
+            return Ok(last_result);
+        }
+    }
+
+    Ok(last_result)
+}
+
 /// Execute a shell command with optional rate-limit retry.
 pub async fn run_command(cmd: &str, max_retries: usize) -> Result<CommandResult> {
     let mut attempts = 0;
@@ -127,6 +145,27 @@ mod tests {
     async fn test_run_failing_command() {
         let result = run_command("exit 1", 0).await.unwrap();
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_run_commands_sequential() {
+        let cmds = vec!["echo a".to_string(), "echo b".to_string()];
+        let result = run_commands(&cmds, 0).await.unwrap();
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_run_commands_stops_on_failure() {
+        // Second command would succeed but shouldn't run because first fails.
+        let cmds = vec!["exit 1".to_string(), "echo ok".to_string()];
+        let result = run_commands(&cmds, 0).await.unwrap();
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_run_commands_empty() {
+        let result = run_commands(&[], 0).await.unwrap();
+        assert!(result.success);
     }
 
     #[tokio::test]

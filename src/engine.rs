@@ -4,10 +4,13 @@ use console::style;
 
 use crate::cli::Args;
 use crate::condition::{evaluate_if_condition, should_skip};
-use crate::config::WorkflowConfig;
+use crate::config::{SkipCondition, WorkflowConfig};
+
+/// Variable name that maps to the plan file.
+const PLAN_VAR_NAME: &str = "plan";
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
-use crate::step::command::run_command;
+use crate::step::command::run_commands;
 use crate::step::option::run_option;
 use crate::step::prompt::run_prompt;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
@@ -30,7 +33,7 @@ pub async fn run(args: Args) -> Result<()> {
     let mut vars = VariableStore::new(input.clone());
 
     if let Some(plan_path) = &config.plan {
-        vars.set_named_file("plan", plan_path.clone());
+        vars.set_named_file(PLAN_VAR_NAME, plan_path.clone());
     }
 
     let mut tracker = FileTracker::with_root(std::env::current_dir()?);
@@ -55,36 +58,29 @@ pub async fn run(args: Args) -> Result<()> {
         let step_config = config
             .steps
             .get(&current_step)
-            .ok_or_else(|| CruiseError::StepNotFound(current_step.clone()))?
-            .clone();
+            .ok_or_else(|| CruiseError::StepNotFound(current_step.clone()))?;
 
-        // Skip step unconditionally.
-        if should_skip(step_config.skip) {
-            eprintln!("{} skipping: {}", style("→").yellow(), current_step);
+        // Determine if this step should be skipped and why.
+        let skip_msg = if should_skip(&step_config.skip, &vars)? {
+            Some(format!("skipping: {}", current_step))
+        } else if let Some(ref if_cond) = step_config.if_condition {
+            if !evaluate_if_condition(if_cond, &tracker)? {
+                Some(format!("condition not met, skipping: {}", current_step))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(msg) = skip_msg {
+            eprintln!("{} {}", style("→").yellow(), msg);
             match get_next_step(&config, &current_step, None) {
                 Some(next) => {
                     current_step = next;
                     continue;
                 }
                 None => break,
-            }
-        }
-
-        // Skip step if `if` condition is not met.
-        if let Some(ref if_cond) = step_config.if_condition {
-            if !evaluate_if_condition(if_cond, &tracker)? {
-                eprintln!(
-                    "{} condition not met, skipping: {}",
-                    style("→").yellow(),
-                    current_step
-                );
-                match get_next_step(&config, &current_step, None) {
-                    Some(next) => {
-                        current_step = next;
-                        continue;
-                    }
-                    None => break,
-                }
             }
         }
 
@@ -95,7 +91,7 @@ pub async fn run(args: Args) -> Result<()> {
         );
 
         let step_next = step_config.next.clone();
-        let kind = StepKind::try_from(step_config)?;
+        let kind = StepKind::try_from(step_config.clone())?;
 
         let option_next = match &kind {
             StepKind::Prompt(step) => {
@@ -103,14 +99,7 @@ pub async fn run(args: Args) -> Result<()> {
                 None
             }
             StepKind::Command(step) => {
-                run_command_step(
-                    &mut vars,
-                    &tracker,
-                    step,
-                    &current_step,
-                    args.rate_limit_retries,
-                )
-                .await?;
+                run_command_step(&mut vars, step, args.rate_limit_retries).await?;
                 // Snapshot after the command so `if: file-changed` can detect diffs.
                 tracker.take_snapshot(&current_step)?;
                 None
@@ -145,6 +134,46 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the `{model}` placeholder in a command, or strip `--model {model}` if no model.
+///
+/// - `Some(model)`: replaces every `{model}` occurrence with the model string.
+/// - `None`: removes arguments containing `{model}` and any immediately-preceding `--model` flag.
+fn resolve_command_with_model(command: &[String], effective_model: Option<&str>) -> Vec<String> {
+    if let Some(model) = effective_model {
+        command
+            .iter()
+            .map(|arg| arg.replace("{model}", model))
+            .collect()
+    } else {
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < command.len() {
+            let arg = &command[i];
+            if arg == "--model" {
+                // Only remove the pair if the next arg is a {model} template placeholder.
+                if command
+                    .get(i + 1)
+                    .is_some_and(|next| next.contains("{model}"))
+                {
+                    i += 2;
+                } else {
+                    result.push(arg.clone());
+                    i += 1;
+                }
+            } else if arg.starts_with("--model=") {
+                // Always drop --model=VALUE when effective_model is None.
+                i += 1;
+            } else if arg.contains("{model}") {
+                i += 1;
+            } else {
+                result.push(arg.clone());
+                i += 1;
+            }
+        }
+        result
+    }
+}
+
 /// Execute a prompt step, updating variable state.
 async fn run_prompt_step(
     vars: &mut VariableStore,
@@ -152,21 +181,38 @@ async fn run_prompt_step(
     step: &PromptStep,
     rate_limit_retries: usize,
 ) -> Result<()> {
+    // Display instruction and description.
+    if let Some(inst) = &step.instruction {
+        let resolved = vars.resolve(inst)?;
+        eprintln!("  {}", style(resolved).dim());
+    }
     if let Some(desc) = &step.description {
-        eprintln!("  {}", style(desc).dim());
+        let resolved = vars.resolve(desc)?;
+        eprintln!("  {}", style(resolved).dim());
     }
 
     let prompt = vars.resolve(&step.prompt)?;
-    let instruction = step
-        .instruction
-        .as_ref()
-        .map(|s| vars.resolve(s))
-        .transpose()?;
+
+    // Effective model: step-level overrides config-level default.
+    let effective_model = step.model.as_deref().or(config.model.as_deref());
+
+    // If the command contains a {model} placeholder, resolve it there and pass
+    // model=None to run_prompt (backward-compat path). Otherwise pass model
+    // directly so execute_prompt appends --model as before.
+    let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
+
+    let (resolved_command, model_arg) = if has_placeholder {
+        (
+            resolve_command_with_model(&config.command, effective_model),
+            None,
+        )
+    } else {
+        (config.command.clone(), effective_model.map(str::to_string))
+    };
 
     let result = run_prompt(
-        &config.command,
-        step.model.as_deref(),
-        instruction.as_deref(),
+        &resolved_command,
+        model_arg.as_deref(),
         &prompt,
         rate_limit_retries,
     )
@@ -174,10 +220,10 @@ async fn run_prompt_step(
 
     if let Some(output_var) = &step.output {
         // Write to the plan file if this output is bound to it.
-        if let Some(plan_path) = &config.plan {
-            if output_var == "plan" {
-                std::fs::write(plan_path, &result.output)?;
-            }
+        if let Some(plan_path) = &config.plan
+            && output_var == PLAN_VAR_NAME
+        {
+            std::fs::write(plan_path, &result.output)?;
         }
         vars.set_named_value(output_var, result.output.clone());
     }
@@ -191,19 +237,26 @@ async fn run_prompt_step(
 /// Execute a command step, updating variable state.
 async fn run_command_step(
     vars: &mut VariableStore,
-    _tracker: &FileTracker,
     step: &CommandStep,
-    _step_name: &str,
     rate_limit_retries: usize,
 ) -> Result<()> {
     if let Some(desc) = &step.description {
-        eprintln!("  {}", style(desc).dim());
+        let resolved = vars.resolve(desc)?;
+        eprintln!("  {}", style(resolved).dim());
     }
 
-    let cmd = vars.resolve(&step.command)?;
-    eprintln!("  {} {}", style("$").dim(), style(&cmd).dim());
+    // Resolve variables in each command, then display and run.
+    let cmds: Vec<String> = step
+        .command
+        .iter()
+        .map(|c| vars.resolve(c))
+        .collect::<Result<Vec<_>>>()?;
 
-    let result = run_command(&cmd, rate_limit_retries).await?;
+    for cmd in &cmds {
+        eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
+    }
+
+    let result = run_commands(&cmds, rate_limit_retries).await?;
 
     vars.set_prev_success(Some(result.success));
     vars.set_prev_stderr(Some(result.stderr));
@@ -215,11 +268,13 @@ async fn run_command_step(
 
 /// Execute an option step, updating variable state and returning the chosen next step.
 fn run_option_step(vars: &mut VariableStore, step: &OptionStep) -> Result<Option<String>> {
-    let result = run_option(
-        &step.options,
-        step.text_input.as_ref(),
-        step.description.as_deref(),
-    )?;
+    let desc = step
+        .description
+        .as_ref()
+        .map(|d| vars.resolve(d))
+        .transpose()?;
+
+    let result = run_option(&step.choices, desc.as_deref())?;
 
     if let Some(ref text) = result.text_input {
         vars.set_prev_input(Some(text.clone()));
@@ -257,6 +312,10 @@ fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
 
+    if let Some(model) = &config.model {
+        println!("model: {}", model);
+    }
+
     if let Some(plan) = &config.plan {
         println!("plan: {}", plan.display());
     }
@@ -286,8 +345,12 @@ fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
 
         print!("  {} [{}]", style(name).bold(), style(kind_label).cyan());
 
-        if step.skip == Some(true) {
-            print!(" {}", style("(skip)").yellow());
+        match &step.skip {
+            Some(SkipCondition::Static(true)) => print!(" {}", style("(skip)").yellow()),
+            Some(SkipCondition::Variable(v)) => {
+                print!(" {}", style(format!("(skip if {v})")).yellow())
+            }
+            _ => {}
         }
         if step.if_condition.is_some() {
             print!(" {}", style("(conditional)").yellow());
@@ -320,6 +383,61 @@ mod tests {
             rate_limit_retries: 0,
             dry_run,
         }
+    }
+
+    #[test]
+    fn test_resolve_command_with_model_some() {
+        let command = vec![
+            "claude".to_string(),
+            "--model".to_string(),
+            "{model}".to_string(),
+            "-p".to_string(),
+        ];
+        let resolved = resolve_command_with_model(&command, Some("sonnet"));
+        assert_eq!(resolved, vec!["claude", "--model", "sonnet", "-p"]);
+    }
+
+    #[test]
+    fn test_resolve_command_with_model_none() {
+        let command = vec![
+            "claude".to_string(),
+            "--model".to_string(),
+            "{model}".to_string(),
+            "-p".to_string(),
+        ];
+        let resolved = resolve_command_with_model(&command, None);
+        assert_eq!(resolved, vec!["claude", "-p"]);
+    }
+
+    #[test]
+    fn test_resolve_command_no_placeholder() {
+        let command = vec!["claude".to_string(), "-p".to_string()];
+        let resolved = resolve_command_with_model(&command, Some("opus"));
+        assert_eq!(resolved, vec!["claude", "-p"]);
+    }
+
+    #[test]
+    fn test_resolve_command_model_equals_form_none() {
+        // --model=value form is also removed when None
+        let command = vec![
+            "claude".to_string(),
+            "--model=claude-opus-4-6".to_string(),
+            "-p".to_string(),
+        ];
+        let resolved = resolve_command_with_model(&command, None);
+        assert_eq!(resolved, vec!["claude", "-p"]);
+    }
+
+    #[test]
+    fn test_resolve_command_model_equals_form_some() {
+        // --model=value form does not contain {model}, so it is preserved when Some
+        let command = vec![
+            "claude".to_string(),
+            "--model={model}".to_string(),
+            "-p".to_string(),
+        ];
+        let resolved = resolve_command_with_model(&command, Some("claude-opus-4-6"));
+        assert_eq!(resolved, vec!["claude", "--model=claude-opus-4-6", "-p"]);
     }
 
     #[test]
@@ -397,6 +515,24 @@ steps:
     }
 
     #[tokio::test]
+    async fn test_run_command_list_workflow() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command:
+      - "echo hello"
+      - "echo world"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), Some("test"), None, false);
+        let result = run(args).await;
+        assert!(result.is_ok(), "workflow run failed: {:?}", result);
+    }
+
+    #[tokio::test]
     async fn test_run_skip_step() {
         let yaml = r#"
 command: [echo]
@@ -412,6 +548,28 @@ steps:
 
         let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
         // The skipped step has `exit 1` but should not be executed.
+        let result = run(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_dynamic_skip_step() {
+        let yaml = r#"
+command: [echo]
+steps:
+  first:
+    command: "echo success"
+  skipped:
+    command: "exit 1"
+    skip: prev.success
+  normal:
+    command: "echo done"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        // "first" succeeds → prev.success = true → "skipped" step is skipped.
         let result = run(args).await;
         assert!(result.is_ok());
     }
@@ -475,6 +633,25 @@ steps:
     }
 
     #[tokio::test]
+    async fn test_dry_run_with_skip_variable() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  step1:
+    command: "echo hi"
+  step2:
+    command: "echo skip me"
+    skip: prev.success
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, true);
+        let result = run(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_config_not_found() {
         let args = make_args("nonexistent.yaml", None, None, false);
         let result = run(args).await;
@@ -493,6 +670,23 @@ steps:
         std::fs::write(tmp.path(), yaml).unwrap();
 
         let args = make_args(tmp.path().to_str().unwrap(), Some("hello"), None, false);
+        let result = run(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_variable_resolution_in_description() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo hello"
+    description: "Input is: {input}"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), Some("world"), None, false);
         let result = run(args).await;
         assert!(result.is_ok());
     }

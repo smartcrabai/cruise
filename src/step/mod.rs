@@ -1,4 +1,4 @@
-use crate::config::StepConfig;
+use crate::config::{OptionItem, StepConfig, StringOrVec};
 use crate::error::{CruiseError, Result};
 
 pub mod command;
@@ -10,7 +10,7 @@ pub mod prompt;
 pub enum StepKind {
     /// Calls an LLM via the configured command.
     Prompt(PromptStep),
-    /// Runs a shell command.
+    /// Runs one or more shell commands.
     Command(CommandStep),
     /// Presents an interactive selection menu.
     Option(OptionStep),
@@ -29,15 +29,33 @@ pub struct PromptStep {
 /// Parameters for a command step.
 #[derive(Debug, Clone)]
 pub struct CommandStep {
-    pub command: String,
+    /// One or more shell commands to run sequentially.
+    pub command: Vec<String>,
     pub description: Option<String>,
+}
+
+/// A single choice in an option step.
+#[derive(Debug, Clone)]
+pub enum OptionChoice {
+    /// A regular selector item.
+    Selector { label: String, next: Option<String> },
+    /// A free-text input item.
+    TextInput { label: String, next: Option<String> },
+}
+
+impl OptionChoice {
+    pub fn label(&self) -> &str {
+        match self {
+            OptionChoice::Selector { label, .. } => label,
+            OptionChoice::TextInput { label, .. } => label,
+        }
+    }
 }
 
 /// Parameters for an option step.
 #[derive(Debug, Clone)]
 pub struct OptionStep {
-    pub options: Vec<crate::config::OptionConfig>,
-    pub text_input: Option<crate::config::TextInputConfig>,
+    pub choices: Vec<OptionChoice>,
     pub description: Option<String>,
 }
 
@@ -57,29 +75,29 @@ impl TryFrom<StepConfig> for StepKind {
         }
 
         // Command step: `command` field is present without `option`.
-        if let Some(command) = config.command {
-            if config.option.is_none() {
-                return Ok(StepKind::Command(CommandStep {
-                    command,
-                    description: config.description,
-                }));
+        if let Some(cmd) = config.command
+            && config.option.is_none()
+        {
+            let commands = match cmd {
+                StringOrVec::Single(s) => vec![s],
+                StringOrVec::Multiple(v) => v,
+            };
+            if commands.is_empty() {
+                return Err(CruiseError::InvalidStepConfig(
+                    "command step must have at least one command".to_string(),
+                ));
             }
-        }
-
-        // Option step: `option` field is present.
-        if let Some(options) = config.option {
-            return Ok(StepKind::Option(OptionStep {
-                options,
-                text_input: config.text_input,
+            return Ok(StepKind::Command(CommandStep {
+                command: commands,
                 description: config.description,
             }));
         }
 
-        // Option step with text-input only.
-        if let Some(text_input) = config.text_input {
+        // Option step: `option` field is present.
+        if let Some(items) = config.option {
+            let choices = items_to_choices(items)?;
             return Ok(StepKind::Option(OptionStep {
-                options: vec![],
-                text_input: Some(text_input),
+                choices,
                 description: config.description,
             }));
         }
@@ -90,10 +108,39 @@ impl TryFrom<StepConfig> for StepKind {
     }
 }
 
+/// Convert a list of `OptionItem` into `OptionChoice` values.
+fn items_to_choices(items: Vec<OptionItem>) -> Result<Vec<OptionChoice>> {
+    items
+        .into_iter()
+        .map(|item| {
+            if item.selector.is_some() && item.text_input.is_some() {
+                return Err(CruiseError::InvalidStepConfig(
+                    "option item must have either 'selector' or 'text-input', not both".to_string(),
+                ));
+            }
+            if let Some(label) = item.selector {
+                Ok(OptionChoice::Selector {
+                    label,
+                    next: item.next,
+                })
+            } else if let Some(label) = item.text_input {
+                Ok(OptionChoice::TextInput {
+                    label,
+                    next: item.next,
+                })
+            } else {
+                Err(CruiseError::InvalidStepConfig(
+                    "option item must have a 'selector' or 'text-input' field".to_string(),
+                ))
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IfCondition, OptionConfig, StepConfig, TextInputConfig};
+    use crate::config::{IfCondition, OptionItem, StepConfig, StringOrVec};
 
     fn make_prompt_step() -> StepConfig {
         StepConfig {
@@ -108,7 +155,7 @@ mod tests {
 
     fn make_command_step() -> StepConfig {
         StepConfig {
-            command: Some("cargo test".to_string()),
+            command: Some(StringOrVec::Single("cargo test".to_string())),
             description: Some("Run tests".to_string()),
             ..Default::default()
         }
@@ -117,12 +164,14 @@ mod tests {
     fn make_option_step() -> StepConfig {
         StepConfig {
             option: Some(vec![
-                OptionConfig {
-                    label: "Continue".to_string(),
+                OptionItem {
+                    selector: Some("Continue".to_string()),
+                    text_input: None,
                     next: Some("next_step".to_string()),
                 },
-                OptionConfig {
-                    label: "Cancel".to_string(),
+                OptionItem {
+                    selector: Some("Cancel".to_string()),
+                    text_input: None,
                     next: None,
                 },
             ]),
@@ -147,13 +196,31 @@ mod tests {
     }
 
     #[test]
-    fn test_command_step_conversion() {
+    fn test_command_step_conversion_single() {
         let config = make_command_step();
         let kind = StepKind::try_from(config).unwrap();
         match kind {
             StepKind::Command(step) => {
-                assert_eq!(step.command, "cargo test");
+                assert_eq!(step.command, vec!["cargo test"]);
                 assert_eq!(step.description, Some("Run tests".to_string()));
+            }
+            _ => panic!("Expected Command step"),
+        }
+    }
+
+    #[test]
+    fn test_command_step_conversion_multiple() {
+        let config = StepConfig {
+            command: Some(StringOrVec::Multiple(vec![
+                "cargo fmt".to_string(),
+                "cargo test".to_string(),
+            ])),
+            ..Default::default()
+        };
+        let kind = StepKind::try_from(config).unwrap();
+        match kind {
+            StepKind::Command(step) => {
+                assert_eq!(step.command, vec!["cargo fmt", "cargo test"]);
             }
             _ => panic!("Expected Command step"),
         }
@@ -165,33 +232,90 @@ mod tests {
         let kind = StepKind::try_from(config).unwrap();
         match kind {
             StepKind::Option(step) => {
-                assert_eq!(step.options.len(), 2);
-                assert_eq!(step.options[0].label, "Continue");
-                assert_eq!(step.options[0].next, Some("next_step".to_string()));
-                assert_eq!(step.options[1].next, None);
+                assert_eq!(step.choices.len(), 2);
+                match &step.choices[0] {
+                    OptionChoice::Selector { label, next } => {
+                        assert_eq!(label, "Continue");
+                        assert_eq!(next, &Some("next_step".to_string()));
+                    }
+                    _ => panic!("Expected Selector"),
+                }
+                match &step.choices[1] {
+                    OptionChoice::Selector { next, .. } => {
+                        assert_eq!(next, &None);
+                    }
+                    _ => panic!("Expected Selector"),
+                }
             }
             _ => panic!("Expected Option step"),
         }
     }
 
     #[test]
-    fn test_text_input_only_step_conversion() {
+    fn test_text_input_choice_conversion() {
         let config = StepConfig {
-            text_input: Some(TextInputConfig {
-                label: "Enter text".to_string(),
+            option: Some(vec![OptionItem {
+                selector: None,
+                text_input: Some("Enter text".to_string()),
                 next: Some("next".to_string()),
-            }),
+            }]),
             description: Some("Text input step".to_string()),
             ..Default::default()
         };
         let kind = StepKind::try_from(config).unwrap();
         match kind {
             StepKind::Option(step) => {
-                assert!(step.options.is_empty());
-                assert!(step.text_input.is_some());
+                assert_eq!(step.choices.len(), 1);
+                match &step.choices[0] {
+                    OptionChoice::TextInput { label, next } => {
+                        assert_eq!(label, "Enter text");
+                        assert_eq!(next, &Some("next".to_string()));
+                    }
+                    _ => panic!("Expected TextInput choice"),
+                }
             }
             _ => panic!("Expected Option step"),
         }
+    }
+
+    #[test]
+    fn test_option_item_both_fields_error() {
+        // error if both selector and text_input are present
+        let config = StepConfig {
+            option: Some(vec![OptionItem {
+                selector: Some("Pick".to_string()),
+                text_input: Some("Enter".to_string()),
+                next: None,
+            }]),
+            ..Default::default()
+        };
+        let err = StepKind::try_from(config).unwrap_err();
+        assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
+    }
+
+    #[test]
+    fn test_command_step_empty_list_error() {
+        // empty command list is an error
+        let config = StepConfig {
+            command: Some(StringOrVec::Multiple(vec![])),
+            ..Default::default()
+        };
+        let err = StepKind::try_from(config).unwrap_err();
+        assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
+    }
+
+    #[test]
+    fn test_invalid_option_item() {
+        let config = StepConfig {
+            option: Some(vec![OptionItem {
+                selector: None,
+                text_input: None,
+                next: None,
+            }]),
+            ..Default::default()
+        };
+        let err = StepKind::try_from(config).unwrap_err();
+        assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
     #[test]
@@ -201,7 +325,7 @@ mod tests {
             ..Default::default()
         };
         let err = StepKind::try_from(config).unwrap_err();
-        matches!(err, CruiseError::InvalidStepConfig(_));
+        assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
     #[test]
@@ -209,17 +333,17 @@ mod tests {
         // When both prompt and command are present, prompt wins.
         let config = StepConfig {
             prompt: Some("Hello".to_string()),
-            command: Some("cargo test".to_string()),
+            command: Some(StringOrVec::Single("cargo test".to_string())),
             ..Default::default()
         };
         let kind = StepKind::try_from(config).unwrap();
-        matches!(kind, StepKind::Prompt(_));
+        assert!(matches!(kind, StepKind::Prompt(_)));
     }
 
     #[test]
     fn test_step_with_if_condition() {
         let config = StepConfig {
-            command: Some("git commit".to_string()),
+            command: Some(StringOrVec::Single("git commit".to_string())),
             if_condition: Some(IfCondition {
                 file_changed: Some("implement".to_string()),
             }),
@@ -227,6 +351,6 @@ mod tests {
         };
         // IfCondition does not affect StepKind conversion; the engine handles it.
         let kind = StepKind::try_from(config).unwrap();
-        matches!(kind, StepKind::Command(_));
+        assert!(matches!(kind, StepKind::Command(_)));
     }
 }

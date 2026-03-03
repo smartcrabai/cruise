@@ -1,7 +1,7 @@
 use dialoguer::{Input, Select};
 
-use crate::config::{OptionConfig, TextInputConfig};
 use crate::error::Result;
+use crate::step::OptionChoice;
 
 /// Result of executing an option step.
 #[derive(Debug, Clone)]
@@ -9,26 +9,18 @@ pub struct OptionResult {
     /// Next step name chosen by the user (None = end of workflow).
     pub next_step: Option<String>,
 
-    /// Text entered by the user when the text-input option was selected.
+    /// Text entered by the user when a text-input choice was selected.
     pub text_input: Option<String>,
 }
 
 /// Display an interactive selection menu and return the user's choice.
-pub fn run_option(
-    options: &[OptionConfig],
-    text_input_config: Option<&TextInputConfig>,
-    description: Option<&str>,
-) -> Result<OptionResult> {
+pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result<OptionResult> {
     if let Some(desc) = description {
         println!("\n{desc}");
     }
 
     // Build the label list shown to the user.
-    let mut labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
-
-    if let Some(ti) = text_input_config {
-        labels.push(ti.label.clone());
-    }
+    let labels: Vec<&str> = choices.iter().map(|c| c.label()).collect();
 
     if labels.is_empty() {
         // Nothing to select — continue to the next step.
@@ -45,60 +37,58 @@ pub fn run_option(
         .interact()
         .map_err(|e| crate::error::CruiseError::Other(format!("selection error: {e}")))?;
 
-    // Handle text-input selection.
-    if let Some(ti) = text_input_config {
-        if selection == options.len() {
+    match &choices[selection] {
+        OptionChoice::Selector { next, .. } => Ok(OptionResult {
+            next_step: next.clone(),
+            text_input: None,
+        }),
+        OptionChoice::TextInput { label, next } => {
             let text: String = Input::new()
-                .with_prompt(&ti.label)
+                .with_prompt(label)
                 .interact_text()
                 .map_err(|e| crate::error::CruiseError::Other(format!("input error: {e}")))?;
 
-            return Ok(OptionResult {
-                next_step: ti.next.clone(),
+            Ok(OptionResult {
+                next_step: next.clone(),
                 text_input: Some(text),
-            });
+            })
         }
     }
-
-    let selected = &options[selection];
-    Ok(OptionResult {
-        next_step: selected.next.clone(),
-        text_input: None,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{OptionConfig, TextInputConfig};
+    use crate::step::OptionChoice;
 
     #[test]
-    fn test_option_config_structure() {
-        let options = vec![
-            OptionConfig {
-                label: "Option A".to_string(),
-                next: Some("step_a".to_string()),
-            },
-            OptionConfig {
-                label: "Option B".to_string(),
-                next: None,
-            },
-        ];
-
-        assert_eq!(options[0].label, "Option A");
-        assert_eq!(options[0].next, Some("step_a".to_string()));
-        assert_eq!(options[1].next, None);
+    fn test_option_choice_selector() {
+        let choice = OptionChoice::Selector {
+            label: "Option A".to_string(),
+            next: Some("step_a".to_string()),
+        };
+        match choice {
+            OptionChoice::Selector { label, next } => {
+                assert_eq!(label, "Option A");
+                assert_eq!(next, Some("step_a".to_string()));
+            }
+            _ => panic!("Expected Selector"),
+        }
     }
 
     #[test]
-    fn test_text_input_config_structure() {
-        let config = TextInputConfig {
+    fn test_option_choice_text_input() {
+        let choice = OptionChoice::TextInput {
             label: "Enter text".to_string(),
             next: Some("next_step".to_string()),
         };
-
-        assert_eq!(config.label, "Enter text");
-        assert_eq!(config.next, Some("next_step".to_string()));
+        match choice {
+            OptionChoice::TextInput { label, next } => {
+                assert_eq!(label, "Enter text");
+                assert_eq!(next, Some("next_step".to_string()));
+            }
+            _ => panic!("Expected TextInput"),
+        }
     }
 
     #[test]
