@@ -19,9 +19,6 @@ jobs:
       - name: Lint Cargo.toml
         run: taplo lint Cargo.toml
 
-      - name: Validate Cargo.toml
-        run: taplo check Cargo.toml
-
       - name: Check Cargo.toml formatting
         run: taplo fmt --check --option reorder_keys=true Cargo.toml
 
