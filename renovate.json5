@@ -1,0 +1,20 @@
+{
+  extends: [
+    "config:best-practices"
+  ],
+  dependencyDashboard: false,
+  packageRules: [
+    {
+      matchUpdateTypes: [
+        "minor",
+        "patch",
+        "digest"
+      ],
+      groupName: "all minor, patch, and digest updates",
+      groupSlug: "all-minor-patch-digest-updates",
+      addLabels: [
+        "automerge"
+      ]
+    }
+  ]
+}

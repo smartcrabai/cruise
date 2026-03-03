@@ -1,0 +1,64 @@
+command:
+  - claude
+  - -p
+
+plan: plan.md
+
+steps:
+  planning:
+    model: claude-opus-4-5
+    instruction: |
+      あなたはシニアソフトウェアエンジニアです。
+      実装計画を立て、テスト駆動開発のアプローチを採用してください。
+    prompt: |
+      以下の機能の実装計画を立ててください:
+
+      {input}
+
+      実装計画をMarkdown形式で出力してください。
+    output: plan
+
+  review_plan:
+    description: |
+      実装計画を確認してください
+    option:
+      - label: 承認して続行
+        next: write_tests
+      - label: 計画を修正する
+        next: planning
+      - label: キャンセル
+        next: null
+
+  write_tests:
+    prompt: |
+      以下の計画に基づいてテストを書いてください:
+
+      {plan}
+    description: テストを作成しています...
+
+  implement:
+    prompt: |
+      以下の計画に基づいて実装してください:
+
+      {plan}
+
+      テストがパスするように実装してください。
+    description: 実装しています...
+
+  run_tests:
+    command: cargo test
+    description: テストを実行しています...
+
+  fix_or_done:
+    description: テスト結果を確認してください
+    option:
+      - label: テストがパスした
+        next: create_pr
+      - label: 修正が必要
+        next: implement
+
+  create_pr:
+    command: gh pr create --fill
+    description: PRを作成しています...
+    if:
+      file-changed: implement
