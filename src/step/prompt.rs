@@ -14,14 +14,13 @@ pub struct PromptResult {
 pub async fn run_prompt(
     command: &[String],
     model: Option<&str>,
-    instruction: Option<&str>,
     prompt: &str,
     max_retries: usize,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_prompt(command, model, instruction, prompt).await;
+        let result = execute_prompt(command, model, prompt).await;
 
         match result {
             Ok(output) => return Ok(PromptResult { output }),
@@ -46,12 +45,7 @@ pub async fn run_prompt(
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout.
-async fn execute_prompt(
-    command: &[String],
-    model: Option<&str>,
-    instruction: Option<&str>,
-    prompt: &str,
-) -> Result<String> {
+async fn execute_prompt(command: &[String], model: Option<&str>, prompt: &str) -> Result<String> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
             "command list is empty".to_string(),
@@ -65,11 +59,6 @@ async fn execute_prompt(
         cmd_args.push(m.to_string());
     }
 
-    if let Some(inst) = instruction {
-        cmd_args.push("--system-prompt".to_string());
-        cmd_args.push(inst.to_string());
-    }
-
     let mut child = Command::new(&command[0])
         .args(&cmd_args)
         .stdin(std::process::Stdio::piped())
@@ -79,12 +68,11 @@ async fn execute_prompt(
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
 
     // Write the prompt via stdin to avoid ARG_MAX limits.
-    if let Some(stdin) = child.stdin.take() {
-        let mut stdin = stdin;
+    if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
             .await
-            .map_err(|e| CruiseError::IoError(e))?;
+            .map_err(CruiseError::IoError)?;
         // Close stdin to send EOF.
         drop(stdin);
     }
@@ -100,7 +88,7 @@ async fn execute_prompt(
         let error_msg = if stderr.is_empty() {
             format!("command failed (exit code: {:?})", output.status.code())
         } else {
-            stderr.clone()
+            stderr
         };
         return Err(CruiseError::CommandError(error_msg));
     }
@@ -115,21 +103,12 @@ async fn execute_prompt(
 
 /// Build the full argument list for the LLM command (test helper).
 #[cfg(test)]
-pub(crate) fn build_command_args(
-    command: &[String],
-    model: Option<&str>,
-    instruction: Option<&str>,
-) -> Vec<String> {
+pub(crate) fn build_command_args(command: &[String], model: Option<&str>) -> Vec<String> {
     let mut args = command.to_vec();
 
     if let Some(m) = model {
         args.push("--model".to_string());
         args.push(m.to_string());
-    }
-
-    if let Some(inst) = instruction {
-        args.push("--system-prompt".to_string());
-        args.push(inst.to_string());
     }
 
     args
@@ -142,57 +121,28 @@ mod tests {
     #[test]
     fn test_build_command_args_minimal() {
         let command = vec!["claude".to_string(), "-p".to_string()];
-        let args = build_command_args(&command, None, None);
+        let args = build_command_args(&command, None);
         assert_eq!(args, vec!["claude", "-p"]);
     }
 
     #[test]
     fn test_build_command_args_with_model() {
         let command = vec!["claude".to_string(), "-p".to_string()];
-        let args = build_command_args(&command, Some("claude-opus-4-5"), None);
+        let args = build_command_args(&command, Some("claude-opus-4-5"));
         assert_eq!(args, vec!["claude", "-p", "--model", "claude-opus-4-5"]);
-    }
-
-    #[test]
-    fn test_build_command_args_with_instruction() {
-        let command = vec!["claude".to_string(), "-p".to_string()];
-        let args = build_command_args(&command, None, Some("You are helpful"));
-        assert_eq!(
-            args,
-            vec!["claude", "-p", "--system-prompt", "You are helpful"]
-        );
-    }
-
-    #[test]
-    fn test_build_command_args_with_all() {
-        let command = vec!["claude".to_string(), "-p".to_string()];
-        let args = build_command_args(&command, Some("my-model"), Some("Be helpful"));
-        assert_eq!(
-            args,
-            vec![
-                "claude",
-                "-p",
-                "--model",
-                "my-model",
-                "--system-prompt",
-                "Be helpful"
-            ]
-        );
     }
 
     #[tokio::test]
     async fn test_run_prompt_with_echo() {
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
-        let result = run_prompt(&command, None, None, "test prompt", 0)
-            .await
-            .unwrap();
+        let result = run_prompt(&command, None, "test prompt", 0).await.unwrap();
         assert_eq!(result.output, "test prompt");
     }
 
     #[tokio::test]
     async fn test_run_prompt_empty_command() {
-        let result = run_prompt(&[], None, None, "prompt", 0).await;
+        let result = run_prompt(&[], None, "prompt", 0).await;
         assert!(result.is_err());
     }
 }

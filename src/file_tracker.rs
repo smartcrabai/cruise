@@ -89,10 +89,7 @@ fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
         .filter_entry(|e| !is_excluded(e.path()))
     {
         let entry = entry.map_err(|e| {
-            crate::error::CruiseError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            crate::error::CruiseError::IoError(std::io::Error::other(e.to_string()))
         })?;
 
         if entry.file_type().is_file() {

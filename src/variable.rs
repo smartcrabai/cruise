@@ -107,7 +107,7 @@ impl VariableStore {
     }
 
     /// Look up a variable by name and return its value.
-    fn get_variable(&self, name: &str) -> Result<String> {
+    pub fn get_variable(&self, name: &str) -> Result<String> {
         match name {
             "input" => Ok(self.input.clone()),
             "prev.output" => self
