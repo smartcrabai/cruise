@@ -70,6 +70,14 @@ impl VariableStore {
         self.prev_success = success;
     }
 
+    pub fn set_input(&mut self, input: String) {
+        self.input = input;
+    }
+
+    pub fn input_is_empty(&self) -> bool {
+        self.input.is_empty()
+    }
+
     /// Resolve all `{variable_name}` placeholders in `template`.
     /// Returns an error for any undefined variable.
     pub fn resolve(&self, template: &str) -> Result<String> {

@@ -209,7 +209,16 @@ async fn run_prompt_step(
     // Display instruction and description.
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
-        eprintln!("  {}", style(resolved).dim());
+        if vars.input_is_empty() {
+            // Prompt the user for input inline with the instruction text.
+            let text = dialoguer::Input::<String>::new()
+                .with_prompt(format!("  {}", style(&resolved).dim()))
+                .interact_text()
+                .map_err(|e| crate::error::CruiseError::IoError(e.into()))?;
+            vars.set_input(text);
+        } else {
+            eprintln!("  {}", style(resolved).dim());
+        }
     }
     if let Some(desc) = &step.description {
         let resolved = vars.resolve(desc)?;
