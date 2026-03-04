@@ -1,0 +1,65 @@
+command:
+  - claude
+  - --model
+  - "{model}"
+  - -p  # prompt is passed via stdin at runtime
+
+model: sonnet
+
+plan: .cruise/plan.md
+
+steps:
+  plan:
+    model: opus
+    instruction: "What will you do?"
+    prompt: |
+      I am trying to implement the following features. Create an implementation plan.
+      ---
+      {input}
+    output: plan
+
+  approve-plan:
+    description: "{prev.output}"
+    option:
+      - selector: Approve
+        next: implement
+      - text-input: Fix
+        next: fix-plan
+      - text-input: Ask
+        next: ask-plan
+
+  fix-plan:
+    model: opus
+    prompt: |
+      The user has requested the following changes to the {plan} implementation plan. Make the modifications:
+      {prev.input}
+    next: approve-plan
+
+  ask-plan:
+    prompt: |
+      The user has the following questions about the implementation plan for {plan}. Provide answers:
+      {prev.input}
+    next: approve-plan
+
+  implement:
+    prompt: |
+      Please implement according to {plan}.
+
+  test:
+    command: echo "No test command configured. Edit your workflow config to add tests."
+
+  fix-test-error:
+    skip: prev.success
+    prompt: |
+      The following error occurred. Please correct it:
+      ---
+      {prev.stderr}
+    next: test
+
+  improve:
+    prompt: /improve
+    if:
+      file-changed: test
+
+  pr:
+    prompt: create a PR

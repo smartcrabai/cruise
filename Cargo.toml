@@ -1,10 +1,10 @@
 [package]
-edition = "2024"
-name = "cruise"
-version = "0.1.4"
 description = "YAML-driven coding agent workflow orchestrator"
+edition = "2024"
 license = "MIT"
+name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
+version = "0.1.4"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -54,6 +54,13 @@ publish-jobs = ["homebrew"]
 # A GitHub repo to push Homebrew formulas to
 tap = "smartcrabai/homebrew-tap"
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
 # Whether to install an updater program
 install-updater = false

@@ -18,9 +18,8 @@ use crate::variable::VariableStore;
 
 /// Load the config and run the workflow state machine.
 pub async fn run(args: Args) -> Result<()> {
-    let config_path = &args.config;
-    let yaml = std::fs::read_to_string(config_path)
-        .map_err(|_| CruiseError::ConfigNotFound(config_path.clone()))?;
+    let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
+    eprintln!("{}", style(source.display_string()).dim());
 
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
@@ -377,7 +376,7 @@ mod tests {
     fn make_args(config: &str, input: Option<&str>, from: Option<&str>, dry_run: bool) -> Args {
         crate::cli::Args {
             input: input.map(|s| s.to_string()),
-            config: config.to_string(),
+            config: Some(config.to_string()),
             from: from.map(|s| s.to_string()),
             max_retries: 10,
             rate_limit_retries: 0,
@@ -653,7 +652,15 @@ steps:
 
     #[tokio::test]
     async fn test_config_not_found() {
-        let args = make_args("nonexistent.yaml", None, None, false);
+        // Passing an explicit path that doesn't exist should error.
+        let args = crate::cli::Args {
+            input: None,
+            config: Some("nonexistent.yaml".to_string()),
+            from: None,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            dry_run: false,
+        };
         let result = run(args).await;
         assert!(result.is_err());
     }
