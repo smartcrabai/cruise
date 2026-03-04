@@ -19,7 +19,7 @@ pub async fn run_prompt(
     prompt: &str,
     max_retries: usize,
     env: &HashMap<String, String>,
-    spinner: Option<&indicatif::ProgressBar>,
+    on_retry: Option<&dyn Fn(&str)>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
@@ -39,8 +39,8 @@ pub async fn run_prompt(
                         attempts,
                         max_retries
                     );
-                    if let Some(pb) = spinner {
-                        pb.suspend(|| eprintln!("{}", msg));
+                    if let Some(cb) = on_retry {
+                        cb(&msg);
                     } else {
                         eprintln!("{}", msg);
                     }

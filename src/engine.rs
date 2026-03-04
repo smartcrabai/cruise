@@ -244,17 +244,20 @@ async fn run_prompt_step(
         (config.command.clone(), effective_model.map(str::to_string))
     };
 
-    let spinner = crate::spinner::start_spinner("Cruising...");
-    let result = run_prompt(
-        &resolved_command,
-        model_arg.as_deref(),
-        &prompt,
-        rate_limit_retries,
-        env,
-        Some(&spinner),
-    )
-    .await;
-    crate::spinner::clear_spinner(&spinner);
+    let spinner = crate::spinner::Spinner::start("Cruising...");
+    let result = {
+        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
+        run_prompt(
+            &resolved_command,
+            model_arg.as_deref(),
+            &prompt,
+            rate_limit_retries,
+            env,
+            Some(&on_retry),
+        )
+        .await
+    };
+    drop(spinner);
     let result = result?;
 
     if let Some(output_var) = &step.output {
