@@ -3,6 +3,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "cruise",
+    version,
     about = "YAML-driven coding agent workflow orchestrator"
 )]
 pub struct Args {
