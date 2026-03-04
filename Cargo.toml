@@ -2,6 +2,9 @@
 edition = "2024"
 name = "cruise"
 version = "0.1.2"
+description = "YAML-driven coding agent workflow orchestrator"
+license = "MIT"
+repository = "https://github.com/smartcrabai/cruise"
 
 [dependencies]
 anyhow = "1.0.102"
