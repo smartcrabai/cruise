@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name = "cruise"
-version = "0.1.3"
+version = "0.1.4"
 description = "YAML-driven coding agent workflow orchestrator"
 license = "MIT"
 repository = "https://github.com/smartcrabai/cruise"
@@ -39,17 +39,21 @@ tempfile = "3.26.0"
 [workspace]
 resolver = "2"
 
+# Config for 'dist'
 [workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
+# CI backends to support
 ci = "github"
+# Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# The installers to generate for each app
 installers = ["shell", "homebrew"]
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+# A GitHub repo to push Homebrew formulas to
 tap = "smartcrabai/homebrew-tap"
-targets = [
-  "aarch64-apple-darwin",
-  "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-pc-windows-msvc",
-  "aarch64-pc-windows-msvc",
-]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Whether to install an updater program
+install-updater = false
