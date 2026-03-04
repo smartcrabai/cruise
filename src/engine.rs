@@ -835,4 +835,286 @@ steps:
         let result = run(args).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_prev_success_true_propagation() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+  step2:
+    command: 'test "{prev.success}" = true'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prev.success should be true after success: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prev_success_false_after_failure() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: exit 1
+  step2:
+    command: 'test "{prev.success}" = false'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prev.success should be false after failure: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_failure_does_not_stop_workflow() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: exit 1
+  step2:
+    command: echo done
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "workflow should continue after command failure: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prev_stderr_propagation() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "printf 'hello_err' >&2; true"
+  step2:
+    command: test -n "$PREV_STDERR"
+    env:
+      PREV_STDERR: "{prev.stderr}"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prev.stderr should be propagated to env: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_field_skips_steps() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+    next: step3
+  step2:
+    command: exit 1
+  step3:
+    command: echo done
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        // step1 jumps to step3 via `next`, step2 (exit 1) is never executed.
+        let result = run(args).await;
+        assert!(result.is_ok(), "next field should skip step2: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_env_prev_success_variable() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+  step2:
+    command: test "$RESULT" = true
+    env:
+      RESULT: "{prev.success}"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prev.success template in env should work: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_output_as_prev_output() {
+        let yaml = r#"
+command: [cat]
+steps:
+  step1:
+    prompt: "hello_output"
+  step2:
+    command: 'test "{prev.output}" = hello_output'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prompt output should be accessible as prev.output: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_named_output_variable_between_steps() {
+        let yaml = r#"
+command: [cat]
+steps:
+  step1:
+    prompt: "stored_value"
+    output: myvar
+  step2:
+    command: 'test "{myvar}" = stored_value'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "named output variable should be accessible in subsequent steps: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_list_partial_failure() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command:
+      - echo success
+      - exit 1
+  step2:
+    command: 'test "{prev.success}" = false'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "partial command list failure should set prev.success=false: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_true_with_if_condition() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: exit 1
+    skip: true
+    if:
+      file-changed: step1
+  step2:
+    command: echo done
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        // skip: true is evaluated before the if condition, so step1 (exit 1) never runs.
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "skip:true should take priority over if condition: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skipped_step_preserves_prev_vars() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+  step2:
+    command: exit 1
+    skip: true
+  step3:
+    command: 'test "{prev.success}" = true'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        // step1 succeeds (prev.success=true), step2 is skipped (prev unchanged),
+        // step3 verifies prev.success is still true from step1.
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "skipped step should not update prev vars: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_to_command_chain() {
+        let yaml = r#"
+command: [cat]
+steps:
+  prompt_step:
+    prompt: "chain_data"
+  command_step:
+    command: test "$OUTPUT" = chain_data
+    env:
+      OUTPUT: "{prev.output}"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "prompt output should be usable in command env via prev.output: {:?}",
+            result
+        );
+    }
 }

@@ -156,4 +156,32 @@ mod tests {
         let result = run_prompt(&[], None, "prompt", 0, &HashMap::new()).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_run_prompt_with_env() {
+        // cat echoes stdin regardless of env; verify env does not break execution.
+        let command = vec!["cat".to_string()];
+        let mut env = HashMap::new();
+        env.insert("SOME_VAR".to_string(), "some_value".to_string());
+        let result = run_prompt(&command, None, "prompt text", 0, &env)
+            .await
+            .unwrap();
+        assert_eq!(result.output, "prompt text");
+    }
+
+    #[tokio::test]
+    async fn test_run_prompt_with_model_arg() {
+        // "sh -c cat" ignores extra positional args (--model test-model become $0/$1 in sh).
+        let command = vec!["sh".to_string(), "-c".to_string(), "cat".to_string()];
+        let result = run_prompt(
+            &command,
+            Some("test-model"),
+            "hello model",
+            0,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output, "hello model");
+    }
 }
