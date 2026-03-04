@@ -33,7 +33,10 @@ strip = true
 [dev-dependencies]
 tempfile = "3.26.0"
 
-[package.metadata.dist]
+[workspace]
+resolver = "2"
+
+[workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
 ci = "github"
 install-path = "CARGO_HOME"
