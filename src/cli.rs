@@ -10,8 +10,8 @@ pub struct Args {
     pub input: Option<String>,
 
     /// Path to the workflow config file.
-    #[arg(short = 'c', long, default_value = "cruise.yaml")]
-    pub config: String,
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 
     /// Step name to start from (for resuming mid-workflow).
     #[arg(long)]
@@ -56,7 +56,7 @@ mod tests {
     fn test_args_parse_with_input() {
         let args = Args::parse_from(["cruise", "hello world"]);
         assert_eq!(args.input, Some("hello world".to_string()));
-        assert_eq!(args.config, "cruise.yaml");
+        assert_eq!(args.config, None);
         assert_eq!(args.max_retries, 10);
         assert_eq!(args.rate_limit_retries, 5);
         assert!(!args.dry_run);
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn test_args_parse_with_config() {
         let args = Args::parse_from(["cruise", "-c", "my.yaml", "task"]);
-        assert_eq!(args.config, "my.yaml");
+        assert_eq!(args.config, Some("my.yaml".to_string()));
         assert_eq!(args.input, Some("task".to_string()));
     }
 

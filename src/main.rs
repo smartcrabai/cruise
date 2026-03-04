@@ -4,6 +4,7 @@ mod config;
 mod engine;
 mod error;
 mod file_tracker;
+mod resolver;
 mod step;
 mod variable;
 
