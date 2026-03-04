@@ -19,6 +19,7 @@ pub async fn run_prompt(
     prompt: &str,
     max_retries: usize,
     env: &HashMap<String, String>,
+    on_retry: Option<&dyn Fn(&str)>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
@@ -32,12 +33,17 @@ pub async fn run_prompt(
                 if is_rate_limited(&err_msg) && attempts < max_retries {
                     attempts += 1;
                     let delay = calculate_backoff(attempts);
-                    eprintln!(
+                    let msg = format!(
                         "Rate limit detected. Retrying in {:.1}s... ({}/{})",
                         delay.as_secs_f64(),
                         attempts,
                         max_retries
                     );
+                    if let Some(cb) = on_retry {
+                        cb(&msg);
+                    } else {
+                        eprintln!("{}", msg);
+                    }
                     tokio::time::sleep(delay).await;
                     continue;
                 }
@@ -145,7 +151,7 @@ mod tests {
     async fn test_run_prompt_with_echo() {
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
-        let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new())
+        let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new(), None)
             .await
             .unwrap();
         assert_eq!(result.output, "test prompt");
@@ -153,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_empty_command() {
-        let result = run_prompt(&[], None, "prompt", 0, &HashMap::new()).await;
+        let result = run_prompt(&[], None, "prompt", 0, &HashMap::new(), None).await;
         assert!(result.is_err());
     }
 
@@ -163,7 +169,7 @@ mod tests {
         let command = vec!["cat".to_string()];
         let mut env = HashMap::new();
         env.insert("SOME_VAR".to_string(), "some_value".to_string());
-        let result = run_prompt(&command, None, "prompt text", 0, &env)
+        let result = run_prompt(&command, None, "prompt text", 0, &env, None)
             .await
             .unwrap();
         assert_eq!(result.output, "prompt text");
@@ -179,6 +185,7 @@ mod tests {
             "hello model",
             0,
             &HashMap::new(),
+            None,
         )
         .await
         .unwrap();
