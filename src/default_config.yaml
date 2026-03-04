@@ -2,7 +2,7 @@ command:
   - claude
   - --model
   - "{model}"
-  - -p
+  - -p  # prompt is passed via stdin at runtime
 
 model: sonnet
 

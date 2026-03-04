@@ -29,8 +29,13 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
     // 1. Explicit path.
     if let Some(path) = explicit {
         let buf = PathBuf::from(path);
-        let yaml = std::fs::read_to_string(&buf)
-            .map_err(|_| CruiseError::ConfigNotFound(path.to_string()))?;
+        let yaml = std::fs::read_to_string(&buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CruiseError::ConfigNotFound(path.to_string())
+            } else {
+                CruiseError::Other(format!("failed to read '{}': {}", path, e))
+            }
+        })?;
         return Ok((yaml, ConfigSource::Explicit(buf)));
     }
 
@@ -104,8 +109,9 @@ fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
         .with_prompt("Select a workflow config")
         .items(&names)
         .default(0)
-        .interact()
-        .map_err(|e| CruiseError::Other(e.to_string()))?;
+        .interact_opt()
+        .map_err(|e| CruiseError::Other(e.to_string()))?
+        .ok_or_else(|| CruiseError::Other("config selection cancelled".to_string()))?;
 
     Ok(files[selection].clone())
 }
