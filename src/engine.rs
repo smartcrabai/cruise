@@ -19,16 +19,7 @@ use crate::variable::VariableStore;
 /// Load the config and run the workflow state machine.
 pub async fn run(args: Args) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
-    eprintln!(
-        "{}",
-        style(match &source {
-            crate::resolver::ConfigSource::Explicit(p) => format!("config: {}", p.display()),
-            crate::resolver::ConfigSource::Local(p) => format!("config: {}", p.display()),
-            crate::resolver::ConfigSource::UserDir(p) => format!("config: {}", p.display()),
-            crate::resolver::ConfigSource::Builtin => "config: (builtin default)".to_string(),
-        })
-        .dim()
-    );
+    eprintln!("{}", style(source.display_string()).dim());
 
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;

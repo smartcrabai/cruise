@@ -18,6 +18,17 @@ pub enum ConfigSource {
     Builtin,
 }
 
+impl ConfigSource {
+    pub fn display_string(&self) -> String {
+        match self {
+            Self::Builtin => "config: (builtin default)".to_string(),
+            Self::Explicit(p) | Self::Local(p) | Self::UserDir(p) => {
+                format!("config: {}", p.display())
+            }
+        }
+    }
+}
+
 /// Resolve a workflow config, returning (yaml_content, source).
 ///
 /// Resolution order:
@@ -41,32 +52,31 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 
     // 2. Local cruise.yaml.
     let local = PathBuf::from("cruise.yaml");
-    if local.exists() {
-        let yaml = std::fs::read_to_string(&local)
-            .map_err(|_| CruiseError::ConfigNotFound("cruise.yaml".to_string()))?;
-        return Ok((yaml, ConfigSource::Local(local)));
+    match std::fs::read_to_string(&local) {
+        Ok(yaml) => return Ok((yaml, ConfigSource::Local(local))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CruiseError::Other(format!(
+                "failed to read 'cruise.yaml': {}",
+                e
+            )));
+        }
     }
 
     // 3. ~/.cruise/*.yaml / *.yml
     if let Ok(home) = std::env::var("HOME") {
         let cruise_dir = PathBuf::from(home).join(".cruise");
-        if cruise_dir.is_dir() {
-            let files = collect_yaml_files(&cruise_dir);
-            match files.len() {
-                0 => {}
-                1 => {
-                    let path = files.into_iter().next().unwrap();
-                    let yaml = std::fs::read_to_string(&path)
-                        .map_err(|e| CruiseError::Other(e.to_string()))?;
-                    return Ok((yaml, ConfigSource::UserDir(path)));
-                }
-                _ => {
-                    let path = prompt_select_config(&files)?;
-                    let yaml = std::fs::read_to_string(&path)
-                        .map_err(|e| CruiseError::Other(e.to_string()))?;
-                    return Ok((yaml, ConfigSource::UserDir(path)));
-                }
-            }
+        let files = collect_yaml_files(&cruise_dir);
+        if !files.is_empty() {
+            let path = if files.len() == 1 {
+                files.into_iter().next().unwrap()
+            } else {
+                prompt_select_config(&files)?
+            };
+            let yaml = std::fs::read_to_string(&path).map_err(|e| {
+                CruiseError::Other(format!("failed to read '{}': {}", path.display(), e))
+            })?;
+            return Ok((yaml, ConfigSource::UserDir(path)));
         }
     }
 
@@ -76,9 +86,10 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 
 /// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
 fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut files: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
