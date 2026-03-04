@@ -349,4 +349,26 @@ steps:
         assert_eq!(config.plan, Some(PathBuf::from(".cruise/plan.md")));
         assert!(!config.steps.is_empty(), "steps is empty");
     }
+
+    #[test]
+    fn test_empty_steps() {
+        let yaml = "command: [echo]\nsteps: {}";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(config.steps.is_empty());
+    }
+
+    #[test]
+    fn test_missing_steps_error() {
+        let yaml = "command: [echo]";
+        let result = WorkflowConfig::from_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_command_type_mismatch() {
+        // A mapping value cannot be deserialized as String or Vec<String>.
+        let yaml = "command: [echo]\nsteps:\n  s1:\n    command: {foo: bar}";
+        let result = WorkflowConfig::from_yaml(yaml);
+        assert!(result.is_err());
+    }
 }

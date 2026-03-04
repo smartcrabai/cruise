@@ -197,4 +197,36 @@ mod tests {
             .unwrap();
         assert!(result.success);
     }
+
+    #[tokio::test]
+    async fn test_run_commands_partial_failure_stderr() {
+        // Second command fails with a message written to stderr.
+        let cmds = vec![
+            "echo step1".to_string(),
+            "echo 'err_msg' >&2; exit 1".to_string(),
+        ];
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("err_msg"));
+    }
+
+    #[tokio::test]
+    async fn test_run_command_multiple_env_vars() {
+        let mut env = HashMap::new();
+        env.insert("VAR_A".to_string(), "alpha".to_string());
+        env.insert("VAR_B".to_string(), "beta".to_string());
+        let result = run_command(r#"test "$VAR_A" = alpha && test "$VAR_B" = beta"#, 0, &env)
+            .await
+            .unwrap();
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_run_command_env_in_echo() {
+        let mut env = HashMap::new();
+        env.insert("GREETING".to_string(), "hello".to_string());
+        // stdout is inherited (not captured), but success means the command ran.
+        let result = run_command("echo $GREETING", 0, &env).await.unwrap();
+        assert!(result.success);
+    }
 }
