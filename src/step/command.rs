@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -13,14 +14,18 @@ pub struct CommandResult {
 
 /// Execute a list of shell commands sequentially.
 /// Stops immediately on the first failure and returns that result.
-pub async fn run_commands(cmds: &[String], max_retries: usize) -> Result<CommandResult> {
+pub async fn run_commands(
+    cmds: &[String],
+    max_retries: usize,
+    env: &HashMap<String, String>,
+) -> Result<CommandResult> {
     let mut last_result = CommandResult {
         success: true,
         stderr: String::new(),
     };
 
     for cmd in cmds {
-        last_result = run_command(cmd, max_retries).await?;
+        last_result = run_command(cmd, max_retries, env).await?;
         if !last_result.success {
             return Ok(last_result);
         }
@@ -30,11 +35,15 @@ pub async fn run_commands(cmds: &[String], max_retries: usize) -> Result<Command
 }
 
 /// Execute a shell command with optional rate-limit retry.
-pub async fn run_command(cmd: &str, max_retries: usize) -> Result<CommandResult> {
+pub async fn run_command(
+    cmd: &str,
+    max_retries: usize,
+    env: &HashMap<String, String>,
+) -> Result<CommandResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_command(cmd).await?;
+        let result = execute_command(cmd, env).await?;
 
         if result.success {
             return Ok(result);
@@ -58,10 +67,11 @@ pub async fn run_command(cmd: &str, max_retries: usize) -> Result<CommandResult>
 }
 
 /// Run `sh -c cmd`, streaming stdout and capturing stderr.
-async fn execute_command(cmd: &str) -> Result<CommandResult> {
+async fn execute_command(cmd: &str, env: &HashMap<String, String>) -> Result<CommandResult> {
     let output = Command::new("sh")
         .arg("-c")
         .arg(cmd)
+        .envs(env)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -137,20 +147,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_successful_command() {
-        let result = run_command("echo hello", 0).await.unwrap();
+        let result = run_command("echo hello", 0, &HashMap::new()).await.unwrap();
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_run_failing_command() {
-        let result = run_command("exit 1", 0).await.unwrap();
+        let result = run_command("exit 1", 0, &HashMap::new()).await.unwrap();
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_run_commands_sequential() {
         let cmds = vec!["echo a".to_string(), "echo b".to_string()];
-        let result = run_commands(&cmds, 0).await.unwrap();
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
         assert!(result.success);
     }
 
@@ -158,22 +168,33 @@ mod tests {
     async fn test_run_commands_stops_on_failure() {
         // Second command would succeed but shouldn't run because first fails.
         let cmds = vec!["exit 1".to_string(), "echo ok".to_string()];
-        let result = run_commands(&cmds, 0).await.unwrap();
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_run_commands_empty() {
-        let result = run_commands(&[], 0).await.unwrap();
+        let result = run_commands(&[], 0, &HashMap::new()).await.unwrap();
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_run_command_captures_stderr() {
-        let result = run_command("echo 'error msg' >&2; exit 1", 0)
+        let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new())
             .await
             .unwrap();
         assert!(!result.success);
         assert!(result.stderr.contains("error msg"));
+    }
+
+    #[tokio::test]
+    async fn test_run_command_with_env() {
+        let mut env = HashMap::new();
+        env.insert("CRUISE_TEST_VAR".to_string(), "hello_env".to_string());
+        // The command echoes the env var; success means env was passed correctly.
+        let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env)
+            .await
+            .unwrap();
+        assert!(result.success);
     }
 }

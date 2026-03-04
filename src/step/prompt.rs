@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -16,11 +18,12 @@ pub async fn run_prompt(
     model: Option<&str>,
     prompt: &str,
     max_retries: usize,
+    env: &HashMap<String, String>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_prompt(command, model, prompt).await;
+        let result = execute_prompt(command, model, prompt, env).await;
 
         match result {
             Ok(output) => return Ok(PromptResult { output }),
@@ -45,7 +48,12 @@ pub async fn run_prompt(
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout.
-async fn execute_prompt(command: &[String], model: Option<&str>, prompt: &str) -> Result<String> {
+async fn execute_prompt(
+    command: &[String],
+    model: Option<&str>,
+    prompt: &str,
+    env: &HashMap<String, String>,
+) -> Result<String> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
             "command list is empty".to_string(),
@@ -61,6 +69,7 @@ async fn execute_prompt(command: &[String], model: Option<&str>, prompt: &str) -
 
     let mut child = Command::new(&command[0])
         .args(&cmd_args)
+        .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -136,13 +145,15 @@ mod tests {
     async fn test_run_prompt_with_echo() {
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
-        let result = run_prompt(&command, None, "test prompt", 0).await.unwrap();
+        let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new())
+            .await
+            .unwrap();
         assert_eq!(result.output, "test prompt");
     }
 
     #[tokio::test]
     async fn test_run_prompt_empty_command() {
-        let result = run_prompt(&[], None, "prompt", 0).await;
+        let result = run_prompt(&[], None, "prompt", 0, &HashMap::new()).await;
         assert!(result.is_err());
     }
 }

@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level workflow configuration.
@@ -13,6 +14,10 @@ pub struct WorkflowConfig {
 
     /// File path bound to the `plan` variable.
     pub plan: Option<PathBuf>,
+
+    /// Environment variables applied to all steps.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
@@ -69,6 +74,10 @@ pub struct StepConfig {
     /// Conditional execution rule.
     #[serde(rename = "if")]
     pub if_condition: Option<IfCondition>,
+
+    /// Environment variables applied to this step (overrides top-level env).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// A single item in an option step.
@@ -265,6 +274,57 @@ steps:
             Some(SkipCondition::Variable(name)) => assert_eq!(name, "prev.success"),
             _ => panic!("Expected Variable skip condition"),
         }
+    }
+
+    #[test]
+    fn test_top_level_env() {
+        let yaml = r#"
+command: [claude, -p]
+env:
+  ANTHROPIC_API_KEY: sk-test
+  PROJECT_NAME: myproject
+steps:
+  step1:
+    command: echo hello
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.env.get("ANTHROPIC_API_KEY"),
+            Some(&"sk-test".to_string())
+        );
+        assert_eq!(
+            config.env.get("PROJECT_NAME"),
+            Some(&"myproject".to_string())
+        );
+    }
+
+    #[test]
+    fn test_step_level_env() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+    env:
+      RUST_LOG: debug
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let build = config.steps.get("build").unwrap();
+        assert_eq!(build.env.get("RUST_LOG"), Some(&"debug".to_string()));
+    }
+
+    #[test]
+    fn test_env_defaults_empty() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  step1:
+    command: echo hello
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(config.env.is_empty());
+        let step = config.steps.get("step1").unwrap();
+        assert!(step.env.is_empty());
     }
 
     #[test]

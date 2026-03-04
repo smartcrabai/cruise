@@ -90,15 +90,23 @@ pub async fn run(args: Args) -> Result<()> {
         );
 
         let step_next = step_config.next.clone();
+        let merged_env = resolve_env(&config.env, &step_config.env, &vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
 
         let option_next = match &kind {
             StepKind::Prompt(step) => {
-                run_prompt_step(&mut vars, &config, step, args.rate_limit_retries).await?;
+                run_prompt_step(
+                    &mut vars,
+                    &config,
+                    step,
+                    args.rate_limit_retries,
+                    &merged_env,
+                )
+                .await?;
                 None
             }
             StepKind::Command(step) => {
-                run_command_step(&mut vars, step, args.rate_limit_retries).await?;
+                run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env).await?;
                 // Snapshot after the command so `if: file-changed` can detect diffs.
                 tracker.take_snapshot(&current_step)?;
                 None
@@ -131,6 +139,23 @@ pub async fn run(args: Args) -> Result<()> {
 
     eprintln!("\n{}", style("✓ workflow complete").green().bold());
     Ok(())
+}
+
+/// Merge top-level and step-level env maps, resolving template variables in values.
+/// Step-level values override top-level values.
+fn resolve_env(
+    top: &HashMap<String, String>,
+    step: &HashMap<String, String>,
+    vars: &VariableStore,
+) -> Result<HashMap<String, String>> {
+    let mut merged = HashMap::new();
+    for (k, v) in top {
+        merged.insert(k.clone(), vars.resolve(v)?);
+    }
+    for (k, v) in step {
+        merged.insert(k.clone(), vars.resolve(v)?);
+    }
+    Ok(merged)
 }
 
 /// Resolve the `{model}` placeholder in a command, or strip `--model {model}` if no model.
@@ -179,6 +204,7 @@ async fn run_prompt_step(
     config: &WorkflowConfig,
     step: &PromptStep,
     rate_limit_retries: usize,
+    env: &HashMap<String, String>,
 ) -> Result<()> {
     // Display instruction and description.
     if let Some(inst) = &step.instruction {
@@ -214,6 +240,7 @@ async fn run_prompt_step(
         model_arg.as_deref(),
         &prompt,
         rate_limit_retries,
+        env,
     )
     .await?;
 
@@ -238,6 +265,7 @@ async fn run_command_step(
     vars: &mut VariableStore,
     step: &CommandStep,
     rate_limit_retries: usize,
+    env: &HashMap<String, String>,
 ) -> Result<()> {
     if let Some(desc) = &step.description {
         let resolved = vars.resolve(desc)?;
@@ -255,7 +283,7 @@ async fn run_command_step(
         eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
     }
 
-    let result = run_commands(&cmds, rate_limit_retries).await?;
+    let result = run_commands(&cmds, rate_limit_retries, env).await?;
 
     vars.set_prev_success(Some(result.success));
     vars.set_prev_stderr(Some(result.stderr));
@@ -307,6 +335,14 @@ fn get_next_step(
 }
 
 /// Print a dry-run summary of the workflow flow.
+fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    for k in keys {
+        println!("{}{}={}", indent, k, env[k]);
+    }
+}
+
 fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
@@ -317,6 +353,11 @@ fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
 
     if let Some(plan) = &config.plan {
         println!("plan: {}", plan.display());
+    }
+
+    if !config.env.is_empty() {
+        println!("env:");
+        print_env_vars(&config.env, "  ");
     }
 
     println!("\nsteps:");
@@ -362,6 +403,10 @@ fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
 
         if let Some(desc) = &step.description {
             println!("    {}", style(desc).dim());
+        }
+
+        if !step.env.is_empty() {
+            print_env_vars(&step.env, "    env: ");
         }
     }
 
@@ -641,6 +686,90 @@ steps:
   step2:
     command: "echo skip me"
     skip: prev.success
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, true);
+        let result = run(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_top_level_env_passed_to_command() {
+        let yaml = r#"
+command: [echo]
+env:
+  CRUISE_TOP_ENV: top_value
+steps:
+  step1:
+    command: 'test "$CRUISE_TOP_ENV" = top_value'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(result.is_ok(), "top-level env was not passed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_step_env_overrides_top_level() {
+        let yaml = r#"
+command: [echo]
+env:
+  CRUISE_OVERRIDE_ENV: top_value
+steps:
+  step1:
+    command: 'test "$CRUISE_OVERRIDE_ENV" = step_value'
+    env:
+      CRUISE_OVERRIDE_ENV: step_value
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), None, None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "step env override did not work: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_env_variable_resolution() {
+        let yaml = r#"
+command: [echo]
+env:
+  CRUISE_INPUT_ENV: "{input}"
+steps:
+  step1:
+    command: 'test "$CRUISE_INPUT_ENV" = myinput'
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml).unwrap();
+
+        let args = make_args(tmp.path().to_str().unwrap(), Some("myinput"), None, false);
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "env variable resolution failed: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_with_env() {
+        let yaml = r#"
+command: [claude, -p]
+env:
+  API_KEY: sk-test
+steps:
+  step1:
+    command: echo hello
+    env:
+      STEP_VAR: step_val
 "#;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), yaml).unwrap();
