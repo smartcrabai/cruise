@@ -5,6 +5,7 @@ mod engine;
 mod error;
 mod file_tracker;
 mod resolver;
+mod spinner;
 mod step;
 mod variable;
 
