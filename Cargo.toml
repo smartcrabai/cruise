@@ -30,6 +30,9 @@ codegen-units = 1
 lto = true
 strip = true
 
+[profile.dist]
+inherits = "release"
+
 [dev-dependencies]
 tempfile = "3.26.0"
 
