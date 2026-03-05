@@ -104,7 +104,7 @@ fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
     files
 }
 
-/// Prompt the user to select one of the given config files using dialoguer.
+/// Prompt the user to select one of the given config files using inquire.
 fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
     let names: Vec<String> = files
         .iter()
@@ -116,14 +116,17 @@ fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
         })
         .collect();
 
-    let selection = dialoguer::Select::new()
-        .with_prompt("Select a workflow config")
-        .items(&names)
-        .default(0)
-        .interact_opt()
-        .map_err(|e| CruiseError::Other(e.to_string()))?
-        .ok_or_else(|| CruiseError::Other("config selection cancelled".to_string()))?;
+    let selected = match inquire::Select::new("Select a workflow config", names.clone()).prompt() {
+        Ok(name) => name,
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => {
+            return Err(CruiseError::Other("config selection cancelled".to_string()));
+        }
+        Err(e) => return Err(CruiseError::Other(e.to_string())),
+    };
 
+    let selection = names.iter().position(|n| n == &selected).unwrap();
     Ok(files[selection].clone())
 }
 
