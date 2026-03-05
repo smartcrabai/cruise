@@ -112,7 +112,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut current_step = start_step;
 
-    let total_steps = config.steps.len();
+    let mut total_steps = config.steps.len();
     let mut step_index = 0usize;
     let workflow_start = Instant::now();
     let mut steps_run = 0usize;
@@ -152,6 +152,7 @@ pub async fn run(args: Args) -> Result<()> {
         }
 
         step_index += 1;
+        total_steps = total_steps.max(step_index);
         eprintln!(
             "\n{} {}",
             style("▶").cyan().bold(),

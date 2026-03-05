@@ -81,6 +81,9 @@ async fn execute_command(cmd: &str, env: &HashMap<String, String>) -> Result<Com
         .map_err(|e| CruiseError::CommandError(e.to_string()))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !stderr.is_empty() {
+        eprint!("{}", stderr);
+    }
     let success = output.status.success();
 
     Ok(CommandResult { success, stderr })
