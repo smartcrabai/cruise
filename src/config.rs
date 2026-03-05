@@ -61,11 +61,8 @@ pub struct StepConfig {
     /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
 
-    /// Variable name to store LLM output into (prompt steps only).
-    pub output: Option<String>,
-
-    /// Human-readable description displayed during execution.
-    pub description: Option<String>,
+    /// Plan file path to display as context in option steps.
+    pub plan: Option<String>,
 
     /// List of choices (option steps only).
     pub option: Option<Vec<OptionItem>>,
@@ -133,10 +130,9 @@ steps:
     model: claude-opus-4-5
     instruction: "You are a senior engineer."
     prompt: "Plan the implementation of: {input}"
-    output: plan
 
   review_plan:
-    description: "Review the plan"
+    plan: "{plan}"
     option:
       - selector: "Approve and continue"
         next: implement
@@ -191,7 +187,6 @@ steps:
             Some("You are a senior engineer.".to_string())
         );
         assert!(planning.prompt.is_some());
-        assert_eq!(planning.output, Some("plan".to_string()));
     }
 
     #[test]
