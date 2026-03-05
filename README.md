@@ -53,6 +53,7 @@ Options:
   --dry-run                    Print the workflow flow without executing
   --worktree                   Run workflow in an isolated git worktree
   --keep-worktree              Keep the worktree after workflow completes (default: auto-delete)
+  --new-worktree               Skip worktree resume detection; always create a new worktree
 ```
 
 ## Config File Resolution
@@ -147,9 +148,6 @@ steps:
     prompt: |                     # prompt body (required)
       Create an implementation plan for:
       {input}
-    output: plan                  # variable to store the output in (optional)
-                                  # if output matches the top-level plan field name,
-                                  # the result is also written to that file automatically
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
@@ -160,7 +158,6 @@ steps:
 steps:
   run_tests:
     command: cargo test           # single command (required)
-    description: Running tests    # display label (optional)
     env:                          # environment variables for this step (optional)
       RUST_LOG: debug
 
@@ -173,12 +170,12 @@ steps:
 
 #### Option Step (interactive selection)
 
-Each item in `option` is either a `selector` (menu choice) or a `text-input` (free-text prompt):
+Each item in `option` is either a `selector` (menu choice) or a `text-input` (free-text prompt). The optional `plan` field resolves to a file path whose contents are displayed in a bordered panel before the menu is shown:
 
 ```yaml
 steps:
   review_plan:
-    description: Review the plan
+    plan: "{plan}"               # optional: display contents of this file before the menu
     option:
       - selector: Approve and continue   # shown in selection menu
         next: implement
@@ -222,21 +219,22 @@ The `skip` field accepts a static boolean (`true`/`false`) or a variable referen
 
 #### Conditional execution (file-changed detection)
 
+When a step has `if: file-changed: <target>`, a snapshot of the working directory is taken **before** the step runs. After the step executes, if any files changed during its execution, the workflow jumps to `<target>`. If no files changed, the workflow continues to the next step normally.
+
+This is designed for loop-back patterns — for example, re-running tests whenever a review step modifies code:
+
 ```yaml
 steps:
-  implement:
-    command: claude -p "implement: {input}"
-
-  run_tests:
+  test:
     command: cargo test
 
-  commit:
-    command: git commit -am "feat: {input}"
+  review:
+    prompt: "Review the code and fix any issues."
     if:
-      file-changed: implement     # only run if files changed since `implement`
+      file-changed: test    # after review, if it modified files, jump back to test
 ```
 
-> **Note:** Snapshots for `file-changed` checks are taken **only after command steps**. Prompt and option steps do not create snapshots. If the referenced step has never run (no snapshot exists), the condition evaluates to `false` and the step is skipped.
+> **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
 ### Variable Reference
 
@@ -247,8 +245,7 @@ steps:
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
-| `{plan}` | Contents of the file specified by the top-level `plan` field; also written automatically when a prompt step uses `output: plan` |
-| `{name}` | Named variable defined via the `output` field |
+| `{plan}` | File path specified by the top-level `plan` field |
 
 > **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
@@ -276,8 +273,6 @@ steps:
 
   pr:
     prompt: create a PR
-    if:
-      file-changed: implement
 ```
 
 - A new branch `cruise/<timestamp>-<sanitized-input>` is created and a worktree is checked out next to the repo directory.
@@ -330,13 +325,12 @@ steps:
     model: opus
     instruction: "What will you do?"
     prompt: |
-      I am trying to implement the following features. Create an implementation plan.
+      I am trying to implement the following features. Create an implementation plan and write it to {plan}.
       ---
       {input}
-    output: plan
 
   approve-plan:
-    description: "{prev.output}"
+    plan: "{plan}"
     option:
       - selector: Approve
         next: write-tests
@@ -371,7 +365,7 @@ steps:
   test:
     command:
       - cargo fmt --all
-      - cargo clippy --fix --allow-dirty -- -D warnings
+      - cargo clippy --fix --allow-dirty --all-targets --all-features -- -D warnings
       - cargo test
 
   fix-test-error:
@@ -382,10 +376,13 @@ steps:
       {prev.stderr}
     next: test
 
+  coderabbit:
+    prompt: /cr
+    if:
+      file-changed: test          # after coderabbit, if it modified files, re-run tests
+
   pr:
     prompt: create a PR
-    if:
-      file-changed: test          # only if files changed since `test` step
 ```
 
 ### Simple Auto-Commit Flow
@@ -399,10 +396,19 @@ steps:
   implement:
     prompt: "{input}"
 
+  test:
+    command: cargo test
+
+  fix:
+    prompt: |
+      The following test errors occurred. Please fix them:
+      ---
+      {prev.stderr}
+    if:
+      file-changed: test    # after fix, if it modified files, jump back to test
+
   commit:
     command: git add -A && git commit -m "feat: {input}"
-    if:
-      file-changed: implement
 ```
 
 ## Rate Limit Retry

@@ -7,6 +7,7 @@ command:
 model: sonnet
 
 plan: .cruise/plan.md
+state: .cruise/state.json
 
 steps:
   plan:
@@ -62,17 +63,6 @@ steps:
       {prev.stderr}
     next: test
 
-  improve:
-    prompt: /improve
-    if:
-      file-changed: test
-
-  simplify:
-    model: opus
-    prompt: /simplify
-    if:
-      file-changed: test
-
   coderabbit:
     prompt: |
       Run `coderabbit --prompt-only` to address any reasonable suggestions.
@@ -82,5 +72,16 @@ steps:
     if:
       file-changed: test
 
+  simplify:
+    model: opus
+    prompt: /simplify
+    if:
+      file-changed: test
+
+  improve:
+    prompt: /improve
+    if:
+      file-changed: test
+
   pr:
-    prompt: create a PR
+    prompt: Please create a PR and provide the URL
