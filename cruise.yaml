@@ -13,13 +13,12 @@ steps:
     model: opus
     instruction: "What will you do?"
     prompt: |
-      I am trying to implement the following features. Create an implementation plan.
+      I am trying to implement the following features. Create an implementation plan and write it to {plan}.
       ---
       {input}
-    output: plan
 
   approve-plan:
-    description: "{prev.output}"
+    plan: "{plan}"
     option:
       - selector: Approve
         next: write-tests

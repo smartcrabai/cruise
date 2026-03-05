@@ -22,8 +22,6 @@ pub struct PromptStep {
     pub model: Option<String>,
     pub prompt: String,
     pub instruction: Option<String>,
-    pub output: Option<String>,
-    pub description: Option<String>,
 }
 
 /// Parameters for a command step.
@@ -31,7 +29,6 @@ pub struct PromptStep {
 pub struct CommandStep {
     /// One or more shell commands to run sequentially.
     pub command: Vec<String>,
-    pub description: Option<String>,
 }
 
 /// A single choice in an option step.
@@ -56,7 +53,8 @@ impl OptionChoice {
 #[derive(Debug, Clone)]
 pub struct OptionStep {
     pub choices: Vec<OptionChoice>,
-    pub description: Option<String>,
+    /// Template string that resolves to a file path; contents shown as context.
+    pub plan: Option<String>,
 }
 
 impl TryFrom<StepConfig> for StepKind {
@@ -69,8 +67,6 @@ impl TryFrom<StepConfig> for StepKind {
                 model: config.model,
                 prompt,
                 instruction: config.instruction,
-                output: config.output,
-                description: config.description,
             }));
         }
 
@@ -87,10 +83,7 @@ impl TryFrom<StepConfig> for StepKind {
                     "command step must have at least one command".to_string(),
                 ));
             }
-            return Ok(StepKind::Command(CommandStep {
-                command: commands,
-                description: config.description,
-            }));
+            return Ok(StepKind::Command(CommandStep { command: commands }));
         }
 
         // Option step: `option` field is present.
@@ -98,7 +91,7 @@ impl TryFrom<StepConfig> for StepKind {
             let choices = items_to_choices(items)?;
             return Ok(StepKind::Option(OptionStep {
                 choices,
-                description: config.description,
+                plan: config.plan,
             }));
         }
 
@@ -147,8 +140,6 @@ mod tests {
             prompt: Some("Hello {input}".to_string()),
             model: Some("claude-opus-4-5".to_string()),
             instruction: Some("Be helpful".to_string()),
-            output: Some("plan".to_string()),
-            description: Some("Planning step".to_string()),
             ..Default::default()
         }
     }
@@ -156,7 +147,6 @@ mod tests {
     fn make_command_step() -> StepConfig {
         StepConfig {
             command: Some(StringOrVec::Single("cargo test".to_string())),
-            description: Some("Run tests".to_string()),
             ..Default::default()
         }
     }
@@ -175,7 +165,7 @@ mod tests {
                     next: None,
                 },
             ]),
-            description: Some("Choose an option".to_string()),
+            plan: Some("{plan}".to_string()),
             ..Default::default()
         }
     }
@@ -189,7 +179,6 @@ mod tests {
                 assert_eq!(step.prompt, "Hello {input}");
                 assert_eq!(step.model, Some("claude-opus-4-5".to_string()));
                 assert_eq!(step.instruction, Some("Be helpful".to_string()));
-                assert_eq!(step.output, Some("plan".to_string()));
             }
             _ => panic!("Expected Prompt step"),
         }
@@ -202,7 +191,6 @@ mod tests {
         match kind {
             StepKind::Command(step) => {
                 assert_eq!(step.command, vec!["cargo test"]);
-                assert_eq!(step.description, Some("Run tests".to_string()));
             }
             _ => panic!("Expected Command step"),
         }
@@ -259,7 +247,6 @@ mod tests {
                 text_input: Some("Enter text".to_string()),
                 next: Some("next".to_string()),
             }]),
-            description: Some("Text input step".to_string()),
             ..Default::default()
         };
         let kind = StepKind::try_from(config).unwrap();
@@ -320,10 +307,7 @@ mod tests {
 
     #[test]
     fn test_invalid_step_conversion() {
-        let config = StepConfig {
-            description: Some("Only description".to_string()),
-            ..Default::default()
-        };
+        let config = StepConfig::default();
         let err = StepKind::try_from(config).unwrap_err();
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }

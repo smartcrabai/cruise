@@ -480,11 +480,6 @@ async fn run_prompt_step(
             eprintln!("  {}", style(resolved).dim());
         }
     }
-    if let Some(desc) = &step.description {
-        let resolved = vars.resolve(desc)?;
-        eprintln!("  {}", style(resolved).dim());
-    }
-
     let prompt = vars.resolve(&step.prompt)?;
 
     // Effective model: step-level overrides config-level default.
@@ -520,19 +515,6 @@ async fn run_prompt_step(
     drop(spinner);
     let result = result?;
 
-    if let Some(output_var) = &step.output {
-        // Write to the plan file if this output is bound to it.
-        if let Some(plan_path) = &config.plan
-            && output_var == PLAN_VAR_NAME
-        {
-            if let Some(parent) = plan_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(plan_path, &result.output)?;
-        }
-        vars.set_named_value(output_var, result.output.clone());
-    }
-
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));
     vars.set_prev_input(None);
@@ -547,11 +529,6 @@ async fn run_command_step(
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
 ) -> Result<bool> {
-    if let Some(desc) = &step.description {
-        let resolved = vars.resolve(desc)?;
-        eprintln!("  {}", style(resolved).dim());
-    }
-
     // Resolve variables in each command, then display and run.
     let cmds: Vec<String> = step
         .command
@@ -576,10 +553,16 @@ async fn run_command_step(
 
 /// Execute an option step, updating variable state and returning the chosen next step.
 fn run_option_step(vars: &mut VariableStore, step: &OptionStep) -> Result<Option<String>> {
+    // If a plan field is set, resolve it to a file path and read that file's
+    // contents to show as context above the selection menu.
     let desc = step
-        .description
+        .plan
         .as_ref()
-        .map(|d| vars.resolve(d))
+        .map(|tmpl| -> Result<String> {
+            let path = vars.resolve(tmpl)?;
+            std::fs::read_to_string(&path)
+                .map_err(|e| CruiseError::Other(format!("failed to read plan file {path}: {e}")))
+        })
         .transpose()?;
 
     let result = run_option(&step.choices, desc.as_deref())?;
@@ -681,10 +664,6 @@ fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Result<()> {
         }
 
         println!();
-
-        if let Some(desc) = &step.description {
-            println!("    {}", style(desc).dim());
-        }
 
         if !step.env.is_empty() {
             print_env_vars(&step.env, "    env: ");
@@ -1098,23 +1077,6 @@ steps:
     }
 
     #[tokio::test]
-    async fn test_variable_resolution_in_description() {
-        let yaml = r#"
-command: [echo]
-steps:
-  step1:
-    command: "echo hello"
-    description: "Input is: {input}"
-"#;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), yaml).unwrap();
-
-        let args = make_args(tmp.path().to_str().unwrap(), Some("world"), None, false);
-        let result = run(args).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn test_prev_success_true_propagation() {
         let yaml = r#"
 command: [echo]
@@ -1273,15 +1235,14 @@ steps:
     }
 
     #[tokio::test]
-    async fn test_named_output_variable_between_steps() {
+    async fn test_prev_output_accessible_in_subsequent_steps() {
         let yaml = r#"
 command: [cat]
 steps:
   step1:
     prompt: "stored_value"
-    output: myvar
   step2:
-    command: 'test "{myvar}" = stored_value'
+    command: 'test "{prev.output}" = stored_value'
 "#;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), yaml).unwrap();
@@ -1290,7 +1251,7 @@ steps:
         let result = run(args).await;
         assert!(
             result.is_ok(),
-            "named output variable should be accessible in subsequent steps: {:?}",
+            "prev.output should be accessible in subsequent steps: {:?}",
             result
         );
     }

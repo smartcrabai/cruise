@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::error::{CruiseError, Result};
 
@@ -21,16 +20,14 @@ pub struct VariableStore {
     /// Exit status of the previous command step.
     prev_success: Option<bool>,
 
-    /// Named variables defined via the `output` field.
+    /// Named variables (e.g. plan file path).
     named: HashMap<String, NamedVariable>,
 }
 
 /// A named variable value.
 #[derive(Debug, Clone)]
 pub enum NamedVariable {
-    /// An inline string value.
-    Value(String),
-    /// A file path whose contents are read on demand.
+    /// A file path – resolves to the path string itself (not the file contents).
     FilePath(std::path::PathBuf),
 }
 
@@ -40,12 +37,6 @@ impl VariableStore {
             input,
             ..Default::default()
         }
-    }
-
-    /// Register a named variable with an inline string value.
-    pub fn set_named_value(&mut self, name: &str, value: String) {
-        self.named
-            .insert(name.to_string(), NamedVariable::Value(value));
     }
 
     /// Register a named variable backed by a file path.
@@ -135,24 +126,16 @@ impl VariableStore {
                 .map(|b| b.to_string())
                 .ok_or_else(|| CruiseError::UndefinedVariable("prev.success".to_string())),
             other => match self.named.get(other) {
-                Some(NamedVariable::Value(v)) => Ok(v.clone()),
-                Some(NamedVariable::FilePath(path)) => self.read_file_variable(other, path),
+                Some(NamedVariable::FilePath(path)) => Ok(path.to_string_lossy().to_string()),
                 None => Err(CruiseError::UndefinedVariable(other.to_string())),
             },
         }
-    }
-
-    /// Read the contents of a file-backed variable.
-    fn read_file_variable(&self, name: &str, path: &Path) -> Result<String> {
-        std::fs::read_to_string(path)
-            .map_err(|e| CruiseError::VariableFileReadError(name.to_string(), e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -205,25 +188,15 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_named_value() {
-        let mut store = VariableStore::new("input".to_string());
-        store.set_named_value("plan", "Step 1: do something".to_string());
-        assert_eq!(
-            store.resolve("Plan: {plan}").unwrap(),
-            "Plan: Step 1: do something"
-        );
-    }
-
-    #[test]
     fn test_resolve_named_file() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "File content").unwrap();
+        let file = NamedTempFile::new().unwrap();
         let path = file.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
 
         let mut store = VariableStore::new("input".to_string());
         store.set_named_file("plan", path);
         let result = store.resolve("Plan: {plan}").unwrap();
-        assert!(result.contains("File content"));
+        assert_eq!(result, format!("Plan: {path_str}"));
     }
 
     #[test]

@@ -17,9 +17,6 @@ pub enum CruiseError {
     #[error("undefined variable: {{{0}}}")]
     UndefinedVariable(String),
 
-    #[error("failed to read variable file: {0}: {1}")]
-    VariableFileReadError(String, String),
-
     #[error("command error: {0}")]
     CommandError(String),
 
