@@ -52,8 +52,8 @@ steps:
   test:
     command:
       - cargo fmt --all
-      - cargo clippy --fix --allow-dirty -- -D warnings
-      - cargo test
+      - cargo clippy --fix --allow-dirty --all-targets --all-features -- -D warnings
+      - cargo test --all-features
 
   fix-test-error:
     skip: prev.success
