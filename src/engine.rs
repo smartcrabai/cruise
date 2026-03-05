@@ -244,6 +244,9 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(state_path) = &config.state {
         WorkflowState::cleanup(state_path)?;
     }
+    if let Some(plan_path) = &config.plan {
+        WorkflowState::cleanup(plan_path)?;
+    }
 
     let total_elapsed = workflow_start.elapsed();
     eprintln!(
