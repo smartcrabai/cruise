@@ -5,7 +5,7 @@ use console::style;
 use inquire::{Confirm, InquireError};
 
 use crate::cli::Args;
-use crate::condition::{evaluate_if_condition, should_skip};
+use crate::condition::should_skip;
 use crate::config::{SkipCondition, WorkflowConfig};
 
 use crate::state::WorkflowState;
@@ -219,12 +219,6 @@ pub async fn run(args: Args) -> Result<()> {
         // Determine if this step should be skipped and why.
         let skip_msg = if should_skip(&step_config.skip, &vars)? {
             Some(format!("skipping: {}", current_step))
-        } else if let Some(ref if_cond) = step_config.if_condition {
-            if !evaluate_if_condition(if_cond, &tracker)? {
-                Some(format!("condition not met, skipping: {}", current_step))
-            } else {
-                None
-            }
         } else {
             None
         };
@@ -265,6 +259,15 @@ pub async fn run(args: Args) -> Result<()> {
         let merged_env = resolve_env(&config.env, &step_config.env, &vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
 
+        // Pre-execution snapshot so we can detect file changes after this step.
+        if step_config
+            .if_condition
+            .as_ref()
+            .is_some_and(|c| c.file_changed.is_some())
+        {
+            tracker.take_snapshot(&current_step)?;
+        }
+
         let option_next = match &kind {
             StepKind::Prompt(step) => {
                 let output = run_prompt_step(
@@ -297,8 +300,6 @@ pub async fn run(args: Args) -> Result<()> {
                     steps_failed += 1;
                 }
                 log_step_result(elapsed, success);
-                // Snapshot after the command so `if: file-changed` can detect diffs.
-                tracker.take_snapshot(&current_step)?;
                 None
             }
             StepKind::Option(step) => {
@@ -310,7 +311,27 @@ pub async fn run(args: Args) -> Result<()> {
         };
         steps_run += 1;
 
-        let effective_next = option_next.or(step_next);
+        // Post-execution: if file-changed condition → jump to target step.
+        let if_next = if let Some(ref if_cond) = step_config.if_condition {
+            if let Some(ref target) = if_cond.file_changed {
+                if tracker.has_files_changed(&current_step)? {
+                    eprintln!(
+                        "  {} files changed, jumping to: {}",
+                        style("↻").cyan(),
+                        target
+                    );
+                    Some(target.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let effective_next = if_next.or(option_next).or(step_next);
         let next_step = get_next_step(&config, &current_step, effective_next.as_deref());
 
         // Loop protection.
