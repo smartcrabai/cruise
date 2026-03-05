@@ -256,15 +256,14 @@ pub async fn run(args: Args) -> Result<()> {
 
         let step_start = Instant::now();
         let step_next = step_config.next.clone();
-        let if_condition = step_config.if_condition.clone();
         let merged_env = resolve_env(&config.env, &step_config.env, &vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
 
         // Pre-execution snapshot so we can detect file changes after this step.
-        if if_condition
+        if step_config
+            .if_condition
             .as_ref()
-            .and_then(|c| c.file_changed.as_ref())
-            .is_some()
+            .is_some_and(|c| c.file_changed.is_some())
         {
             tracker.take_snapshot(&current_step)?;
         }
@@ -313,7 +312,7 @@ pub async fn run(args: Args) -> Result<()> {
         steps_run += 1;
 
         // Post-execution: if file-changed condition → jump to target step.
-        let if_next = if let Some(ref if_cond) = if_condition {
+        let if_next = if let Some(ref if_cond) = step_config.if_condition {
             if let Some(ref target) = if_cond.file_changed {
                 if tracker.has_files_changed(&current_step)? {
                     eprintln!(
