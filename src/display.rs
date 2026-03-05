@@ -6,7 +6,7 @@ use console::{Term, measure_text_width, style};
 /// An optional `title` is embedded in the top border line.
 pub fn print_bordered(text: &str, title: Option<&str>) {
     let term_width = Term::stdout().size().1 as usize;
-    let box_width = term_width.min(100).max(20);
+    let box_width = term_width.clamp(20, 100);
     let content_width = box_width - 4; // "│ " + content + " │"
 
     // Top border
