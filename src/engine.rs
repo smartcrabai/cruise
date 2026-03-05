@@ -6,6 +6,7 @@ use crate::cli::Args;
 use crate::condition::{evaluate_if_condition, should_skip};
 use crate::config::{SkipCondition, WorkflowConfig};
 
+use crate::state::WorkflowState;
 use crate::worktree;
 /// Variable name that maps to the plan file.
 const PLAN_VAR_NAME: &str = "plan";
@@ -84,8 +85,21 @@ pub async fn run(args: Args) -> Result<()> {
     // Edge counters for loop protection: (from, to) → visit count.
     let mut edge_counts: HashMap<(String, String), usize> = HashMap::new();
 
+    // Auto-resume: if a state file exists, load it and resume from saved step.
+    // --from (args.from) takes priority over saved state.
     let start_step = if let Some(from) = args.from {
         from
+    } else if !args.dry_run
+        && let Some(state_path) = &config.state
+        && state_path.exists()
+    {
+        let saved = WorkflowState::load(state_path)?;
+        eprintln!(
+            "{} resuming from: {}",
+            console::style("→").cyan(),
+            saved.current
+        );
+        saved.current
     } else {
         config
             .steps
@@ -133,6 +147,12 @@ pub async fn run(args: Args) -> Result<()> {
             style(&current_step).bold()
         );
 
+        if !args.dry_run {
+            if let Some(state_path) = &config.state {
+                WorkflowState::new(config.clone(), current_step.clone()).save(state_path)?;
+            }
+        }
+
         let step_next = step_config.next.clone();
         let merged_env = resolve_env(&config.env, &step_config.env, &vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
@@ -179,6 +199,10 @@ pub async fn run(args: Args) -> Result<()> {
             Some(next) => current_step = next,
             None => break,
         }
+    }
+
+    if let Some(state_path) = &config.state {
+        WorkflowState::cleanup(state_path)?;
     }
 
     eprintln!("\n{}", style("✓ workflow complete").green().bold());
