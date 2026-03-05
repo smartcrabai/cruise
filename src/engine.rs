@@ -141,7 +141,11 @@ pub async fn run(args: Args) -> Result<()> {
         eprintln!(
             "\n{} {}",
             style("▶").cyan().bold(),
-            style(format!("[{}/{}] {}", step_index, total_steps, &current_step)).bold()
+            style(format!(
+                "[{}/{}] {}",
+                step_index, total_steps, &current_step
+            ))
+            .bold()
         );
 
         let step_start = Instant::now();
@@ -161,24 +165,38 @@ pub async fn run(args: Args) -> Result<()> {
                 .await?;
                 let elapsed = step_start.elapsed();
                 steps_run += 1;
-                let preview: String = output.lines().next().unwrap_or("").chars().take(80).collect();
+                let preview: String = output
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
                 if !preview.is_empty() {
                     eprintln!("  {} {}", style("│").dim(), style(&preview).dim());
                 }
-                eprintln!("  {}", style(format!("✓ {}", format_duration(elapsed))).green());
+                eprintln!(
+                    "  {}",
+                    style(format!("✓ {}", format_duration(elapsed))).green()
+                );
                 None
             }
             StepKind::Command(step) => {
                 let success =
-                    run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env)
-                        .await?;
+                    run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env).await?;
                 let elapsed = step_start.elapsed();
                 steps_run += 1;
                 if success {
-                    eprintln!("  {}", style(format!("✓ {}", format_duration(elapsed))).green());
+                    eprintln!(
+                        "  {}",
+                        style(format!("✓ {}", format_duration(elapsed))).green()
+                    );
                 } else {
                     steps_failed += 1;
-                    eprintln!("  {}", style(format!("✗ {}", format_duration(elapsed))).red());
+                    eprintln!(
+                        "  {}",
+                        style(format!("✗ {}", format_duration(elapsed))).red()
+                    );
                 }
                 // Snapshot after the command so `if: file-changed` can detect diffs.
                 tracker.take_snapshot(&current_step)?;
@@ -188,7 +206,10 @@ pub async fn run(args: Args) -> Result<()> {
                 let result = run_option_step(&mut vars, step)?;
                 let elapsed = step_start.elapsed();
                 steps_run += 1;
-                eprintln!("  {}", style(format!("✓ {}", format_duration(elapsed))).green());
+                eprintln!(
+                    "  {}",
+                    style(format!("✓ {}", format_duration(elapsed))).green()
+                );
                 result
             }
         };
