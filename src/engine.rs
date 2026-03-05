@@ -184,7 +184,6 @@ pub async fn run(args: Args) -> Result<()> {
                 )
                 .await?;
                 let elapsed = step_start.elapsed();
-                steps_run += 1;
                 let preview: String = output
                     .lines()
                     .next()
@@ -195,29 +194,17 @@ pub async fn run(args: Args) -> Result<()> {
                 if !preview.is_empty() {
                     eprintln!("  {} {}", style("│").dim(), style(&preview).dim());
                 }
-                eprintln!(
-                    "  {}",
-                    style(format!("✓ {}", format_duration(elapsed))).green()
-                );
+                log_step_result(elapsed, true);
                 None
             }
             StepKind::Command(step) => {
                 let success =
                     run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env).await?;
                 let elapsed = step_start.elapsed();
-                steps_run += 1;
-                if success {
-                    eprintln!(
-                        "  {}",
-                        style(format!("✓ {}", format_duration(elapsed))).green()
-                    );
-                } else {
+                if !success {
                     steps_failed += 1;
-                    eprintln!(
-                        "  {}",
-                        style(format!("✗ {}", format_duration(elapsed))).red()
-                    );
                 }
+                log_step_result(elapsed, success);
                 // Snapshot after the command so `if: file-changed` can detect diffs.
                 tracker.take_snapshot(&current_step)?;
                 None
@@ -225,14 +212,11 @@ pub async fn run(args: Args) -> Result<()> {
             StepKind::Option(step) => {
                 let result = run_option_step(&mut vars, step)?;
                 let elapsed = step_start.elapsed();
-                steps_run += 1;
-                eprintln!(
-                    "  {}",
-                    style(format!("✓ {}", format_duration(elapsed))).green()
-                );
+                log_step_result(elapsed, true);
                 result
             }
         };
+        steps_run += 1;
 
         let effective_next = option_next.or(step_next);
         let next_step = get_next_step(&config, &current_step, effective_next.as_deref());
@@ -288,6 +272,21 @@ fn resolve_env(
         merged.insert(k.clone(), vars.resolve(v)?);
     }
     Ok(merged)
+}
+
+/// Print the step completion line (✓ success or ✗ failure) with elapsed time.
+fn log_step_result(elapsed: std::time::Duration, success: bool) {
+    if success {
+        eprintln!(
+            "  {}",
+            style(format!("✓ {}", format_duration(elapsed))).green()
+        );
+    } else {
+        eprintln!(
+            "  {}",
+            style(format!("✗ {}", format_duration(elapsed))).red()
+        );
+    }
 }
 
 /// Format a duration as a human-readable string.
