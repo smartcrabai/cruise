@@ -147,10 +147,10 @@ pub async fn run(args: Args) -> Result<()> {
             style(&current_step).bold()
         );
 
-        if !args.dry_run {
-            if let Some(state_path) = &config.state {
-                WorkflowState::new(config.clone(), current_step.clone()).save(state_path)?;
-            }
+        if !args.dry_run
+            && let Some(state_path) = &config.state
+        {
+            WorkflowState::new(config.clone(), current_step.clone()).save(state_path)?;
         }
 
         let step_next = step_config.next.clone();
