@@ -81,14 +81,18 @@ pub async fn run(args: Args) -> Result<()> {
             ctx
         } else if resumable.len() == 1 {
             let r = &resumable[0];
-            let confirmed = Confirm::new(&format!(
+            let confirmed = match Confirm::new(&format!(
                 "Resume worktree at {} (step: {})?",
                 r.info.path.display(),
                 r.current_step
             ))
             .with_default(true)
             .prompt()
-            .unwrap_or(false);
+            {
+                Ok(b) => b,
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => false,
+                Err(e) => return Err(CruiseError::Other(format!("prompt error: {e}"))),
+            };
 
             if confirmed {
                 eprintln!(
@@ -136,7 +140,7 @@ pub async fn run(args: Args) -> Result<()> {
                 let idx = labels
                     .iter()
                     .position(|l| l.as_str() == selected)
-                    .unwrap_or(resumable.len());
+                    .expect("selected label must exist in labels");
                 let r = &resumable[idx];
                 eprintln!(
                     "{} resuming worktree: {}",
