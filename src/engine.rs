@@ -450,7 +450,7 @@ async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             // Prompt the user for input inline with the instruction text.
-            let prompt_text = format!("  {}", style(&resolved).dim());
+            let prompt_text = format!("  {}", &resolved);
             let text = inquire::Text::new(&prompt_text)
                 .prompt()
                 .map_err(|e| crate::error::CruiseError::Other(format!("input error: {e}")))?;
