@@ -114,7 +114,13 @@ fn ensure_git_repo(dir: &Path) -> Result<()> {
 fn sanitize_branch_name(input: &str) -> String {
     let raw: String = input
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
 
     // Collapse consecutive hyphens and strip leading/trailing ones.
@@ -214,8 +220,14 @@ mod tests {
 
         let ctx = setup_worktree(&repo, Some("test task")).unwrap();
         assert!(ctx.path.exists(), "worktree directory should exist");
-        assert!(ctx.branch.starts_with("cruise/"), "branch should start with cruise/");
-        assert!(ctx.branch.contains("test-task"), "branch should contain sanitized input");
+        assert!(
+            ctx.branch.starts_with("cruise/"),
+            "branch should start with cruise/"
+        );
+        assert!(
+            ctx.branch.contains("test-task"),
+            "branch should contain sanitized input"
+        );
 
         cleanup_worktree(&ctx).unwrap();
         assert!(!ctx.path.exists(), "worktree directory should be removed");
