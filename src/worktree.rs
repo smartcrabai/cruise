@@ -18,7 +18,7 @@ pub fn setup_worktree(original_dir: &Path, input: Option<&str>) -> Result<Worktr
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_millis();
 
     let branch = if let Some(inp) = input.filter(|s| !s.is_empty()) {
         let sanitized = sanitize_branch_name(inp);
@@ -153,10 +153,25 @@ fn copy_worktree_includes(original_dir: &Path, worktree_dir: &Path) -> Result<()
 
         // Strip trailing slash to get the actual relative path.
         let pattern = line.trim_end_matches('/');
+
+        // Reject absolute paths and path traversal attempts.
+        if std::path::Path::new(pattern).is_absolute() || pattern.split('/').any(|c| c == "..") {
+            continue;
+        }
+
         let source = original_dir.join(pattern);
         let dest = worktree_dir.join(pattern);
 
         if !source.exists() {
+            continue;
+        }
+
+        // Skip symlinks to avoid following links outside the repository.
+        if source
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -177,9 +192,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             fs::copy(&src_path, &dst_path)?;
