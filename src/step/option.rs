@@ -1,4 +1,4 @@
-use dialoguer::{Input, Select};
+use inquire::{InquireError, Select, Text};
 
 use crate::error::Result;
 use crate::step::OptionChoice;
@@ -30,12 +30,25 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
         });
     }
 
-    let selection = Select::new()
-        .with_prompt("Select an option")
-        .items(&labels)
-        .default(0)
-        .interact()
-        .map_err(|e| crate::error::CruiseError::Other(format!("selection error: {e}")))?;
+    let selected_label = match Select::new("Select an option", labels).prompt() {
+        Ok(label) => label,
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(OptionResult {
+                next_step: None,
+                text_input: None,
+            });
+        }
+        Err(e) => {
+            return Err(crate::error::CruiseError::Other(format!(
+                "selection error: {e}"
+            )));
+        }
+    };
+
+    let selection = choices
+        .iter()
+        .position(|c| c.label() == selected_label)
+        .ok_or_else(|| crate::error::CruiseError::Other("selected item not found".to_string()))?;
 
     match &choices[selection] {
         OptionChoice::Selector { next, .. } => Ok(OptionResult {
@@ -43,10 +56,20 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
             text_input: None,
         }),
         OptionChoice::TextInput { label, next } => {
-            let text: String = Input::new()
-                .with_prompt(label)
-                .interact_text()
-                .map_err(|e| crate::error::CruiseError::Other(format!("input error: {e}")))?;
+            let text = match Text::new(label).prompt() {
+                Ok(t) => t,
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    return Ok(OptionResult {
+                        next_step: None,
+                        text_input: None,
+                    });
+                }
+                Err(e) => {
+                    return Err(crate::error::CruiseError::Other(format!(
+                        "input error: {e}"
+                    )));
+                }
+            };
 
             Ok(OptionResult {
                 next_step: next.clone(),

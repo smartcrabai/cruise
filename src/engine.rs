@@ -255,10 +255,10 @@ async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             // Prompt the user for input inline with the instruction text.
-            let text = dialoguer::Input::<String>::new()
-                .with_prompt(format!("  {}", style(&resolved).dim()))
-                .interact_text()
-                .map_err(|e| crate::error::CruiseError::IoError(e.into()))?;
+            let prompt_text = format!("  {}", style(&resolved).dim());
+            let text = inquire::Text::new(&prompt_text)
+                .prompt()
+                .map_err(|e| crate::error::CruiseError::Other(format!("input error: {e}")))?;
             vars.set_input(text);
         } else {
             eprintln!("  {}", style(resolved).dim());
