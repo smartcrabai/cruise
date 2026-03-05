@@ -37,6 +37,10 @@ pub struct Args {
     /// Keep the worktree after workflow completes (default: auto-delete).
     #[arg(long)]
     pub keep_worktree: bool,
+
+    /// Skip worktree resume detection; always create a new worktree.
+    #[arg(long)]
+    pub new_worktree: bool,
 }
 
 pub fn parse_args() -> Args {
