@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use console::style;
 
@@ -97,6 +98,13 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut current_step = start_step;
 
+    let total_steps = config.steps.len();
+    let mut step_index = 0usize;
+    let workflow_start = Instant::now();
+    let mut steps_run = 0usize;
+    let mut steps_skipped = 0usize;
+    let mut steps_failed = 0usize;
+
     loop {
         let step_config = config
             .steps
@@ -117,6 +125,8 @@ pub async fn run(args: Args) -> Result<()> {
         };
 
         if let Some(msg) = skip_msg {
+            step_index += 1;
+            steps_skipped += 1;
             eprintln!("{} {}", style("→").yellow(), msg);
             match get_next_step(&config, &current_step, None) {
                 Some(next) => {
@@ -127,19 +137,25 @@ pub async fn run(args: Args) -> Result<()> {
             }
         }
 
+        step_index += 1;
         eprintln!(
             "\n{} {}",
             style("▶").cyan().bold(),
-            style(&current_step).bold()
+            style(format!(
+                "[{}/{}] {}",
+                step_index, total_steps, &current_step
+            ))
+            .bold()
         );
 
+        let step_start = Instant::now();
         let step_next = step_config.next.clone();
         let merged_env = resolve_env(&config.env, &step_config.env, &vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
 
         let option_next = match &kind {
             StepKind::Prompt(step) => {
-                run_prompt_step(
+                let output = run_prompt_step(
                     &mut vars,
                     &config,
                     step,
@@ -147,15 +163,55 @@ pub async fn run(args: Args) -> Result<()> {
                     &merged_env,
                 )
                 .await?;
+                let elapsed = step_start.elapsed();
+                steps_run += 1;
+                let preview: String = output
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
+                if !preview.is_empty() {
+                    eprintln!("  {} {}", style("│").dim(), style(&preview).dim());
+                }
+                eprintln!(
+                    "  {}",
+                    style(format!("✓ {}", format_duration(elapsed))).green()
+                );
                 None
             }
             StepKind::Command(step) => {
-                run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env).await?;
+                let success =
+                    run_command_step(&mut vars, step, args.rate_limit_retries, &merged_env).await?;
+                let elapsed = step_start.elapsed();
+                steps_run += 1;
+                if success {
+                    eprintln!(
+                        "  {}",
+                        style(format!("✓ {}", format_duration(elapsed))).green()
+                    );
+                } else {
+                    steps_failed += 1;
+                    eprintln!(
+                        "  {}",
+                        style(format!("✗ {}", format_duration(elapsed))).red()
+                    );
+                }
                 // Snapshot after the command so `if: file-changed` can detect diffs.
                 tracker.take_snapshot(&current_step)?;
                 None
             }
-            StepKind::Option(step) => run_option_step(&mut vars, step)?,
+            StepKind::Option(step) => {
+                let result = run_option_step(&mut vars, step)?;
+                let elapsed = step_start.elapsed();
+                steps_run += 1;
+                eprintln!(
+                    "  {}",
+                    style(format!("✓ {}", format_duration(elapsed))).green()
+                );
+                result
+            }
         };
 
         let effective_next = option_next.or(step_next);
@@ -181,7 +237,15 @@ pub async fn run(args: Args) -> Result<()> {
         }
     }
 
-    eprintln!("\n{}", style("✓ workflow complete").green().bold());
+    let total_elapsed = workflow_start.elapsed();
+    eprintln!(
+        "\n{} ({} run, {} skipped, {} failed) [{}]",
+        style("✓ workflow complete").green().bold(),
+        steps_run,
+        steps_skipped,
+        steps_failed,
+        format_duration(total_elapsed)
+    );
     Ok(())
 }
 
@@ -200,6 +264,19 @@ fn resolve_env(
         merged.insert(k.clone(), vars.resolve(v)?);
     }
     Ok(merged)
+}
+
+/// Format a duration as a human-readable string.
+/// 60 seconds or more: "Xm Y.Ys", otherwise "X.Ys".
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs >= 60.0 {
+        let mins = (secs / 60.0) as u64;
+        let remaining = secs - (mins as f64 * 60.0);
+        format!("{}m {:.1}s", mins, remaining)
+    } else {
+        format!("{:.1}s", secs)
+    }
 }
 
 /// Resolve the `{model}` placeholder in a command, or strip `--model {model}` if no model.
@@ -242,14 +319,14 @@ fn resolve_command_with_model(command: &[String], effective_model: Option<&str>)
     }
 }
 
-/// Execute a prompt step, updating variable state.
+/// Execute a prompt step, updating variable state and returning the LLM output.
 async fn run_prompt_step(
     vars: &mut VariableStore,
     config: &WorkflowConfig,
     step: &PromptStep,
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
-) -> Result<()> {
+) -> Result<String> {
     // Display instruction and description.
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -317,19 +394,20 @@ async fn run_prompt_step(
         vars.set_named_value(output_var, result.output.clone());
     }
 
-    vars.set_prev_output(Some(result.output));
+    let output = result.output;
+    vars.set_prev_output(Some(output.clone()));
     vars.set_prev_input(None);
 
-    Ok(())
+    Ok(output)
 }
 
-/// Execute a command step, updating variable state.
+/// Execute a command step, updating variable state and returning whether it succeeded.
 async fn run_command_step(
     vars: &mut VariableStore,
     step: &CommandStep,
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(desc) = &step.description {
         let resolved = vars.resolve(desc)?;
         eprintln!("  {}", style(resolved).dim());
@@ -348,12 +426,13 @@ async fn run_command_step(
 
     let result = run_commands(&cmds, rate_limit_retries, env).await?;
 
-    vars.set_prev_success(Some(result.success));
+    let success = result.success;
+    vars.set_prev_success(Some(success));
     vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_output(None);
     vars.set_prev_input(None);
 
-    Ok(())
+    Ok(success)
 }
 
 /// Execute an option step, updating variable state and returning the chosen next step.
