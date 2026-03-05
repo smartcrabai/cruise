@@ -207,6 +207,105 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Metadata about an existing cruise worktree.
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+/// A cruise worktree that has a saved state file and can be resumed.
+pub struct ResumableWorktree {
+    pub info: WorktreeInfo,
+    pub current_step: String,
+}
+
+/// Parse `git worktree list --porcelain` output and return all worktrees
+/// whose branch matches `refs/heads/cruise/`.
+fn list_cruise_worktrees(repo_dir: &Path) -> Result<Vec<WorktreeInfo>> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::WorktreeError(format!(
+            "git worktree list failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut worktrees = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+
+    for line in text.lines() {
+        if let Some(path_str) = line.strip_prefix("worktree ") {
+            // Flush the previous block if it had a cruise/ branch.
+            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
+                worktrees.push(WorktreeInfo { path, branch });
+            }
+            current_path = Some(PathBuf::from(path_str));
+            current_branch = None;
+        } else if let Some(branch_ref) = line.strip_prefix("branch ")
+            && branch_ref.starts_with("refs/heads/cruise/")
+        {
+            current_branch = Some(
+                branch_ref
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch_ref)
+                    .to_string(),
+            );
+        }
+    }
+    // Flush the last block.
+    if let (Some(path), Some(branch)) = (current_path, current_branch) {
+        worktrees.push(WorktreeInfo { path, branch });
+    }
+
+    Ok(worktrees)
+}
+
+/// Find all cruise worktrees that have a resumable state file.
+pub fn find_resumable_worktrees(
+    repo_dir: &Path,
+    config: &crate::config::WorkflowConfig,
+) -> Result<Vec<ResumableWorktree>> {
+    let state_path = match &config.state {
+        Some(p) => p,
+        None => return Ok(vec![]),
+    };
+
+    let cruise_worktrees = list_cruise_worktrees(repo_dir)?;
+    let mut resumable = Vec::new();
+
+    for info in cruise_worktrees {
+        let candidate_state = info.path.join(state_path);
+        if !candidate_state.exists() {
+            continue;
+        }
+        match crate::state::WorkflowState::load(&candidate_state) {
+            Ok(state) => {
+                resumable.push(ResumableWorktree {
+                    info,
+                    current_step: state.current,
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to load state from {}: {}",
+                    candidate_state.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(resumable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +452,163 @@ mod tests {
         copy_worktree_includes(&src, &dst).unwrap();
 
         assert!(dst.join(".env").exists());
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+    }
+
+    #[test]
+    fn test_list_cruise_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("myrepo");
+        fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+
+        // Create a cruise/ worktree — should be detected.
+        let wt_cruise = tmp.path().join("myrepo-cruise");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "cruise/test-task",
+                wt_cruise.to_str().unwrap(),
+            ],
+        );
+
+        // Create a non-cruise worktree — should NOT be detected.
+        let wt_other = tmp.path().join("myrepo-other");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/other",
+                wt_other.to_str().unwrap(),
+            ],
+        );
+
+        let result = list_cruise_worktrees(&repo).unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "should detect exactly one cruise/ worktree"
+        );
+        assert_eq!(result[0].branch, "cruise/test-task");
+        // Canonicalize both sides: macOS /var is a symlink to /private/var.
+        assert_eq!(
+            result[0].path.canonicalize().unwrap(),
+            wt_cruise.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_find_resumable_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("myrepo");
+        fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let wt_path = tmp.path().join("myrepo-wt");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "cruise/test",
+                wt_path.to_str().unwrap(),
+            ],
+        );
+
+        // Write a state file inside the worktree using WorkflowState helpers.
+        use crate::config::{StepConfig, WorkflowConfig};
+        use crate::state::WorkflowState;
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+
+        let state_rel = std::path::PathBuf::from(".cruise/state.json");
+        let mut steps = IndexMap::new();
+        steps.insert(
+            "my-step".to_string(),
+            StepConfig {
+                prompt: Some("test".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = WorkflowConfig {
+            command: vec!["claude".to_string(), "-p".to_string()],
+            model: None,
+            plan: None,
+            env: HashMap::new(),
+            worktree: false,
+            state: Some(state_rel.clone()),
+            steps,
+        };
+        WorkflowState::new(cfg.clone(), "my-step".to_string())
+            .save(&wt_path.join(&state_rel))
+            .unwrap();
+
+        let result = find_resumable_worktrees(&repo, &cfg).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].current_step, "my-step");
+        // Canonicalize both sides: macOS /var is a symlink to /private/var.
+        assert_eq!(
+            result[0].info.path.canonicalize().unwrap(),
+            wt_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_find_resumable_worktrees_empty() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("myrepo");
+        fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let wt_path = tmp.path().join("myrepo-wt");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "cruise/test",
+                wt_path.to_str().unwrap(),
+            ],
+        );
+
+        // No state file written — should return empty.
+        use crate::config::{StepConfig, WorkflowConfig};
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+
+        let mut steps = IndexMap::new();
+        steps.insert(
+            "step1".to_string(),
+            StepConfig {
+                command: Some(crate::config::StringOrVec::Single("echo hi".to_string())),
+                ..Default::default()
+            },
+        );
+        let cfg = WorkflowConfig {
+            command: vec!["claude".to_string(), "-p".to_string()],
+            model: None,
+            plan: None,
+            env: HashMap::new(),
+            worktree: false,
+            state: Some(std::path::PathBuf::from(".cruise/state.json")),
+            steps,
+        };
+
+        let result = find_resumable_worktrees(&repo, &cfg).unwrap();
+        assert!(result.is_empty(), "expected no resumable worktrees");
     }
 }

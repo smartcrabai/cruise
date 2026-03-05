@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use console::style;
+use inquire::{Confirm, InquireError};
 
 use crate::cli::Args;
 use crate::condition::{evaluate_if_condition, should_skip};
@@ -62,9 +63,99 @@ pub async fn run(args: Args) -> Result<()> {
     let original_dir = std::env::current_dir()?;
 
     let _guard = if use_worktree {
-        let ctx = worktree::setup_worktree(&original_dir, args.input.as_deref())?;
-        eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
-        std::env::set_current_dir(&ctx.path)?;
+        // Detect resumable worktrees unless --new-worktree is set.
+        let resumable = if !args.new_worktree {
+            worktree::find_resumable_worktrees(&original_dir, &config).unwrap_or_else(|e| {
+                eprintln!("warning: worktree detection failed: {}", e);
+                vec![]
+            })
+        } else {
+            vec![]
+        };
+
+        let ctx = if resumable.is_empty() {
+            // No resumable worktrees — create a new one (original behaviour).
+            let ctx = worktree::setup_worktree(&original_dir, args.input.as_deref())?;
+            eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
+            std::env::set_current_dir(&ctx.path)?;
+            ctx
+        } else if resumable.len() == 1 {
+            let r = &resumable[0];
+            let confirmed = match Confirm::new(&format!(
+                "Resume worktree at {} (step: {})?",
+                r.info.path.display(),
+                r.current_step
+            ))
+            .with_default(true)
+            .prompt()
+            {
+                Ok(b) => b,
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => false,
+                Err(e) => return Err(CruiseError::Other(format!("prompt error: {e}"))),
+            };
+
+            if confirmed {
+                eprintln!(
+                    "{} resuming worktree: {}",
+                    style("→").cyan(),
+                    r.info.path.display()
+                );
+                std::env::set_current_dir(&r.info.path)?;
+                worktree::WorktreeContext {
+                    path: r.info.path.clone(),
+                    branch: r.info.branch.clone(),
+                    original_dir: original_dir.clone(),
+                }
+            } else {
+                let ctx = worktree::setup_worktree(&original_dir, args.input.as_deref())?;
+                eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
+                std::env::set_current_dir(&ctx.path)?;
+                ctx
+            }
+        } else {
+            // Multiple resumable worktrees — let the user pick one.
+            let new_label = "Create new worktree";
+            let labels: Vec<String> = resumable
+                .iter()
+                .map(|r| format!("{} (step: {})", r.info.path.display(), r.current_step))
+                .chain(std::iter::once(new_label.to_string()))
+                .collect();
+            let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+            let selected =
+                match inquire::Select::new("Select a worktree to resume:", label_refs).prompt() {
+                    Ok(s) => s,
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        new_label
+                    }
+                    Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+                };
+
+            if selected == new_label {
+                let ctx = worktree::setup_worktree(&original_dir, args.input.as_deref())?;
+                eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
+                std::env::set_current_dir(&ctx.path)?;
+                ctx
+            } else {
+                let idx = labels
+                    .iter()
+                    .position(|l| l.as_str() == selected)
+                    .expect("selected label must exist in labels");
+                let r = &resumable[idx];
+                eprintln!(
+                    "{} resuming worktree: {}",
+                    style("→").cyan(),
+                    r.info.path.display()
+                );
+                std::env::set_current_dir(&r.info.path)?;
+                worktree::WorktreeContext {
+                    path: r.info.path.clone(),
+                    branch: r.info.branch.clone(),
+                    original_dir: original_dir.clone(),
+                }
+            }
+        };
+
         Some(WorktreeGuard {
             ctx: Some(ctx),
             keep: args.keep_worktree,
@@ -597,6 +688,7 @@ mod tests {
             dry_run,
             worktree: false,
             keep_worktree: false,
+            new_worktree: false,
         }
     }
 
@@ -962,6 +1054,7 @@ steps:
             dry_run: false,
             worktree: false,
             keep_worktree: false,
+            new_worktree: false,
         };
         let result = run(args).await;
         assert!(result.is_err());
