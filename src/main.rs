@@ -1,6 +1,7 @@
 mod cli;
 mod condition;
 mod config;
+mod display;
 mod engine;
 mod error;
 mod file_tracker;

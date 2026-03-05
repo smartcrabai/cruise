@@ -16,7 +16,7 @@ pub struct OptionResult {
 /// Display an interactive selection menu and return the user's choice.
 pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result<OptionResult> {
     if let Some(desc) = description {
-        println!("\n{desc}");
+        crate::display::print_bordered(desc, Some("Plan"));
     }
 
     // Build the label list shown to the user.
