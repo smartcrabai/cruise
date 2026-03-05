@@ -63,15 +63,6 @@ steps:
       {prev.stderr}
     next: test
 
-  coderabbit:
-    prompt: |
-      Run `coderabbit --prompt-only` to address any reasonable suggestions.
-      Since coderabbit doesn't fully understand the entire project, feel free to ignore any incorrect suggestions.
-      Also, prioritize adhering to existing code style guidelines over following the suggestions.
-      If coderabbit's rate limit is reached, wait an appropriate amount of time before retrying.
-    if:
-      file-changed: test
-
   improve:
     prompt: /improve
     if:
@@ -80,6 +71,15 @@ steps:
   simplify:
     model: opus
     prompt: /simplify
+    if:
+      file-changed: test
+
+  coderabbit:
+    prompt: |
+      Run `coderabbit --prompt-only` to address any reasonable suggestions.
+      Since coderabbit doesn't fully understand the entire project, feel free to ignore any incorrect suggestions.
+      Also, prioritize adhering to existing code style guidelines over following the suggestions.
+      If coderabbit's rate limit is reached, wait an appropriate amount of time before retrying.
     if:
       file-changed: test
 
