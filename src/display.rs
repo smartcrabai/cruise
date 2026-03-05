@@ -9,12 +9,14 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
     let box_width = term_width.clamp(20, 100);
     let content_width = box_width - 4; // "│ " + content + " │"
 
+    let bar = "─".repeat(box_width - 2);
+
     // Top border
     let top = match title {
         Some(t) => {
             let label = format!(" {} ", t);
             let label_width = measure_text_width(&label);
-            let remaining = box_width.saturating_sub(2 + label_width);
+            let remaining = box_width.saturating_sub(3 + label_width);
             format!(
                 "{}{}{}{}",
                 style("┌─").cyan(),
@@ -23,19 +25,15 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
                 style("┐").cyan(),
             )
         }
-        None => {
-            let bar = "─".repeat(box_width - 2);
-            format!(
-                "{}{}{}",
-                style("┌").cyan(),
-                style(&bar).cyan(),
-                style("┐").cyan()
-            )
-        }
+        None => format!(
+            "{}{}{}",
+            style("┌").cyan(),
+            style(&bar).cyan(),
+            style("┐").cyan()
+        ),
     };
 
     // Bottom border
-    let bar = "─".repeat(box_width - 2);
     let bottom = format!(
         "{}{}{}",
         style("└").cyan(),
@@ -79,10 +77,11 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
         // If a single word is wider than the width, split by characters.
         if word_width > width && current.is_empty() {
             for ch in word.chars() {
-                let ch_width = measure_text_width(&ch.to_string());
+                let mut buf = [0u8; 4];
+                let ch_str = ch.encode_utf8(&mut buf);
+                let ch_width = measure_text_width(ch_str);
                 if current_width + ch_width > width && !current.is_empty() {
-                    chunks.push(current.clone());
-                    current.clear();
+                    chunks.push(std::mem::take(&mut current));
                     current_width = 0;
                 }
                 current.push(ch);
@@ -92,8 +91,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
         }
 
         if current_width + word_width > width && !current.is_empty() {
-            chunks.push(current.clone());
-            current.clear();
+            chunks.push(std::mem::take(&mut current));
             current_width = 0;
         }
         current.push_str(word);
