@@ -167,7 +167,7 @@ steps:
   lint_and_test:
     command:                      # list of commands: run sequentially, stop on first failure
       - cargo fmt --all
-      - cargo clippy -D warnings
+      - cargo clippy -- -D warnings
       - cargo test
 ```
 
@@ -371,7 +371,7 @@ steps:
   test:
     command:
       - cargo fmt --all
-      - cargo clippy --fix --allow-dirty -D warnings
+      - cargo clippy --fix --allow-dirty -- -D warnings
       - cargo test
 
   fix-test-error:
