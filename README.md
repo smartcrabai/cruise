@@ -30,6 +30,9 @@ cruise -c workflow.yaml "task"
 # Resume from a specific step
 cruise --from implement "implement the feature"
 
+# Run in an isolated git worktree
+cruise --worktree "implement the feature"
+
 # Preview the flow without executing
 cruise --dry-run "implement the feature"
 ```
@@ -43,12 +46,24 @@ Arguments:
   [INPUT]  Initial input passed to the workflow (reads from stdin if omitted and stdin is piped)
 
 Options:
-  -c, --config <PATH>          Path to the workflow config file [default: cruise.yaml]
+  -c, --config <PATH>          Path to the workflow config file (see Config File Resolution)
   --from <STEP>                Step name to start from (resume mid-workflow)
   --max-retries <N>            Maximum times a loop edge may be traversed [default: 10]
   --rate-limit-retries <N>     Maximum rate-limit retries per step [default: 5]
   --dry-run                    Print the workflow flow without executing
+  --worktree                   Run workflow in an isolated git worktree
+  --keep-worktree              Keep the worktree after workflow completes (default: auto-delete)
 ```
+
+## Config File Resolution
+
+When `-c` is not specified, cruise searches for a config in this order:
+
+1. `./cruise.yaml` — in the current directory
+2. `~/.cruise/*.yaml` / `*.yml` — auto-selected if exactly one file exists, or prompted if multiple
+3. Built-in default — a minimal single-step workflow; no config file required
+
+When `-c <PATH>` is given, that file must exist or cruise exits with an error.
 
 ## Config File Reference
 
@@ -64,6 +79,14 @@ command:
 model: sonnet             # default model for all prompt steps (optional)
 
 plan: plan.md             # optional: file path bound to the {plan} variable
+
+env:                      # environment variables applied to all steps (optional)
+  API_KEY: sk-...
+  PROJECT: myproject
+
+worktree: false           # run in isolated git worktree (optional, default: false)
+
+state: .cruise/state.json # state file path for suspend/resume (optional)
 
 steps:
   step_name:
@@ -94,6 +117,23 @@ steps:
     prompt: "Create a plan for: {input}"
 ```
 
+### Environment Variables
+
+Environment variables can be set at two levels. Step-level values override top-level values for that step only. Values support template variable substitution.
+
+```yaml
+env:                        # top-level: applied to all steps
+  ANTHROPIC_API_KEY: sk-...
+  TARGET_ENV: production
+
+steps:
+  deploy:
+    command: ./deploy.sh
+    env:                    # step-level: merged over top-level env
+      TARGET_ENV: staging   # overrides top-level value for this step only
+      LOG_LEVEL: debug
+```
+
 ### Step Types
 
 #### Prompt Step (LLM call)
@@ -110,6 +150,8 @@ steps:
     output: plan                  # variable to store the output in (optional)
                                   # if output matches the top-level plan field name,
                                   # the result is also written to that file automatically
+    env:                          # environment variables for this step (optional)
+      ANTHROPIC_MODEL: claude-opus-4-5
 ```
 
 #### Command Step (shell execution)
@@ -119,6 +161,8 @@ steps:
   run_tests:
     command: cargo test           # single command (required)
     description: Running tests    # display label (optional)
+    env:                          # environment variables for this step (optional)
+      RUST_LOG: debug
 
   lint_and_test:
     command:                      # list of commands: run sequentially, stop on first failure
@@ -207,6 +251,64 @@ steps:
 | `{name}` | Named variable defined via the `output` field |
 
 > **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
+
+## Worktree Isolation
+
+Cruise can run the entire workflow inside an isolated git worktree, keeping the main working tree clean.
+
+Enable via CLI flag or YAML field:
+
+```sh
+cruise --worktree "implement the feature"
+cruise --worktree --keep-worktree "implement the feature"  # keep after completion
+```
+
+```yaml
+command:
+  - claude
+  - -p
+
+worktree: true   # always run in an isolated worktree
+
+steps:
+  implement:
+    prompt: "{input}"
+
+  pr:
+    prompt: create a PR
+    if:
+      file-changed: implement
+```
+
+- A new branch `cruise/<timestamp>-<sanitized-input>` is created and a worktree is checked out next to the repo directory.
+- After the workflow completes, the worktree and branch are deleted automatically (unless `--keep-worktree` is set).
+- CLI `--worktree` takes effect in addition to the YAML `worktree` field (either is sufficient to enable).
+
+### Copying files into the worktree
+
+Create a `.worktreeinclude` file in the repo root to copy files or directories into the new worktree before the workflow starts:
+
+```
+# .worktreeinclude
+.env
+.cruise/
+secrets/config.yaml
+```
+
+Each line is a relative path (files or directories). Absolute paths and `..` traversal are ignored for safety.
+
+## State Save / Resume
+
+Set the `state` field to a file path to enable automatic suspend/resume:
+
+```yaml
+state: .cruise/state.json
+```
+
+- Before each step runs, the current step name is saved to the state file.
+- If cruise is interrupted (Ctrl-C, crash, etc.), re-running the same command automatically resumes from the saved step.
+- On successful workflow completion, the state file is deleted.
+- `--from <STEP>` always takes priority over saved state.
 
 ## Example Config
 
