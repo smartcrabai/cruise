@@ -6,6 +6,7 @@ use crate::cli::Args;
 use crate::condition::{evaluate_if_condition, should_skip};
 use crate::config::{SkipCondition, WorkflowConfig};
 
+use crate::worktree;
 /// Variable name that maps to the plan file.
 const PLAN_VAR_NAME: &str = "plan";
 use crate::error::{CruiseError, Result};
@@ -16,6 +17,26 @@ use crate::step::prompt::run_prompt;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
 
+/// Ensures worktree cleanup on drop.
+struct WorktreeGuard {
+    ctx: Option<crate::worktree::WorktreeContext>,
+    keep: bool,
+    original_dir: std::path::PathBuf,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        if !self.keep
+            && let Some(ctx) = self.ctx.take()
+        {
+            let _ = std::env::set_current_dir(&self.original_dir);
+            if let Err(e) = worktree::cleanup_worktree(&ctx) {
+                eprintln!("warning: worktree cleanup failed: {}", e);
+            }
+        }
+    }
+}
+
 /// Load the config and run the workflow state machine.
 pub async fn run(args: Args) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
@@ -24,9 +45,32 @@ pub async fn run(args: Args) -> Result<()> {
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
 
+    let use_worktree = args.worktree || config.worktree;
+
     if args.dry_run {
+        if use_worktree {
+            eprintln!(
+                "{}",
+                style("worktree: enabled (dry-run, not created)").dim()
+            );
+        }
         return print_dry_run(&config, args.from.as_deref());
     }
+
+    let original_dir = std::env::current_dir()?;
+
+    let _guard = if use_worktree {
+        let ctx = worktree::setup_worktree(&original_dir, args.input.as_deref())?;
+        eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
+        std::env::set_current_dir(&ctx.path)?;
+        Some(WorktreeGuard {
+            ctx: Some(ctx),
+            keep: args.keep_worktree,
+            original_dir,
+        })
+    } else {
+        None
+    };
 
     let input = args.input.unwrap_or_default();
     let mut vars = VariableStore::new(input.clone());
@@ -445,6 +489,8 @@ mod tests {
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run,
+            worktree: false,
+            keep_worktree: false,
         }
     }
 
@@ -808,6 +854,8 @@ steps:
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run: false,
+            worktree: false,
+            keep_worktree: false,
         };
         let result = run(args).await;
         assert!(result.is_err());

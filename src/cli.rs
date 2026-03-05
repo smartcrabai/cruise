@@ -29,6 +29,14 @@ pub struct Args {
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Run workflow in an isolated git worktree.
+    #[arg(long)]
+    pub worktree: bool,
+
+    /// Keep the worktree after workflow completes (default: auto-delete).
+    #[arg(long)]
+    pub keep_worktree: bool,
 }
 
 pub fn parse_args() -> Args {
@@ -92,6 +100,20 @@ mod tests {
     fn test_args_parse_dry_run() {
         let args = Args::parse_from(["cruise", "--dry-run", "task"]);
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_args_parse_worktree() {
+        let args = Args::parse_from(["cruise", "--worktree", "task"]);
+        assert!(args.worktree);
+        assert!(!args.keep_worktree);
+    }
+
+    #[test]
+    fn test_args_parse_keep_worktree() {
+        let args = Args::parse_from(["cruise", "--worktree", "--keep-worktree", "task"]);
+        assert!(args.worktree);
+        assert!(args.keep_worktree);
     }
 
     #[test]

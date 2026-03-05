@@ -8,6 +8,7 @@ mod resolver;
 mod spinner;
 mod step;
 mod variable;
+mod worktree;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

@@ -19,6 +19,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
+    /// If true, run the workflow inside an isolated git worktree.
+    #[serde(default)]
+    pub worktree: bool,
+
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
 }
@@ -370,5 +374,19 @@ steps:
         let yaml = "command: [echo]\nsteps:\n  s1:\n    command: {foo: bar}";
         let result = WorkflowConfig::from_yaml(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_worktree_config_field() {
+        let yaml = "command: [echo]\nworktree: true\nsteps:\n  s1:\n    command: echo hi";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(config.worktree);
+    }
+
+    #[test]
+    fn test_worktree_config_field_default_false() {
+        let yaml = "command: [echo]\nsteps:\n  s1:\n    command: echo hi";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(!config.worktree);
     }
 }
