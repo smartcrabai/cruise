@@ -32,6 +32,9 @@ pub enum CruiseError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("state error: {0}")]
+    StateError(String),
+
     #[error("not a git repository")]
     NotGitRepository,
 

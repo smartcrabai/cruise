@@ -1,10 +1,10 @@
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level workflow configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
     /// LLM invocation command (e.g. ["claude", "--model", "{model}", "-p"]).
     pub command: Vec<String>,
@@ -23,12 +23,16 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub worktree: bool,
 
+    /// Path to state file for suspend/resume support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<PathBuf>,
+
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
 }
 
 /// A command value that can be either a single string or a list of strings.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum StringOrVec {
     Single(String),
@@ -36,7 +40,7 @@ pub enum StringOrVec {
 }
 
 /// Skip condition: static boolean or a variable reference.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum SkipCondition {
     /// Always skip (true) or never skip (false).
@@ -46,7 +50,7 @@ pub enum SkipCondition {
 }
 
 /// Per-step configuration. All fields are optional.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct StepConfig {
     /// Model to use (prompt steps only).
     pub model: Option<String>,
@@ -85,7 +89,7 @@ pub struct StepConfig {
 }
 
 /// A single item in an option step.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OptionItem {
     /// Selector label shown in the menu.
     pub selector: Option<String>,
@@ -99,7 +103,7 @@ pub struct OptionItem {
 }
 
 /// Conditional execution rule.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IfCondition {
     /// Only execute this step if the given step's snapshot differs from the current state.
     #[serde(rename = "file-changed")]

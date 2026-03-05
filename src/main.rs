@@ -6,6 +6,7 @@ mod error;
 mod file_tracker;
 mod resolver;
 mod spinner;
+mod state;
 mod step;
 mod variable;
 mod worktree;
