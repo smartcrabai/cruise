@@ -1,17 +1,6 @@
-use crate::config::{IfCondition, SkipCondition};
+use crate::config::SkipCondition;
 use crate::error::Result;
-use crate::file_tracker::FileTracker;
 use crate::variable::VariableStore;
-
-/// Returns true if the step should execute given its `if` condition.
-pub fn evaluate_if_condition(condition: &IfCondition, tracker: &FileTracker) -> Result<bool> {
-    if let Some(step_name) = &condition.file_changed {
-        return tracker.has_files_changed(step_name);
-    }
-
-    // No condition — always execute.
-    Ok(true)
-}
 
 /// Returns true if the step should be skipped.
 pub fn should_skip(skip: &Option<SkipCondition>, vars: &VariableStore) -> Result<bool> {
@@ -28,7 +17,6 @@ pub fn should_skip(skip: &Option<SkipCondition>, vars: &VariableStore) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::IfCondition;
     use crate::variable::VariableStore;
 
     fn empty_vars() -> VariableStore {
@@ -85,13 +73,5 @@ mod tests {
             &vars,
         );
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_if_condition_no_file_changed() {
-        let tracker = FileTracker::new();
-        let condition = IfCondition { file_changed: None };
-        // No file-changed condition — should execute (true).
-        assert!(evaluate_if_condition(&condition, &tracker).unwrap());
     }
 }
