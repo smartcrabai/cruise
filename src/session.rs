@@ -70,6 +70,20 @@ impl SessionState {
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
     }
+
+    /// Returns a WorktreeContext if the session has a valid, existing worktree.
+    pub fn worktree_context(&self) -> Option<crate::worktree::WorktreeContext> {
+        let path = self.worktree_path.as_ref()?;
+        let branch = self.worktree_branch.as_ref()?;
+        if !path.exists() {
+            return None;
+        }
+        Some(crate::worktree::WorktreeContext {
+            path: path.clone(),
+            branch: branch.clone(),
+            original_dir: self.base_dir.clone(),
+        })
+    }
 }
 
 /// Manages sessions stored under `<base>/sessions/`.
@@ -188,21 +202,13 @@ impl SessionManager {
             }
 
             // Remove the git worktree if it still exists.
-            if let (Some(wt_path), Some(wt_branch)) =
-                (&session.worktree_path, &session.worktree_branch)
-                && wt_path.exists()
+            if let Some(ctx) = session.worktree_context()
+                && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
             {
-                let ctx = crate::worktree::WorktreeContext {
-                    path: wt_path.clone(),
-                    branch: wt_branch.clone(),
-                    original_dir: session.base_dir.clone(),
-                };
-                if let Err(e) = crate::worktree::cleanup_worktree(&ctx) {
-                    eprintln!(
-                        "warning: failed to remove worktree for {}: {}",
-                        session.id, e
-                    );
-                }
+                eprintln!(
+                    "warning: failed to remove worktree for {}: {}",
+                    session.id, e
+                );
             }
 
             self.delete(&session.id)?;
