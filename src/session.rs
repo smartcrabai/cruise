@@ -227,6 +227,11 @@ pub fn cruise_home() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".cruise"))
 }
 
+/// Get the cruise home directory or return an error.
+pub fn get_cruise_home() -> crate::error::Result<PathBuf> {
+    cruise_home().ok_or_else(|| crate::error::CruiseError::Other("HOME not set".to_string()))
+}
+
 /// Generate a session ID from current UTC time: `YYYYMMDDHHmmss`.
 pub fn current_timestamp_id() -> String {
     let secs = SystemTime::now()

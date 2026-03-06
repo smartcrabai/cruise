@@ -8,7 +8,7 @@ use crate::config::WorkflowConfig;
 use crate::engine::{execute_steps, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
-use crate::session::{SessionManager, SessionPhase, cruise_home, current_iso8601};
+use crate::session::{SessionManager, SessionPhase, current_iso8601, get_cruise_home};
 use crate::variable::VariableStore;
 use crate::worktree;
 
@@ -16,8 +16,7 @@ use crate::worktree;
 const PLAN_VAR: &str = "plan";
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    let home = cruise_home().ok_or_else(|| CruiseError::Other("HOME not set".to_string()))?;
-    let manager = SessionManager::new(home.clone());
+    let manager = SessionManager::new(get_cruise_home()?);
 
     // Auto-cleanup old completed sessions.
     if let Err(e) = manager.cleanup_old(3) {
@@ -150,7 +149,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
             "{} Selected session: {} — {}",
             style("→").cyan(),
             s.id,
-            truncate(&s.input, 60)
+            crate::display::truncate(&s.input, 60)
         );
         return Ok(s.id.clone());
     }
@@ -163,7 +162,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
                 "{} | {} | {}",
                 s.id,
                 s.phase.label(),
-                truncate(&s.input, 60)
+                crate::display::truncate(&s.input, 60)
             )
         })
         .collect();
@@ -181,14 +180,4 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
 
     let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
     Ok(pending[idx].id.clone())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let s = s.trim();
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.chars().count() <= max {
-        first_line.to_string()
-    } else {
-        format!("{}...", first_line.chars().take(max).collect::<String>())
-    }
 }

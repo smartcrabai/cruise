@@ -8,7 +8,7 @@ use crate::cli::PlanArgs;
 use crate::config::WorkflowConfig;
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
-use crate::session::{SessionManager, SessionPhase, SessionState, cruise_home};
+use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
@@ -34,8 +34,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
 
     // Set up session.
-    let home = cruise_home().ok_or_else(|| CruiseError::Other("HOME not set".to_string()))?;
-    let manager = SessionManager::new(home.clone());
+    let manager = SessionManager::new(get_cruise_home()?);
 
     // Auto-cleanup old sessions.
     if let Err(e) = manager.cleanup_old(3) {
@@ -58,10 +57,6 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
-    // Ensure parent directory exists for the plan file.
-    if let Some(parent) = plan_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());

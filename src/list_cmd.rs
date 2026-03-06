@@ -2,11 +2,10 @@ use console::style;
 use inquire::InquireError;
 
 use crate::error::{CruiseError, Result};
-use crate::session::{SessionManager, SessionPhase, SessionState, cruise_home};
+use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
 
 pub async fn run() -> Result<()> {
-    let home = cruise_home().ok_or_else(|| CruiseError::Other("HOME not set".to_string()))?;
-    let manager = SessionManager::new(home);
+    let manager = SessionManager::new(get_cruise_home()?);
 
     loop {
         let sessions = manager.list()?;
@@ -33,10 +32,8 @@ pub async fn run() -> Result<()> {
 
         // Show plan.md content.
         let plan_path = session.plan_path(&manager.sessions_dir());
-        if plan_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&plan_path) {
-                crate::display::print_bordered(&content, Some("plan.md"));
-            }
+        if let Ok(content) = std::fs::read_to_string(&plan_path) {
+            crate::display::print_bordered(&content, Some("plan.md"));
         }
 
         // Action menu.
@@ -88,16 +85,6 @@ fn format_session_label(s: &SessionState) -> String {
         SessionPhase::Completed => style("Completed").green().to_string(),
         SessionPhase::Failed(_) => style("Failed").red().to_string(),
     };
-    let input_preview = truncate(&s.input, 60);
+    let input_preview = crate::display::truncate(&s.input, 60);
     format!("{} | {} | {}", s.id, phase_str, input_preview)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let s = s.trim();
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.chars().count() <= max {
-        first_line.to_string()
-    } else {
-        format!("{}...", first_line.chars().take(max).collect::<String>())
-    }
 }
