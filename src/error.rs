@@ -29,14 +29,14 @@ pub enum CruiseError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("state error: {0}")]
-    StateError(String),
-
     #[error("not a git repository")]
     NotGitRepository,
 
     #[error("git worktree error: {0}")]
     WorktreeError(String),
+
+    #[error("session error: {0}")]
+    SessionError(String),
 
     #[error("{0}")]
     Other(String),

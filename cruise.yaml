@@ -5,42 +5,9 @@ command:
   - -p
 
 model: sonnet
-
-plan: .cruise/plan.md
-state: .cruise/state.json
+plan_model: opus
 
 steps:
-  plan:
-    model: opus
-    instruction: "What will you do?"
-    prompt: |
-      I am trying to implement the following features. Create an implementation plan and write it to {plan}.
-      ---
-      {input}
-
-  approve-plan:
-    plan: "{plan}"
-    option:
-      - selector: Approve
-        next: write-tests
-      - text-input: Fix
-        next: fix-plan
-      - text-input: Ask
-        next: ask-plan
-
-  fix-plan:
-    model: opus
-    prompt: |
-      The user has requested the following changes to the {plan} implementation plan. Make the modifications:
-      {prev.input}
-    next: approve-plan
-
-  ask-plan:
-    prompt: |
-      The user has the following questions about the implementation plan for {plan}. Provide answers:
-      {prev.input}
-    next: approve-plan
-
   write-tests:
     prompt: |
       Based on the {plan} implementation schedule, please first create the test code, then update the {plan} if necessary.

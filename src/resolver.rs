@@ -85,6 +85,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 }
 
 /// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
+/// Subdirectories named `sessions` or `worktrees` are excluded.
 fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
@@ -93,6 +94,13 @@ fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
+            // Skip sessions/ and worktrees/ subdirectories.
+            if p.is_dir() {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name == "sessions" || name == "worktrees" {
+                    return false;
+                }
+            }
             p.is_file()
                 && matches!(
                     p.extension().and_then(|e| e.to_str()),

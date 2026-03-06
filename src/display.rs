@@ -61,6 +61,17 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
     println!("{bottom}");
 }
 
+/// Truncate `s` to `max` characters (first line only), appending `…` if truncated.
+pub fn truncate(s: &str, max: usize) -> String {
+    let s = s.trim();
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.chars().count() <= max {
+        first_line.to_string()
+    } else {
+        format!("{}…", first_line.chars().take(max).collect::<String>())
+    }
+}
+
 /// Wrap a single line into chunks of at most `width` visible characters.
 fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
