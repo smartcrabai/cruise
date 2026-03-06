@@ -190,8 +190,8 @@ impl SessionManager {
             // Remove the git worktree if it still exists.
             if let (Some(wt_path), Some(wt_branch)) =
                 (&session.worktree_path, &session.worktree_branch)
+                && wt_path.exists()
             {
-                if wt_path.exists() {
                     let ctx = crate::worktree::WorktreeContext {
                         path: wt_path.clone(),
                         branch: wt_branch.clone(),
@@ -203,7 +203,6 @@ impl SessionManager {
                             session.id, e
                         );
                     }
-                }
             }
 
             self.delete(&session.id)?;
@@ -257,9 +256,7 @@ pub fn current_iso8601() -> String {
 /// Parse an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`) to Unix seconds.
 fn parse_iso8601_secs(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('Z');
-    let mut parts = s.splitn(2, 'T');
-    let date_str = parts.next()?;
-    let time_str = parts.next()?;
+    let (date_str, time_str) = s.split_once('T')?;
     let mut dp = date_str.split('-');
     let year: u16 = dp.next()?.parse().ok()?;
     let month: u8 = dp.next()?.parse().ok()?;
@@ -278,8 +275,8 @@ fn date_to_days(year: u16, month: u8, day: u8) -> u32 {
         days += if is_leap_year(y) { 366 } else { 365 };
     }
     let months = months_in_year(year);
-    for m in 0..(month as usize - 1) {
-        days += months[m] as u32;
+    for month_days in months.iter().take(month as usize - 1) {
+        days += *month_days as u32;
     }
     days + day as u32 - 1
 }
@@ -312,7 +309,7 @@ fn seconds_to_datetime(secs: u64) -> (u16, u8, u8, u8, u8, u8) {
 }
 
 fn is_leap_year(year: u16) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn months_in_year(year: u16) -> [u8; 12] {

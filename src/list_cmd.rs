@@ -16,7 +16,7 @@ pub async fn run() -> Result<()> {
         }
 
         // Build display labels with color-coded phase.
-        let labels: Vec<String> = sessions.iter().map(|s| format_session_label(s)).collect();
+        let labels: Vec<String> = sessions.iter().map(format_session_label).collect();
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
         let selected = match inquire::Select::new("Select a session:", label_refs).prompt() {

@@ -1,5 +1,4 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
 use console::style;
 use inquire::InquireError;
@@ -125,7 +124,7 @@ async fn run_approve_loop(
     config: &WorkflowConfig,
     manager: &SessionManager,
     session: &mut SessionState,
-    plan_path: &PathBuf,
+    plan_path: &std::path::Path,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
 ) -> Result<()> {
@@ -211,7 +210,7 @@ async fn run_approve_loop(
 async fn run_fix_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
-    plan_path: &PathBuf,
+    plan_path: &std::path::Path,
     rate_limit_retries: usize,
 ) -> Result<()> {
     let prompt_template = format!(
@@ -239,7 +238,7 @@ async fn run_fix_plan(
 async fn run_ask_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
-    plan_path: &PathBuf,
+    plan_path: &std::path::Path,
     rate_limit_retries: usize,
 ) -> Result<()> {
     let prompt_template = format!(

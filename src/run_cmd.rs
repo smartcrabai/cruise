@@ -55,7 +55,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .keys()
             .next()
             .ok_or_else(|| CruiseError::Other("config has no steps".to_string()))
-            .map(|k| k.clone())
+            .cloned()
     })?;
 
     // chdir to base_dir.
@@ -82,10 +82,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
     vars.set_named_file(PLAN_VAR, plan_path);
 
     // Also set plan from config.plan if present (backward compat with old configs).
-    if let Some(ref config_plan) = config.plan {
-        if !config_plan.as_os_str().is_empty() {
-            vars.set_named_file(PLAN_VAR, config_plan.clone());
-        }
+    if let Some(config_plan) = config.plan.as_ref().filter(|p| !p.as_os_str().is_empty()) {
+        vars.set_named_file(PLAN_VAR, config_plan.clone());
     }
 
     let mut tracker = FileTracker::with_root(ctx.path.clone());
@@ -124,10 +122,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     manager.save(session)?;
 
     // Cleanup worktree unless --keep-worktree.
-    if !args.keep_worktree {
-        if let Err(e) = worktree::cleanup_worktree(&ctx) {
-            eprintln!("warning: worktree cleanup failed: {}", e);
-        }
+    if !args.keep_worktree
+        && let Err(e) = worktree::cleanup_worktree(&ctx) {
+        eprintln!("warning: worktree cleanup failed: {}", e);
     }
 
     exec_result.map(|_| ())

@@ -263,9 +263,7 @@ pub(crate) fn resolve_command_with_model(
                     result.push(arg.clone());
                     i += 1;
                 }
-            } else if arg.starts_with("--model=") {
-                i += 1;
-            } else if arg.contains("{model}") {
+            } else if arg.starts_with("--model=") || arg.contains("{model}") {
                 i += 1;
             } else {
                 result.push(arg.clone());
