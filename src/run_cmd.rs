@@ -62,10 +62,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let base_dir = session.base_dir.clone();
     std::env::set_current_dir(&base_dir)?;
 
-    // Create worktree at ~/.cruise/worktrees/{session_id}/.
-    let worktrees_dir = manager.worktrees_dir();
-    let ctx =
-        worktree::setup_session_worktree(&base_dir, &session_id, &session.input, &worktrees_dir)?;
+    // Create worktree at ~/.cruise/worktrees/{session_id}/, or reuse existing one.
+    let ctx = if let Some(ctx) = session.worktree_context() {
+        ctx
+    } else {
+        let worktrees_dir = manager.worktrees_dir();
+        worktree::setup_session_worktree(&base_dir, &session_id, &session.input, &worktrees_dir)?
+    };
     eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
 
     session.worktree_path = Some(ctx.path.clone());
