@@ -103,15 +103,8 @@ pub async fn execute_steps(
                 let output =
                     run_prompt_step(vars, config, step, rate_limit_retries, &merged_env).await?;
                 let elapsed = step_start.elapsed();
-                let preview: String = output
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect();
-                if !preview.is_empty() {
-                    eprintln!("  {} {}", style("│").dim(), style(&preview).dim());
+                if !output.is_empty() {
+                    eprint!("{}", output);
                 }
                 log_step_result(elapsed, true);
                 None
