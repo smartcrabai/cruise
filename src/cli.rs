@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -6,17 +6,48 @@ use clap::Parser;
     version,
     about = "YAML-driven coding agent workflow orchestrator"
 )]
-pub struct Args {
-    /// Initial input passed to the workflow.
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
+    /// Initial input (legacy: no subcommand is treated as `plan`).
+    pub input: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Create an implementation plan for a task.
+    Plan(PlanArgs),
+    /// Execute a planned session.
+    Run(RunArgs),
+    /// List and manage sessions interactively.
+    List,
+    /// Remove old completed sessions.
+    Clean(CleanArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct PlanArgs {
+    /// Task description.
     pub input: Option<String>,
 
     /// Path to the workflow config file.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
-    /// Step name to start from (for resuming mid-workflow).
+    /// Print the plan step without executing it.
     #[arg(long)]
-    pub from: Option<String>,
+    pub dry_run: bool,
+
+    /// Maximum number of rate-limit retries per LLM call.
+    #[arg(long, default_value = "5")]
+    pub rate_limit_retries: usize,
+}
+
+#[derive(Parser, Debug)]
+pub struct RunArgs {
+    /// Session ID to execute (if omitted, picks from pending sessions).
+    pub session: Option<String>,
 
     /// Maximum number of times a single loop edge may be traversed.
     #[arg(long, default_value = "10")]
@@ -26,38 +57,40 @@ pub struct Args {
     #[arg(long, default_value = "5")]
     pub rate_limit_retries: usize,
 
-    /// Print the workflow flow without executing it.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Run workflow in an isolated git worktree.
-    #[arg(long)]
-    pub worktree: bool,
-
-    /// Keep the worktree after workflow completes (default: auto-delete).
+    /// Keep the worktree after the session completes (default: auto-delete).
     #[arg(long)]
     pub keep_worktree: bool,
 
-    /// Skip worktree resume detection; always create a new worktree.
+    /// Print the workflow flow without executing it.
     #[arg(long)]
-    pub new_worktree: bool,
+    pub dry_run: bool,
 }
 
-pub fn parse_args() -> Args {
-    let mut args = Args::parse();
+#[derive(Parser, Debug)]
+pub struct CleanArgs {
+    /// Remove completed sessions older than this many days.
+    #[arg(long, default_value = "3")]
+    pub days: u64,
+}
 
-    // Read from stdin when no INPUT argument is given and stdin is a pipe.
-    if args.input.is_none() && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+pub fn parse_cli() -> Cli {
+    let mut cli = Cli::parse();
+
+    // Backward compat: no subcommand + stdin pipe → read input from stdin.
+    if cli.command.is_none()
+        && cli.input.is_none()
+        && !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         use std::io::Read;
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input).ok();
         let trimmed = input.trim().to_string();
         if !trimmed.is_empty() {
-            args.input = Some(trimmed);
+            cli.input = Some(trimmed);
         }
     }
 
-    args
+    cli
 }
 
 #[cfg(test)]
@@ -66,68 +99,132 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn test_args_parse_with_input() {
-        let args = Args::parse_from(["cruise", "hello world"]);
-        assert_eq!(args.input, Some("hello world".to_string()));
-        assert_eq!(args.config, None);
-        assert_eq!(args.max_retries, 10);
-        assert_eq!(args.rate_limit_retries, 5);
-        assert!(!args.dry_run);
-    }
-
-    #[test]
-    fn test_args_parse_with_config() {
-        let args = Args::parse_from(["cruise", "-c", "my.yaml", "task"]);
-        assert_eq!(args.config, Some("my.yaml".to_string()));
-        assert_eq!(args.input, Some("task".to_string()));
-    }
-
-    #[test]
-    fn test_args_parse_with_from() {
-        let args = Args::parse_from(["cruise", "--from", "implement", "task"]);
-        assert_eq!(args.from, Some("implement".to_string()));
-    }
-
-    #[test]
-    fn test_args_parse_max_retries() {
-        let args = Args::parse_from(["cruise", "--max-retries", "20"]);
-        assert_eq!(args.max_retries, 20);
-    }
-
-    #[test]
-    fn test_args_parse_rate_limit_retries() {
-        let args = Args::parse_from(["cruise", "--rate-limit-retries", "3"]);
-        assert_eq!(args.rate_limit_retries, 3);
-    }
-
-    #[test]
-    fn test_args_parse_dry_run() {
-        let args = Args::parse_from(["cruise", "--dry-run", "task"]);
-        assert!(args.dry_run);
-    }
-
-    #[test]
-    fn test_args_parse_worktree() {
-        let args = Args::parse_from(["cruise", "--worktree", "task"]);
-        assert!(args.worktree);
-        assert!(!args.keep_worktree);
-    }
-
-    #[test]
-    fn test_args_parse_keep_worktree() {
-        let args = Args::parse_from(["cruise", "--worktree", "--keep-worktree", "task"]);
-        assert!(args.worktree);
-        assert!(args.keep_worktree);
-    }
-
-    #[test]
-    fn test_args_parse_no_input() {
-        let args = Args::parse_from(["cruise"]);
-        assert_eq!(args.input, None);
-    }
-
-    #[test]
     fn test_cli_verify() {
-        Args::command().debug_assert();
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_plan_subcommand_with_input() {
+        let cli = Cli::parse_from(["cruise", "plan", "add feature X"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.input, Some("add feature X".to_string()));
+                assert!(!args.dry_run);
+                assert_eq!(args.rate_limit_retries, 5);
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_subcommand_with_config() {
+        let cli = Cli::parse_from(["cruise", "plan", "-c", "my.yaml", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.config, Some("my.yaml".to_string()));
+                assert_eq!(args.input, Some("task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_subcommand_dry_run() {
+        let cli = Cli::parse_from(["cruise", "plan", "--dry-run", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_defaults() {
+        let cli = Cli::parse_from(["cruise", "run"]);
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.session, None);
+                assert_eq!(args.max_retries, 10);
+                assert_eq!(args.rate_limit_retries, 5);
+                assert!(!args.keep_worktree);
+                assert!(!args.dry_run);
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_with_session() {
+        let cli = Cli::parse_from(["cruise", "run", "20260306143000"]);
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.session, Some("20260306143000".to_string()));
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_flags() {
+        let cli = Cli::parse_from([
+            "cruise",
+            "run",
+            "--max-retries",
+            "20",
+            "--rate-limit-retries",
+            "3",
+            "--keep-worktree",
+        ]);
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.max_retries, 20);
+                assert_eq!(args.rate_limit_retries, 3);
+                assert!(args.keep_worktree);
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_list_subcommand() {
+        let cli = Cli::parse_from(["cruise", "list"]);
+        assert!(matches!(cli.command, Some(Commands::List)));
+    }
+
+    #[test]
+    fn test_clean_subcommand_default_days() {
+        let cli = Cli::parse_from(["cruise", "clean"]);
+        match cli.command {
+            Some(Commands::Clean(args)) => {
+                assert_eq!(args.days, 3);
+            }
+            _ => panic!("expected Clean subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_clean_subcommand_custom_days() {
+        let cli = Cli::parse_from(["cruise", "clean", "--days", "7"]);
+        match cli.command {
+            Some(Commands::Clean(args)) => {
+                assert_eq!(args.days, 7);
+            }
+            _ => panic!("expected Clean subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_backward_compat_no_subcommand() {
+        let cli = Cli::parse_from(["cruise", "add hello world"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.input, Some("add hello world".to_string()));
+    }
+
+    #[test]
+    fn test_no_args() {
+        let cli = Cli::parse_from(["cruise"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.input, None);
     }
 }

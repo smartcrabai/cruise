@@ -12,20 +12,16 @@ pub struct WorkflowConfig {
     /// Default model for prompt steps (e.g. "sonnet"). Per-step model overrides this.
     pub model: Option<String>,
 
-    /// File path bound to the `plan` variable.
+    /// Model to use for the built-in plan step (falls back to `model`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_model: Option<String>,
+
+    /// File path bound to the `plan` variable (legacy; new flow uses session plan path).
     pub plan: Option<PathBuf>,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
     pub env: HashMap<String, String>,
-
-    /// If true, run the workflow inside an isolated git worktree.
-    #[serde(default)]
-    pub worktree: bool,
-
-    /// Path to state file for suspend/resume support.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<PathBuf>,
 
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
@@ -159,6 +155,22 @@ steps:
         assert_eq!(config.command, vec!["claude", "-p"]);
         assert_eq!(config.model, None);
         assert_eq!(config.plan, Some(PathBuf::from("plan.md")));
+        assert_eq!(config.plan_model, None);
+    }
+
+    #[test]
+    fn test_plan_model_field() {
+        let yaml = r#"
+command: [claude, -p]
+model: sonnet
+plan_model: opus
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.model, Some("sonnet".to_string()));
+        assert_eq!(config.plan_model, Some("opus".to_string()));
     }
 
     #[test]
@@ -349,7 +361,6 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).expect("failed to parse cruise.yaml");
         assert_eq!(config.command, vec!["claude", "--model", "{model}", "-p"]);
         assert_eq!(config.model, Some("sonnet".to_string()));
-        assert_eq!(config.plan, Some(PathBuf::from(".cruise/plan.md")));
         assert!(!config.steps.is_empty(), "steps is empty");
     }
 
@@ -369,23 +380,16 @@ steps:
 
     #[test]
     fn test_command_type_mismatch() {
-        // A mapping value cannot be deserialized as String or Vec<String>.
         let yaml = "command: [echo]\nsteps:\n  s1:\n    command: {foo: bar}";
         let result = WorkflowConfig::from_yaml(yaml);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_worktree_config_field() {
-        let yaml = "command: [echo]\nworktree: true\nsteps:\n  s1:\n    command: echo hi";
+    fn test_unknown_fields_ignored() {
+        // Old configs with `state` or `worktree` fields should still parse.
+        let yaml = "command: [echo]\nworktree: true\nstate: .cruise/state.json\nsteps:\n  s1:\n    command: echo hi";
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
-        assert!(config.worktree);
-    }
-
-    #[test]
-    fn test_worktree_config_field_default_false() {
-        let yaml = "command: [echo]\nsteps:\n  s1:\n    command: echo hi";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap();
-        assert!(!config.worktree);
+        assert!(!config.steps.is_empty());
     }
 }
