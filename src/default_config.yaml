@@ -23,10 +23,5 @@ steps:
       {prev.stderr}
     next: test
 
-  improve:
-    prompt: /improve
-    if:
-      file-changed: test
-
   pr:
     prompt: create a PR
