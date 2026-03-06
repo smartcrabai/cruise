@@ -104,7 +104,7 @@ pub async fn execute_steps(
                     run_prompt_step(vars, config, step, rate_limit_retries, &merged_env).await?;
                 let elapsed = step_start.elapsed();
                 if !output.is_empty() {
-                    eprintln!("{}", output);
+                    eprint!("{}", output);
                 }
                 log_step_result(elapsed, true);
                 None
