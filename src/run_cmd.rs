@@ -164,10 +164,8 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {}", e)))?;
 
-    if output.status.success() {
-        if let Some(url) = gh_output_line(&output.stdout) {
-            return Ok(url);
-        }
+    if output.status.success() && let Some(url) = gh_output_line(&output.stdout) {
+        return Ok(url);
     }
 
     // PR may already exist — try to fetch the URL.
@@ -177,10 +175,8 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {}", e)))?;
 
-    if fallback.status.success() {
-        if let Some(url) = gh_output_line(&fallback.stdout) {
-            return Ok(url);
-        }
+    if fallback.status.success() && let Some(url) = gh_output_line(&fallback.stdout) {
+        return Ok(url);
     }
 
     let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
