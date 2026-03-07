@@ -2,7 +2,7 @@
 
 A CLI tool that orchestrates coding agent workflows defined in a YAML config file.
 
-Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan → approve → write tests → implement → test → review → open PR. It handles variable passing between steps, conditional branching, and loop control.
+Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan → approve → write tests → implement → test → review → open PR → post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
 
 ## Prerequisites
 
@@ -103,7 +103,7 @@ Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
    - **Fix** — Provide feedback; the plan step reruns with your input.
    - **Ask** — Ask a question; the answer is shown before the menu reappears.
    - **Execute now** — Skip approval and run immediately.
-3. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, and automatically creates a PR with `gh pr create`.
+3. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
 Sessions remain in `~/.cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
@@ -144,6 +144,10 @@ groups:                   # step group definitions (optional)
 steps:
   step_name:
     # step configuration
+
+after-pr:                # optional: steps that run automatically after PR creation
+  step_name:
+    # step configuration (same format as `steps`)
 ```
 
 ### Dynamic Model Selection
@@ -239,6 +243,28 @@ steps:
         next: ~                          # null next = end of workflow
 ```
 
+### Post-PR Automation (`after-pr`)
+
+Use `after-pr` for steps that should run automatically after `cruise run` successfully creates a pull request. `after-pr` uses the same step format as `steps`, so you can define prompt steps, command steps, and grouped steps there as well.
+
+```yaml
+steps:
+  implement:
+    prompt: "{input}"
+
+  test:
+    command: cargo test
+
+after-pr:
+  notify:
+    command: "echo 'PR #{pr.number} created: {pr.url}'"
+
+  label:
+    command: "gh pr edit {pr.number} --add-label enhancement"
+```
+
+`after-pr` steps run only after PR creation succeeds. They can use all normal template variables plus the PR-specific variables listed below.
+
 ### Flow Control
 
 #### Explicit next step
@@ -329,6 +355,8 @@ steps:
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
+| `{pr.number}` | Pull request number, available after a PR has been created |
+| `{pr.url}` | Pull request URL, available after a PR has been created |
 
 > **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
@@ -435,6 +463,13 @@ steps:
   coderabbit:
     group: review
     prompt: /cr
+
+after-pr:
+  label:
+    command: gh pr edit {pr.number} --add-label automated
+
+  announce:
+    command: "echo 'Created PR: {pr.url}'"
 ```
 
 ### Simple Auto-Commit Flow
