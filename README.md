@@ -21,50 +21,97 @@ brew install smartcrabai/tap/cruise
 ## Usage
 
 ```sh
-# Run the default cruise.yaml workflow
+# Create a session (plan → approve)
+cruise plan "implement the feature"
+
+# Execute the approved session
+cruise run
+
+# List and manage sessions interactively
+cruise list
+
+# Remove completed sessions older than 3 days
+cruise clean --days 3
+
+# Legacy: no subcommand is treated as `cruise plan`
 cruise "implement the feature"
-
-# Use a custom config file
-cruise -c workflow.yaml "task"
-
-# Resume from a specific step
-cruise --from implement "implement the feature"
-
-# Run in an isolated git worktree
-cruise --worktree "implement the feature"
-
-# Preview the flow without executing
-cruise --dry-run "implement the feature"
 ```
 
 ### CLI Reference
 
 ```
-cruise [OPTIONS] [INPUT]
+cruise [INPUT] [COMMAND]
+
+Commands:
+  plan   Create an implementation plan for a task
+  run    Execute a planned session
+  list   List and manage sessions interactively
+  clean  Remove old completed sessions
+```
+
+#### `cruise plan`
+
+```
+cruise plan [OPTIONS] [INPUT]
 
 Arguments:
-  [INPUT]  Initial input passed to the workflow (reads from stdin if omitted and stdin is piped)
+  [INPUT]  Task description
 
 Options:
-  -c, --config <PATH>          Path to the workflow config file (see Config File Resolution)
-  --from <STEP>                Step name to start from (resume mid-workflow)
-  --max-retries <N>            Maximum times a loop edge may be traversed [default: 10]
-  --rate-limit-retries <N>     Maximum rate-limit retries per step [default: 5]
-  --dry-run                    Print the workflow flow without executing
-  --worktree                   Run workflow in an isolated git worktree
-  --keep-worktree              Keep the worktree after workflow completes (default: auto-delete)
-  --new-worktree               Skip worktree resume detection; always create a new worktree
+  -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
+      --dry-run                    Print the plan step without executing it
+      --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
 ```
+
+#### `cruise run`
+
+```
+cruise run [OPTIONS] [SESSION]
+
+Arguments:
+  [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
+
+Options:
+      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
+      --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
+      --keep-worktree              Keep the worktree after the session completes (default: auto-delete)
+      --dry-run                    Print the workflow flow without executing it
+```
+
+#### `cruise clean`
+
+```
+cruise clean [OPTIONS]
+
+Options:
+      --days <DAYS>  Remove completed sessions older than this many days [default: 3]
+```
+
+## Session Management
+
+Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
+
+### Session Lifecycle
+
+1. **`cruise plan "task"`** — Runs the built-in plan step to generate an implementation plan, then presents an approve-plan menu.
+2. **Approve-plan menu** — Choose one of:
+   - **Approve** — Mark the session as ready to run.
+   - **Fix** — Provide feedback; the plan step reruns with your input.
+   - **Ask** — Ask a question; the answer is shown before the menu reappears.
+   - **Execute now** — Skip approval and run immediately.
+3. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, and executes the workflow steps.
+
+Sessions remain in `~/.cruise/sessions/` until removed by `cruise clean`.
 
 ## Config File Resolution
 
 When `-c` is not specified, cruise searches for a config in this order:
 
-1. `./cruise.yaml` — in the current directory
-2. `~/.cruise/*.yaml` / `*.yml` — auto-selected if exactly one file exists, or prompted if multiple
-3. Built-in default — a minimal single-step workflow; no config file required
-
-When `-c <PATH>` is given, that file must exist or cruise exits with an error.
+1. `-c/--config` flag — the specified file must exist or cruise exits with an error.
+2. `CRUISE_CONFIG` environment variable — error if file does not exist.
+3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml` — in the current directory.
+4. `~/.cruise/*.yaml` / `*.yml` — auto-selected if exactly one file exists, or prompted if multiple.
+5. Built-in default — a minimal single-step workflow; no config file required.
 
 ## Config File Reference
 
@@ -78,6 +125,7 @@ command:
   - -p
 
 model: sonnet             # default model for all prompt steps (optional)
+plan_model: opus          # model used for the built-in plan step (optional)
 
 plan: plan.md             # optional: file path bound to the {plan} variable
 
@@ -85,9 +133,11 @@ env:                      # environment variables applied to all steps (optional
   API_KEY: sk-...
   PROJECT: myproject
 
-worktree: false           # run in isolated git worktree (optional, default: false)
-
-state: .cruise/state.json # state file path for suspend/resume (optional)
+groups:                   # step group definitions (optional)
+  review:
+    if:
+      file-changed: test
+    max_retries: 3
 
 steps:
   step_name:
@@ -236,6 +286,37 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
+### Step Groups
+
+Steps can be grouped to coordinate retry loops across multiple steps. A group retries all its member steps together when the `if: file-changed` condition triggers.
+
+Define groups at the top level, then assign steps to a group:
+
+```yaml
+groups:
+  review:
+    if:
+      file-changed: test    # if any step in the group changes files, retry from the group start
+    max_retries: 3          # maximum number of group-level retry loops (optional)
+
+steps:
+  test:
+    command: cargo test
+
+  simplify:
+    group: review           # this step belongs to the "review" group
+    prompt: /simplify
+
+  coderabbit:
+    group: review           # consecutive steps sharing the same group form the group boundary
+    prompt: /cr
+```
+
+**Constraints:**
+- All steps belonging to the same group must be **consecutive** in the YAML.
+- Steps within a group cannot have individual `if:` conditions — the group-level `if:` applies to the entire group.
+- When the group's `if: file-changed` condition triggers, execution jumps back to the **first step of the group** and all group steps re-run.
+
 ### Variable Reference
 
 | Variable | Description |
@@ -251,33 +332,11 @@ steps:
 
 ## Worktree Isolation
 
-Cruise can run the entire workflow inside an isolated git worktree, keeping the main working tree clean.
+`cruise run` always executes the workflow inside an isolated git worktree at `~/.cruise/worktrees/<session-id>/`, keeping the main working tree clean.
 
-Enable via CLI flag or YAML field:
-
-```sh
-cruise --worktree "implement the feature"
-cruise --worktree --keep-worktree "implement the feature"  # keep after completion
-```
-
-```yaml
-command:
-  - claude
-  - -p
-
-worktree: true   # always run in an isolated worktree
-
-steps:
-  implement:
-    prompt: "{input}"
-
-  pr:
-    prompt: create a PR
-```
-
-- A new branch `cruise/<timestamp>-<sanitized-input>` is created and a worktree is checked out next to the repo directory.
-- After the workflow completes, the worktree and branch are deleted automatically (unless `--keep-worktree` is set).
-- CLI `--worktree` takes effect in addition to the YAML `worktree` field (either is sufficient to enable).
+- A new branch `cruise/<timestamp>-<sanitized-input>` is created and checked out in the worktree.
+- After the workflow completes, the worktree and branch are deleted automatically.
+- Pass `--keep-worktree` to `cruise run` to retain the worktree after completion.
 
 ### Copying files into the worktree
 
@@ -292,19 +351,6 @@ secrets/config.yaml
 
 Each line is a relative path (files or directories). Absolute paths and `..` traversal are ignored for safety.
 
-## State Save / Resume
-
-Set the `state` field to a file path to enable automatic suspend/resume:
-
-```yaml
-state: .cruise/state.json
-```
-
-- Before each step runs, the current step name is saved to the state file.
-- If cruise is interrupted (Ctrl-C, crash, etc.), re-running the same command automatically resumes from the saved step.
-- On successful workflow completion, the state file is deleted.
-- `--from <STEP>` always takes priority over saved state.
-
 ## Example Config
 
 ### Full Development Flow
@@ -317,8 +363,15 @@ command:
   - -p
 
 model: sonnet
+plan_model: opus
 
 plan: .cruise/plan.md
+
+groups:
+  review:
+    if:
+      file-changed: test
+    max_retries: 3
 
 steps:
   plan:
@@ -376,10 +429,13 @@ steps:
       {prev.stderr}
     next: test
 
+  simplify:
+    group: review
+    prompt: /simplify
+
   coderabbit:
+    group: review
     prompt: /cr
-    if:
-      file-changed: test          # after coderabbit, if it modified files, re-run tests
 
   pr:
     prompt: create a PR
