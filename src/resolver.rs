@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
+use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
-
-/// Embedded default workflow configuration.
-const DEFAULT_CONFIG: &str = include_str!("default_config.yaml");
 
 /// Indicates where the resolved config came from.
 #[derive(Debug, Clone)]
@@ -91,7 +89,9 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
     }
 
     // 6. Built-in default.
-    Ok((DEFAULT_CONFIG.to_string(), ConfigSource::Builtin))
+    let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin())
+        .map_err(|e| CruiseError::Other(format!("failed to serialize built-in config: {}", e)))?;
+    Ok((yaml, ConfigSource::Builtin))
 }
 
 /// Try to read a local file by name. Returns `Ok(None)` if not found, `Ok(Some(...))` on
@@ -446,12 +446,20 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    // ---- builtin YAML parses ----
+    // ---- builtin roundtrip ----
 
     #[test]
-    fn test_builtin_yaml_parses() {
+    fn test_builtin_yaml_roundtrip() {
         use crate::config::WorkflowConfig;
-        let config = WorkflowConfig::from_yaml(DEFAULT_CONFIG).unwrap();
-        assert!(!config.steps.is_empty());
+        let original = WorkflowConfig::default_builtin();
+        let yaml = serde_yaml::to_string(&original).unwrap();
+        let parsed = WorkflowConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(parsed.steps.len(), original.steps.len());
+        assert_eq!(parsed.model, original.model);
+        assert_eq!(parsed.plan_model, original.plan_model);
+        assert_eq!(parsed.command, original.command);
+        for key in original.steps.keys() {
+            assert!(parsed.steps.contains_key(key), "missing step: {}", key);
+        }
     }
 }
