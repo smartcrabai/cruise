@@ -2,6 +2,9 @@
   extends: [
     "config:best-practices"
   ],
+  ignorePaths: [
+    ".github/workflows/release.yml"
+  ],
   dependencyDashboard: false,
   packageRules: [
     {
