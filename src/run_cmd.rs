@@ -133,21 +133,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     let session = session_cell.into_inner();
 
-    // Update session phase based on result.
-    match &exec_result {
+    let overall_result = match exec_result {
         Ok(_) => {
-            // Commit all changes before creating PR.
-            match commit_changes(&ctx.path, &session.input) {
-                Ok(true) => {
-                    eprintln!("{} Changes committed", style("✓").green().bold());
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("warning: commit failed: {}", e);
-                }
-            }
-
-            // Generate PR title and body via LLM using the create-pr prompt template.
             let (pr_title, pr_body) = match vars.resolve(CREATE_PR_PROMPT_TEMPLATE) {
                 Err(e) => {
                     eprintln!("warning: PR prompt resolution failed: {}", e);
@@ -187,39 +174,56 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 }
             };
 
-            // Try to create a PR automatically.
-            match create_pr(&ctx.path, &ctx.branch, &pr_title, &pr_body) {
-                Ok(url) => {
-                    eprintln!("{} PR created: {}", style("✓").green().bold(), url);
-                    if let Some(number) = extract_last_path_segment(&url) {
-                        vars.set_named_value(PR_NUMBER_VAR, number);
-                    }
-                    vars.set_named_value(PR_URL_VAR, url.clone());
-                    session.pr_url = Some(url);
+            match attempt_pr_creation(&ctx, &session.input, &pr_title, &pr_body) {
+                Ok(pr_attempt) => {
+                    pr_attempt.report();
+                    match pr_attempt {
+                        PrAttemptOutcome::Created { url, .. } => {
+                            eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                            if let Some(number) = extract_last_path_segment(&url) {
+                                vars.set_named_value(PR_NUMBER_VAR, number);
+                            }
+                            vars.set_named_value(PR_URL_VAR, url.clone());
+                            session.pr_url = Some(url);
 
-                    // Run after_pr steps if any.
-                    if let Some(first_step) = config.after_pr.keys().next() {
-                        let mut after_config = config.clone();
-                        after_config.steps = std::mem::take(&mut after_config.after_pr);
-                        if let Err(e) = execute_steps(
-                            &after_config,
-                            &mut vars,
-                            &mut tracker,
-                            first_step,
-                            args.max_retries,
-                            args.rate_limit_retries,
-                            &|_| Ok(()),
-                        )
-                        .await
-                        {
-                            eprintln!("warning: after-pr steps failed: {}", e);
+                            // Run after_pr steps if any.
+                            if let Some(first_step) = config.after_pr.keys().next() {
+                                let mut after_config = config.clone();
+                                after_config.steps = std::mem::take(&mut after_config.after_pr);
+                                if let Err(e) = execute_steps(
+                                    &after_config,
+                                    &mut vars,
+                                    &mut tracker,
+                                    first_step,
+                                    args.max_retries,
+                                    args.rate_limit_retries,
+                                    &|_| Ok(()),
+                                )
+                                .await
+                                {
+                                    eprintln!("warning: after-pr steps failed: {}", e);
+                                }
+                            }
+                            Ok(())
+                        }
+                        PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
+                            "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
+                            ctx.branch
+                        ))),
+                        PrAttemptOutcome::CreateFailed { error, .. } => {
+                            eprintln!("warning: PR creation failed: {}", error);
+                            Ok(())
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("warning: PR creation failed: {}", e);
-                }
+                Err(e) => Err(e),
             }
+        }
+        Err(e) => Err(e),
+    };
+
+    match &overall_result {
+        Ok(()) => {
             session.phase = SessionPhase::Completed;
             session.completed_at = Some(current_iso8601());
         }
@@ -230,12 +234,123 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
     manager.save(session)?;
 
-    exec_result.map(|_| ())
+    overall_result
 }
 
-/// Stage all changes and commit them. Returns `true` if a commit was created,
-/// `false` if there was nothing to commit.
-fn commit_changes(worktree_path: &Path, message: &str) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitOutcome {
+    Created,
+    NoChanges,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrAttemptOutcome {
+    Created {
+        url: String,
+        commit_outcome: CommitOutcome,
+    },
+    SkippedNoCommits,
+    CreateFailed {
+        error: String,
+        commit_outcome: CommitOutcome,
+    },
+}
+
+impl PrAttemptOutcome {
+    fn report(&self) {
+        match self {
+            Self::Created { commit_outcome, .. } | Self::CreateFailed { commit_outcome, .. } => {
+                report_commit_outcome(*commit_outcome);
+            }
+            Self::SkippedNoCommits => {}
+        }
+    }
+}
+
+fn report_commit_outcome(commit_outcome: CommitOutcome) {
+    match commit_outcome {
+        CommitOutcome::Created => {
+            eprintln!("{} Changes committed", style("✓").green().bold());
+        }
+        CommitOutcome::NoChanges => {
+            eprintln!(
+                "{} No new changes to commit; using existing branch commits",
+                style("→").cyan()
+            );
+        }
+    }
+}
+
+fn attempt_pr_creation(
+    ctx: &worktree::WorktreeContext,
+    message: &str,
+    title: &str,
+    body: &str,
+) -> Result<PrAttemptOutcome> {
+    let commit_outcome = commit_changes(&ctx.path, message)?;
+    if branch_commit_count(ctx)? == 0 {
+        return Ok(PrAttemptOutcome::SkippedNoCommits);
+    }
+
+    match create_pr(&ctx.path, &ctx.branch, title, body) {
+        Ok(url) => Ok(PrAttemptOutcome::Created {
+            url,
+            commit_outcome,
+        }),
+        Err(e) => Ok(PrAttemptOutcome::CreateFailed {
+            error: e.to_string(),
+            commit_outcome,
+        }),
+    }
+}
+
+fn branch_commit_count(ctx: &worktree::WorktreeContext) -> Result<usize> {
+    let base_head = git_stdout(
+        &ctx.original_dir,
+        &["rev-parse", "HEAD"],
+        "git rev-parse HEAD failed",
+    )?;
+    let merge_base = git_stdout(
+        &ctx.path,
+        &["merge-base", "HEAD", &base_head],
+        "git merge-base failed",
+    )?;
+    let count = git_stdout(
+        &ctx.path,
+        &["rev-list", "--count", &format!("{merge_base}..HEAD")],
+        "git rev-list --count failed",
+    )?;
+    count.parse::<usize>().map_err(|e| {
+        CruiseError::Other(format!(
+            "failed to parse branch commit count from `{count}`: {e}"
+        ))
+    })
+}
+
+fn git_stdout(current_dir: &Path, args: &[&str], context: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(current_dir)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git {}: {}", args.join(" "), e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::Other(format!("{context}: {}", stderr.trim())));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        Err(CruiseError::Other(format!(
+            "{context}: command produced no stdout"
+        )))
+    } else {
+        Ok(stdout)
+    }
+}
+
+/// Stage all changes and commit them.
+fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> {
     // git add -A
     let add = std::process::Command::new("git")
         .args(["add", "-A"])
@@ -258,7 +373,7 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<bool> {
         .map_err(|e| CruiseError::Other(format!("failed to run git diff: {}", e)))?;
     if diff.status.success() {
         // No changes to commit
-        return Ok(false);
+        return Ok(CommitOutcome::NoChanges);
     }
 
     // git commit
@@ -275,7 +390,7 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<bool> {
         )));
     }
 
-    Ok(true)
+    Ok(CommitOutcome::Created)
 }
 
 /// Create a PR using `gh pr create`. Uses `--title`/`--body` if provided, otherwise `--fill`.
@@ -477,6 +592,128 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    static GLOBAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PathEnvGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PathEnvGuard {
+        fn prepend(dir: &Path) -> Self {
+            let lock = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("PATH");
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(ref existing) = prev {
+                paths.extend(std::env::split_paths(existing));
+            }
+            let joined = std::env::join_paths(paths).expect("failed to join PATH");
+            // SAFETY: the test holds GLOBAL_ENV_LOCK, so no other test mutates PATH concurrently.
+            unsafe { std::env::set_var("PATH", &joined) };
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the test holds GLOBAL_ENV_LOCK for the lifetime of the guard.
+            unsafe {
+                if let Some(ref prev) = self.prev {
+                    std::env::set_var("PATH", prev);
+                } else {
+                    std::env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    fn run_git_ok(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed to start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed to start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_git_repo(dir: &Path) {
+        run_git_ok(dir, &["init"]);
+        run_git_ok(dir, &["config", "user.email", "test@example.com"]);
+        run_git_ok(dir, &["config", "user.name", "Test"]);
+        fs::write(dir.join("README.md"), "init").unwrap();
+        run_git_ok(dir, &["add", "."]);
+        run_git_ok(dir, &["commit", "-m", "init"]);
+        run_git_ok(dir, &["branch", "-M", "main"]);
+    }
+
+    fn create_worktree(tmp: &TempDir, session_id: &str) -> (PathBuf, worktree::WorktreeContext) {
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let worktrees_dir = tmp.path().join("worktrees");
+        let (ctx, reused) =
+            worktree::setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None)
+                .unwrap();
+        assert!(!reused, "test worktree should be created fresh");
+        (repo, ctx)
+    }
+
+    fn install_fake_gh(bin_dir: &Path, log_path: &Path, head_path: &Path, url: &str) {
+        fs::create_dir_all(bin_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = bin_dir.join("gh");
+            let script = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ngit rev-parse HEAD > \"{}\"\nprintf '%s\\n' \"{}\"\n",
+                log_path.display(),
+                head_path.display(),
+                url
+            );
+            fs::write(&script_path, script).unwrap();
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let script_path = bin_dir.join("gh.cmd");
+            let script = format!(
+                "@echo off\r\necho %*>>\"{}\"\r\ngit rev-parse HEAD > \"{}\"\r\necho {}\r\n",
+                log_path.display(),
+                head_path.display(),
+                url
+            );
+            fs::write(&script_path, script).unwrap();
+        }
+    }
 
     #[test]
     fn test_extract_last_path_segment_github_pr_url() {
@@ -486,6 +723,120 @@ mod tests {
         let result = extract_last_path_segment(url);
         // Then: last segment is returned
         assert_eq!(result, Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_skips_gh_when_branch_has_no_commits() {
+        let tmp = TempDir::new().unwrap();
+        let (_repo, ctx) = create_worktree(&tmp, "20260307225900");
+        let bin_dir = tmp.path().join("bin");
+        let log_path = tmp.path().join("gh.log");
+        let head_path = tmp.path().join("gh-head.txt");
+        install_fake_gh(
+            &bin_dir,
+            &log_path,
+            &head_path,
+            "https://github.com/owner/repo/pull/1",
+        );
+        let _path_guard = PathEnvGuard::prepend(&bin_dir);
+
+        let result = attempt_pr_creation(&ctx, "test task", "", "").unwrap();
+
+        assert_eq!(result, PrAttemptOutcome::SkippedNoCommits);
+        assert!(
+            !log_path.exists(),
+            "gh should not be called when no commit exists"
+        );
+        assert!(
+            !head_path.exists(),
+            "gh should not observe HEAD when skipped"
+        );
+        worktree::cleanup_worktree(&ctx).unwrap();
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, ctx) = create_worktree(&tmp, "20260307225901");
+        let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        let log_path = tmp.path().join("gh.log");
+        let head_path = tmp.path().join("gh-head.txt");
+        let url = "https://github.com/owner/repo/pull/2";
+        install_fake_gh(&bin_dir, &log_path, &head_path, url);
+        let _path_guard = PathEnvGuard::prepend(&bin_dir);
+
+        let result = attempt_pr_creation(&ctx, "add feature", "", "").unwrap();
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: url.to_string(),
+                commit_outcome: CommitOutcome::Created,
+            }
+        );
+        assert_eq!(
+            git_stdout_ok(&ctx.path, &["log", "-1", "--pretty=%s"]),
+            "add feature"
+        );
+        let worktree_head = git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            worktree_head, base_head,
+            "helper should create a new commit"
+        );
+        assert_eq!(
+            fs::read_to_string(&head_path).unwrap().trim(),
+            worktree_head
+        );
+        assert!(
+            {
+                let gh_args = fs::read_to_string(&log_path).unwrap();
+                gh_args.contains("pr create --head") && gh_args.contains("--fill")
+            },
+            "fake gh should receive a pr create invocation"
+        );
+        worktree::cleanup_worktree(&ctx).unwrap();
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_reuses_existing_branch_commits() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, ctx) = create_worktree(&tmp, "20260307225902");
+        let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+        run_git_ok(&ctx.path, &["add", "."]);
+        run_git_ok(&ctx.path, &["commit", "-m", "existing commit"]);
+
+        let existing_head = git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]);
+        assert_ne!(existing_head, base_head);
+
+        let bin_dir = tmp.path().join("bin");
+        let log_path = tmp.path().join("gh.log");
+        let head_path = tmp.path().join("gh-head.txt");
+        let url = "https://github.com/owner/repo/pull/3";
+        install_fake_gh(&bin_dir, &log_path, &head_path, url);
+        let _path_guard = PathEnvGuard::prepend(&bin_dir);
+
+        let result = attempt_pr_creation(&ctx, "rerun without changes", "", "").unwrap();
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: url.to_string(),
+                commit_outcome: CommitOutcome::NoChanges,
+            }
+        );
+        assert_eq!(
+            git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]),
+            existing_head
+        );
+        assert_eq!(
+            fs::read_to_string(&head_path).unwrap().trim(),
+            existing_head
+        );
+        worktree::cleanup_worktree(&ctx).unwrap();
     }
 
     // --- parse_pr_metadata tests ---
