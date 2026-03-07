@@ -13,6 +13,7 @@ use crate::variable::VariableStore;
 
 /// Name of the variable that holds the plan file path.
 const PLAN_VAR: &str = "plan";
+const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve input: CLI arg, or read from stdin if piped.
@@ -63,11 +64,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // Run the built-in plan step (LLM writes plan.md).
     let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
-    let plan_prompt = format!(
-        "I am trying to implement the following features. Create an implementation plan and write it to {}.\n---\n{}",
-        plan_path.display(),
-        session.input
-    );
+    let plan_prompt = vars.resolve(PLAN_PROMPT_TEMPLATE)?;
 
     eprintln!(
         "\n{} {}",
