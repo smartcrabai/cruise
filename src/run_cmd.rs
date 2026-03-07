@@ -135,6 +135,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // Update session phase based on result.
     match &exec_result {
         Ok(_) => {
+            // Commit all changes before creating PR.
+            match commit_changes(&ctx.path, &session.input) {
+                Ok(()) => {
+                    eprintln!("{} Changes committed", style("✓").green().bold());
+                }
+                Err(e) => {
+                    eprintln!("warning: commit failed: {}", e);
+                }
+            }
+
             // Try to create a PR automatically.
             match create_pr(&ctx.path, &ctx.branch) {
                 Ok(url) => {
@@ -179,6 +189,50 @@ pub async fn run(args: RunArgs) -> Result<()> {
     manager.save(session)?;
 
     exec_result.map(|_| ())
+}
+
+/// Stage all changes and commit them.
+fn commit_changes(worktree_path: &Path, message: &str) -> Result<()> {
+    // git add -A
+    let add = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git add: {}", e)))?;
+    if !add.status.success() {
+        let stderr = String::from_utf8_lossy(&add.stderr);
+        return Err(CruiseError::Other(format!(
+            "git add -A failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    // Check if there are staged changes
+    let diff = std::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git diff: {}", e)))?;
+    if diff.status.success() {
+        // No changes to commit
+        return Ok(());
+    }
+
+    // git commit
+    let commit = std::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git commit: {}", e)))?;
+    if !commit.status.success() {
+        let stderr = String::from_utf8_lossy(&commit.stderr);
+        return Err(CruiseError::Other(format!(
+            "git commit failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Create a PR using `gh pr create --fill`. Falls back to `gh pr view` if a PR already exists.
