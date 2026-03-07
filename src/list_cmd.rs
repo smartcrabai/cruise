@@ -37,18 +37,15 @@ pub async fn run() -> Result<()> {
         }
 
         // Action menu.
-        let can_run = matches!(
-            session.phase,
-            SessionPhase::Planned | SessionPhase::Failed(_)
-        );
-        let can_continue = matches!(session.phase, SessionPhase::Running);
+        let can_run = session.phase.is_runnable();
 
         let mut actions = vec![];
         if can_run {
-            actions.push("Run");
-        }
-        if can_continue {
-            actions.push("Continue");
+            if matches!(session.phase, SessionPhase::Running) {
+                actions.push("Resume");
+            } else {
+                actions.push("Run");
+            }
         }
         actions.push("Delete");
         actions.push("Back");
@@ -60,7 +57,7 @@ pub async fn run() -> Result<()> {
         };
 
         match action {
-            "Run" | "Continue" => {
+            "Run" | "Resume" => {
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
                     max_retries: 10,
