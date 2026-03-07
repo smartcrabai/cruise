@@ -89,6 +89,8 @@ cruise clean
 
 Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is closed or merged are deleted along with their worktrees. Sessions without a PR URL or with an open PR are skipped.
 
+> **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached (e.g. the workflow failed before completion, or PR creation returned an error). If a session is unexpectedly skipped by `cruise clean`, check the session logs or re-run PR creation manually with `gh pr create`.
+
 ## Session Management
 
 Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.

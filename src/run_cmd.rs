@@ -183,10 +183,11 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
     Err(CruiseError::Other(format!(
-        "gh pr create failed: {}",
-        stderr
+        "gh pr create failed: {}; gh pr view also failed: {}",
+        create_stderr, view_stderr
     )))
 }
 
