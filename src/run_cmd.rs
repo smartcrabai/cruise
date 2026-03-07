@@ -15,10 +15,10 @@ use crate::worktree;
 
 /// Variable name that maps to the plan file.
 const PLAN_VAR: &str = "plan";
+const PR_NUMBER_VAR: &str = "pr.number";
+const PR_URL_VAR: &str = "pr.url";
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    ensure_gh_available()?;
-
     let manager = SessionManager::new(get_cruise_home()?);
 
     // Determine which session to run.
@@ -46,6 +46,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
         eprintln!("{}", style(format!("Session: {}", session_id)).dim());
         return print_dry_run(&config, session.current_step.as_deref());
     }
+
+    ensure_gh_available()?;
 
     // Determine start step.
     let start_step = session.current_step.clone().map(Ok).unwrap_or_else(|| {
@@ -137,7 +139,30 @@ pub async fn run(args: RunArgs) -> Result<()> {
             match create_pr(&ctx.path, &ctx.branch) {
                 Ok(url) => {
                     eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                    if let Some(number) = extract_last_path_segment(&url) {
+                        vars.set_named_value(PR_NUMBER_VAR, number);
+                    }
+                    vars.set_named_value(PR_URL_VAR, url.clone());
                     session.pr_url = Some(url);
+
+                    // Run after_pr steps if any.
+                    if let Some(first_step) = config.after_pr.keys().next() {
+                        let mut after_config = config.clone();
+                        after_config.steps = std::mem::take(&mut after_config.after_pr);
+                        if let Err(e) = execute_steps(
+                            &after_config,
+                            &mut vars,
+                            &mut tracker,
+                            first_step,
+                            args.max_retries,
+                            args.rate_limit_retries,
+                            &|_| Ok(()),
+                        )
+                        .await
+                        {
+                            eprintln!("warning: after-pr steps failed: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("warning: PR creation failed: {}", e);
@@ -195,6 +220,16 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
 fn gh_output_line(bytes: &[u8]) -> Option<String> {
     let s = String::from_utf8_lossy(bytes).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
+}
+
+/// Extracts the last path segment from a URL, stripping any query string or fragment.
+/// Returns `None` if the URL has no non-empty trailing path segment.
+fn extract_last_path_segment(url: &str) -> Option<String> {
+    url.rsplit('/')
+        .next()
+        .map(|s| s.split_once(['?', '#']).map_or(s, |(prefix, _)| prefix))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Verify that `gh` CLI is available in PATH.
@@ -261,4 +296,19 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
 
     let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
     Ok(pending[idx].id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_last_path_segment_github_pr_url() {
+        // Given: a standard GitHub PR URL
+        let url = "https://github.com/owner/repo/pull/42";
+        // When: extracting the last segment
+        let result = extract_last_path_segment(url);
+        // Then: last segment is returned
+        assert_eq!(result, Some("42".to_string()));
+    }
 }

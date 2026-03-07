@@ -29,6 +29,8 @@ pub struct VariableStore {
 pub enum NamedVariable {
     /// A file path – resolves to the path string itself (not the file contents).
     FilePath(std::path::PathBuf),
+    /// A plain string value.
+    Value(String),
 }
 
 impl VariableStore {
@@ -43,6 +45,12 @@ impl VariableStore {
     pub fn set_named_file(&mut self, name: &str, path: std::path::PathBuf) {
         self.named
             .insert(name.to_string(), NamedVariable::FilePath(path));
+    }
+
+    /// Register a named variable with a plain string value.
+    pub fn set_named_value(&mut self, name: &str, value: String) {
+        self.named
+            .insert(name.to_string(), NamedVariable::Value(value));
     }
 
     pub fn set_prev_output(&mut self, output: Option<String>) {
@@ -127,6 +135,7 @@ impl VariableStore {
                 .ok_or_else(|| CruiseError::UndefinedVariable("prev.success".to_string())),
             other => match self.named.get(other) {
                 Some(NamedVariable::FilePath(path)) => Ok(path.to_string_lossy().to_string()),
+                Some(NamedVariable::Value(val)) => Ok(val.clone()),
                 None => Err(CruiseError::UndefinedVariable(other.to_string())),
             },
         }
@@ -237,5 +246,75 @@ mod tests {
         let store = VariableStore::new("input".to_string());
         // No closing brace — emit literally.
         assert_eq!(store.resolve("Hello {unclosed").unwrap(), "Hello {unclosed");
+    }
+
+    #[test]
+    fn test_set_named_value_resolves() {
+        // Given: a store with a named string value set via set_named_value
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value("greeting", "Hello".to_string());
+        // When: resolved
+        let result = store.resolve("Say: {greeting}").unwrap();
+        // Then: variable is substituted correctly
+        assert_eq!(result, "Say: Hello");
+    }
+
+    #[test]
+    fn test_resolve_pr_url() {
+        // Given: pr.url is set as a named value
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value(
+            "pr.url",
+            "https://github.com/owner/repo/pull/42".to_string(),
+        );
+        // When: resolved in a template
+        let result = store.resolve("PR: {pr.url}").unwrap();
+        // Then: URL is substituted
+        assert_eq!(result, "PR: https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn test_resolve_pr_number() {
+        // Given: pr.number is set as a named value
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value("pr.number", "42".to_string());
+        // When: resolved in a command template
+        let result = store
+            .resolve("gh pr edit {pr.number} --add-label foo")
+            .unwrap();
+        // Then: PR number is substituted
+        assert_eq!(result, "gh pr edit 42 --add-label foo");
+    }
+
+    #[test]
+    fn test_set_named_value_overrides_existing() {
+        // Given: the same named value is set twice
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value("pr.number", "10".to_string());
+        store.set_named_value("pr.number", "42".to_string());
+        // When: resolved
+        let result = store.resolve("{pr.number}").unwrap();
+        // Then: latest value wins
+        assert_eq!(result, "42");
+    }
+
+    #[test]
+    fn test_set_named_value_both_pr_vars() {
+        // Given: both pr.url and pr.number are set
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value(
+            "pr.url",
+            "https://github.com/owner/repo/pull/42".to_string(),
+        );
+        store.set_named_value("pr.number", "42".to_string());
+        // When: template uses both placeholders
+        let result = store
+            .resolve("echo 'PR #{pr.number} created: {pr.url}'")
+            .unwrap();
+        // Then: both are substituted
+        assert_eq!(
+            result,
+            "echo 'PR #42 created: https://github.com/owner/repo/pull/42'"
+        );
     }
 }

@@ -25,6 +25,10 @@ pub struct WorkflowConfig {
 
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
+
+    /// Steps to run after PR creation. Same format as `steps`.
+    #[serde(default, rename = "after-pr")]
+    pub after_pr: IndexMap<String, StepConfig>,
 }
 
 /// A command value that can be either a single string or a list of strings.
@@ -155,6 +159,7 @@ impl WorkflowConfig {
             env: HashMap::new(),
             groups: HashMap::new(),
             steps,
+            after_pr: IndexMap::new(),
         }
     }
 }
@@ -164,16 +169,25 @@ impl WorkflowConfig {
 /// - Steps in the same group must be consecutive in the IndexMap.
 /// - Steps with a group must not have individual `if` conditions.
 pub fn validate_groups(config: &WorkflowConfig) -> crate::error::Result<()> {
+    validate_step_groups(&config.steps, &config.groups)?;
+    validate_step_groups(&config.after_pr, &config.groups)?;
+    Ok(())
+}
+
+fn validate_step_groups(
+    steps: &IndexMap<String, StepConfig>,
+    groups: &std::collections::HashMap<String, GroupConfig>,
+) -> crate::error::Result<()> {
     use crate::error::CruiseError;
     use std::collections::HashSet;
 
     let mut current_group: Option<&str> = None;
     let mut seen_groups: HashSet<&str> = HashSet::new();
 
-    for (step_name, step) in &config.steps {
+    for (step_name, step) in steps {
         match step.group.as_deref() {
             Some(group_name) => {
-                if !config.groups.contains_key(group_name) {
+                if !groups.contains_key(group_name) {
                     return Err(CruiseError::InvalidStepConfig(format!(
                         "step '{}' references undefined group '{}'",
                         step_name, group_name
@@ -613,5 +627,66 @@ steps:
         let result = validate_groups(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("individual 'if'"));
+    }
+
+    #[test]
+    fn test_after_pr_field_parse() {
+        // Given: YAML with after-pr steps containing pr.number / pr.url placeholders
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  implement:
+    prompt: "Implement: {input}"
+  test:
+    command: cargo test
+after-pr:
+  notify:
+    command: "echo 'PR #{pr.number} created: {pr.url}'"
+  label:
+    command: "gh pr edit {pr.number} --add-label enhancement"
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: after_pr has 2 steps in order
+        assert_eq!(config.after_pr.len(), 2);
+        let keys: Vec<&str> = config.after_pr.keys().map(|s| s.as_str()).collect();
+        assert_eq!(keys, vec!["notify", "label"]);
+    }
+
+    #[test]
+    fn test_after_pr_field_default_empty() {
+        // Given: YAML without after-pr field
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  implement:
+    prompt: "Implement: {input}"
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: after_pr defaults to empty IndexMap
+        assert!(config.after_pr.is_empty());
+    }
+
+    #[test]
+    fn test_after_pr_step_fields() {
+        // Given: YAML where after-pr step uses command field
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+after-pr:
+  notify:
+    command: "echo done"
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: after_pr step has the command field set
+        let notify = config.after_pr.get("notify").unwrap();
+        match notify.command.as_ref().unwrap() {
+            StringOrVec::Single(s) => assert_eq!(s, "echo done"),
+            _ => panic!("Expected Single command"),
+        }
     }
 }

@@ -48,10 +48,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
                 CruiseError::Other(format!("failed to read '{}': {}", path, e))
             }
         })?;
-        let abs_buf = std::env::current_dir()
-            .map(|cwd| cwd.join(&buf))
-            .unwrap_or(buf);
-        return Ok((yaml, ConfigSource::Explicit(abs_buf)));
+        return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
     }
 
     // 2. CRUISE_CONFIG environment variable.
@@ -64,10 +61,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
                 CruiseError::Other(format!("failed to read '{}': {}", buf.display(), e))
             }
         })?;
-        let abs_buf = std::env::current_dir()
-            .map(|cwd| cwd.join(&buf))
-            .unwrap_or(buf);
-        return Ok((yaml, ConfigSource::EnvVar(abs_buf)));
+        return Ok((yaml, ConfigSource::EnvVar(to_absolute(buf))));
     }
 
     // 3-4. Local config files: visible first, then hidden.
@@ -105,18 +99,25 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 fn try_read_local(name: &str) -> Result<Option<(String, PathBuf)>> {
     let path = PathBuf::from(name);
     match std::fs::read_to_string(&path) {
-        Ok(yaml) => {
-            let abs_path = std::env::current_dir()
-                .map(|cwd| cwd.join(&path))
-                .unwrap_or(path);
-            Ok(Some((yaml, abs_path)))
-        }
+        Ok(yaml) => Ok(Some((yaml, to_absolute(path)))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(CruiseError::Other(format!(
             "failed to read '{}': {}",
             name, e
         ))),
     }
+}
+
+/// Convert a path to absolute by joining with the current working directory.
+/// If the path is already absolute, it is returned unchanged.
+/// Falls back to the original path if `current_dir()` fails.
+fn to_absolute(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .unwrap_or(path)
 }
 
 /// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
