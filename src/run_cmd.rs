@@ -165,8 +165,7 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {}", e)))?;
 
     if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !url.is_empty() {
+        if let Some(url) = gh_output_line(&output.stdout) {
             return Ok(url);
         }
     }
@@ -179,8 +178,7 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {}", e)))?;
 
     if fallback.status.success() {
-        let url = String::from_utf8_lossy(&fallback.stdout).trim().to_string();
-        if !url.is_empty() {
+        if let Some(url) = gh_output_line(&fallback.stdout) {
             return Ok(url);
         }
     }
@@ -190,6 +188,12 @@ fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
         "gh pr create failed: {}",
         stderr
     )))
+}
+
+/// Trim and return a non-empty line from `gh` stdout bytes, or `None`.
+fn gh_output_line(bytes: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(bytes).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Verify that `gh` CLI is available in PATH.
