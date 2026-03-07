@@ -516,10 +516,6 @@ pub(crate) fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) -> Resu
         println!("model: {}", model);
     }
 
-    if let Some(plan) = &config.plan {
-        println!("plan: {}", plan.display());
-    }
-
     if !config.env.is_empty() {
         println!("env:");
         print_env_vars(&config.env, "  ");

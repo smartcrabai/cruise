@@ -127,8 +127,6 @@ command:
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 
-plan: plan.md             # optional: file path bound to the {plan} variable
-
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
   PROJECT: myproject
@@ -326,7 +324,7 @@ steps:
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
-| `{plan}` | File path specified by the top-level `plan` field |
+| `{plan}` | Session plan file path (set automatically by `cruise run`) |
 
 > **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
@@ -364,8 +362,6 @@ command:
 
 model: sonnet
 plan_model: opus
-
-plan: .cruise/plan.md
 
 groups:
   review:

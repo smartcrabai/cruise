@@ -1,7 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -15,9 +14,6 @@ pub struct WorkflowConfig {
     /// Model to use for the built-in plan step (falls back to `model`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<String>,
-
-    /// File path bound to the `plan` variable (legacy; new flow uses session plan path).
-    pub plan: Option<PathBuf>,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -187,8 +183,6 @@ command:
   - claude
   - -p
 
-plan: plan.md
-
 steps:
   planning:
     model: claude-opus-4-5
@@ -222,7 +216,6 @@ steps:
         let config = WorkflowConfig::from_yaml(SAMPLE_YAML).unwrap();
         assert_eq!(config.command, vec!["claude", "-p"]);
         assert_eq!(config.model, None);
-        assert_eq!(config.plan, Some(PathBuf::from("plan.md")));
         assert_eq!(config.plan_model, None);
     }
 
@@ -419,7 +412,6 @@ steps:
     prompt: "Hello {input}"
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
-        assert_eq!(config.plan, None);
         assert_eq!(config.steps.len(), 1);
     }
 
