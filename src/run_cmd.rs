@@ -4,7 +4,7 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::RunArgs;
-use crate::config::WorkflowConfig;
+use crate::config::{WorkflowConfig, validate_groups};
 use crate::engine::{execute_steps, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -42,6 +42,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     })?;
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    validate_groups(&config)?;
 
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {}", session_id)).dim());

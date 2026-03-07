@@ -23,6 +23,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
+    /// Group definitions. Groups share if conditions and max_retries.
+    #[serde(default)]
+    pub groups: HashMap<String, GroupConfig>,
+
     /// Step definitions. IndexMap preserves YAML key order.
     pub steps: IndexMap<String, StepConfig>,
 }
@@ -79,6 +83,9 @@ pub struct StepConfig {
     /// Environment variables applied to this step (overrides top-level env).
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    /// Group this step belongs to.
+    pub group: Option<String>,
 }
 
 /// A single item in an option step.
@@ -103,11 +110,72 @@ pub struct IfCondition {
     pub file_changed: Option<String>,
 }
 
+/// Group configuration for grouping related steps.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct GroupConfig {
+    /// Conditional execution rule applied to the entire group.
+    #[serde(rename = "if")]
+    pub if_condition: Option<IfCondition>,
+
+    /// Maximum number of retries for this group before skipping.
+    pub max_retries: Option<usize>,
+}
+
 impl WorkflowConfig {
     /// Parse a workflow config from a YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
     }
+}
+
+/// Validate group configuration:
+/// - All step `group` references must point to defined groups.
+/// - Steps in the same group must be consecutive in the IndexMap.
+/// - Steps with a group must not have individual `if` conditions.
+pub fn validate_groups(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    use std::collections::HashSet;
+
+    let mut current_group: Option<&str> = None;
+    let mut seen_groups: HashSet<&str> = HashSet::new();
+
+    for (step_name, step) in &config.steps {
+        match step.group.as_deref() {
+            Some(group_name) => {
+                if !config.groups.contains_key(group_name) {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "step '{}' references undefined group '{}'",
+                        step_name, group_name
+                    )));
+                }
+                if step.if_condition.is_some() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "step '{}' has both a group and an individual 'if' condition; use only the group's 'if'",
+                        step_name
+                    )));
+                }
+                if current_group != Some(group_name) {
+                    if seen_groups.contains(group_name) {
+                        return Err(CruiseError::InvalidStepConfig(format!(
+                            "steps in group '{}' are not consecutive (step '{}' is out of order)",
+                            group_name, step_name
+                        )));
+                    }
+                    if let Some(prev) = current_group {
+                        seen_groups.insert(prev);
+                    }
+                    current_group = Some(group_name);
+                }
+            }
+            None => {
+                if let Some(prev) = current_group.take() {
+                    seen_groups.insert(prev);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,5 +459,117 @@ steps:
         let yaml = "command: [echo]\nworktree: true\nstate: .cruise/state.json\nsteps:\n  s1:\n    command: echo hi";
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         assert!(!config.steps.is_empty());
+    }
+
+    #[test]
+    fn test_group_config_parse() {
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: test
+    max_retries: 3
+steps:
+  test:
+    command: cargo test
+  simplify:
+    group: review
+    prompt: /simplify
+  ai-antipattern:
+    group: review
+    prompt: /ai-antipattern
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(config.groups.contains_key("review"));
+        let review = &config.groups["review"];
+        assert_eq!(review.max_retries, Some(3));
+        assert!(review.if_condition.is_some());
+        assert_eq!(
+            review.if_condition.as_ref().unwrap().file_changed,
+            Some("test".to_string())
+        );
+        let simplify = config.steps.get("simplify").unwrap();
+        assert_eq!(simplify.group, Some("review".to_string()));
+    }
+
+    #[test]
+    fn test_validate_groups_ok() {
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: 2
+steps:
+  build:
+    command: cargo build
+  simplify:
+    group: review
+    prompt: /simplify
+  ai-antipattern:
+    group: review
+    prompt: /ai-antipattern
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert!(validate_groups(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_groups_undefined_group() {
+        let yaml = r#"
+command: [claude, -p]
+groups: {}
+steps:
+  step1:
+    group: nonexistent
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("undefined group"));
+    }
+
+    #[test]
+    fn test_validate_groups_non_consecutive() {
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: 2
+steps:
+  step_a:
+    group: review
+    command: echo a
+  step_b:
+    command: echo b
+  step_c:
+    group: review
+    command: echo c
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not consecutive"));
+    }
+
+    #[test]
+    fn test_validate_groups_step_has_individual_if() {
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: 2
+steps:
+  step1:
+    group: review
+    command: echo hi
+    if:
+      file-changed: step1
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("individual 'if'"));
     }
 }

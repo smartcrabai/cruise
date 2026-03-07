@@ -4,7 +4,7 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::PlanArgs;
-use crate::config::WorkflowConfig;
+use crate::config::{WorkflowConfig, validate_groups};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
@@ -31,6 +31,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     eprintln!("{}", style(source.display_string()).dim());
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    validate_groups(&config)?;
 
     // Set up session.
     let manager = SessionManager::new(get_cruise_home()?);
