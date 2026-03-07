@@ -59,18 +59,43 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .cloned()
     })?;
 
+    // Show resume message if restarting an interrupted session.
+    if let Some(ref step) = session.current_step {
+        match &session.phase {
+            SessionPhase::Running => {
+                eprintln!("{} Resuming from step: {}", style("↺").cyan(), step);
+            }
+            SessionPhase::Failed(_) => {
+                eprintln!(
+                    "{} Retrying from failed step: {}",
+                    style("↺").yellow(),
+                    step
+                );
+            }
+            _ => {}
+        }
+    }
+
     // chdir to base_dir.
     let base_dir = session.base_dir.clone();
     std::env::set_current_dir(&base_dir)?;
 
-    // Create worktree at ~/.cruise/worktrees/{session_id}/, or reuse existing one.
-    let ctx = if let Some(ctx) = session.worktree_context() {
-        ctx
-    } else {
-        let worktrees_dir = manager.worktrees_dir();
-        worktree::setup_session_worktree(&base_dir, &session_id, &session.input, &worktrees_dir)?
-    };
-    eprintln!("{} worktree: {}", style("→").cyan(), ctx.path.display());
+    // Create or reuse worktree at ~/.cruise/worktrees/{session_id}/.
+    let worktrees_dir = manager.worktrees_dir();
+    let (ctx, reused) = worktree::setup_session_worktree(
+        &base_dir,
+        &session_id,
+        &session.input,
+        &worktrees_dir,
+        session.worktree_branch.as_deref(),
+    )?;
+    let suffix = if reused { " (reused)" } else { "" };
+    eprintln!(
+        "{} worktree: {}{}",
+        style("→").cyan(),
+        ctx.path.display(),
+        suffix
+    );
 
     session.worktree_path = Some(ctx.path.clone());
     session.worktree_branch = Some(ctx.branch.clone());

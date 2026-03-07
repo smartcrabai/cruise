@@ -23,6 +23,16 @@ impl SessionPhase {
             Self::Failed(_) => "Failed",
         }
     }
+
+    /// Whether this phase allows (re-)execution.
+    pub fn is_runnable(&self) -> bool {
+        matches!(self, Self::Planned | Self::Running | Self::Failed(_))
+    }
+
+    /// Whether this phase represents an actively running session.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
 }
 
 /// Persisted state for a single session.
@@ -161,12 +171,12 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    /// Return sessions in Planned or Failed phase (pending execution).
+    /// Return sessions in a runnable phase (pending execution).
     pub fn pending(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|s| matches!(s.phase, SessionPhase::Planned | SessionPhase::Failed(_)))
+            .filter(|s| s.phase.is_runnable())
             .collect())
     }
 
@@ -482,11 +492,25 @@ mod tests {
         failed.phase = SessionPhase::Failed("some error".to_string());
         manager.create(&failed).unwrap();
 
+        let mut running = SessionState::new(
+            "20260306130000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task4".to_string(),
+        );
+        running.phase = SessionPhase::Running;
+        manager.create(&running).unwrap();
+
         let pending = manager.pending().unwrap();
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 3);
         let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
-        assert!(ids.contains(&"20260306100000"));
-        assert!(ids.contains(&"20260306120000"));
+        assert!(ids.contains(&"20260306100000"), "Planned should be pending");
+        assert!(ids.contains(&"20260306120000"), "Failed should be pending");
+        assert!(ids.contains(&"20260306130000"), "Running should be pending");
+        assert!(
+            !ids.contains(&"20260306110000"),
+            "Completed should not be pending"
+        );
     }
 
     #[test]

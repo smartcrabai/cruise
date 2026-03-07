@@ -10,16 +10,9 @@ pub struct WorktreeContext {
     pub original_dir: PathBuf,
 }
 
-/// Create a new git worktree at `~/.cruise/worktrees/{session_id}/`.
-pub fn setup_session_worktree(
-    base_dir: &Path,
-    session_id: &str,
-    input: &str,
-    worktrees_dir: &Path,
-) -> Result<WorktreeContext> {
-    ensure_git_repo(base_dir)?;
-
-    let branch = if !input.is_empty() {
+/// Generate the default branch name for a session worktree.
+fn default_branch_name(session_id: &str, input: &str) -> String {
+    if !input.is_empty() {
         let sanitized = sanitize_branch_name(input);
         if sanitized.is_empty() {
             format!("cruise/{}", session_id)
@@ -28,9 +21,40 @@ pub fn setup_session_worktree(
         }
     } else {
         format!("cruise/{}", session_id)
-    };
+    }
+}
+
+/// Create or reuse a git worktree at `~/.cruise/worktrees/{session_id}/`.
+///
+/// If the worktree directory already exists (e.g. resuming a session),
+/// it is reused. `existing_branch` overrides the branch name when reusing.
+pub fn setup_session_worktree(
+    base_dir: &Path,
+    session_id: &str,
+    input: &str,
+    worktrees_dir: &Path,
+    existing_branch: Option<&str>,
+) -> Result<(WorktreeContext, bool)> {
+    ensure_git_repo(base_dir)?;
 
     let worktree_path = worktrees_dir.join(session_id);
+
+    // Reuse existing worktree directory if present.
+    if worktree_path.is_dir() {
+        let branch = existing_branch
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| default_branch_name(session_id, input));
+        return Ok((
+            WorktreeContext {
+                path: worktree_path,
+                branch,
+                original_dir: base_dir.to_path_buf(),
+            },
+            true,
+        ));
+    }
+
+    let branch = default_branch_name(session_id, input);
     fs::create_dir_all(worktrees_dir)?;
 
     let output = Command::new("git")
@@ -50,11 +74,14 @@ pub fn setup_session_worktree(
 
     copy_worktree_includes(base_dir, &worktree_path)?;
 
-    Ok(WorktreeContext {
-        path: worktree_path,
-        branch,
-        original_dir: base_dir.to_path_buf(),
-    })
+    Ok((
+        WorktreeContext {
+            path: worktree_path,
+            branch,
+            original_dir: base_dir.to_path_buf(),
+        },
+        false,
+    ))
 }
 
 /// Remove the worktree and delete its branch.
@@ -222,8 +249,10 @@ mod tests {
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143000";
-        let ctx = setup_session_worktree(&repo, session_id, "test task", &worktrees_dir).unwrap();
+        let (ctx, reused) =
+            setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None).unwrap();
 
+        assert!(!reused, "should not be reused on first creation");
         assert!(ctx.path.exists(), "worktree directory should exist");
         assert_eq!(ctx.path, worktrees_dir.join(session_id));
         assert!(
@@ -248,7 +277,7 @@ mod tests {
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143001";
-        let ctx = setup_session_worktree(&repo, session_id, "", &worktrees_dir).unwrap();
+        let (ctx, _) = setup_session_worktree(&repo, session_id, "", &worktrees_dir, None).unwrap();
 
         assert_eq!(ctx.branch, format!("cruise/{}", session_id));
         cleanup_worktree(&ctx).unwrap();
@@ -258,7 +287,8 @@ mod tests {
     fn test_setup_session_worktree_not_git_repo() {
         let tmp = TempDir::new().unwrap();
         let worktrees_dir = tmp.path().join("worktrees");
-        let result = setup_session_worktree(tmp.path(), "20260306143000", "task", &worktrees_dir);
+        let result =
+            setup_session_worktree(tmp.path(), "20260306143000", "task", &worktrees_dir, None);
         assert!(
             matches!(result, Err(CruiseError::NotGitRepository)),
             "expected NotGitRepository error"
