@@ -18,6 +18,10 @@ const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
 
 pub async fn run(args: PlanArgs) -> Result<()> {
+    // Resolve config first so the path is visible before prompting for input.
+    let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
+    eprintln!("{}", style(source.display_string()).dim());
+
     // Resolve input: CLI arg, or read from stdin if piped.
     let input = resolve_input(args.input)?;
 
@@ -28,10 +32,6 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         );
         return Ok(());
     }
-
-    // Resolve config.
-    let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
-    eprintln!("{}", style(source.display_string()).dim());
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
     validate_groups(&config)?;

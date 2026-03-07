@@ -48,7 +48,10 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
                 CruiseError::Other(format!("failed to read '{}': {}", path, e))
             }
         })?;
-        return Ok((yaml, ConfigSource::Explicit(buf)));
+        let abs_buf = std::env::current_dir()
+            .map(|cwd| cwd.join(&buf))
+            .unwrap_or(buf);
+        return Ok((yaml, ConfigSource::Explicit(abs_buf)));
     }
 
     // 2. CRUISE_CONFIG environment variable.
@@ -61,7 +64,10 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
                 CruiseError::Other(format!("failed to read '{}': {}", buf.display(), e))
             }
         })?;
-        return Ok((yaml, ConfigSource::EnvVar(buf)));
+        let abs_buf = std::env::current_dir()
+            .map(|cwd| cwd.join(&buf))
+            .unwrap_or(buf);
+        return Ok((yaml, ConfigSource::EnvVar(abs_buf)));
     }
 
     // 3-4. Local config files: visible first, then hidden.
@@ -99,7 +105,12 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 fn try_read_local(name: &str) -> Result<Option<(String, PathBuf)>> {
     let path = PathBuf::from(name);
     match std::fs::read_to_string(&path) {
-        Ok(yaml) => Ok(Some((yaml, path))),
+        Ok(yaml) => {
+            let abs_path = std::env::current_dir()
+                .map(|cwd| cwd.join(&path))
+                .unwrap_or(path);
+            Ok(Some((yaml, abs_path)))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(CruiseError::Other(format!(
             "failed to read '{}': {}",
