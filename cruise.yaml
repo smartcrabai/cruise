@@ -30,5 +30,3 @@ steps:
       {prev.stderr}
     next: test
 
-  pr:
-    prompt: Please create a PR and provide the URL

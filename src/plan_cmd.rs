@@ -36,11 +36,6 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     // Set up session.
     let manager = SessionManager::new(get_cruise_home()?);
 
-    // Auto-cleanup old sessions.
-    if let Err(e) = manager.cleanup_old(3) {
-        eprintln!("warning: cleanup failed: {}", e);
-    }
-
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
     let mut session = SessionState::new(
@@ -197,7 +192,6 @@ async fn run_approve_loop(
                     session: Some(session.id.clone()),
                     max_retries: 10,
                     rate_limit_retries,
-                    keep_worktree: false,
                     dry_run: false,
                 };
                 return crate::run_cmd::run(run_args).await;

@@ -23,5 +23,3 @@ steps:
       {prev.stderr}
     next: test
 
-  pr:
-    prompt: create a PR

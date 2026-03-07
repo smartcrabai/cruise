@@ -22,7 +22,7 @@ pub enum Commands {
     Run(RunArgs),
     /// List and manage sessions interactively.
     List,
-    /// Remove old completed sessions.
+    /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
 }
 
@@ -57,21 +57,13 @@ pub struct RunArgs {
     #[arg(long, default_value = "5")]
     pub rate_limit_retries: usize,
 
-    /// Keep the worktree after the session completes (default: auto-delete).
-    #[arg(long)]
-    pub keep_worktree: bool,
-
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 #[derive(Parser, Debug)]
-pub struct CleanArgs {
-    /// Remove completed sessions older than this many days.
-    #[arg(long, default_value = "3")]
-    pub days: u64,
-}
+pub struct CleanArgs {}
 
 pub fn parse_cli() -> Cli {
     let mut cli = Cli::parse();
@@ -147,7 +139,6 @@ mod tests {
                 assert_eq!(args.session, None);
                 assert_eq!(args.max_retries, 10);
                 assert_eq!(args.rate_limit_retries, 5);
-                assert!(!args.keep_worktree);
                 assert!(!args.dry_run);
             }
             _ => panic!("expected Run subcommand"),
@@ -174,13 +165,11 @@ mod tests {
             "20",
             "--rate-limit-retries",
             "3",
-            "--keep-worktree",
         ]);
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert_eq!(args.max_retries, 20);
                 assert_eq!(args.rate_limit_retries, 3);
-                assert!(args.keep_worktree);
             }
             _ => panic!("expected Run subcommand"),
         }
@@ -193,25 +182,9 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_subcommand_default_days() {
+    fn test_clean_subcommand_default() {
         let cli = Cli::parse_from(["cruise", "clean"]);
-        match cli.command {
-            Some(Commands::Clean(args)) => {
-                assert_eq!(args.days, 3);
-            }
-            _ => panic!("expected Clean subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_clean_subcommand_custom_days() {
-        let cli = Cli::parse_from(["cruise", "clean", "--days", "7"]);
-        match cli.command {
-            Some(Commands::Clean(args)) => {
-                assert_eq!(args.days, 7);
-            }
-            _ => panic!("expected Clean subcommand"),
-        }
+        assert!(matches!(cli.command, Some(Commands::Clean(_))));
     }
 
     #[test]
