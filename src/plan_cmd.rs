@@ -14,6 +14,8 @@ use crate::variable::VariableStore;
 /// Name of the variable that holds the plan file path.
 const PLAN_VAR: &str = "plan";
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
+const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
+const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
 
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve input: CLI arg, or read from stdin if piped.
@@ -169,7 +171,7 @@ async fn run_approve_loop(
                     Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
                 };
                 vars.set_prev_input(Some(text));
-                run_fix_plan(config, vars, plan_path, rate_limit_retries).await?;
+                run_fix_plan(config, vars, rate_limit_retries).await?;
             }
             "Ask" => {
                 let text = match inquire::Text::new("Your question:").prompt() {
@@ -180,7 +182,7 @@ async fn run_approve_loop(
                     Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
                 };
                 vars.set_prev_input(Some(text));
-                run_ask_plan(config, vars, plan_path, rate_limit_retries).await?;
+                run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
                 session.phase = SessionPhase::Planned;
@@ -208,14 +210,9 @@ async fn run_approve_loop(
 async fn run_fix_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
-    plan_path: &std::path::Path,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    let prompt_template = format!(
-        "The user has requested the following changes to the {} implementation plan. Make the modifications:\n{{prev.input}}",
-        plan_path.display()
-    );
-    let prompt = vars.resolve(&prompt_template)?;
+    let prompt = vars.resolve(FIX_PLAN_PROMPT_TEMPLATE)?;
     let fix_model = config.plan_model.clone().or_else(|| config.model.clone());
     let step = PromptStep {
         model: fix_model,
@@ -236,14 +233,9 @@ async fn run_fix_plan(
 async fn run_ask_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
-    plan_path: &std::path::Path,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    let prompt_template = format!(
-        "The user has the following questions about the implementation plan for {}. Provide answers:\n{{prev.input}}",
-        plan_path.display()
-    );
-    let prompt = vars.resolve(&prompt_template)?;
+    let prompt = vars.resolve(ASK_PLAN_PROMPT_TEMPLATE)?;
     let step = PromptStep {
         model: config.plan_model.clone().or_else(|| config.model.clone()),
         prompt,
