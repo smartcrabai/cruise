@@ -110,11 +110,6 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path);
 
-    // Also set plan from config.plan if present (backward compat with old configs).
-    if let Some(config_plan) = config.plan.as_ref().filter(|p| !p.as_os_str().is_empty()) {
-        vars.set_named_file(PLAN_VAR, config_plan.clone());
-    }
-
     let mut tracker = FileTracker::with_root(ctx.path.clone());
 
     // Use RefCell for interior mutability in the callback.
