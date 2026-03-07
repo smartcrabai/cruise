@@ -58,6 +58,9 @@ pub struct SessionState {
     pub worktree_path: Option<PathBuf>,
     /// Worktree branch name (set during run phase).
     pub worktree_branch: Option<String>,
+    /// PR URL created after workflow completion.
+    #[serde(default)]
+    pub pr_url: Option<String>,
 }
 
 impl SessionState {
@@ -73,6 +76,7 @@ impl SessionState {
             completed_at: None,
             worktree_path: None,
             worktree_branch: None,
+            pr_url: None,
         }
     }
 
@@ -189,13 +193,8 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Remove Completed sessions older than `days` days (and their worktrees).
-    pub fn cleanup_old(&self, days: u64) -> Result<CleanupReport> {
-        let now_secs = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let threshold_secs = days * 86400;
+    /// Remove Completed sessions whose PR is closed or merged (checked via `gh`).
+    pub fn cleanup_by_pr_status(&self) -> Result<CleanupReport> {
         let sessions = self.list()?;
         let mut report = CleanupReport::default();
 
@@ -203,11 +202,39 @@ impl SessionManager {
             if !matches!(session.phase, SessionPhase::Completed) {
                 continue;
             }
-            let Some(completed_secs) = session.completed_at.as_deref().and_then(parse_iso8601_secs)
-            else {
+            let Some(ref pr_url) = session.pr_url else {
+                // No PR URL recorded — skip silently.
                 continue;
             };
-            if now_secs.saturating_sub(completed_secs) < threshold_secs {
+
+            // Check PR state via gh CLI.
+            let output = std::process::Command::new("gh")
+                .args(["pr", "view", pr_url, "--json", "state", "--jq", ".state"])
+                .output();
+
+            let state = match output {
+                Ok(out) if out.status.success() => {
+                    let raw = String::from_utf8_lossy(&out.stdout);
+                    raw.trim().to_uppercase()
+                }
+                Ok(out) => {
+                    eprintln!(
+                        "warning: gh pr view failed for {}: {}",
+                        session.id,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                    report.skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to run gh for {}: {}", session.id, e);
+                    report.skipped += 1;
+                    continue;
+                }
+            };
+
+            if state != "CLOSED" && state != "MERGED" {
+                report.skipped += 1;
                 continue;
             }
 
@@ -232,6 +259,7 @@ impl SessionManager {
 #[derive(Default)]
 pub struct CleanupReport {
     pub deleted: usize,
+    pub skipped: usize,
 }
 
 /// Get the cruise home directory: `~/.cruise/`
@@ -270,6 +298,7 @@ pub fn current_iso8601() -> String {
 }
 
 /// Parse an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`) to Unix seconds.
+#[cfg(test)]
 fn parse_iso8601_secs(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('Z');
     let (date_str, time_str) = s.split_once('T')?;
@@ -285,6 +314,7 @@ fn parse_iso8601_secs(s: &str) -> Option<u64> {
     Some(days * 86400 + h * 3600 + m * 60 + s_val)
 }
 
+#[cfg(test)]
 fn date_to_days(year: u16, month: u8, day: u8) -> u32 {
     let mut days = 0u32;
     for y in 1970..year {
@@ -408,6 +438,7 @@ mod tests {
         assert_eq!(loaded.input, "add hello world");
         assert!(matches!(loaded.phase, SessionPhase::Planned));
         assert!(loaded.current_step.is_none());
+        assert!(loaded.pr_url.is_none());
     }
 
     #[test]
@@ -535,60 +566,52 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_old_completed() {
+    fn test_session_state_pr_url_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let manager = SessionManager::new(tmp.path().to_path_buf());
-
-        // Old session completed 10 days ago (relative to actual current time).
-        let now_secs = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let old_secs: u64 = now_secs - 10 * 86400;
-        let (y, mo, d, h, mi, s) = seconds_to_datetime(old_secs);
-        let old_time = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s);
-
-        let mut old = SessionState::new(
-            "20260101000000".to_string(),
-            PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
-            "old task".to_string(),
-        );
-        old.phase = SessionPhase::Completed;
-        old.completed_at = Some(old_time);
-        manager.create(&old).unwrap();
-
-        let report = manager.cleanup_old(3).unwrap();
-        assert_eq!(report.deleted, 1);
-        assert!(manager.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_cleanup_old_keeps_recent() {
-        let tmp = TempDir::new().unwrap();
-        let manager = SessionManager::new(tmp.path().to_path_buf());
-
-        // Recent session completed 1 day ago (relative to actual current time).
-        let now_secs = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let recent_secs: u64 = now_secs - 86400;
-        let (y, mo, d, h, mi, s) = seconds_to_datetime(recent_secs);
-        let recent_time = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s);
-
-        let mut recent = SessionState::new(
-            "20260306100000".to_string(),
+        let id = "20260306160000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
             PathBuf::from("/repo"),
             "cruise.yaml".to_string(),
             "task".to_string(),
         );
-        recent.phase = SessionPhase::Completed;
-        recent.completed_at = Some(recent_time);
-        manager.create(&recent).unwrap();
+        state.phase = SessionPhase::Completed;
+        state.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
+        manager.create(&state).unwrap();
 
-        let report = manager.cleanup_old(3).unwrap();
-        assert_eq!(report.deleted, 0);
-        assert_eq!(manager.list().unwrap().len(), 1);
+        let loaded = manager.load(&id).unwrap();
+        assert_eq!(
+            loaded.pr_url,
+            Some("https://github.com/owner/repo/pull/42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_session_state_backward_compat() {
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260306170000".to_string();
+
+        // Write a state.json without the pr_url field (simulating old format).
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let json = serde_json::json!({
+            "id": id,
+            "base_dir": "/repo",
+            "phase": "Planned",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-03-06T17:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        std::fs::write(session_dir.join("state.json"), json.to_string()).unwrap();
+
+        let loaded = manager.load(&id).unwrap();
+        assert_eq!(loaded.pr_url, None);
+        assert_eq!(loaded.input, "old task");
     }
 }

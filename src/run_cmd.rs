@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::Path;
 
 use console::style;
 use inquire::InquireError;
@@ -16,12 +17,9 @@ use crate::worktree;
 const PLAN_VAR: &str = "plan";
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    let manager = SessionManager::new(get_cruise_home()?);
+    ensure_gh_available()?;
 
-    // Auto-cleanup old completed sessions.
-    if let Err(e) = manager.cleanup_old(3) {
-        eprintln!("warning: cleanup failed: {}", e);
-    }
+    let manager = SessionManager::new(get_cruise_home()?);
 
     // Determine which session to run.
     let session_id = match args.session {
@@ -135,6 +133,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // Update session phase based on result.
     match &exec_result {
         Ok(_) => {
+            // Try to create a PR automatically.
+            match create_pr(&ctx.path, &ctx.branch) {
+                Ok(url) => {
+                    eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                    session.pr_url = Some(url);
+                }
+                Err(e) => {
+                    eprintln!("warning: PR creation failed: {}", e);
+                }
+            }
             session.phase = SessionPhase::Completed;
             session.completed_at = Some(current_iso8601());
         }
@@ -145,14 +153,57 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
     manager.save(session)?;
 
-    // Cleanup worktree unless --keep-worktree.
-    if !args.keep_worktree
-        && let Err(e) = worktree::cleanup_worktree(&ctx)
-    {
-        eprintln!("warning: worktree cleanup failed: {}", e);
+    exec_result.map(|_| ())
+}
+
+/// Create a PR using `gh pr create --fill`. Falls back to `gh pr view` if a PR already exists.
+fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "create", "--fill", "--head", branch])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {}", e)))?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Ok(url);
+        }
     }
 
-    exec_result.map(|_| ())
+    // PR may already exist — try to fetch the URL.
+    let fallback = std::process::Command::new("gh")
+        .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {}", e)))?;
+
+    if fallback.status.success() {
+        let url = String::from_utf8_lossy(&fallback.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Ok(url);
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(CruiseError::Other(format!("gh pr create failed: {}", stderr)))
+}
+
+/// Verify that `gh` CLI is available in PATH.
+fn ensure_gh_available() -> Result<()> {
+    let ok = std::process::Command::new("gh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if ok {
+        Ok(())
+    } else {
+        Err(CruiseError::Other(
+            "gh CLI is not installed. Install it from https://cli.github.com/".to_string(),
+        ))
+    }
 }
 
 /// Select a pending session interactively (or automatically if only one).

@@ -62,7 +62,6 @@ pub async fn run() -> Result<()> {
                     session: Some(session.id.clone()),
                     max_retries: 10,
                     rate_limit_retries: 5,
-                    keep_worktree: false,
                     dry_run: false,
                 };
                 return crate::run_cmd::run(run_args).await;
