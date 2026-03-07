@@ -6,7 +6,7 @@ use inquire::InquireError;
 
 use crate::cli::RunArgs;
 use crate::config::{WorkflowConfig, validate_groups};
-use crate::engine::{execute_steps, print_dry_run};
+use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::session::{SessionManager, SessionPhase, current_iso8601, get_cruise_home};
@@ -17,6 +17,7 @@ use crate::worktree;
 const PLAN_VAR: &str = "plan";
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
+const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
 pub async fn run(args: RunArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
@@ -133,50 +134,91 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let session = session_cell.into_inner();
 
     let overall_result = match exec_result {
-        Ok(_) => match attempt_pr_creation(&ctx, &session.input) {
-            Ok(pr_attempt) => {
-                pr_attempt.report();
-                match pr_attempt {
-                    PrAttemptOutcome::Created { url, .. } => {
-                        eprintln!("{} PR created: {}", style("✓").green().bold(), url);
-                        if let Some(number) = extract_last_path_segment(&url) {
-                            vars.set_named_value(PR_NUMBER_VAR, number);
-                        }
-                        vars.set_named_value(PR_URL_VAR, url.clone());
-                        session.pr_url = Some(url);
-
-                        // Run after_pr steps if any.
-                        if let Some(first_step) = config.after_pr.keys().next() {
-                            let mut after_config = config.clone();
-                            after_config.steps = std::mem::take(&mut after_config.after_pr);
-                            if let Err(e) = execute_steps(
-                                &after_config,
-                                &mut vars,
-                                &mut tracker,
-                                first_step,
-                                args.max_retries,
-                                args.rate_limit_retries,
-                                &|_| Ok(()),
-                            )
-                            .await
-                            {
-                                eprintln!("warning: after-pr steps failed: {}", e);
+        Ok(_) => {
+            let (pr_title, pr_body) = match vars.resolve(CREATE_PR_PROMPT_TEMPLATE) {
+                Err(e) => {
+                    eprintln!("warning: PR prompt resolution failed: {}", e);
+                    (String::new(), String::new())
+                }
+                Ok(pr_prompt) => {
+                    let pr_model = config.model.as_deref();
+                    let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
+                    let (resolved_command, model_arg) = if has_placeholder {
+                        (resolve_command_with_model(&config.command, pr_model), None)
+                    } else {
+                        (config.command.clone(), pr_model.map(str::to_string))
+                    };
+                    let spinner = crate::spinner::Spinner::start("Generating PR description...");
+                    let env = std::collections::HashMap::new();
+                    let llm_output = {
+                        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
+                        match crate::step::prompt::run_prompt(
+                            &resolved_command,
+                            model_arg.as_deref(),
+                            &pr_prompt,
+                            args.rate_limit_retries,
+                            &env,
+                            Some(&on_retry),
+                        )
+                        .await
+                        {
+                            Ok(r) => r.output,
+                            Err(e) => {
+                                eprintln!("warning: PR description generation failed: {}", e);
+                                String::new()
                             }
                         }
-                        Ok(())
-                    }
-                    PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
-                        "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
-                        ctx.branch
-                    ))),
-                    PrAttemptOutcome::CreateFailed { error, .. } => {
-                        eprintln!("warning: PR creation failed: {}", error);
-                        Ok(())
+                    };
+                    drop(spinner);
+                    parse_pr_metadata(&llm_output)
+                }
+            };
+
+            match attempt_pr_creation(&ctx, &session.input, &pr_title, &pr_body) {
+                Ok(pr_attempt) => {
+                    pr_attempt.report();
+                    match pr_attempt {
+                        PrAttemptOutcome::Created { url, .. } => {
+                            eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                            if let Some(number) = extract_last_path_segment(&url) {
+                                vars.set_named_value(PR_NUMBER_VAR, number);
+                            }
+                            vars.set_named_value(PR_URL_VAR, url.clone());
+                            session.pr_url = Some(url);
+
+                            // Run after_pr steps if any.
+                            if let Some(first_step) = config.after_pr.keys().next() {
+                                let mut after_config = config.clone();
+                                after_config.steps = std::mem::take(&mut after_config.after_pr);
+                                if let Err(e) = execute_steps(
+                                    &after_config,
+                                    &mut vars,
+                                    &mut tracker,
+                                    first_step,
+                                    args.max_retries,
+                                    args.rate_limit_retries,
+                                    &|_| Ok(()),
+                                )
+                                .await
+                                {
+                                    eprintln!("warning: after-pr steps failed: {}", e);
+                                }
+                            }
+                            Ok(())
+                        }
+                        PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
+                            "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
+                            ctx.branch
+                        ))),
+                        PrAttemptOutcome::CreateFailed { error, .. } => {
+                            eprintln!("warning: PR creation failed: {}", error);
+                            Ok(())
+                        }
                     }
                 }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
-        },
+        }
         Err(e) => Err(e),
     };
 
@@ -239,13 +281,18 @@ fn report_commit_outcome(commit_outcome: CommitOutcome) {
     }
 }
 
-fn attempt_pr_creation(ctx: &worktree::WorktreeContext, message: &str) -> Result<PrAttemptOutcome> {
+fn attempt_pr_creation(
+    ctx: &worktree::WorktreeContext,
+    message: &str,
+    title: &str,
+    body: &str,
+) -> Result<PrAttemptOutcome> {
     let commit_outcome = commit_changes(&ctx.path, message)?;
     if branch_commit_count(ctx)? == 0 {
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
 
-    match create_pr(&ctx.path, &ctx.branch) {
+    match create_pr(&ctx.path, &ctx.branch, title, body) {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
@@ -346,10 +393,17 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> 
     Ok(CommitOutcome::Created)
 }
 
-/// Create a PR using `gh pr create --fill`. Falls back to `gh pr view` if a PR already exists.
-fn create_pr(worktree_path: &Path, branch: &str) -> Result<String> {
+/// Create a PR using `gh pr create`. Uses `--title`/`--body` if provided, otherwise `--fill`.
+/// Falls back to `gh pr view` if a PR already exists.
+fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
+    let mut gh_args = vec!["pr", "create", "--head", branch];
+    if !title.is_empty() {
+        gh_args.extend(["--title", title, "--body", body]);
+    } else {
+        gh_args.push("--fill");
+    }
     let output = std::process::Command::new("gh")
-        .args(["pr", "create", "--fill", "--head", branch])
+        .args(&gh_args)
         .current_dir(worktree_path)
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {}", e)))?;
@@ -461,6 +515,78 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
 
     let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
     Ok(pending[idx].id.clone())
+}
+
+/// Strip an optional markdown code block wrapper from `s`.
+///
+/// Handles both ` ```md ` and plain ` ``` ` prefixes. Returns the inner
+/// content with trailing newlines removed, or the trimmed input unchanged if
+/// no well-formed code block is found.
+fn strip_code_block(s: &str) -> &str {
+    let trimmed = s.trim();
+    let Some(after_backticks) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(newline_pos) = after_backticks.find('\n') else {
+        return trimmed;
+    };
+    let inner = &after_backticks[newline_pos + 1..];
+    let Some(close) = inner.rfind("```") else {
+        return trimmed;
+    };
+    inner[..close].trim_end_matches('\n')
+}
+
+/// Parse LLM output into (title, body) from frontmatter format:
+///
+/// ```text
+/// ---
+/// title: "My PR title"
+/// ---
+/// PR body here
+/// ```
+///
+/// Returns `(String::new(), String::new())` if parsing fails.
+fn parse_pr_metadata(output: &str) -> (String, String) {
+    let content = strip_code_block(output);
+
+    // Must start with ---
+    if !content.starts_with("---") {
+        return (String::new(), String::new());
+    }
+
+    // Skip the opening --- line
+    let after_open = match content[3..].find('\n') {
+        Some(pos) => &content[3 + pos + 1..],
+        None => return (String::new(), String::new()),
+    };
+
+    // Find closing ---
+    let close_pos = match after_open.find("\n---") {
+        Some(pos) => pos,
+        None => return (String::new(), String::new()),
+    };
+
+    let frontmatter = &after_open[..close_pos];
+    let after_close = &after_open[close_pos + "\n---".len()..];
+    let body = after_close.strip_prefix('\n').unwrap_or(after_close);
+
+    // Find title in frontmatter
+    let title = frontmatter.lines().find_map(|line| {
+        line.strip_prefix("title:").map(|rest| {
+            let rest = rest.trim();
+            rest.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(rest)
+                .to_string()
+        })
+    });
+
+    match title {
+        Some(t) => (t, body.to_string()),
+        None => (String::new(), String::new()),
+    }
 }
 
 #[cfg(test)]
@@ -614,7 +740,7 @@ mod tests {
         );
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "test task").unwrap();
+        let result = attempt_pr_creation(&ctx, "test task", "", "").unwrap();
 
         assert_eq!(result, PrAttemptOutcome::SkippedNoCommits);
         assert!(
@@ -642,7 +768,7 @@ mod tests {
         install_fake_gh(&bin_dir, &log_path, &head_path, url);
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "add feature").unwrap();
+        let result = attempt_pr_creation(&ctx, "add feature", "", "").unwrap();
 
         assert_eq!(
             result,
@@ -665,9 +791,10 @@ mod tests {
             worktree_head
         );
         assert!(
-            fs::read_to_string(&log_path)
-                .unwrap()
-                .contains("pr create --fill --head"),
+            {
+                let gh_args = fs::read_to_string(&log_path).unwrap();
+                gh_args.contains("pr create --head") && gh_args.contains("--fill")
+            },
             "fake gh should receive a pr create invocation"
         );
         worktree::cleanup_worktree(&ctx).unwrap();
@@ -692,7 +819,7 @@ mod tests {
         install_fake_gh(&bin_dir, &log_path, &head_path, url);
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "rerun without changes").unwrap();
+        let result = attempt_pr_creation(&ctx, "rerun without changes", "", "").unwrap();
 
         assert_eq!(
             result,
@@ -710,5 +837,106 @@ mod tests {
             existing_head
         );
         worktree::cleanup_worktree(&ctx).unwrap();
+    }
+
+    // --- parse_pr_metadata tests ---
+
+    #[test]
+    fn test_parse_pr_metadata_standard_frontmatter() {
+        // Given: standard frontmatter output from LLM
+        let output = r#"---
+title: "feat: Add user icon registration feature"
+---
+## Overview
+Enabled users to upload icon images.
+
+## Background
+Previously, emojis were used as user icons."#;
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: title and body are extracted correctly
+        assert_eq!(title, "feat: Add user icon registration feature");
+        assert_eq!(
+            body.trim(),
+            "## Overview\nEnabled users to upload icon images.\n\n## Background\nPreviously, emojis were used as user icons."
+        );
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_wrapped_in_markdown_code_block() {
+        // Given: LLM output wrapped in ```md code block
+        let output =
+            "```md\n---\ntitle: \"fix: Resolve login bug\"\n---\nFixed the login issue.\n```";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: code block delimiters are stripped and content is parsed
+        assert_eq!(title, "fix: Resolve login bug");
+        assert_eq!(body.trim(), "Fixed the login issue.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_title_without_quotes() {
+        // Given: frontmatter with unquoted title
+        let output = "---\ntitle: feat: Add feature without quotes\n---\nBody text here.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: title is extracted without quotes
+        assert_eq!(title, "feat: Add feature without quotes");
+        assert_eq!(body.trim(), "Body text here.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_no_frontmatter_returns_empty() {
+        // Given: output without frontmatter delimiters
+        let output = "This is just a plain text response without frontmatter.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: both title and body are empty (caller falls back to session.input)
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_missing_title_field_returns_empty() {
+        // Given: frontmatter without a title field
+        let output = "---\nauthor: someone\n---\nBody without title.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: both title and body are empty (fallback)
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_empty_body_after_frontmatter() {
+        // Given: frontmatter with title but no body
+        let output = "---\ntitle: \"chore: Update deps\"\n---\n";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: title is extracted, body is empty string
+        assert_eq!(title, "chore: Update deps");
+        assert_eq!(body.trim(), "");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_only_closing_delimiter_missing_returns_empty() {
+        // Given: frontmatter with only opening --- and no closing ---
+        let output = "---\ntitle: \"feat: something\"\nBody without closing delimiter.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: both title and body are empty (malformed frontmatter)
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_wrapped_in_plain_code_block() {
+        // Given: LLM output wrapped in plain ``` (no language specifier)
+        let output = "```\n---\ntitle: \"docs: Update README\"\n---\nUpdated documentation.\n```";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: code block is stripped and parsed correctly
+        assert_eq!(title, "docs: Update README");
+        assert_eq!(body.trim(), "Updated documentation.");
     }
 }
