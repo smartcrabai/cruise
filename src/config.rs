@@ -128,7 +128,7 @@ impl WorkflowConfig {
         let mut steps = IndexMap::new();
 
         steps.insert(
-            "write-test".to_string(),
+            "write-tests".to_string(),
             StepConfig {
                 prompt: Some(include_str!("../prompts/write-test-first.md").to_string()),
                 ..Default::default()
@@ -474,7 +474,7 @@ steps:
         assert_eq!(config.plan_model, Some("opus".to_string()));
         assert_eq!(config.steps.len(), 2);
 
-        let write_test = config.steps.get("write-test").unwrap();
+        let write_test = config.steps.get("write-tests").unwrap();
         assert!(write_test.prompt.as_deref().unwrap().contains("{plan}"));
 
         let implement = config.steps.get("implement").unwrap();

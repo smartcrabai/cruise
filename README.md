@@ -115,7 +115,7 @@ When `-c` is not specified, cruise searches for a config in this order:
 2. `CRUISE_CONFIG` environment variable — error if file does not exist.
 3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml` — in the current directory.
 4. `~/.cruise/*.yaml` / `*.yml` — auto-selected if exactly one file exists, or prompted if multiple.
-5. Built-in default — a 2-step test-first workflow (`write-test` → `implement`); no config file required.
+5. Built-in default — a 2-step test-first workflow (`write-tests` → `implement`); no config file required.
 
 ## Config File Reference
 
