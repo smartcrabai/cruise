@@ -47,7 +47,12 @@ pub struct PlanArgs {
 #[derive(Parser, Debug)]
 pub struct RunArgs {
     /// Session ID to execute (if omitted, picks from pending sessions).
+    #[arg(conflicts_with = "all")]
     pub session: Option<String>,
+
+    /// Run all planned sessions sequentially.
+    #[arg(long)]
+    pub all: bool,
 
     /// Maximum number of times a single loop edge may be traversed.
     #[arg(long, default_value = "10")]
@@ -199,5 +204,48 @@ mod tests {
         let cli = Cli::parse_from(["cruise"]);
         assert!(cli.command.is_none());
         assert_eq!(cli.input, None);
+    }
+
+    #[test]
+    fn test_run_subcommand_all_flag() {
+        // Given: --all フラグのみ指定
+        let cli = Cli::parse_from(["cruise", "run", "--all"]);
+        // When/Then: all=true, session=None
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.all, "--all should be true");
+                assert_eq!(args.session, None);
+                assert!(!args.dry_run);
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_all_flag_default_is_false() {
+        // Given: フラグなしで run サブコマンド
+        let cli = Cli::parse_from(["cruise", "run"]);
+        // When/Then: all のデフォルトは false
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(!args.all, "--all should default to false");
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_all_with_dry_run() {
+        // Given: --all --dry-run の組み合わせ
+        let cli = Cli::parse_from(["cruise", "run", "--all", "--dry-run"]);
+        // When/Then: 両フラグが有効
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.all);
+                assert!(args.dry_run);
+                assert_eq!(args.session, None);
+            }
+            _ => panic!("expected Run subcommand"),
+        }
     }
 }

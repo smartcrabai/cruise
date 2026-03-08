@@ -20,6 +20,15 @@ const PR_URL_VAR: &str = "pr.url";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    if args.all {
+        if args.session.is_some() {
+            return Err(CruiseError::Other(
+                "Cannot specify both --all and a session ID".to_string(),
+            ));
+        }
+        return run_all(args).await;
+    }
+
     let manager = SessionManager::new(get_cruise_home()?);
 
     // Determine which session to run.
@@ -235,6 +244,24 @@ pub async fn run(args: RunArgs) -> Result<()> {
     manager.save(session)?;
 
     overall_result
+}
+
+async fn run_all(args: RunArgs) -> Result<()> {
+    let manager = SessionManager::new(get_cruise_home()?);
+    let planned_sessions = manager.planned()?;
+
+    for session in planned_sessions {
+        let session_args = RunArgs {
+            session: Some(session.id),
+            all: false,
+            max_retries: args.max_retries,
+            rate_limit_retries: args.rate_limit_retries,
+            dry_run: args.dry_run,
+        };
+        Box::pin(run(session_args)).await?;
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -938,5 +965,77 @@ Previously, emojis were used as user icons."#;
         // Then: code block is stripped and parsed correctly
         assert_eq!(title, "docs: Update README");
         assert_eq!(body.trim(), "Updated documentation.");
+    }
+
+    // -----------------------------------------------------------------------
+    // run_all() 統合テスト
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_run_all_errors_when_session_and_all_both_specified() {
+        // Given: --all と session ID が同時に指定される
+        let args = RunArgs {
+            session: Some("some-session-id".to_string()),
+            all: true,
+            max_retries: 10,
+            rate_limit_retries: 5,
+            dry_run: false,
+        };
+
+        // When: run() を呼ぶ
+        let result = run(args).await;
+
+        // Then: "Cannot specify both --all and a session ID" エラーが返る
+        assert!(result.is_err(), "expected error but got Ok");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Cannot specify both --all and a session ID"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_all_returns_ok_when_no_planned_sessions() {
+        // Given: planned セッションが存在しない空の cruise home
+        let tmp = TempDir::new().unwrap();
+        let cruise_home = tmp.path().join(".cruise");
+        std::fs::create_dir_all(cruise_home.join("sessions")).unwrap();
+
+        // ロックは await をまたがないよう、スコープを限定して保持する
+        let orig_home = {
+            let _guard = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let orig = std::env::var("HOME").ok();
+            // SAFETY: テスト内でのみ変更し、終了前に復元する
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+            }
+            orig
+            // _guard はここでドロップ
+        };
+
+        let args = RunArgs {
+            session: None,
+            all: true,
+            max_retries: 10,
+            rate_limit_retries: 5,
+            dry_run: false,
+        };
+
+        // When: run() を呼ぶ（planned セッション 0 件）
+        let result = run(args).await;
+
+        // Restore HOME
+        {
+            let _guard = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                match orig_home {
+                    Some(h) => std::env::set_var("HOME", h),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+
+        // Then: エラーなく Ok(()) が返る
+        assert!(result.is_ok(), "expected Ok but got: {:?}", result.err());
     }
 }

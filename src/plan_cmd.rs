@@ -189,6 +189,7 @@ async fn run_approve_loop(
                 );
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
+                    all: false,
                     max_retries: 10,
                     rate_limit_retries,
                     dry_run: false,
