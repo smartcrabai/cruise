@@ -292,6 +292,8 @@ fn attempt_pr_creation(
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
 
+    push_branch(&ctx.path, &ctx.branch)?;
+
     match create_pr(&ctx.path, &ctx.branch, title, body) {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
@@ -391,6 +393,22 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> 
     }
 
     Ok(CommitOutcome::Created)
+}
+
+fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["push", "-u", "origin", branch])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git push: {}", e)))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::Other(format!(
+            "git push failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
 }
 
 /// Create a PR using `gh pr create`. Uses `--title`/`--body` if provided, otherwise `--fill`.
@@ -675,6 +693,15 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
         init_git_repo(&repo);
+
+        // Set up a local bare repo as "origin" so git push works in tests
+        let bare = tmp.path().join("origin.git");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        run_git_ok(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
 
         let worktrees_dir = tmp.path().join("worktrees");
         let (ctx, reused) =
