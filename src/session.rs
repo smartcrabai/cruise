@@ -184,6 +184,15 @@ impl SessionManager {
             .collect())
     }
 
+    /// Return sessions in the Planned phase only.
+    pub fn planned(&self) -> Result<Vec<SessionState>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|s| s.phase == SessionPhase::Planned)
+            .collect())
+    }
+
     /// Delete a session directory.
     pub fn delete(&self, id: &str) -> Result<()> {
         let session_dir = self.sessions_dir().join(id);
@@ -613,5 +622,110 @@ mod tests {
         let loaded = manager.load(&id).unwrap();
         assert_eq!(loaded.pr_url, None);
         assert_eq!(loaded.input, "old task");
+    }
+
+    #[test]
+    fn test_session_planned_returns_only_planned() {
+        // Given: Planned / Completed / Failed / Running の各フェーズのセッションが存在する
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut planned = SessionState::new(
+            "20260308100000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "planned-task".to_string(),
+        );
+        planned.phase = SessionPhase::Planned;
+        manager.create(&planned).unwrap();
+
+        let mut completed = SessionState::new(
+            "20260308110000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "completed-task".to_string(),
+        );
+        completed.phase = SessionPhase::Completed;
+        manager.create(&completed).unwrap();
+
+        let mut failed = SessionState::new(
+            "20260308120000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "failed-task".to_string(),
+        );
+        failed.phase = SessionPhase::Failed("error".to_string());
+        manager.create(&failed).unwrap();
+
+        let mut running = SessionState::new(
+            "20260308130000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "running-task".to_string(),
+        );
+        running.phase = SessionPhase::Running;
+        manager.create(&running).unwrap();
+
+        // When: planned() を呼ぶ
+        let result = manager.planned().unwrap();
+
+        // Then: Planned フェーズのセッションのみ返される
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "20260308100000");
+        assert!(matches!(result[0].phase, SessionPhase::Planned));
+    }
+
+    #[test]
+    fn test_session_planned_empty_when_none_planned() {
+        // Given: Planned セッションが存在しない（Completed のみ）
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut completed = SessionState::new(
+            "20260308200000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "done".to_string(),
+        );
+        completed.phase = SessionPhase::Completed;
+        manager.create(&completed).unwrap();
+
+        // When: planned() を呼ぶ
+        let result = manager.planned().unwrap();
+
+        // Then: 空のリストが返される
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_session_planned_multiple_planned() {
+        // Given: 複数の Planned セッションが存在する
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for (id, input) in [
+            ("20260308300000", "task-a"),
+            ("20260308310000", "task-b"),
+            ("20260308320000", "task-c"),
+        ] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                input.to_string(),
+            );
+            s.phase = SessionPhase::Planned;
+            manager.create(&s).unwrap();
+        }
+
+        // When: planned() を呼ぶ
+        let result = manager.planned().unwrap();
+
+        // Then: すべての Planned セッションが返される
+        assert_eq!(result.len(), 3);
+        let ids: Vec<&str> = result.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"20260308300000"));
+        assert!(ids.contains(&"20260308310000"));
+        assert!(ids.contains(&"20260308320000"));
     }
 }

@@ -60,6 +60,7 @@ pub async fn run() -> Result<()> {
             "Run" | "Resume" => {
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
+                    all: false,
                     max_retries: 10,
                     rate_limit_retries: 5,
                     dry_run: false,
