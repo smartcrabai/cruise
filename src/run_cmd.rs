@@ -696,11 +696,7 @@ mod tests {
 
         // Set up a local bare repo as "origin" so git push works in tests
         let bare = tmp.path().join("origin.git");
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .output()
-            .unwrap();
+        run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
         run_git_ok(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
 
         let worktrees_dir = tmp.path().join("worktrees");
