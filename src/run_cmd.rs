@@ -183,10 +183,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     drop(spinner);
                     let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
                     if pr_title.is_empty() && !llm_output.trim().is_empty() {
+                        let truncated: String = llm_output.chars().take(500).collect();
                         eprintln!(
                             "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
                             style("⚠").yellow(),
-                            &llm_output[..llm_output.len().min(500)]
+                            truncated
                         );
                     }
                     (pr_title, pr_body)

@@ -1,4 +1,4 @@
-I have completed the implementation described in {plan}. Review the changes with `git diff HEAD~1..HEAD` (or all commits on this branch if there are multiple).
+I have completed the implementation described in {plan}. Review the changes with `git diff HEAD~1..HEAD` for the last commit, or `git diff $(git merge-base HEAD main)..HEAD` to see all commits on this branch relative to the base branch.
 
 Based on the plan and the actual diff, generate Pull Request metadata in the exact format below.
 
