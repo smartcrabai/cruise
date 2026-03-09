@@ -7,6 +7,7 @@ mod engine;
 mod error;
 mod file_tracker;
 mod list_cmd;
+mod multiline_input;
 mod plan_cmd;
 mod resolver;
 mod run_cmd;

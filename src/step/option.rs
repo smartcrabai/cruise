@@ -1,4 +1,4 @@
-use inquire::{InquireError, Select, Text};
+use inquire::{InquireError, Select};
 
 use crate::error::Result;
 use crate::step::OptionChoice;
@@ -56,18 +56,13 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
             text_input: None,
         }),
         OptionChoice::TextInput { label, next } => {
-            let text = match Text::new(label).prompt() {
-                Ok(t) => t,
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            let text = match crate::multiline_input::prompt_multiline(label)? {
+                crate::multiline_input::InputResult::Submitted(t) => t,
+                crate::multiline_input::InputResult::Cancelled => {
                     return Ok(OptionResult {
                         next_step: None,
                         text_input: None,
                     });
-                }
-                Err(e) => {
-                    return Err(crate::error::CruiseError::Other(format!(
-                        "input error: {e}"
-                    )));
                 }
             };
 

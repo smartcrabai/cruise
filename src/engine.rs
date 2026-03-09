@@ -377,9 +377,12 @@ pub(crate) async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             let prompt_text = format!("  {}", &resolved);
-            let text = inquire::Text::new(&prompt_text)
-                .prompt()
-                .map_err(|e| CruiseError::Other(format!("input error: {e}")))?;
+            let text = match crate::multiline_input::prompt_multiline(&prompt_text)? {
+                crate::multiline_input::InputResult::Submitted(t) => t,
+                crate::multiline_input::InputResult::Cancelled => {
+                    return Err(CruiseError::Other("input cancelled".to_string()));
+                }
+            };
             vars.set_input(text);
         } else {
             eprintln!("  {}", style(resolved).dim());
