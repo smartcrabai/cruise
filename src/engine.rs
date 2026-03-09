@@ -418,6 +418,7 @@ pub(crate) async fn run_prompt_step(
 
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));
+    vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_input(None);
 
     Ok(output)
@@ -1180,5 +1181,31 @@ steps:
 
         assert!(result.is_ok());
         assert_eq!(called_steps, vec!["step1", "step2"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_prompt_step_stdout_still_captured_when_stderr_present() {
+        // Given: an LLM command that writes specific content to stdout and noise to stderr
+        // When: the prompt step runs
+        // Then: stdout is captured to prev.output and stderr is captured to prev.stderr
+        // NOTE: Both variables are checked in the same step2 via env vars, before any subsequent
+        // command step could overwrite prev.stderr.
+        let yaml = r#"
+command: [sh, -c, "cat; printf noise >&2"]
+steps:
+  step1:
+    prompt: "chain_value"
+  step2:
+    command: 'sh -c "test \"$PREV_OUT\" = chain_value && test \"$PREV_ERR\" = noise"'
+    env:
+      PREV_OUT: "{prev.output}"
+      PREV_ERR: "{prev.stderr}"
+"#;
+        let result = run_config(yaml, "", None).await;
+        let result = result.expect("workflow run failed");
+        assert_eq!(
+            result.steps_failed, 0,
+            "stdout and stderr should both be captured correctly"
+        );
     }
 }
