@@ -586,8 +586,7 @@ fn strip_code_block(s: &str) -> &str {
 
     // Slow path: look for a ``` line somewhere in the text (preamble case)
     for (line_start, line) in iter_line_offsets(trimmed) {
-        if line.starts_with("```") {
-            let after_backticks = &line["```".len()..];
+        if let Some(after_backticks) = line.strip_prefix("```") {
             if let Some(newline_pos) = after_backticks.find('\n') {
                 let inner = &after_backticks[newline_pos + 1..];
                 if let Some(close) = inner.rfind("```") {
@@ -674,10 +673,10 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
     }
 
     // 2. Search for \n---\n in the text and try from that position
-    if let Some(pos) = content.find("\n---\n") {
-        if let Some(result) = try_parse_frontmatter(&content[pos + 1..]) {
-            return result;
-        }
+    if let Some(pos) = content.find("\n---\n")
+        && let Some(result) = try_parse_frontmatter(&content[pos + 1..])
+    {
+        return result;
     }
 
     (String::new(), String::new())
