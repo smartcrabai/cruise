@@ -10,7 +10,7 @@ version = "0.1.12"
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 console = "0.16.2"
-crossterm = "0.28"
+crossterm = "0.29"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
