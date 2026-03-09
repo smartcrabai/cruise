@@ -1055,12 +1055,12 @@ Previously, emojis were used as user icons."#;
     }
 
     // -----------------------------------------------------------------------
-    // run_all() 統合テスト
+    // run_all() integration tests
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_run_all_errors_when_session_and_all_both_specified() {
-        // Given: --all と session ID が同時に指定される
+        // Given: both --all and a session ID are specified
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
@@ -1069,10 +1069,10 @@ Previously, emojis were used as user icons."#;
             dry_run: false,
         };
 
-        // When: run() を呼ぶ
+        // When: call run()
         let result = run(args).await;
 
-        // Then: "Cannot specify both --all and a session ID" エラーが返る
+        // Then: returns a "Cannot specify both --all and a session ID" error
         assert!(result.is_err(), "expected error but got Ok");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1083,21 +1083,21 @@ Previously, emojis were used as user icons."#;
 
     #[tokio::test]
     async fn test_run_all_returns_ok_when_no_planned_sessions() {
-        // Given: planned セッションが存在しない空の cruise home
+        // Given: empty cruise home with no planned sessions
         let tmp = TempDir::new().unwrap();
         let cruise_home = tmp.path().join(".cruise");
         std::fs::create_dir_all(cruise_home.join("sessions")).unwrap();
 
-        // ロックは await をまたがないよう、スコープを限定して保持する
+        // Hold the lock in a narrow scope so it is dropped before the await.
         let orig_home = {
             let _guard = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let orig = std::env::var("HOME").ok();
-            // SAFETY: テスト内でのみ変更し、終了前に復元する
+            // SAFETY: only modified within this test and restored before exit.
             unsafe {
                 std::env::set_var("HOME", tmp.path());
             }
             orig
-            // _guard はここでドロップ
+            // _guard is dropped here
         };
 
         let args = RunArgs {
@@ -1108,7 +1108,7 @@ Previously, emojis were used as user icons."#;
             dry_run: false,
         };
 
-        // When: run() を呼ぶ（planned セッション 0 件）
+        // When: call run() with 0 planned sessions
         let result = run(args).await;
 
         // Restore HOME
@@ -1122,12 +1122,12 @@ Previously, emojis were used as user icons."#;
             }
         }
 
-        // Then: エラーなく Ok(()) が返る
+        // Then: returns Ok(()) without error
         assert!(result.is_ok(), "expected Ok but got: {:?}", result.err());
     }
 
     // -----------------------------------------------------------------------
-    // format_run_all_summary() ユニットテスト
+    // format_run_all_summary() unit tests
     // -----------------------------------------------------------------------
 
     fn make_session(input: &str, phase: SessionPhase, pr_url: Option<&str>) -> SessionState {
@@ -1144,13 +1144,13 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_empty_returns_empty_string() {
-        // Given: 空の結果リスト
+        // Given: empty result list
         let results: Vec<SessionState> = vec![];
 
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: 空文字列が返る
+        // Then: returns empty string
         assert!(
             summary.is_empty(),
             "expected empty string, got: {summary:?}"
@@ -1159,7 +1159,7 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_single_completed_with_pr() {
-        // Given: PR URL あり Completed セッション
+        // Given: Completed session with PR URL
         let results = vec![make_session(
             "add login feature",
             SessionPhase::Completed,
@@ -1169,7 +1169,7 @@ Previously, emojis were used as user icons."#;
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: 入力概要・PR URLが含まれる
+        // Then: summary contains input and PR URL
         assert!(
             summary.contains("add login feature"),
             "summary should contain input: {summary}"
@@ -1186,7 +1186,7 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_single_completed_without_pr() {
-        // Given: PR URL なし Completed セッション
+        // Given: Completed session without PR URL
         let results = vec![make_session(
             "refactor database layer",
             SessionPhase::Completed,
@@ -1196,7 +1196,7 @@ Previously, emojis were used as user icons."#;
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: 入力概要を含み、エラー表示はない
+        // Then: summary contains input without failure indicators
         assert!(
             summary.contains("refactor database layer"),
             "summary should contain input: {summary}"
@@ -1209,7 +1209,7 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_single_failed_session() {
-        // Given: Failed セッション（エラーメッセージ付き）
+        // Given: Failed session with an error message
         let results = vec![make_session(
             "fix login bug",
             SessionPhase::Failed("CI timeout".to_string()),
@@ -1219,7 +1219,7 @@ Previously, emojis were used as user icons."#;
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: 入力概要・失敗表示・エラーメッセージを含む
+        // Then: summary contains input, failure indicator and error message
         assert!(
             summary.contains("fix login bug"),
             "summary should contain input: {summary}"
@@ -1232,7 +1232,7 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_mixed_results() {
-        // Given: Completed + Failed の混在
+        // Given: mixed Completed and Failed sessions
         let results = vec![
             make_session(
                 "add auth module",
@@ -1249,7 +1249,7 @@ Previously, emojis were used as user icons."#;
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: 両方のセッションの情報を含む
+        // Then: summary contains info for both sessions
         assert!(
             summary.contains("add auth module"),
             "summary should contain first input: {summary}"
@@ -1270,14 +1270,14 @@ Previously, emojis were used as user icons."#;
 
     #[test]
     fn test_format_run_all_summary_long_input_is_truncated() {
-        // Given: 非常に長い input を持つセッション
+        // Given: session with a very long input
         let long_input = "a".repeat(200);
         let results = vec![make_session(&long_input, SessionPhase::Completed, None)];
 
         // When
         let summary = format_run_all_summary(&results);
 
-        // Then: サマリーの各行が過度に長くならない（300文字以内）
+        // Then: each summary line is within a reasonable length (300 chars max)
         for line in summary.lines() {
             assert!(
                 line.chars().count() <= 300,
