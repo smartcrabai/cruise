@@ -7,6 +7,7 @@ use crate::cli::PlanArgs;
 use crate::config::{WorkflowConfig, validate_groups};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
+use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
@@ -158,23 +159,17 @@ async fn run_approve_loop(
                 return Ok(());
             }
             "Fix" => {
-                let text = match inquire::Text::new("Describe the changes needed:").prompt() {
-                    Ok(t) => t,
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        continue;
-                    }
-                    Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
+                let text = match prompt_multiline("Describe the changes needed:")? {
+                    InputResult::Submitted(t) => t,
+                    InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
                 run_fix_plan(config, vars, rate_limit_retries).await?;
             }
             "Ask" => {
-                let text = match inquire::Text::new("Your question:").prompt() {
-                    Ok(t) => t,
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        continue;
-                    }
-                    Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
+                let text = match prompt_multiline("Your question:")? {
+                    InputResult::Submitted(t) => t,
+                    InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
                 run_ask_plan(config, vars, rate_limit_retries).await?;
