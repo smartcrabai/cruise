@@ -1,24 +1,11 @@
-I have completed the implementation of {plan}. Please provide the following information to create a Pull Request:
+I have completed the implementation described in {plan}. Review the changes with `git diff HEAD~1..HEAD` for the last commit, or `git diff $(git merge-base HEAD main)..HEAD` to see all commits on this branch relative to the base branch.
 
-- Summary of changes (to be used as commit message and PR title)
-- Details of changes (to be used as PR description)
+Based on the plan and the actual diff, generate Pull Request metadata in the exact format below.
 
-IMPORTANT: Output ONLY the formatted block below. Do not include any preamble, explanation, or commentary before or after it.
-
-## Output format
+IMPORTANT: Output ONLY the block below — no preamble, explanation, or commentary.
 
 ---
-title: "Write summary of changes here"
+title: "Write a concise PR title here"
 ---
-Write details of changes here
-
-## Output example
-
----
-title: "feat: Add user icon registration feature"
----
-## Overview
-Enabled users to upload icon images.
-
-## Background
-Previously, emojis were used as user icons, but it was difficult to distinguish users who used the same emoji as an icon.
+Write the PR description here.
+Include an overview of the changes and any relevant background.

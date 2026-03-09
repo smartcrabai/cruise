@@ -181,7 +181,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         }
                     };
                     drop(spinner);
-                    parse_pr_metadata(&llm_output)
+                    let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
+                    if pr_title.is_empty() && !llm_output.trim().is_empty() {
+                        let truncated: String = llm_output.chars().take(500).collect();
+                        eprintln!(
+                            "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
+                            style("⚠").yellow(),
+                            truncated
+                        );
+                    }
+                    (pr_title, pr_body)
                 }
             };
 
@@ -596,21 +605,15 @@ fn strip_code_block(s: &str) -> &str {
         return trimmed;
     }
 
-    // Slow path: look for a ``` line somewhere in the text (preamble case)
+    // Slow path: look for a ``` line somewhere in the text (preamble case).
+    // Lines from s.lines() never contain '\n', so the ``` marker is always on
+    // its own line; inner content starts on the next line.
     for (line_start, line) in iter_line_offsets(trimmed) {
-        if let Some(after_backticks) = line.strip_prefix("```") {
-            if let Some(newline_pos) = after_backticks.find('\n') {
-                let inner = &after_backticks[newline_pos + 1..];
-                if let Some(close) = inner.rfind("```") {
-                    return inner[..close].trim_end_matches('\n');
-                }
-            } else {
-                // The ``` marker is on its own line; inner starts after the newline
-                let rest = &trimmed[line_start + line.len()..];
-                let rest = rest.strip_prefix('\n').unwrap_or(rest);
-                if let Some(close) = rest.rfind("```") {
-                    return rest[..close].trim_end_matches('\n');
-                }
+        if line.starts_with("```") {
+            let rest = &trimmed[line_start + line.len()..];
+            let rest = rest.strip_prefix('\n').unwrap_or(rest);
+            if let Some(close) = rest.rfind("```") {
+                return rest[..close].trim_end_matches('\n');
             }
             break;
         }
@@ -666,12 +669,45 @@ fn try_parse_frontmatter(content: &str) -> Option<(String, String)> {
     Some((title, body.to_string()))
 }
 
+/// Try to parse Markdown heading format from `content`:
+///
+/// ```text
+/// # My PR title
+/// PR body here
+/// ```
+///
+/// Only `# ` (h1) is treated as the title line; `## ` (h2) headings may
+/// appear in the body and are left as-is.  Returns `None` if no h1 is found.
+fn try_parse_heading_format(content: &str) -> Option<(String, String)> {
+    for (line_start, line) in iter_line_offsets(content) {
+        if let Some(rest) = line.strip_prefix("# ") {
+            let title = rest.trim().to_string();
+            if title.is_empty() {
+                continue;
+            }
+            // Body: everything after the title line, using tracked offset to
+            // avoid content.find(line) which would match the first occurrence.
+            let after = &content[line_start + line.len()..];
+            let after = after.strip_prefix('\n').unwrap_or(after);
+            return Some((title, after.to_string()));
+        }
+    }
+    None
+}
+
 /// Parse LLM output into (title, body) from frontmatter format:
 ///
 /// ```text
 /// ---
 /// title: "My PR title"
 /// ---
+/// PR body here
+/// ```
+///
+/// Also accepts Markdown h1 heading format as a fallback:
+///
+/// ```text
+/// # My PR title
 /// PR body here
 /// ```
 ///
@@ -688,6 +724,11 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
     if let Some(pos) = content.find("\n---\n")
         && let Some(result) = try_parse_frontmatter(&content[pos + 1..])
     {
+        return result;
+    }
+
+    // 3. Fallback: Markdown h1 heading format
+    if let Some(result) = try_parse_heading_format(content) {
         return result;
     }
 
@@ -1133,6 +1174,49 @@ Previously, emojis were used as user icons."#;
         // Then: all preamble lines are skipped, frontmatter is parsed
         assert_eq!(title, "refactor: Clean up code");
         assert_eq!(body.trim(), "Refactored the core module.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_heading_format() {
+        // Given: LLM output using Markdown h1 heading as title
+        let output = "# feat: Add user icon registration feature\n## Overview\nEnabled users to upload icon images.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: h1 line is used as title, rest as body
+        assert_eq!(title, "feat: Add user icon registration feature");
+        assert_eq!(
+            body.trim(),
+            "## Overview\nEnabled users to upload icon images."
+        );
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_heading_format_in_code_block() {
+        // Given: LLM output wrapped in code block using h1 heading
+        let output = "```md\n# fix: Resolve login bug\nFixed the login issue.\n```";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: code block is stripped and h1 heading is used as title
+        assert_eq!(title, "fix: Resolve login bug");
+        assert_eq!(body.trim(), "Fixed the login issue.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_empty_input_returns_empty() {
+        // Given: empty input
+        let (title, body) = parse_pr_metadata("");
+        // Then: both are empty
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_whitespace_only_returns_empty() {
+        // Given: whitespace-only input
+        let (title, body) = parse_pr_metadata("   \n  \n  ");
+        // Then: both are empty
+        assert_eq!(title, "");
+        assert_eq!(body, "");
     }
 
     #[test]
