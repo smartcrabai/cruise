@@ -579,50 +579,73 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
 /// Handles both ` ```md ` and plain ` ``` ` prefixes. Returns the inner
 /// content with trailing newlines removed, or the trimmed input unchanged if
 /// no well-formed code block is found.
+///
+/// Also handles the case where the code block is preceded by preamble text:
+/// searches for the first ` ``` ` line and attempts extraction from there.
 fn strip_code_block(s: &str) -> &str {
     let trimmed = s.trim();
-    let Some(after_backticks) = trimmed.strip_prefix("```") else {
+
+    // Fast path: starts directly with ```
+    if let Some(after_backticks) = trimmed.strip_prefix("```") {
+        if let Some(newline_pos) = after_backticks.find('\n') {
+            let inner = &after_backticks[newline_pos + 1..];
+            if let Some(close) = inner.rfind("```") {
+                return inner[..close].trim_end_matches('\n');
+            }
+        }
         return trimmed;
-    };
-    let Some(newline_pos) = after_backticks.find('\n') else {
-        return trimmed;
-    };
-    let inner = &after_backticks[newline_pos + 1..];
-    let Some(close) = inner.rfind("```") else {
-        return trimmed;
-    };
-    inner[..close].trim_end_matches('\n')
+    }
+
+    // Slow path: look for a ``` line somewhere in the text (preamble case)
+    for (line_start, line) in iter_line_offsets(trimmed) {
+        if let Some(after_backticks) = line.strip_prefix("```") {
+            if let Some(newline_pos) = after_backticks.find('\n') {
+                let inner = &after_backticks[newline_pos + 1..];
+                if let Some(close) = inner.rfind("```") {
+                    return inner[..close].trim_end_matches('\n');
+                }
+            } else {
+                // The ``` marker is on its own line; inner starts after the newline
+                let rest = &trimmed[line_start + line.len()..];
+                let rest = rest.strip_prefix('\n').unwrap_or(rest);
+                if let Some(close) = rest.rfind("```") {
+                    return rest[..close].trim_end_matches('\n');
+                }
+            }
+            break;
+        }
+    }
+
+    trimmed
 }
 
-/// Parse LLM output into (title, body) from frontmatter format:
-///
-/// ```text
-/// ---
-/// title: "My PR title"
-/// ---
-/// PR body here
-/// ```
-///
-/// Returns `(String::new(), String::new())` if parsing fails.
-fn parse_pr_metadata(output: &str) -> (String, String) {
-    let content = strip_code_block(output);
+/// Iterate over (byte_offset_of_line_start, line_content) pairs in `s`.
+fn iter_line_offsets(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    s.lines().map(move |line| {
+        let start = offset;
+        offset += line.len() + 1; // +1 for '\n'
+        (start, line)
+    })
+}
 
+/// Try to parse a frontmatter block from `content` that starts with `---`.
+///
+/// Returns `Some((title, body))` on success, `None` otherwise.
+fn try_parse_frontmatter(content: &str) -> Option<(String, String)> {
     // Must start with ---
     if !content.starts_with("---") {
-        return (String::new(), String::new());
+        return None;
     }
 
     // Skip the opening --- line
     let after_open = match content[3..].find('\n') {
         Some(pos) => &content[3 + pos + 1..],
-        None => return (String::new(), String::new()),
+        None => return None,
     };
 
     // Find closing ---
-    let close_pos = match after_open.find("\n---") {
-        Some(pos) => pos,
-        None => return (String::new(), String::new()),
-    };
+    let close_pos = after_open.find("\n---")?;
 
     let frontmatter = &after_open[..close_pos];
     let after_close = &after_open[close_pos + "\n---".len()..];
@@ -638,12 +661,37 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
                 .unwrap_or(rest)
                 .to_string()
         })
-    });
+    })?;
 
-    match title {
-        Some(t) => (t, body.to_string()),
-        None => (String::new(), String::new()),
+    Some((title, body.to_string()))
+}
+
+/// Parse LLM output into (title, body) from frontmatter format:
+///
+/// ```text
+/// ---
+/// title: "My PR title"
+/// ---
+/// PR body here
+/// ```
+///
+/// Returns `(String::new(), String::new())` if parsing fails.
+fn parse_pr_metadata(output: &str) -> (String, String) {
+    let content = strip_code_block(output);
+
+    // 1. Try parsing the whole content as frontmatter
+    if let Some(result) = try_parse_frontmatter(content) {
+        return result;
     }
+
+    // 2. Search for \n---\n in the text and try from that position
+    if let Some(pos) = content.find("\n---\n")
+        && let Some(result) = try_parse_frontmatter(&content[pos + 1..])
+    {
+        return result;
+    }
+
+    (String::new(), String::new())
 }
 
 /// Format a summary of all sessions run by `run --all`.
@@ -1052,6 +1100,59 @@ Previously, emojis were used as user icons."#;
         // Then: code block is stripped and parsed correctly
         assert_eq!(title, "docs: Update README");
         assert_eq!(body.trim(), "Updated documentation.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_with_preamble_then_frontmatter() {
+        // Given: LLM output with preamble text before frontmatter
+        let output = "Here is the PR information:\n---\ntitle: \"feat: Add new feature\"\n---\nThis adds a new feature.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: preamble is ignored, frontmatter is parsed
+        assert_eq!(title, "feat: Add new feature");
+        assert_eq!(body.trim(), "This adds a new feature.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_with_preamble_then_code_block() {
+        // Given: LLM output with preamble then a code-block-wrapped frontmatter
+        let output = "Here is the PR information:\n```md\n---\ntitle: \"fix: Fix the bug\"\n---\nFixed the critical bug.\n```";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: preamble and code block delimiters are stripped, frontmatter is parsed
+        assert_eq!(title, "fix: Fix the bug");
+        assert_eq!(body.trim(), "Fixed the critical bug.");
+    }
+
+    #[test]
+    fn test_parse_pr_metadata_with_multiline_preamble() {
+        // Given: LLM output with multiple lines of preamble
+        let output = "I have reviewed the changes.\nBased on the commits, here is the PR:\n\n---\ntitle: \"refactor: Clean up code\"\n---\nRefactored the core module.";
+        // When: parsing PR metadata
+        let (title, body) = parse_pr_metadata(output);
+        // Then: all preamble lines are skipped, frontmatter is parsed
+        assert_eq!(title, "refactor: Clean up code");
+        assert_eq!(body.trim(), "Refactored the core module.");
+    }
+
+    #[test]
+    fn test_strip_code_block_with_preamble() {
+        // Given: text with preamble before code block
+        let input = "Some intro text\n```\n---\ntitle: test\n---\nbody\n```";
+        // When: stripping code block
+        let result = strip_code_block(input);
+        // Then: inner content is extracted
+        assert_eq!(result.trim(), "---\ntitle: test\n---\nbody");
+    }
+
+    #[test]
+    fn test_strip_code_block_no_code_block_unchanged() {
+        // Given: text without any code block
+        let input = "Just plain text here.";
+        // When: stripping code block
+        let result = strip_code_block(input);
+        // Then: input is returned unchanged (trimmed)
+        assert_eq!(result, "Just plain text here.");
     }
 
     // -----------------------------------------------------------------------
