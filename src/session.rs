@@ -30,6 +30,14 @@ impl SessionPhase {
     }
 }
 
+/// Where a session should execute its workflow.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceMode {
+    #[default]
+    Worktree,
+    CurrentBranch,
+}
+
 /// Persisted state for a single session.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionState {
@@ -53,6 +61,12 @@ pub struct SessionState {
     pub worktree_path: Option<PathBuf>,
     /// Worktree branch name (set during run phase).
     pub worktree_branch: Option<String>,
+    /// Where this session should run.
+    #[serde(default)]
+    pub workspace_mode: WorkspaceMode,
+    /// Branch captured for current-branch mode.
+    #[serde(default)]
+    pub target_branch: Option<String>,
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
@@ -71,6 +85,8 @@ impl SessionState {
             completed_at: None,
             worktree_path: None,
             worktree_branch: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            target_branch: None,
             pr_url: None,
         }
     }
@@ -453,6 +469,8 @@ mod tests {
         assert_eq!(loaded.input, "add hello world");
         assert!(matches!(loaded.phase, SessionPhase::Planned));
         assert!(loaded.current_step.is_none());
+        assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
+        assert_eq!(loaded.target_branch, None);
         assert!(loaded.pr_url.is_none());
     }
 
@@ -626,8 +644,30 @@ mod tests {
         std::fs::write(session_dir.join("state.json"), json.to_string()).unwrap();
 
         let loaded = manager.load(&id).unwrap();
+        assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
+        assert_eq!(loaded.target_branch, None);
         assert_eq!(loaded.pr_url, None);
         assert_eq!(loaded.input, "old task");
+    }
+
+    #[test]
+    fn test_session_state_target_branch_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260306180000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.workspace_mode = WorkspaceMode::CurrentBranch;
+        state.target_branch = Some("feature/direct-mode".to_string());
+        manager.create(&state).unwrap();
+
+        let loaded = manager.load(&id).unwrap();
+        assert_eq!(loaded.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(loaded.target_branch.as_deref(), Some("feature/direct-mode"));
     }
 
     #[test]

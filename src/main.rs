@@ -14,6 +14,8 @@ mod run_cmd;
 mod session;
 mod spinner;
 mod step;
+#[cfg(test)]
+mod test_support;
 mod variable;
 mod workflow;
 mod worktree;
