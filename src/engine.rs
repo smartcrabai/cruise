@@ -1424,4 +1424,25 @@ steps:
             "5.5s"
         );
     }
+
+    #[tokio::test]
+    async fn test_next_pointing_to_nonexistent_step() {
+        // Given: a step whose `next` points to a step that doesn't exist
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+    next: nonexistent
+"#;
+        // When: the workflow runs
+        let result = run_config(yaml, "test", None).await;
+        // Then: StepNotFound error is returned
+        assert!(result.is_err(), "expected an error but got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CruiseError::StepNotFound(ref s) if s == "nonexistent"),
+            "expected StepNotFound(\"nonexistent\"), got: {err:?}"
+        );
+    }
 }
