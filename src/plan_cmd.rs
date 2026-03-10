@@ -4,7 +4,7 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::{DEFAULT_MAX_RETRIES, PlanArgs};
-use crate::config::{WorkflowConfig, validate_fail_if_no_file_changes, validate_groups};
+use crate::config::{WorkflowConfig, validate_config};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
@@ -58,8 +58,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     }
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    validate_groups(&config)?;
-    validate_fail_if_no_file_changes(&config)?;
+    validate_config(&config)?;
 
     // Set up session.
     let manager = SessionManager::new(get_cruise_home()?);
