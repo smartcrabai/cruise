@@ -5,7 +5,7 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::RunArgs;
-use crate::config::{WorkflowConfig, validate_groups};
+use crate::config::{DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_groups};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -17,9 +17,21 @@ use crate::worktree;
 
 /// Variable name that maps to the plan file.
 const PLAN_VAR: &str = "plan";
+const PR_LANGUAGE_VAR: &str = "pr.language";
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
+
+fn build_pr_prompt(vars: &mut VariableStore, config: &WorkflowConfig) -> Result<String> {
+    let lang = config.pr_language.trim();
+    let lang = if lang.is_empty() {
+        DEFAULT_PR_LANGUAGE
+    } else {
+        lang
+    };
+    vars.set_named_value(PR_LANGUAGE_VAR, lang.to_string());
+    vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
+}
 
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.all {
@@ -146,7 +158,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     let overall_result = match exec_result {
         Ok(_) => {
-            let (pr_title, pr_body) = match vars.resolve(CREATE_PR_PROMPT_TEMPLATE) {
+            let (pr_title, pr_body) = match build_pr_prompt(&mut vars, &config) {
                 Err(e) => {
                     eprintln!("warning: PR prompt resolution failed: {}", e);
                     (String::new(), String::new())
@@ -606,12 +618,13 @@ fn strip_code_block(s: &str) -> &str {
     }
 
     // Slow path: look for a ``` line somewhere in the text (preamble case).
-    // Lines from s.lines() never contain '\n', so the ``` marker is always on
-    // its own line; inner content starts on the next line.
+    // iter_line_offsets yields lines without trailing CR/LF so the ```
+    // marker is always cleanly on its own line; inner content starts on
+    // the next line.
     for (line_start, line) in iter_line_offsets(trimmed) {
         if line.starts_with("```") {
             let rest = &trimmed[line_start + line.len()..];
-            let rest = rest.strip_prefix('\n').unwrap_or(rest);
+            let rest = skip_newline(rest);
             if let Some(close) = rest.rfind("```") {
                 return rest[..close].trim_end_matches('\n');
             }
@@ -622,13 +635,24 @@ fn strip_code_block(s: &str) -> &str {
     trimmed
 }
 
+/// Strip a leading newline (`\r\n` or `\n`) from `s`, if present.
+fn skip_newline(s: &str) -> &str {
+    s.strip_prefix("\r\n")
+        .or_else(|| s.strip_prefix('\n'))
+        .unwrap_or(s)
+}
+
 /// Iterate over (byte_offset_of_line_start, line_content) pairs in `s`.
+///
+/// Uses `split('\n')` so that the raw byte length (including any trailing `\r`
+/// from CRLF line endings) is used for offset accounting, while the returned
+/// line content has the trailing `\r` stripped for clean comparisons.
 fn iter_line_offsets(s: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut offset = 0;
-    s.lines().map(move |line| {
+    s.split('\n').map(move |raw| {
         let start = offset;
-        offset += line.len() + 1; // +1 for '\n'
-        (start, line)
+        offset += raw.len() + 1; // raw.len() includes \r if CRLF; +1 for the consumed '\n'
+        (start, raw.trim_end_matches('\r'))
     })
 }
 
@@ -688,7 +712,7 @@ fn try_parse_heading_format(content: &str) -> Option<(String, String)> {
             // Body: everything after the title line, using tracked offset to
             // avoid content.find(line) which would match the first occurrence.
             let after = &content[line_start + line.len()..];
-            let after = after.strip_prefix('\n').unwrap_or(after);
+            let after = skip_newline(after);
             return Some((title, after.to_string()));
         }
     }
@@ -918,6 +942,21 @@ mod tests {
         }
     }
 
+    fn make_pr_prompt_config(pr_language_yaml: Option<&str>) -> WorkflowConfig {
+        let mut yaml = String::from("command: [claude, -p]\n");
+        if let Some(pr_language_yaml) = pr_language_yaml {
+            yaml.push_str(pr_language_yaml);
+        }
+        yaml.push_str("steps:\n  implement:\n    prompt: test\n");
+        WorkflowConfig::from_yaml(&yaml).unwrap()
+    }
+
+    fn make_pr_prompt_vars() -> VariableStore {
+        let mut vars = VariableStore::new("test input".to_string());
+        vars.set_named_file(PLAN_VAR, PathBuf::from("plan.md"));
+        vars
+    }
+
     #[test]
     fn test_extract_last_path_segment_github_pr_url() {
         // Given: a standard GitHub PR URL
@@ -926,6 +965,42 @@ mod tests {
         let result = extract_last_path_segment(url);
         // Then: last segment is returned
         assert_eq!(result, Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_build_pr_prompt_includes_configured_pr_language() {
+        // Given: a workflow config with a custom PR language
+        let config = make_pr_prompt_config(Some("pr_language: Japanese\n"));
+        let mut vars = make_pr_prompt_vars();
+
+        // When: building the PR prompt
+        let prompt = build_pr_prompt(&mut vars, &config).unwrap();
+
+        // Then: the configured language is injected into the prompt
+        assert!(
+            prompt.contains("Japanese"),
+            "prompt should include configured language: {prompt}"
+        );
+        assert!(
+            prompt.contains("plan.md"),
+            "prompt should continue resolving existing variables: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_build_pr_prompt_defaults_blank_pr_language_to_english() {
+        // Given: a workflow config with a blank PR language
+        let config = make_pr_prompt_config(Some("pr_language: \"   \"\n"));
+        let mut vars = make_pr_prompt_vars();
+
+        // When: building the PR prompt
+        let prompt = build_pr_prompt(&mut vars, &config).unwrap();
+
+        // Then: the prompt falls back to the built-in English default
+        assert!(
+            prompt.contains(crate::config::DEFAULT_PR_LANGUAGE),
+            "prompt should include the default language: {prompt}"
+        );
     }
 
     #[test]
