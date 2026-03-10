@@ -39,7 +39,7 @@ pub async fn run() -> Result<()> {
             }
 
             // Action menu.
-            let actions = session_actions(&session.phase);
+            let actions = session_actions(&session);
 
             let action = match inquire::Select::new("Action:", actions).prompt() {
                 Ok(a) => a,
@@ -75,8 +75,21 @@ pub async fn run() -> Result<()> {
                         DEFAULT_RATE_LIMIT_RETRIES,
                     )
                     .await?;
-                    // Re-load so subsequent session_actions(&session.phase) uses fresh state.
+                    // Re-load so subsequent session_actions(&session) uses fresh state.
                     session = manager.load(&session.id)?;
+                }
+                "Open PR" => {
+                    let url = session.pr_url.as_deref().ok_or_else(|| {
+                        CruiseError::Other("Open PR action requires pr_url".into())
+                    })?;
+                    match open_pr_in_browser(url) {
+                        Ok(()) => {
+                            eprintln!("{} Opening PR in browser…", style("✓").green());
+                        }
+                        Err(e) => {
+                            eprintln!("{} {e}", style("✗").red());
+                        }
+                    }
                 }
                 "Reset to Planned" => {
                     session.reset_to_planned();
@@ -101,13 +114,14 @@ pub async fn run() -> Result<()> {
     }
 }
 
-/// Returns the action menu items available for the given session phase.
+/// Returns the action menu items available for the given session.
 /// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
+/// "Open PR" appears for Completed sessions that have a PR URL.
 /// "Reset to Planned" appears for Running, Failed, and Completed.
 /// "Delete" and "Back" are always present (in that order) at the end.
-fn session_actions(phase: &SessionPhase) -> Vec<&'static str> {
+fn session_actions(session: &SessionState) -> Vec<&'static str> {
     let mut actions = vec![];
-    match phase {
+    match &session.phase {
         SessionPhase::Planned => {
             actions.push("Run");
             actions.push("Replan");
@@ -121,12 +135,28 @@ fn session_actions(phase: &SessionPhase) -> Vec<&'static str> {
             actions.push("Reset to Planned");
         }
         SessionPhase::Completed => {
+            if session.pr_url.is_some() {
+                actions.push("Open PR");
+            }
             actions.push("Reset to Planned");
         }
     }
     actions.push("Delete");
     actions.push("Back");
     actions
+}
+
+fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
+    let status = std::process::Command::new("gh")
+        .args(["pr", "view", pr_url, "--web"])
+        .status()
+        .map_err(|e| CruiseError::Other(format!("failed to run gh: {e}")))?;
+    if !status.success() {
+        return Err(CruiseError::Other(format!(
+            "gh pr view --web exited with {status}"
+        )));
+    }
+    Ok(())
 }
 
 fn format_session_label(s: &SessionState) -> String {
@@ -184,10 +214,10 @@ mod tests {
     #[test]
     fn test_session_actions_planned_has_run_and_replan() {
         // Given: Planned フェーズ
-        let phase = SessionPhase::Planned;
+        let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Run" と "Replan" が含まれ、"Delete" と "Back" も含まれる
         assert!(
@@ -211,10 +241,10 @@ mod tests {
     #[test]
     fn test_session_actions_planned_has_no_resume() {
         // Given: Planned フェーズ
-        let phase = SessionPhase::Planned;
+        let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Resume" は含まれない（未着手なので Resume ではなく Run）
         assert!(
@@ -226,10 +256,10 @@ mod tests {
     #[test]
     fn test_session_actions_running_has_resume_not_replan() {
         // Given: Running フェーズ
-        let phase = SessionPhase::Running;
+        let session = make_session("20260306143000", "task", SessionPhase::Running);
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Resume" は含まれるが "Replan" は含まれない
         assert!(
@@ -249,10 +279,14 @@ mod tests {
     #[test]
     fn test_session_actions_failed_has_run_not_replan() {
         // Given: Failed フェーズ
-        let phase = SessionPhase::Failed("some error".to_string());
+        let session = make_session(
+            "20260306143000",
+            "task",
+            SessionPhase::Failed("some error".to_string()),
+        );
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Run" は含まれるが "Replan" は含まれない
         assert!(
@@ -267,11 +301,11 @@ mod tests {
 
     #[test]
     fn test_session_actions_completed_has_no_run_no_replan_has_reset() {
-        // Given: Completed フェーズ
-        let phase = SessionPhase::Completed;
+        // Given: Completed フェーズ、pr_url なし
+        let session = make_session("20260306143000", "task", SessionPhase::Completed);
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Run" も "Resume" も "Replan" も含まれないが "Reset to Planned" は含まれる
         assert!(
@@ -303,10 +337,10 @@ mod tests {
     #[test]
     fn test_session_actions_planned_run_before_replan() {
         // Given: Planned フェーズ
-        let phase = SessionPhase::Planned;
+        let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
-        let actions = session_actions(&phase);
+        let actions = session_actions(&session);
 
         // Then: "Run" は "Replan" より前に位置する（主要アクションが先頭）
         let run_pos = actions.iter().position(|&a| a == "Run").unwrap();
@@ -320,16 +354,21 @@ mod tests {
     #[test]
     fn test_session_actions_delete_and_back_always_at_end() {
         // Given: すべてのフェーズで Delete と Back が末尾 2 つに並ぶ
-        let phases = [
-            SessionPhase::Planned,
-            SessionPhase::Running,
-            SessionPhase::Completed,
-            SessionPhase::Failed("err".to_string()),
+        let sessions = [
+            make_session("20260306143000", "task", SessionPhase::Planned),
+            make_session("20260306143000", "task", SessionPhase::Running),
+            make_session("20260306143000", "task", SessionPhase::Completed),
+            make_session(
+                "20260306143000",
+                "task",
+                SessionPhase::Failed("err".to_string()),
+            ),
         ];
 
-        for phase in &phases {
+        for session in &sessions {
+            let phase = &session.phase;
             // When
-            let actions = session_actions(phase);
+            let actions = session_actions(session);
             let len = actions.len();
 
             // Then: 末尾が Back、その前が Delete
@@ -589,34 +628,142 @@ mod tests {
 
     #[test]
     fn test_session_actions_planned_exact() {
+        let session = make_session("20260306143000", "task", SessionPhase::Planned);
         assert_eq!(
-            session_actions(&SessionPhase::Planned),
+            session_actions(&session),
             vec!["Run", "Replan", "Delete", "Back"]
         );
     }
 
     #[test]
     fn test_session_actions_running_has_reset_to_planned() {
-        let actions = session_actions(&SessionPhase::Running);
+        let session = make_session("20260306143000", "task", SessionPhase::Running);
         assert_eq!(
-            actions,
+            session_actions(&session),
             vec!["Resume", "Reset to Planned", "Delete", "Back"]
         );
     }
 
     #[test]
     fn test_session_actions_completed_has_reset_to_planned() {
+        // Given: Completed + pr_url なし
+        let session = make_session("20260306143000", "task", SessionPhase::Completed);
         assert_eq!(
-            session_actions(&SessionPhase::Completed),
+            session_actions(&session),
             vec!["Reset to Planned", "Delete", "Back"]
         );
     }
 
     #[test]
     fn test_session_actions_failed_has_run_and_reset_to_planned() {
+        let session = make_session(
+            "20260306143000",
+            "task",
+            SessionPhase::Failed("exit 1".to_string()),
+        );
         assert_eq!(
-            session_actions(&SessionPhase::Failed("exit 1".to_string())),
+            session_actions(&session),
             vec!["Run", "Reset to Planned", "Delete", "Back"]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // session_actions — Open PR coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_completed_with_pr_url_exact_order() {
+        // Given: Completed + pr_url あり
+        let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
+        session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: 順序は ["Open PR", "Reset to Planned", "Delete", "Back"]
+        assert_eq!(
+            actions,
+            vec!["Open PR", "Reset to Planned", "Delete", "Back"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // open_pr_in_browser
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_pr_in_browser_calls_gh_view_web() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::{fs, io::Read};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let log_path = tmp.path().join("gh.log");
+
+        // fake gh: 引数をログに記録して exit 0
+        let script_path = bin_dir.join("gh");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+                log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+
+        let url = "https://github.com/owner/repo/pull/42";
+        let result = open_pr_in_browser(url);
+
+        assert!(result.is_ok(), "should succeed: {result:?}");
+
+        // ログを確認: "pr view <url> --web" が渡されていること
+        let mut log_content = String::new();
+        fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut log_content)
+            .unwrap();
+        assert!(
+            log_content.contains("pr view"),
+            "gh should receive 'pr view': {log_content}"
+        );
+        assert!(
+            log_content.contains(url),
+            "gh should receive the PR url: {log_content}"
+        );
+        assert!(
+            log_content.contains("--web"),
+            "gh should receive '--web': {log_content}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_pr_in_browser_gh_failure_returns_error() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // fake gh: 常に exit 1
+        let script_path = bin_dir.join("gh");
+        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+
+        let result = open_pr_in_browser("https://github.com/owner/repo/pull/1");
+
+        assert!(result.is_err(), "should fail when gh exits non-zero");
     }
 }
