@@ -5,7 +5,9 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::RunArgs;
-use crate::config::{DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_fail_if_no_file_changes, validate_groups};
+use crate::config::{
+    DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_fail_if_no_file_changes, validate_groups,
+};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;

@@ -843,7 +843,6 @@ steps:
         assert!(result.is_ok());
     }
 
-
     // --- New group schema: groups.<name>.steps ---
 
     #[test]
@@ -940,5 +939,4 @@ steps:
             vec!["test1", "review-after-lib", "test2", "review-after-doc"]
         );
     }
-
 }
