@@ -28,11 +28,6 @@ impl SessionPhase {
     pub fn is_runnable(&self) -> bool {
         matches!(self, Self::Planned | Self::Running | Self::Failed(_))
     }
-
-    /// Whether this phase represents an actively running session.
-    pub fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
-    }
 }
 
 /// Persisted state for a single session.
@@ -83,6 +78,17 @@ impl SessionState {
     /// Absolute path to the plan file for this session.
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
+    }
+
+    /// Resets this session back to `Planned` state so it can be re-executed from scratch.
+    ///
+    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`.
+    /// Preserves: `worktree_path`, `worktree_branch` (reused on next run).
+    pub fn reset_to_planned(&mut self) {
+        self.phase = SessionPhase::Planned;
+        self.current_step = None;
+        self.completed_at = None;
+        self.pr_url = None;
     }
 
     /// Returns a WorktreeContext if the session has a valid, existing worktree.
@@ -727,5 +733,83 @@ mod tests {
         assert!(ids.contains(&"20260308300000"));
         assert!(ids.contains(&"20260308310000"));
         assert!(ids.contains(&"20260308320000"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionState::reset_to_planned
+    // -----------------------------------------------------------------------
+
+    fn make_completed_session() -> SessionState {
+        let mut s = SessionState::new(
+            "20260309100000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "some task".to_string(),
+        );
+        s.phase = SessionPhase::Completed;
+        s.current_step = Some("final-step".to_string());
+        s.completed_at = Some("2026-03-09T10:00:00Z".to_string());
+        s.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
+        s.worktree_path = Some(PathBuf::from("/tmp/worktree"));
+        s.worktree_branch = Some("cruise/20260309100000-some-task".to_string());
+        s
+    }
+
+    #[test]
+    fn test_reset_to_planned_from_completed() {
+        // Given: フル状態の Completed セッション
+        let mut s = make_completed_session();
+        let orig_id = s.id.clone();
+        let orig_input = s.input.clone();
+        let orig_created_at = s.created_at.clone();
+        let orig_base_dir = s.base_dir.clone();
+        let orig_config_source = s.config_source.clone();
+
+        // When
+        s.reset_to_planned();
+
+        // Then: 実行状態フィールドがクリアされ、identity/worktree は保持
+        assert!(matches!(s.phase, SessionPhase::Planned));
+        assert!(s.current_step.is_none());
+        assert!(s.completed_at.is_none());
+        assert!(s.pr_url.is_none());
+        assert_eq!(s.worktree_path, Some(PathBuf::from("/tmp/worktree")));
+        assert_eq!(
+            s.worktree_branch,
+            Some("cruise/20260309100000-some-task".to_string())
+        );
+        assert_eq!(s.id, orig_id);
+        assert_eq!(s.input, orig_input);
+        assert_eq!(s.created_at, orig_created_at);
+        assert_eq!(s.base_dir, orig_base_dir);
+        assert_eq!(s.config_source, orig_config_source);
+    }
+
+    #[test]
+    fn test_reset_to_planned_from_running() {
+        // Given: Running 中のセッション
+        let mut s = SessionState::new(
+            "20260309110000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "running task".to_string(),
+        );
+        s.phase = SessionPhase::Running;
+        s.current_step = Some("implement".to_string());
+        s.worktree_path = Some(PathBuf::from("/tmp/wt2"));
+        s.worktree_branch = Some("cruise/20260309110000-running-task".to_string());
+
+        // When
+        s.reset_to_planned();
+
+        // Then: Planned に戻り、実行状態はクリア、worktree は保持
+        assert!(matches!(s.phase, SessionPhase::Planned));
+        assert!(s.current_step.is_none());
+        assert!(s.completed_at.is_none());
+        assert_eq!(s.worktree_path, Some(PathBuf::from("/tmp/wt2")));
+        assert_eq!(
+            s.worktree_branch,
+            Some("cruise/20260309110000-running-task".to_string())
+        );
     }
 }
