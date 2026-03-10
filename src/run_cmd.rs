@@ -9,14 +9,13 @@ use crate::config::{DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_groups};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
+use crate::plan_cmd::PLAN_VAR;
 use crate::session::{
     SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
 };
 use crate::variable::VariableStore;
 use crate::worktree;
 
-/// Variable name that maps to the plan file.
-const PLAN_VAR: &str = "plan";
 const PR_LANGUAGE_VAR: &str = "pr.language";
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
@@ -105,16 +104,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let mut session = manager.load(&session_id)?;
 
     // Load config from session dir.
-    let config_path = manager.sessions_dir().join(&session_id).join("config.yaml");
-    let yaml = std::fs::read_to_string(&config_path).map_err(|e| {
-        CruiseError::Other(format!(
-            "failed to read session config {}: {}",
-            config_path.display(),
-            e
-        ))
-    })?;
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    let config = manager.load_config(&session_id)?;
     validate_groups(&config)?;
 
     if args.dry_run {
@@ -964,6 +954,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
     use crate::session::WorkspaceMode;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1614,8 +1605,8 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
-            max_retries: 10,
-            rate_limit_retries: 5,
+            max_retries: DEFAULT_MAX_RETRIES,
+            rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
         };
 
@@ -1653,8 +1644,8 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
-            max_retries: 10,
-            rate_limit_retries: 5,
+            max_retries: DEFAULT_MAX_RETRIES,
+            rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
         };
 

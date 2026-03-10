@@ -215,6 +215,20 @@ impl SessionManager {
             .collect())
     }
 
+    /// Load the workflow config for a session.
+    pub fn load_config(&self, id: &str) -> Result<crate::config::WorkflowConfig> {
+        let config_path = self.sessions_dir().join(id).join("config.yaml");
+        let yaml = std::fs::read_to_string(&config_path).map_err(|e| {
+            CruiseError::Other(format!(
+                "failed to read session config {}: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
+        crate::config::WorkflowConfig::from_yaml(&yaml)
+            .map_err(|e| CruiseError::ConfigParseError(e.to_string()))
+    }
+
     /// Delete a session directory.
     pub fn delete(&self, id: &str) -> Result<()> {
         let session_dir = self.sessions_dir().join(id);
@@ -409,6 +423,7 @@ fn months_in_year(year: u16) -> [u8; 12] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::CruiseError;
     use tempfile::TempDir;
 
     #[test]
@@ -773,6 +788,52 @@ mod tests {
         assert!(ids.contains(&"20260308300000"));
         assert!(ids.contains(&"20260308310000"));
         assert!(ids.contains(&"20260308320000"));
+    }
+
+    #[test]
+    fn test_session_load_config_reads_valid_yaml() {
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260309120000".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap();
+
+        let yaml = "command:\n  - echo\nsteps:\n  test:\n    command: \"true\"\n";
+        std::fs::write(manager.sessions_dir().join(&id).join("config.yaml"), yaml).unwrap();
+
+        let config = manager.load_config(&id).unwrap();
+
+        assert_eq!(config.command, vec!["echo".to_string()]);
+        assert!(config.steps.contains_key("test"));
+    }
+
+    #[test]
+    fn test_session_load_config_invalid_yaml_returns_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260309120001".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap();
+
+        std::fs::write(
+            manager.sessions_dir().join(&id).join("config.yaml"),
+            "command:\n  - echo\nsteps: [",
+        )
+        .unwrap();
+
+        let err = manager.load_config(&id).unwrap_err();
+
+        assert!(matches!(err, CruiseError::ConfigParseError(_)));
     }
 
     // -----------------------------------------------------------------------

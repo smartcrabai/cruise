@@ -41,7 +41,7 @@ async fn run() -> error::Result<()> {
                 input: cli.input,
                 config: None,
                 dry_run: false,
-                rate_limit_retries: 5,
+                rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
             };
             plan_cmd::run(plan_args).await
         }
