@@ -180,26 +180,25 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    /// Mutex to serialize tests that mutate process-global state (cwd, env vars).
-    static GLOBAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// RAII guard that serializes access to global state and restores the working directory on drop.
     struct DirGuard {
         prev: PathBuf,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::test_support::ProcessLock,
     }
     impl DirGuard {
         fn new() -> Self {
-            let lock = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::test_support::lock_process();
             Self {
-                prev: std::env::current_dir().unwrap(),
+                prev: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
                 _lock: lock,
             }
         }
     }
     impl Drop for DirGuard {
         fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev);
+            if std::env::set_current_dir(&self.prev).is_err() {
+                let _ = std::env::set_current_dir("/");
+            }
         }
     }
 
@@ -211,20 +210,20 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
             let prev = std::env::var(key).ok();
-            // SAFETY: caller holds GLOBAL_ENV_LOCK, so no concurrent env access.
+            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
             unsafe { std::env::set_var(key, value) };
             Self { key, prev }
         }
         fn remove(key: &'static str) -> Self {
             let prev = std::env::var(key).ok();
-            // SAFETY: caller holds GLOBAL_ENV_LOCK, so no concurrent env access.
+            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
             unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: caller holds GLOBAL_ENV_LOCK, so no concurrent env access.
+            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
             unsafe {
                 if let Some(ref v) = self.prev {
                     std::env::set_var(self.key, v);

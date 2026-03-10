@@ -23,7 +23,30 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     eprintln!("{}", style(source.display_string()).dim());
 
     // Resolve input: CLI arg, or read from stdin if piped.
-    let input = resolve_input(args.input)?;
+    // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
+    // or backward-compat path where cli.rs already consumed stdin and placed
+    // the content in args.input).  This prevents inquire from attempting to
+    // read interactive input from a non-TTY file descriptor.
+    let noninteractive = !std::io::stdin().is_terminal();
+    let stdin_input = if args.input.is_none() && noninteractive {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(CruiseError::IoError)?;
+        Some(s)
+    } else {
+        None
+    };
+    let input = resolve_input(args.input, stdin_input, || {
+        if noninteractive {
+            return Err(CruiseError::Other(
+                "no input provided: stdin is not a terminal and no --input flag was given"
+                    .to_string(),
+            ));
+        }
+        prompt_for_plan_input()
+    })?;
 
     if args.dry_run {
         eprintln!(
@@ -110,11 +133,14 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         &plan_path,
         &mut vars,
         args.rate_limit_retries,
+        noninteractive,
     )
     .await
 }
 
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
+/// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
+/// without prompting so that inquire never tries to read from a non-TTY stdin.
 async fn run_approve_loop(
     config: &WorkflowConfig,
     manager: &SessionManager,
@@ -122,6 +148,7 @@ async fn run_approve_loop(
     plan_path: &std::path::Path,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
+    noninteractive: bool,
 ) -> Result<()> {
     loop {
         // Read and display the current plan.
@@ -130,6 +157,21 @@ async fn run_approve_loop(
             _ => "(plan file is empty or not found)".to_string(),
         };
         crate::display::print_bordered(&plan_content, Some("plan.md"));
+
+        if noninteractive {
+            session.phase = SessionPhase::Planned;
+            manager.save(session)?;
+            eprintln!(
+                "\n{} Session {} created.",
+                style("✓").green().bold(),
+                session.id
+            );
+            eprintln!(
+                "  Run with: {}",
+                style(format!("cruise run {}", session.id)).cyan()
+            );
+            return Ok(());
+        }
 
         let options = vec!["Approve", "Fix", "Ask", "Execute now"];
         let selected = match inquire::Select::new("Action:", options).prompt() {
@@ -246,22 +288,30 @@ async fn run_ask_plan(
     Ok(())
 }
 
-/// Resolve user input from CLI arg or stdin pipe.
-fn resolve_input(arg: Option<String>) -> Result<String> {
+fn resolve_input<F>(
+    arg: Option<String>,
+    stdin_input: Option<String>,
+    interactive: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
     if let Some(input) = arg {
         return Ok(input);
     }
-    // Read from stdin if piped.
-    if !std::io::stdin().is_terminal() {
-        use std::io::Read;
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input).ok();
+
+    if let Some(input) = stdin_input {
         let trimmed = input.trim().to_string();
         if !trimmed.is_empty() {
             return Ok(trimmed);
         }
     }
-    // Prompt interactively.
+
+    interactive()
+}
+
+/// Prompt interactively for the initial plan input.
+fn prompt_for_plan_input() -> Result<String> {
     inquire::Text::new("What would you like to implement?")
         .prompt()
         .map_err(|e| CruiseError::Other(format!("input error: {e}")))
@@ -273,7 +323,26 @@ mod tests {
 
     #[test]
     fn test_resolve_input_from_arg() {
-        let result = resolve_input(Some("add feature X".to_string()));
+        // Given: a CLI arg is provided
+        let result = resolve_input(Some("add feature X".to_string()), None, || {
+            panic!("interactive prompt should not run")
+        });
         assert_eq!(result.unwrap(), "add feature X");
+    }
+
+    #[test]
+    fn test_resolve_input_from_stdin() {
+        // Given: stdin input is present and no CLI arg is provided
+        let result = resolve_input(None, Some("  add feature from pipe\n".to_string()), || {
+            panic!("interactive prompt should not run")
+        });
+        assert_eq!(result.unwrap(), "add feature from pipe");
+    }
+
+    #[test]
+    fn test_resolve_input_without_arg_or_stdin_uses_interactive_result() {
+        // Given: no CLI arg or stdin input is available
+        let result = resolve_input(None, None, || Ok("resume in place".to_string()));
+        assert_eq!(result.unwrap(), "resume in place");
     }
 }

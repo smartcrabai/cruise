@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use console::style;
 use inquire::InquireError;
@@ -10,7 +10,7 @@ use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::session::{
-    SessionManager, SessionPhase, SessionState, current_iso8601, get_cruise_home,
+    SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
 };
 use crate::variable::VariableStore;
 use crate::worktree;
@@ -21,6 +21,51 @@ const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceOverride {
+    RespectSession,
+    ForceWorktree,
+}
+
+enum ExecutionWorkspace {
+    Worktree {
+        ctx: worktree::WorktreeContext,
+        reused: bool,
+    },
+    CurrentBranch {
+        path: PathBuf,
+    },
+}
+
+impl ExecutionWorkspace {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Worktree { ctx, .. } => &ctx.path,
+            Self::CurrentBranch { path } => path,
+        }
+    }
+}
+
+struct CurrentDirGuard {
+    original: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn capture() -> Result<Self> {
+        Ok(Self {
+            original: std::env::current_dir()?,
+        })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        if std::env::set_current_dir(&self.original).is_err() {
+            let _ = std::env::set_current_dir("/");
+        }
+    }
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.all {
         if args.session.is_some() {
@@ -30,6 +75,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
         return run_all(args).await;
     }
+
+    run_single(args, WorkspaceOverride::RespectSession).await
+}
+
+async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
+    let _current_dir_guard = CurrentDirGuard::capture()?;
 
     let manager = SessionManager::new(get_cruise_home()?);
 
@@ -59,7 +110,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
         return print_dry_run(&config, session.current_step.as_deref());
     }
 
-    ensure_gh_available()?;
+    let effective_workspace_mode = match workspace_override {
+        WorkspaceOverride::RespectSession => session.workspace_mode,
+        WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
+    };
+
+    if effective_workspace_mode == WorkspaceMode::Worktree {
+        ensure_gh_available()?;
+    }
 
     // Determine start step.
     let start_step = session.current_step.clone().map(Ok).unwrap_or_else(|| {
@@ -92,37 +150,41 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let base_dir = session.base_dir.clone();
     std::env::set_current_dir(&base_dir)?;
 
-    // Create or reuse worktree at ~/.cruise/worktrees/{session_id}/.
-    let worktrees_dir = manager.worktrees_dir();
-    let (ctx, reused) = worktree::setup_session_worktree(
-        &base_dir,
-        &session_id,
-        &session.input,
-        &worktrees_dir,
-        session.worktree_branch.as_deref(),
-    )?;
-    let suffix = if reused { " (reused)" } else { "" };
-    eprintln!(
-        "{} worktree: {}{}",
-        style("→").cyan(),
-        ctx.path.display(),
-        suffix
-    );
+    let execution_workspace =
+        prepare_execution_workspace(&manager, &session, effective_workspace_mode)?;
 
-    session.worktree_path = Some(ctx.path.clone());
-    session.worktree_branch = Some(ctx.branch.clone());
+    match &execution_workspace {
+        ExecutionWorkspace::Worktree { ctx, reused } => {
+            let suffix = if *reused { " (reused)" } else { "" };
+            eprintln!(
+                "{} worktree: {}{}",
+                style("→").cyan(),
+                ctx.path.display(),
+                suffix
+            );
+            session.worktree_path = Some(ctx.path.clone());
+            session.worktree_branch = Some(ctx.branch.clone());
+        }
+        ExecutionWorkspace::CurrentBranch { path } => {
+            eprintln!("{} current branch: {}", style("→").cyan(), path.display());
+            session.worktree_path = None;
+            session.worktree_branch = None;
+            session.pr_url = None;
+        }
+    }
+
     session.phase = SessionPhase::Running;
     manager.save(&session)?;
 
-    // chdir to worktree.
-    std::env::set_current_dir(&ctx.path)?;
+    // chdir to the execution workspace.
+    std::env::set_current_dir(execution_workspace.path())?;
 
     // Set up variables.
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path);
 
-    let mut tracker = FileTracker::with_root(ctx.path.clone());
+    let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
 
     // Use RefCell for interior mutability in the callback.
     let session_cell = RefCell::new(&mut session);
@@ -145,100 +207,104 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let session = session_cell.into_inner();
 
     let overall_result = match exec_result {
-        Ok(_) => {
-            let (pr_title, pr_body) = match vars.resolve(CREATE_PR_PROMPT_TEMPLATE) {
-                Err(e) => {
-                    eprintln!("warning: PR prompt resolution failed: {}", e);
-                    (String::new(), String::new())
-                }
-                Ok(pr_prompt) => {
-                    let pr_model = config.model.as_deref();
-                    let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
-                    let (resolved_command, model_arg) = if has_placeholder {
-                        (resolve_command_with_model(&config.command, pr_model), None)
-                    } else {
-                        (config.command.clone(), pr_model.map(str::to_string))
-                    };
-                    let spinner = crate::spinner::Spinner::start("Generating PR description...");
-                    let env = std::collections::HashMap::new();
-                    let llm_output = {
-                        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
-                        match crate::step::prompt::run_prompt(
-                            &resolved_command,
-                            model_arg.as_deref(),
-                            &pr_prompt,
-                            args.rate_limit_retries,
-                            &env,
-                            Some(&on_retry),
-                        )
-                        .await
-                        {
-                            Ok(r) => r.output,
-                            Err(e) => {
-                                eprintln!("warning: PR description generation failed: {}", e);
-                                String::new()
-                            }
-                        }
-                    };
-                    drop(spinner);
-                    let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
-                    if pr_title.is_empty() && !llm_output.trim().is_empty() {
-                        let truncated: String = llm_output.chars().take(500).collect();
-                        eprintln!(
-                            "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
-                            style("⚠").yellow(),
-                            truncated
-                        );
+        Ok(_) => match &execution_workspace {
+            ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
+            ExecutionWorkspace::Worktree { ctx, .. } => {
+                let (pr_title, pr_body) = match vars.resolve(CREATE_PR_PROMPT_TEMPLATE) {
+                    Err(e) => {
+                        eprintln!("warning: PR prompt resolution failed: {}", e);
+                        (String::new(), String::new())
                     }
-                    (pr_title, pr_body)
-                }
-            };
-
-            match attempt_pr_creation(&ctx, &session.input, &pr_title, &pr_body) {
-                Ok(pr_attempt) => {
-                    pr_attempt.report();
-                    match pr_attempt {
-                        PrAttemptOutcome::Created { url, .. } => {
-                            eprintln!("{} PR created: {}", style("✓").green().bold(), url);
-                            if let Some(number) = extract_last_path_segment(&url) {
-                                vars.set_named_value(PR_NUMBER_VAR, number);
-                            }
-                            vars.set_named_value(PR_URL_VAR, url.clone());
-                            session.pr_url = Some(url);
-
-                            // Run after_pr steps if any.
-                            if let Some(first_step) = config.after_pr.keys().next() {
-                                let mut after_config = config.clone();
-                                after_config.steps = std::mem::take(&mut after_config.after_pr);
-                                if let Err(e) = execute_steps(
-                                    &after_config,
-                                    &mut vars,
-                                    &mut tracker,
-                                    first_step,
-                                    args.max_retries,
-                                    args.rate_limit_retries,
-                                    &|_| Ok(()),
-                                )
-                                .await
-                                {
-                                    eprintln!("warning: after-pr steps failed: {}", e);
+                    Ok(pr_prompt) => {
+                        let pr_model = config.model.as_deref();
+                        let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
+                        let (resolved_command, model_arg) = if has_placeholder {
+                            (resolve_command_with_model(&config.command, pr_model), None)
+                        } else {
+                            (config.command.clone(), pr_model.map(str::to_string))
+                        };
+                        let spinner =
+                            crate::spinner::Spinner::start("Generating PR description...");
+                        let env = std::collections::HashMap::new();
+                        let llm_output = {
+                            let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
+                            match crate::step::prompt::run_prompt(
+                                &resolved_command,
+                                model_arg.as_deref(),
+                                &pr_prompt,
+                                args.rate_limit_retries,
+                                &env,
+                                Some(&on_retry),
+                            )
+                            .await
+                            {
+                                Ok(r) => r.output,
+                                Err(e) => {
+                                    eprintln!("warning: PR description generation failed: {}", e);
+                                    String::new()
                                 }
                             }
-                            Ok(())
+                        };
+                        drop(spinner);
+                        let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
+                        if pr_title.is_empty() && !llm_output.trim().is_empty() {
+                            let truncated: String = llm_output.chars().take(500).collect();
+                            eprintln!(
+                                "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
+                                style("⚠").yellow(),
+                                truncated
+                            );
                         }
-                        PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
-                            "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
-                            ctx.branch
-                        ))),
-                        PrAttemptOutcome::CreateFailed { error, .. } => {
-                            eprintln!("warning: PR creation failed: {}", error);
-                            Ok(())
+                        (pr_title, pr_body)
+                    }
+                };
+
+                match attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body) {
+                    Ok(pr_attempt) => {
+                        pr_attempt.report();
+                        match pr_attempt {
+                            PrAttemptOutcome::Created { url, .. } => {
+                                eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                                if let Some(number) = extract_last_path_segment(&url) {
+                                    vars.set_named_value(PR_NUMBER_VAR, number);
+                                }
+                                vars.set_named_value(PR_URL_VAR, url.clone());
+                                session.pr_url = Some(url);
+
+                                // Run after_pr steps if any.
+                                if let Some(first_step) = config.after_pr.keys().next() {
+                                    let mut after_config = config.clone();
+                                    after_config.steps = std::mem::take(&mut after_config.after_pr);
+                                    if let Err(e) = execute_steps(
+                                        &after_config,
+                                        &mut vars,
+                                        &mut tracker,
+                                        first_step,
+                                        args.max_retries,
+                                        args.rate_limit_retries,
+                                        &|_| Ok(()),
+                                    )
+                                    .await
+                                    {
+                                        eprintln!("warning: after-pr steps failed: {}", e);
+                                    }
+                                }
+                                Ok(())
+                            }
+                            PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
+                                "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
+                                ctx.branch
+                            ))),
+                            PrAttemptOutcome::CreateFailed { error, .. } => {
+                                eprintln!("warning: PR creation failed: {}", error);
+                                Ok(())
+                            }
                         }
                     }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
             }
-        }
+        },
         Err(e) => Err(e),
     };
 
@@ -271,7 +337,7 @@ async fn run_all(args: RunArgs) -> Result<()> {
             rate_limit_retries: args.rate_limit_retries,
             dry_run: args.dry_run,
         };
-        if let Err(e) = Box::pin(run(session_args)).await {
+        if let Err(e) = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await {
             eprintln!("warning: session {} encountered an error: {e}", session.id);
         }
         results.push(manager.load(&session.id)?);
@@ -283,6 +349,90 @@ async fn run_all(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn prepare_execution_workspace(
+    manager: &SessionManager,
+    session: &SessionState,
+    workspace_mode: WorkspaceMode,
+) -> Result<ExecutionWorkspace> {
+    match workspace_mode {
+        WorkspaceMode::Worktree => {
+            let worktrees_dir = manager.worktrees_dir();
+            let (ctx, reused) = worktree::setup_session_worktree(
+                &session.base_dir,
+                &session.id,
+                &session.input,
+                &worktrees_dir,
+                session.worktree_branch.as_deref(),
+            )?;
+            Ok(ExecutionWorkspace::Worktree { ctx, reused })
+        }
+        WorkspaceMode::CurrentBranch => {
+            validate_current_branch_session(session)?;
+            Ok(ExecutionWorkspace::CurrentBranch {
+                path: session.base_dir.clone(),
+            })
+        }
+    }
+}
+
+fn validate_current_branch_session(session: &SessionState) -> Result<()> {
+    let current_branch = current_branch_name(&session.base_dir)?;
+
+    if let Some(target_branch) = session.target_branch.as_deref()
+        && current_branch != target_branch
+    {
+        return Err(CruiseError::Other(format!(
+            "current-branch mode expected branch `{target_branch}`, but found `{current_branch}`"
+        )));
+    }
+
+    // Only enforce a clean working tree at the start of a fresh session; on
+    // resume (current_step.is_some()) the tree may already contain in-progress
+    // changes left by the previous run.
+    if session.current_step.is_none() && is_working_tree_dirty(&session.base_dir)? {
+        return Err(CruiseError::Other(
+            "current-branch mode requires a clean working tree, but the repository is dirty"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn current_branch_name(repo_dir: &Path) -> Result<String> {
+    let branch = git_stdout(
+        repo_dir,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "git rev-parse --abbrev-ref HEAD failed",
+    )?;
+
+    if branch == "HEAD" {
+        return Err(CruiseError::Other(
+            "current-branch mode requires an attached branch; HEAD is detached".to_string(),
+        ));
+    }
+
+    Ok(branch)
+}
+
+fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git status --porcelain: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::Other(format!(
+            "git status --porcelain failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,28 +940,27 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::WorkspaceMode;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use tempfile::TempDir;
 
-    static GLOBAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct PathEnvGuard {
         prev: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::test_support::ProcessLock,
     }
 
     impl PathEnvGuard {
         fn prepend(dir: &Path) -> Self {
-            let lock = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::test_support::lock_process();
             let prev = std::env::var_os("PATH");
             let mut paths = vec![dir.to_path_buf()];
             if let Some(ref existing) = prev {
                 paths.extend(std::env::split_paths(existing));
             }
             let joined = std::env::join_paths(paths).expect("failed to join PATH");
-            // SAFETY: the test holds GLOBAL_ENV_LOCK, so no other test mutates PATH concurrently.
+            // SAFETY: the test holds GLOBAL_PROCESS_LOCK, so no other test mutates PATH concurrently.
             unsafe { std::env::set_var("PATH", &joined) };
             Self { prev, _lock: lock }
         }
@@ -819,7 +968,7 @@ mod tests {
 
     impl Drop for PathEnvGuard {
         fn drop(&mut self) {
-            // SAFETY: the test holds GLOBAL_ENV_LOCK for the lifetime of the guard.
+            // SAFETY: the test holds GLOBAL_PROCESS_LOCK for the lifetime of the guard.
             unsafe {
                 if let Some(ref prev) = self.prev {
                     std::env::set_var("PATH", prev);
@@ -915,6 +1064,147 @@ mod tests {
                 url
             );
             fs::write(&script_path, script).unwrap();
+        }
+    }
+
+    fn install_logging_gh(bin_dir: &Path, log_path: &Path, url: &str) {
+        fs::create_dir_all(bin_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = bin_dir.join("gh");
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'gh version test'\n  exit 0\nfi\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then\n  printf '%s\\n' \"{}\"\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s\\n' \"{}\"\nfi\n",
+                log_path.display(),
+                url,
+                url
+            );
+            fs::write(&script_path, script).unwrap();
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let script_path = bin_dir.join("gh.cmd");
+            let script = format!(
+                "@echo off\r\nif \"%1\"==\"--version\" (\r\n  echo gh version test\r\n  exit /b 0\r\n)\r\necho %*>>\"{}\"\r\nif \"%1\"==\"pr\" if \"%2\"==\"create\" echo {}\r\nif \"%1\"==\"pr\" if \"%2\"==\"view\" echo {}\r\n",
+                log_path.display(),
+                url,
+                url
+            );
+            fs::write(&script_path, script).unwrap();
+        }
+    }
+
+    struct ProcessStateGuard {
+        prev_home: Option<std::ffi::OsString>,
+        prev_path: Option<std::ffi::OsString>,
+        prev_dir: PathBuf,
+        _lock: crate::test_support::ProcessLock,
+    }
+
+    impl ProcessStateGuard {
+        fn new(home: &Path) -> Self {
+            let lock = crate::test_support::lock_process();
+            let prev_home = std::env::var_os("HOME");
+            let prev_path = std::env::var_os("PATH");
+            let prev_dir = std::env::current_dir().expect("failed to capture current dir");
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self {
+                prev_home,
+                prev_path,
+                prev_dir,
+                _lock: lock,
+            }
+        }
+
+        fn prepend_path(&mut self, dir: &Path) {
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            let joined = std::env::join_paths(paths).expect("failed to join PATH");
+            unsafe {
+                std::env::set_var("PATH", joined);
+            }
+        }
+
+        fn set_current_dir(&mut self, dir: &Path) {
+            std::env::set_current_dir(dir).expect("failed to set current dir");
+        }
+    }
+
+    impl Drop for ProcessStateGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.prev_dir).is_err() {
+                let _ = std::env::set_current_dir("/");
+            }
+            unsafe {
+                if let Some(ref prev_home) = self.prev_home {
+                    std::env::set_var("HOME", prev_home);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+
+                if let Some(ref prev_path) = self.prev_path {
+                    std::env::set_var("PATH", prev_path);
+                } else {
+                    std::env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    fn create_repo_with_origin(tmp: &TempDir) -> PathBuf {
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let bare = tmp.path().join("origin.git");
+        run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
+        run_git_ok(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+
+        repo
+    }
+
+    fn make_current_branch_session(
+        id: &str,
+        repo: &Path,
+        input: &str,
+        target_branch: &str,
+    ) -> SessionState {
+        let mut session = SessionState::new(
+            id.to_string(),
+            repo.to_path_buf(),
+            "cruise.yaml".to_string(),
+            input.to_string(),
+        );
+        session.workspace_mode = WorkspaceMode::CurrentBranch;
+        session.target_branch = Some(target_branch.to_string());
+        session
+    }
+
+    fn write_config(manager: &SessionManager, session_id: &str, yaml: &str) {
+        let session_dir = manager.sessions_dir().join(session_id);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    fn single_command_config(step_name: &str, command: &str) -> String {
+        format!("command:\n  - cat\nsteps:\n  {step_name}:\n    command: |\n      {command}\n")
+    }
+
+    fn run_args(session_id: &str) -> RunArgs {
+        RunArgs {
+            session: Some(session_id.to_string()),
+            all: false,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            dry_run: false,
         }
     }
 
@@ -1275,7 +1565,7 @@ Previously, emojis were used as user icons."#;
 
         // Hold the lock in a narrow scope so it is dropped before the await.
         let orig_home = {
-            let _guard = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = crate::test_support::lock_process();
             let orig = std::env::var("HOME").ok();
             // SAFETY: only modified within this test and restored before exit.
             unsafe {
@@ -1298,7 +1588,7 @@ Previously, emojis were used as user icons."#;
 
         // Restore HOME
         {
-            let _guard = GLOBAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = crate::test_support::lock_process();
             unsafe {
                 match orig_home {
                     Some(h) => std::env::set_var("HOME", h),
@@ -1309,6 +1599,302 @@ Previously, emojis were used as user icons."#;
 
         // Then: returns Ok(()) without error
         assert!(result.is_ok(), "expected Ok but got: {:?}", result.err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_keeps_changes_in_base_repo_and_skips_pr_flow() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309120000";
+        let session = make_current_branch_session(session_id, &repo, "edit in place", "main");
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf direct > current-branch.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/99");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_ok(),
+            "expected current-branch mode to succeed: {result:?}"
+        );
+
+        let loaded = manager.load(session_id).unwrap();
+        assert!(
+            loaded.worktree_path.is_none(),
+            "current-branch mode should not persist a worktree path"
+        );
+        assert!(
+            loaded.worktree_branch.is_none(),
+            "current-branch mode should not persist a worktree branch"
+        );
+        assert!(
+            loaded.pr_url.is_none(),
+            "current-branch mode should skip PR creation"
+        );
+        assert!(
+            repo.join("current-branch.txt").exists(),
+            "current-branch mode should write changes into the base repository"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("current-branch.txt")).unwrap(),
+            "direct"
+        );
+        assert!(
+            git_stdout_ok(&repo, &["status", "--short"]).contains("current-branch.txt"),
+            "current-branch mode should leave the new file uncommitted in the base repository"
+        );
+        assert!(
+            !manager.worktrees_dir().join(session_id).exists(),
+            "current-branch mode should not create a cruise worktree directory"
+        );
+        assert!(
+            !gh_log.exists(),
+            "current-branch mode should not invoke gh at all"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_errors_when_branch_has_changed() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309121000";
+        let session =
+            make_current_branch_session(session_id, &repo, "stay on planned branch", "main");
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf nope > wrong-branch.txt"),
+        );
+
+        run_git_ok(&repo, &["checkout", "-b", "other-branch"]);
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/100");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_err(),
+            "expected current-branch mode to reject a branch mismatch"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("branch"), "unexpected error: {message}");
+        assert!(message.contains("main"), "unexpected error: {message}");
+        assert!(
+            message.contains("other-branch"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_errors_when_working_tree_is_dirty() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309122000";
+        let session = make_current_branch_session(session_id, &repo, "edit dirty tree", "main");
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf more > new-file.txt"),
+        );
+
+        fs::write(repo.join("already-dirty.txt"), "dirty").unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/101");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_err(),
+            "expected current-branch mode to reject a dirty working tree"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("dirty"), "unexpected error: {message}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_errors_on_detached_head() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309123000";
+        let session = make_current_branch_session(session_id, &repo, "edit detached head", "main");
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf nope > detached.txt"),
+        );
+
+        run_git_ok(&repo, &["checkout", "--detach"]);
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/102");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_err(),
+            "expected current-branch mode to reject detached HEAD"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("detached"), "unexpected error: {message}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_resumes_from_saved_step_without_pr_flow() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309124000";
+        let mut session = make_current_branch_session(session_id, &repo, "resume in place", "main");
+        session.phase = SessionPhase::Running;
+        session.current_step = Some("second".to_string());
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            r#"command:
+  - cat
+steps:
+  first:
+    command: |
+      printf first > first.txt
+  second:
+    command: |
+      printf second > second.txt
+"#,
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/103");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_ok(),
+            "expected current-branch resume to succeed: {result:?}"
+        );
+
+        let loaded = manager.load(session_id).unwrap();
+        assert!(
+            loaded.worktree_path.is_none(),
+            "current-branch resume should not persist a worktree path"
+        );
+        assert!(
+            loaded.pr_url.is_none(),
+            "current-branch resume should skip PR creation"
+        );
+        assert!(
+            !repo.join("first.txt").exists(),
+            "resume should continue from the saved step instead of rerunning earlier steps"
+        );
+        assert!(
+            repo.join("second.txt").exists(),
+            "resume should execute the saved current step in the base repository"
+        );
+        assert!(
+            !gh_log.exists(),
+            "current-branch resume should not invoke gh"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_all_forces_worktree_even_for_current_branch_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let session_id = "20260309125000";
+        let session = make_current_branch_session(session_id, &repo, "batch run", "main");
+        manager.create(&session).unwrap();
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf batch > run-all.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/104");
+        process.prepend_path(&bin_dir);
+
+        let result = run(RunArgs {
+            session: None,
+            all: true,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            dry_run: false,
+        })
+        .await;
+        assert!(result.is_ok(), "expected run --all to succeed: {result:?}");
+
+        let loaded = manager.load(session_id).unwrap();
+        assert!(
+            loaded.worktree_path.is_some(),
+            "run --all should still use a worktree execution path"
+        );
+        assert!(
+            loaded.worktree_branch.is_some(),
+            "run --all should assign a worktree branch"
+        );
+        assert_eq!(
+            loaded.pr_url.as_deref(),
+            Some("https://github.com/owner/repo/pull/104"),
+            "run --all should keep the existing PR flow"
+        );
+        assert!(
+            !repo.join("run-all.txt").exists(),
+            "run --all should not write changes into the base repository"
+        );
+        assert!(
+            manager
+                .worktrees_dir()
+                .join(session_id)
+                .join("run-all.txt")
+                .exists(),
+            "run --all should write changes inside the session worktree"
+        );
+        assert!(
+            fs::read_to_string(&gh_log)
+                .unwrap_or_default()
+                .contains("pr create --head"),
+            "run --all should still invoke PR creation through gh"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -620,6 +620,7 @@ mod tests {
         max_retries: usize,
         rate_limit_retries: usize,
     ) -> Result<ExecutionResult> {
+        let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(std::env::current_dir().unwrap());
