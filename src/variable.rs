@@ -299,6 +299,59 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_double_brace() {
+        // Given: template "{{input}}" — outer `{` opens a var whose name is "{input"
+        let store = VariableStore::new("hello".to_string());
+        // The parser sees `{` → starts collecting; collects `{input` until `}` is hit.
+        // Then calls get_variable("{input") which is undefined.
+        let err = store.resolve("{{input}}").unwrap_err();
+        assert!(
+            matches!(err, crate::error::CruiseError::UndefinedVariable(ref n) if n == "{input"),
+            "expected UndefinedVariable(\"{{input\"), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_empty_var_name() {
+        // Given: template "{}" — empty variable name
+        let store = VariableStore::new("hello".to_string());
+        // get_variable("") falls through to named lookup, nothing registered → UndefinedVariable
+        let err = store.resolve("{}").unwrap_err();
+        assert!(
+            matches!(err, crate::error::CruiseError::UndefinedVariable(ref n) if n.is_empty()),
+            "expected UndefinedVariable(\"\"), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_trailing_open_brace() {
+        // Given: template "trailing {" — no closing brace
+        let store = VariableStore::new("hello".to_string());
+        // Parser hits `{`, collects until end-of-string, closed=false → emits literally.
+        let result = store.resolve("trailing {").unwrap();
+        assert_eq!(result, "trailing {");
+    }
+
+    #[test]
+    fn test_resolve_nested_dot_path() {
+        // Given: store with "foo.bar.baz" registered as a named value
+        let mut store = VariableStore::new("input".to_string());
+        store.set_named_value("foo.bar.baz", "deep".to_string());
+        // When: resolved
+        let result = store.resolve("{foo.bar.baz}").unwrap();
+        // Then: resolves correctly
+        assert_eq!(result, "deep");
+
+        // And: an unregistered dotted name returns UndefinedVariable
+        let store2 = VariableStore::new("input".to_string());
+        let err = store2.resolve("{foo.bar.baz}").unwrap_err();
+        assert!(
+            matches!(err, crate::error::CruiseError::UndefinedVariable(ref n) if n == "foo.bar.baz"),
+            "expected UndefinedVariable(\"foo.bar.baz\"), got: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_set_named_value_both_pr_vars() {
         // Given: both pr.url and pr.number are set
         let mut store = VariableStore::new("input".to_string());

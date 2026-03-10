@@ -5,9 +5,7 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::RunArgs;
-use crate::config::{
-    DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_fail_if_no_file_changes, validate_groups,
-};
+use crate::config::{DEFAULT_PR_LANGUAGE, validate_fail_if_no_file_changes, validate_groups};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -16,6 +14,7 @@ use crate::session::{
     SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
 };
 use crate::variable::VariableStore;
+use crate::workflow::CompiledWorkflow;
 use crate::worktree;
 
 const PR_LANGUAGE_VAR: &str = "pr.language";
@@ -68,8 +67,8 @@ impl Drop for CurrentDirGuard {
     }
 }
 
-fn build_pr_prompt(vars: &mut VariableStore, config: &WorkflowConfig) -> Result<String> {
-    let lang = config.pr_language.trim();
+fn build_pr_prompt(vars: &mut VariableStore, compiled: &CompiledWorkflow) -> Result<String> {
+    let lang = compiled.pr_language.trim();
     let lang = if lang.is_empty() {
         DEFAULT_PR_LANGUAGE
     } else {
@@ -115,6 +114,8 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         return print_dry_run(&config, session.current_step.as_deref());
     }
 
+    let compiled = crate::workflow::compile(config)?;
+
     let effective_workspace_mode = match workspace_override {
         WorkspaceOverride::RespectSession => session.workspace_mode,
         WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
@@ -126,7 +127,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     // Determine start step.
     let start_step = session.current_step.clone().map(Ok).unwrap_or_else(|| {
-        config
+        compiled
             .steps
             .keys()
             .next()
@@ -195,7 +196,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let session_cell = RefCell::new(&mut session);
 
     let exec_result = execute_steps(
-        &config,
+        &compiled,
         &mut vars,
         &mut tracker,
         &start_step,
@@ -215,18 +216,22 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         Ok(_) => match &execution_workspace {
             ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
             ExecutionWorkspace::Worktree { ctx, .. } => {
-                let (pr_title, pr_body) = match build_pr_prompt(&mut vars, &config) {
+                let (pr_title, pr_body) = match build_pr_prompt(&mut vars, &compiled) {
                     Err(e) => {
                         eprintln!("warning: PR prompt resolution failed: {}", e);
                         (String::new(), String::new())
                     }
                     Ok(pr_prompt) => {
-                        let pr_model = config.model.as_deref();
-                        let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
+                        let pr_model = compiled.model.as_deref();
+                        let has_placeholder =
+                            compiled.command.iter().any(|s| s.contains("{model}"));
                         let (resolved_command, model_arg) = if has_placeholder {
-                            (resolve_command_with_model(&config.command, pr_model), None)
+                            (
+                                resolve_command_with_model(&compiled.command, pr_model),
+                                None,
+                            )
                         } else {
-                            (config.command.clone(), pr_model.map(str::to_string))
+                            (compiled.command.clone(), pr_model.map(str::to_string))
                         };
                         let spinner =
                             crate::spinner::Spinner::start("Generating PR description...");
@@ -277,11 +282,16 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                                 session.pr_url = Some(url);
 
                                 // Run after_pr steps if any.
-                                if let Some(first_step) = config.after_pr.keys().next() {
-                                    let mut after_config = config.clone();
-                                    after_config.steps = std::mem::take(&mut after_config.after_pr);
+                                if let Some(first_step) = compiled.after_pr.keys().next() {
+                                    let after_compiled = CompiledWorkflow {
+                                        steps: compiled.after_pr.clone(),
+                                        invocations: compiled.after_pr_invocations.clone(),
+                                        after_pr: indexmap::IndexMap::new(),
+                                        after_pr_invocations: std::collections::HashMap::new(),
+                                        ..compiled.clone()
+                                    };
                                     if let Err(e) = execute_steps(
-                                        &after_config,
+                                        &after_compiled,
                                         &mut vars,
                                         &mut tracker,
                                         first_step,
@@ -1195,13 +1205,14 @@ mod tests {
         }
     }
 
-    fn make_pr_prompt_config(pr_language_yaml: Option<&str>) -> WorkflowConfig {
+    fn make_pr_prompt_config(pr_language_yaml: Option<&str>) -> CompiledWorkflow {
         let mut yaml = String::from("command: [claude, -p]\n");
         if let Some(pr_language_yaml) = pr_language_yaml {
             yaml.push_str(pr_language_yaml);
         }
         yaml.push_str("steps:\n  implement:\n    prompt: test\n");
-        WorkflowConfig::from_yaml(&yaml).unwrap()
+        let config = crate::config::WorkflowConfig::from_yaml(&yaml).unwrap();
+        crate::workflow::compile(config).unwrap()
     }
 
     fn make_pr_prompt_vars() -> VariableStore {
