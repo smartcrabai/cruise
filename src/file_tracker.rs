@@ -5,6 +5,16 @@ use walkdir::WalkDir;
 
 use crate::error::Result;
 
+/// Compute the SHA-256 digest of arbitrary bytes.
+pub(crate) fn sha256_digest(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&result);
+    hash
+}
+
 /// SHA-256 digest of a single file.
 type FileHash = [u8; 32];
 
@@ -110,12 +120,7 @@ fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
 /// Compute the SHA-256 hash of a file.
 fn hash_file(path: &Path) -> Result<FileHash> {
     let content = std::fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&content);
-    let result = hasher.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&result);
-    Ok(hash)
+    Ok(sha256_digest(&content))
 }
 
 /// Return true if `path` contains an excluded directory component.

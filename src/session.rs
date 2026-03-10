@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CruiseError, Result};
 
 /// Phase of a session's lifecycle.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum SessionPhase {
     Planned,
     Running,
@@ -39,7 +39,7 @@ pub enum WorkspaceMode {
 }
 
 /// Persisted state for a single session.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SessionState {
     /// Session ID (format: YYYYMMDDHHmmss).
     pub id: String,
@@ -70,6 +70,39 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionStateFingerprint([u8; 32]);
+
+impl SessionStateFingerprint {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self(crate::file_tracker::sha256_digest(bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionFileContents {
+    Missing,
+    Parsed {
+        state: Box<SessionState>,
+        fingerprint: SessionStateFingerprint,
+    },
+    Invalid {
+        fingerprint: SessionStateFingerprint,
+        error: String,
+    },
+}
+
+impl SessionFileContents {
+    pub(crate) fn fingerprint(&self) -> Option<SessionStateFingerprint> {
+        match self {
+            Self::Missing => None,
+            Self::Parsed { fingerprint, .. } | Self::Invalid { fingerprint, .. } => {
+                Some(*fingerprint)
+            }
+        }
+    }
 }
 
 impl SessionState {
@@ -157,22 +190,69 @@ impl SessionManager {
 
     /// Load a session by ID.
     pub fn load(&self, id: &str) -> Result<SessionState> {
-        let path = self.sessions_dir().join(id).join("state.json");
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| CruiseError::SessionError(format!("failed to load session {id}: {e}")))?;
-        serde_json::from_str(&json)
-            .map_err(|e| CruiseError::SessionError(format!("failed to parse session {id}: {e}")))
+        let (state, _) = self.load_with_fingerprint(id)?;
+        Ok(state)
     }
 
     /// Persist a session state to disk.
     pub fn save(&self, state: &SessionState) -> Result<()> {
-        let session_dir = self.sessions_dir().join(&state.id);
-        std::fs::create_dir_all(&session_dir)?;
-        let path = session_dir.join("state.json");
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| CruiseError::SessionError(format!("serialize error: {e}")))?;
-        std::fs::write(&path, json)?;
+        self.save_with_fingerprint(state)?;
         Ok(())
+    }
+
+    pub(crate) fn state_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir().join(id).join("state.json")
+    }
+
+    pub(crate) fn load_with_fingerprint(
+        &self,
+        id: &str,
+    ) -> Result<(SessionState, SessionStateFingerprint)> {
+        let path = self.state_path(id);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| CruiseError::SessionError(format!("failed to load session {id}: {e}")))?;
+        let fingerprint = SessionStateFingerprint::from_bytes(&bytes);
+        let state = serde_json::from_slice(&bytes)
+            .map_err(|e| CruiseError::SessionError(format!("failed to parse session {id}: {e}")))?;
+        Ok((state, fingerprint))
+    }
+
+    pub(crate) fn inspect_state_file(&self, id: &str) -> Result<SessionFileContents> {
+        let path = self.state_path(id);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SessionFileContents::Missing);
+            }
+            Err(e) => {
+                return Err(CruiseError::SessionError(format!(
+                    "failed to inspect session {id}: {e}"
+                )));
+            }
+        };
+        let fingerprint = SessionStateFingerprint::from_bytes(&bytes);
+        match serde_json::from_slice(&bytes) {
+            Ok(state) => Ok(SessionFileContents::Parsed {
+                state: Box::new(state),
+                fingerprint,
+            }),
+            Err(e) => Ok(SessionFileContents::Invalid {
+                fingerprint,
+                error: e.to_string(),
+            }),
+        }
+    }
+
+    pub(crate) fn save_with_fingerprint(
+        &self,
+        state: &SessionState,
+    ) -> Result<SessionStateFingerprint> {
+        let path = self.state_path(&state.id);
+        let json = serde_json::to_vec_pretty(state)
+            .map_err(|e| CruiseError::SessionError(format!("serialize error: {e}")))?;
+        let fingerprint = SessionStateFingerprint::from_bytes(&json);
+        std::fs::write(&path, json)?;
+        Ok(fingerprint)
     }
 
     /// List all sessions sorted by ID ascending (oldest first).
@@ -509,6 +589,102 @@ mod tests {
         let loaded = manager.load(&id).unwrap();
         assert!(matches!(loaded.phase, SessionPhase::Running));
         assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_load_with_fingerprint_matches_inspected_file() {
+        // Given: a persisted session state file
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260310130000".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap();
+
+        // When: loading with fingerprint and inspecting the same file
+        let (loaded, load_fingerprint) = manager.load_with_fingerprint(&id).unwrap();
+        let inspected = manager.inspect_state_file(&id).unwrap();
+
+        // Then: both APIs observe the same parsed state and fingerprint
+        assert_eq!(loaded, state);
+        match inspected {
+            SessionFileContents::Parsed { state, fingerprint } => {
+                assert_eq!(*state, loaded);
+                assert_eq!(fingerprint, load_fingerprint);
+            }
+            other => panic!("expected parsed contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_save_with_fingerprint_round_trips_through_load_with_fingerprint() {
+        // Given: a session state to persist via the fingerprint-aware API
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260310130001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Running;
+        state.current_step = Some("write-test-first".to_string());
+
+        // When: saving and then loading with fingerprints
+        std::fs::create_dir_all(manager.sessions_dir().join(&state.id)).unwrap();
+        let saved_fingerprint = manager.save_with_fingerprint(&state).unwrap();
+        let (loaded, loaded_fingerprint) = manager.load_with_fingerprint(&state.id).unwrap();
+
+        // Then: the state and fingerprint round-trip exactly
+        assert_eq!(loaded, state);
+        assert_eq!(loaded_fingerprint, saved_fingerprint);
+    }
+
+    #[test]
+    fn test_inspect_state_file_returns_invalid_for_malformed_json() {
+        // Given: a malformed state.json on disk
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260310130002";
+        let session_dir = manager.sessions_dir().join(id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("state.json"), "{not valid json").unwrap();
+
+        // When: inspecting the state file
+        let inspected = manager.inspect_state_file(id).unwrap();
+
+        // Then: invalid contents are returned with an error and a consistent fingerprint
+        match inspected {
+            SessionFileContents::Invalid { fingerprint, error } => {
+                assert!(
+                    !error.is_empty(),
+                    "invalid JSON inspection should include a parse error"
+                );
+                assert_eq!(
+                    Some(fingerprint),
+                    manager.inspect_state_file(id).unwrap().fingerprint()
+                );
+            }
+            other => panic!("expected invalid contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inspect_state_file_returns_missing_for_absent_file() {
+        // Given: a session directory without a state.json
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        // When: inspecting a missing state file
+        let inspected = manager.inspect_state_file("20260310130003").unwrap();
+
+        // Then: the file is reported as missing without error
+        assert_eq!(inspected, SessionFileContents::Missing);
+        assert_eq!(inspected.fingerprint(), None);
     }
 
     #[test]

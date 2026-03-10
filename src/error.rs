@@ -38,6 +38,12 @@ pub enum CruiseError {
     #[error("session error: {0}")]
     SessionError(String),
 
+    #[error("session state.json changed externally during run: {0}")]
+    SessionStateConflict(String),
+
+    #[error("run aborted to preserve external session state: {0}")]
+    SessionStateConflictAborted(String),
+
     #[error("step '{0}' made no tracked file changes (fail-if-no-file-changes)")]
     StepMadeNoFileChanges(String),
 
