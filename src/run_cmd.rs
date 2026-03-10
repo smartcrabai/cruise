@@ -78,7 +78,6 @@ fn build_pr_prompt(vars: &mut VariableStore, config: &WorkflowConfig) -> Result<
     vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
 }
 
-
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.all {
         if args.session.is_some() {
