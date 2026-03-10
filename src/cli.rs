@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+pub(crate) const DEFAULT_MAX_RETRIES: usize = 10;
+pub(crate) const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "cruise",
@@ -40,7 +43,7 @@ pub struct PlanArgs {
     pub dry_run: bool,
 
     /// Maximum number of rate-limit retries per LLM call.
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 }
 
@@ -55,11 +58,11 @@ pub struct RunArgs {
     pub all: bool,
 
     /// Maximum number of times a single loop edge may be traversed.
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
     pub max_retries: usize,
 
     /// Maximum number of rate-limit retries per step.
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
     /// Print the workflow flow without executing it.
@@ -107,7 +110,7 @@ mod tests {
             Some(Commands::Plan(args)) => {
                 assert_eq!(args.input, Some("add feature X".to_string()));
                 assert!(!args.dry_run);
-                assert_eq!(args.rate_limit_retries, 5);
+                assert_eq!(args.rate_limit_retries, DEFAULT_RATE_LIMIT_RETRIES);
             }
             _ => panic!("expected Plan subcommand"),
         }
@@ -142,8 +145,8 @@ mod tests {
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert_eq!(args.session, None);
-                assert_eq!(args.max_retries, 10);
-                assert_eq!(args.rate_limit_retries, 5);
+                assert_eq!(args.max_retries, DEFAULT_MAX_RETRIES);
+                assert_eq!(args.rate_limit_retries, DEFAULT_RATE_LIMIT_RETRIES);
                 assert!(!args.dry_run);
             }
             _ => panic!("expected Run subcommand"),

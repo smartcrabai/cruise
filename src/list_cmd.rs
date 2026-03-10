@@ -1,6 +1,7 @@
 use console::style;
 use inquire::InquireError;
 
+use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
 
@@ -28,55 +29,90 @@ pub async fn run() -> Result<()> {
         };
 
         let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
-        let session = &sessions[idx];
+        let mut session = sessions[idx].clone();
 
-        // Show plan.md content.
-        let plan_path = session.plan_path(&manager.sessions_dir());
-        if let Ok(content) = std::fs::read_to_string(&plan_path) {
-            crate::display::print_bordered(&content, Some("plan.md"));
-        }
-
-        // Action menu.
-        let can_run = session.phase.is_runnable();
-
-        let mut actions = vec![];
-        if can_run {
-            actions.push(if session.phase.is_running() {
-                "Resume"
-            } else {
-                "Run"
-            });
-        }
-        actions.push("Delete");
-        actions.push("Back");
-
-        let action = match inquire::Select::new("Action:", actions).prompt() {
-            Ok(a) => a,
-            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => "Back",
-            Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
-        };
-
-        match action {
-            "Run" | "Resume" => {
-                let run_args = crate::cli::RunArgs {
-                    session: Some(session.id.clone()),
-                    all: false,
-                    max_retries: 10,
-                    rate_limit_retries: 5,
-                    dry_run: false,
-                };
-                return crate::run_cmd::run(run_args).await;
+        loop {
+            // Show plan.md content.
+            let plan_path = session.plan_path(&manager.sessions_dir());
+            if let Ok(content) = std::fs::read_to_string(&plan_path) {
+                crate::display::print_bordered(&content, Some("plan.md"));
             }
-            "Delete" => {
-                manager.delete(&session.id)?;
-                eprintln!("{} Session {} deleted.", style("✓").green(), session.id);
-                // Loop back to show updated list.
-            }
-            _ => {
-                // "Back" — loop to show session list again.
+
+            // Action menu.
+            let actions = session_actions(&session.phase);
+
+            let action = match inquire::Select::new("Action:", actions).prompt() {
+                Ok(a) => a,
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => "Back",
+                Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+            };
+
+            match action {
+                "Run" | "Resume" => {
+                    let run_args = crate::cli::RunArgs {
+                        session: Some(session.id.clone()),
+                        all: false,
+                        max_retries: DEFAULT_MAX_RETRIES,
+                        rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
+                        dry_run: false,
+                    };
+                    return crate::run_cmd::run(run_args).await;
+                }
+                "Replan" => {
+                    let text = match inquire::Text::new("Describe the changes needed:").prompt() {
+                        Ok(t) => t,
+                        Err(
+                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
+                        ) => {
+                            continue;
+                        }
+                        Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
+                    };
+                    crate::plan_cmd::replan_session(
+                        &manager,
+                        &session,
+                        text,
+                        DEFAULT_RATE_LIMIT_RETRIES,
+                    )
+                    .await?;
+                    // Re-load so subsequent session_actions(&session.phase) uses fresh state.
+                    session = manager.load(&session.id)?;
+                }
+                "Delete" => {
+                    manager.delete(&session.id)?;
+                    eprintln!("{} Session {} deleted.", style("✓").green(), session.id);
+                    break;
+                }
+                _ => {
+                    // "Back" — return to the session list.
+                    break;
+                }
             }
         }
     }
+}
+
+/// Returns the action menu items available for the given session phase.
+/// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
+/// "Delete" and "Back" are always present (in that order) at the end.
+fn session_actions(phase: &SessionPhase) -> Vec<&'static str> {
+    let mut actions = vec![];
+    match phase {
+        SessionPhase::Planned => {
+            actions.push("Run");
+            actions.push("Replan");
+        }
+        SessionPhase::Running => {
+            actions.push("Resume");
+        }
+        SessionPhase::Failed(_) => {
+            actions.push("Run");
+        }
+        SessionPhase::Completed => {}
+    }
+    actions.push("Delete");
+    actions.push("Back");
+    actions
 }
 
 fn format_session_label(s: &SessionState) -> String {
@@ -126,6 +162,175 @@ fn format_suffix(s: &SessionState) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // -----------------------------------------------------------------------
+    // session_actions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_planned_has_run_and_replan() {
+        // Given: Planned フェーズ
+        let phase = SessionPhase::Planned;
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Run" と "Replan" が含まれ、"Delete" と "Back" も含まれる
+        assert!(
+            actions.contains(&"Run"),
+            "Planned should have Run: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Replan"),
+            "Planned should have Replan: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Delete"),
+            "should always have Delete: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Back"),
+            "should always have Back: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_planned_has_no_resume() {
+        // Given: Planned フェーズ
+        let phase = SessionPhase::Planned;
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Resume" は含まれない（未着手なので Resume ではなく Run）
+        assert!(
+            !actions.contains(&"Resume"),
+            "Planned should NOT have Resume: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_running_has_resume_not_replan() {
+        // Given: Running フェーズ
+        let phase = SessionPhase::Running;
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Resume" は含まれるが "Replan" は含まれない
+        assert!(
+            actions.contains(&"Resume"),
+            "Running should have Resume: {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Replan"),
+            "Running should NOT have Replan: {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Run"),
+            "Running should NOT have Run (use Resume): {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_failed_has_run_not_replan() {
+        // Given: Failed フェーズ
+        let phase = SessionPhase::Failed("some error".to_string());
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Run" は含まれるが "Replan" は含まれない
+        assert!(
+            actions.contains(&"Run"),
+            "Failed should have Run: {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Replan"),
+            "Failed should NOT have Replan: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_completed_has_no_run_no_replan() {
+        // Given: Completed フェーズ
+        let phase = SessionPhase::Completed;
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Run" も "Resume" も "Replan" も含まれない
+        assert!(
+            !actions.contains(&"Run"),
+            "Completed should NOT have Run: {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Resume"),
+            "Completed should NOT have Resume: {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Replan"),
+            "Completed should NOT have Replan: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Delete"),
+            "should always have Delete: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Back"),
+            "should always have Back: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_planned_run_before_replan() {
+        // Given: Planned フェーズ
+        let phase = SessionPhase::Planned;
+
+        // When
+        let actions = session_actions(&phase);
+
+        // Then: "Run" は "Replan" より前に位置する（主要アクションが先頭）
+        let run_pos = actions.iter().position(|&a| a == "Run").unwrap();
+        let replan_pos = actions.iter().position(|&a| a == "Replan").unwrap();
+        assert!(
+            run_pos < replan_pos,
+            "Run should come before Replan in actions list"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_delete_and_back_always_at_end() {
+        // Given: すべてのフェーズで Delete と Back が末尾 2 つに並ぶ
+        let phases = [
+            SessionPhase::Planned,
+            SessionPhase::Running,
+            SessionPhase::Completed,
+            SessionPhase::Failed("err".to_string()),
+        ];
+
+        for phase in &phases {
+            // When
+            let actions = session_actions(phase);
+            let len = actions.len();
+
+            // Then: 末尾が Back、その前が Delete
+            assert!(
+                len >= 2,
+                "actions must have at least 2 items for {phase:?}: {actions:?}"
+            );
+            assert_eq!(
+                actions[len - 1],
+                "Back",
+                "Back should be last for {phase:?}: {actions:?}"
+            );
+            assert_eq!(
+                actions[len - 2],
+                "Delete",
+                "Delete should be second-to-last for {phase:?}: {actions:?}"
+            );
+        }
+    }
 
     fn make_session(id: &str, input: &str, phase: SessionPhase) -> SessionState {
         let mut s = SessionState::new(

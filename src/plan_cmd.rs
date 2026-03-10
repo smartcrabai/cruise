@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use console::style;
 use inquire::InquireError;
 
-use crate::cli::PlanArgs;
+use crate::cli::{DEFAULT_MAX_RETRIES, PlanArgs};
 use crate::config::{WorkflowConfig, validate_groups};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
@@ -12,7 +12,7 @@ use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
 /// Name of the variable that holds the plan file path.
-const PLAN_VAR: &str = "plan";
+pub(crate) const PLAN_VAR: &str = "plan";
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
@@ -190,7 +190,7 @@ async fn run_approve_loop(
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
                     all: false,
-                    max_retries: 10,
+                    max_retries: DEFAULT_MAX_RETRIES,
                     rate_limit_retries,
                     dry_run: false,
                 };
@@ -199,6 +199,21 @@ async fn run_approve_loop(
             _ => {}
         }
     }
+}
+
+/// Replan an existing session using the built-in fix-plan prompt.
+pub(crate) async fn replan_session(
+    manager: &SessionManager,
+    session: &SessionState,
+    feedback: String,
+    rate_limit_retries: usize,
+) -> Result<()> {
+    let config = manager.load_config(&session.id)?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_prev_input(Some(feedback));
+    run_fix_plan(&config, &mut vars, rate_limit_retries).await
 }
 
 /// Run the built-in fix-plan prompt.
