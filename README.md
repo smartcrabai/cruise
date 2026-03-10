@@ -76,10 +76,13 @@ Arguments:
   [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
 
 Options:
+      --all                        Run all planned sessions sequentially
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
+
+`--all` runs every Planned session in sequence. Each session gets its own worktree (even if the session was created in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
 
 #### `cruise clean`
 
@@ -107,6 +110,23 @@ Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
 
 Sessions remain in `~/.cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
+### `cruise list` Actions
+
+The interactive session list shows a menu of actions depending on the session's phase:
+
+| Phase | Available Actions |
+|-------|-------------------|
+| **Planned** | Run, Replan, Delete, Back |
+| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Failed** | Run, Reset to Planned, Delete, Back |
+| **Completed** | Reset to Planned, Delete, Back |
+
+- **Run / Resume** — Execute (or continue) the session.
+- **Replan** — Provide feedback to re-generate the plan; the session stays in the Planned phase.
+- **Reset to Planned** — Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
+- **Delete** — Permanently remove the session.
+- **Back** — Return to the session list.
+
 ## Config File Resolution
 
 When `-c` is not specified, cruise searches for a config in this order:
@@ -130,6 +150,7 @@ command:
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
+pr_language: English      # language for auto-generated PR title/body (optional, default: English)
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -172,6 +193,14 @@ steps:
   planning:
     model: opus    # overrides the default for this step only
     prompt: "Create a plan for: {input}"
+```
+
+### PR Language
+
+The `pr_language` field controls the language used for the auto-generated PR title and body. Defaults to `"English"` when omitted.
+
+```yaml
+pr_language: Japanese     # PR title/body will be generated in Japanese
 ```
 
 ### Environment Variables
@@ -318,7 +347,7 @@ steps:
 
 Steps can be grouped to coordinate retry loops across multiple steps. A group retries all its member steps together when the `if: file-changed` condition triggers.
 
-Define groups at the top level, then assign steps to a group:
+Groups can define their steps inline and are invoked from the main `steps` section with `group: <name>`:
 
 ```yaml
 groups:
@@ -326,24 +355,39 @@ groups:
     if:
       file-changed: test    # if any step in the group changes files, retry from the group start
     max_retries: 3          # maximum number of group-level retry loops (optional)
+    steps:                  # steps defined inside the group
+      simplify:
+        prompt: /simplify
+      coderabbit:
+        prompt: /cr
 
 steps:
   test:
     command: cargo test
 
-  simplify:
-    group: review           # this step belongs to the "review" group
-    prompt: /simplify
+  review-pass:
+    group: review           # invokes the "review" group's steps at this point
+```
 
-  coderabbit:
-    group: review           # consecutive steps sharing the same group form the group boundary
-    prompt: /cr
+The same group can be invoked from multiple places in the workflow:
+
+```yaml
+steps:
+  test-lib:
+    command: cargo test --lib
+  review-lib:
+    group: review
+
+  test-doc:
+    command: cargo test --doc
+  review-doc:
+    group: review           # same group, different call site
 ```
 
 **Constraints:**
-- All steps belonging to the same group must be **consecutive** in the YAML.
-- Steps within a group cannot have individual `if:` conditions — the group-level `if:` applies to the entire group.
+- Steps inside a group definition cannot have nested `group:` references or individual `if:` conditions — the group-level `if:` applies to the entire group.
 - When the group's `if: file-changed` condition triggers, execution jumps back to the **first step of the group** and all group steps re-run.
+- A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
 
 ### Variable Reference
 
