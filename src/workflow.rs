@@ -33,6 +33,8 @@ pub struct CompiledWorkflow {
     pub model: Option<String>,
     pub plan_model: Option<String>,
     pub env: HashMap<String, String>,
+    /// Language to use for PR title/body generation.
+    pub pr_language: String,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -57,6 +59,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         model: config.model,
         plan_model: config.plan_model,
         env: config.env,
+        pr_language: config.pr_language,
         steps,
         after_pr,
         invocations,
