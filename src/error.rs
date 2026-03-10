@@ -38,6 +38,9 @@ pub enum CruiseError {
     #[error("session error: {0}")]
     SessionError(String),
 
+    #[error("step '{0}' made no tracked file changes (fail-if-no-file-changes)")]
+    StepMadeNoFileChanges(String),
+
     #[error("{0}")]
     Other(String),
 }

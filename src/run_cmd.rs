@@ -5,7 +5,9 @@ use console::style;
 use inquire::InquireError;
 
 use crate::cli::RunArgs;
-use crate::config::{DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_groups};
+use crate::config::{
+    DEFAULT_PR_LANGUAGE, WorkflowConfig, validate_fail_if_no_file_changes, validate_groups,
+};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -106,6 +108,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     // Load config from session dir.
     let config = manager.load_config(&session_id)?;
     validate_groups(&config)?;
+    validate_fail_if_no_file_changes(&config)?;
 
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {}", session_id)).dim());

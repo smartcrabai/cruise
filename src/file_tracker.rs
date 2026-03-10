@@ -46,6 +46,11 @@ impl FileTracker {
         Ok(())
     }
 
+    /// Returns true if a snapshot already exists for `step_name`.
+    pub fn has_snapshot(&self, step_name: &str) -> bool {
+        self.snapshots.contains_key(step_name)
+    }
+
     /// Compare the snapshot for `step_name` against the current state.
     /// Returns `false` if no snapshot exists for that step.
     pub fn has_files_changed(&self, step_name: &str) -> Result<bool> {

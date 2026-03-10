@@ -92,6 +92,10 @@ pub struct StepConfig {
 
     /// Group this step belongs to.
     pub group: Option<String>,
+
+    /// If true, the step fails immediately when no tracked file changes are detected.
+    #[serde(default, rename = "fail-if-no-file-changes")]
+    pub fail_if_no_file_changes: bool,
 }
 
 /// A single item in an option step.
@@ -177,6 +181,25 @@ impl WorkflowConfig {
             after_pr: IndexMap::new(),
         }
     }
+}
+
+/// Validate that `fail-if-no-file-changes` is not used in `after-pr` steps.
+///
+/// `after-pr` steps are executed in a warning-only context: any error is
+/// downgraded to a printed warning and the workflow continues.  A step with
+/// `fail-if-no-file-changes: true` would therefore never abort the run as
+/// intended.  Reject it explicitly at validation time instead.
+pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    for (name, step) in &config.after_pr {
+        if step.fail_if_no_file_changes {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{}' in after-pr uses fail-if-no-file-changes, which is not supported in after-pr steps",
+                name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validate group configuration:
@@ -744,6 +767,80 @@ after-pr:
             StringOrVec::Single(s) => assert_eq!(s, "echo done"),
             _ => panic!("Expected Single command"),
         }
+    }
+
+    #[test]
+    fn test_fail_if_no_file_changes_default_false() {
+        // Given: a step without the fail-if-no-file-changes field
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: the field defaults to false
+        let implement = config.steps.get("implement").unwrap();
+        assert!(!implement.fail_if_no_file_changes);
+    }
+
+    #[test]
+    fn test_fail_if_no_file_changes_explicit_true() {
+        // Given: a step with fail-if-no-file-changes: true
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    prompt: "Implement: {input}"
+    fail-if-no-file-changes: true
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: the field is true
+        let implement = config.steps.get("implement").unwrap();
+        assert!(implement.fail_if_no_file_changes);
+    }
+
+    #[test]
+    fn test_validate_fail_if_no_file_changes_rejects_after_pr_usage() {
+        // Given: an after-pr step with fail-if-no-file-changes: true
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+after-pr:
+  notify:
+    command: echo done
+    fail-if-no-file-changes: true
+"#;
+        // When: validate_fail_if_no_file_changes is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let result = validate_fail_if_no_file_changes(&config);
+        // Then: returns an error because after-pr + fail-if-no-file-changes is unsupported
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("after-pr"),
+            "error message should mention after-pr"
+        );
+    }
+
+    #[test]
+    fn test_validate_fail_if_no_file_changes_ok_for_normal_steps() {
+        // Given: a normal step with fail-if-no-file-changes: true (no after-pr usage)
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    fail-if-no-file-changes: true
+"#;
+        // When: validate_fail_if_no_file_changes is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        let result = validate_fail_if_no_file_changes(&config);
+        // Then: no error
+        assert!(result.is_ok());
     }
 
     // --- New group schema: groups.<name>.steps ---

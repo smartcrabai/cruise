@@ -343,6 +343,21 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
+#### Fail if no file changes (`fail-if-no-file-changes`)
+
+When a step has `fail-if-no-file-changes: true`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any tracked files, the workflow fails immediately and the session transitions to the `Failed` state.
+
+This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files:
+
+```yaml
+steps:
+  implement:
+    prompt: "Implement the feature described in {plan}"
+    fail-if-no-file-changes: true   # fail immediately if no files were modified
+```
+
+> **Note:** `fail-if-no-file-changes` cannot be used in `after-pr` steps. Since `after-pr` steps run in a warning-only context (errors are downgraded to warnings), the field would never abort the run as intended and is therefore rejected at validation time.
+
 ### Step Groups
 
 Steps can be grouped to coordinate retry loops across multiple steps. A group retries all its member steps together when the `if: file-changed` condition triggers.
