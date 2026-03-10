@@ -148,6 +148,18 @@ pub async fn execute_steps(
             tracker.take_snapshot(&current_step)?;
         }
 
+        // Pre-execution snapshot for fail-if-no-file-changes check (taken only once per step,
+        // so changes from a prior iteration of a looping step are still visible).
+        let nochange_key = if step_config.fail_if_no_file_changes {
+            let key = nochange_snapshot_key(&current_step);
+            if !tracker.has_snapshot(&key) {
+                tracker.take_snapshot(&key)?;
+            }
+            Some(key)
+        } else {
+            None
+        };
+
         // (C) Group snapshot at start of group.
         if let Some(group_name) = step_group_name {
             let is_first = group_first.get(group_name) == Some(&current_step);
@@ -190,6 +202,13 @@ pub async fn execute_steps(
             }
         };
         steps_run += 1;
+
+        // Post-execution: fail-if-no-file-changes check.
+        if let Some(ref key) = nochange_key
+            && !tracker.has_files_changed(key)?
+        {
+            return Err(CruiseError::StepMadeNoFileChanges(current_step));
+        }
 
         // Post-execution: if file-changed condition → jump to target step.
         let if_next = if let Some(ref if_cond) = step_config.if_condition {
@@ -315,6 +334,11 @@ pub(crate) fn log_step_result(elapsed: std::time::Duration, success: bool) {
 /// Build the FileTracker snapshot key for a group.
 fn group_snapshot_key(group_name: &str) -> String {
     format!("__group__{}", group_name)
+}
+
+/// Build the FileTracker snapshot key for a fail-if-no-file-changes check.
+fn nochange_snapshot_key(step_name: &str) -> String {
+    format!("__nochange__{}", step_name)
 }
 
 /// Format a duration as a human-readable string.
@@ -603,6 +627,7 @@ mod tests {
     use crate::config::WorkflowConfig;
     use crate::file_tracker::FileTracker;
     use crate::variable::VariableStore;
+    use tempfile::TempDir;
 
     fn make_config(yaml: &str) -> WorkflowConfig {
         WorkflowConfig::from_yaml(yaml).unwrap()
@@ -616,17 +641,18 @@ mod tests {
         run_config_with_retries(yaml, input, start_step, 10, 0).await
     }
 
-    async fn run_config_with_retries(
+    async fn run_config_inner(
         yaml: &str,
         input: &str,
         start_step: Option<&str>,
+        tracker_root: std::path::PathBuf,
         max_retries: usize,
         rate_limit_retries: usize,
     ) -> Result<ExecutionResult> {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let mut vars = VariableStore::new(input.to_string());
-        let mut tracker = FileTracker::with_root(std::env::current_dir().unwrap());
+        let mut tracker = FileTracker::with_root(tracker_root);
         let first_step = config.steps.keys().next().unwrap().clone();
         let step = start_step.unwrap_or(&first_step).to_string();
         execute_steps(
@@ -639,6 +665,36 @@ mod tests {
             &|_| Ok(()),
         )
         .await
+    }
+
+    async fn run_config_with_retries(
+        yaml: &str,
+        input: &str,
+        start_step: Option<&str>,
+        max_retries: usize,
+        rate_limit_retries: usize,
+    ) -> Result<ExecutionResult> {
+        run_config_inner(
+            yaml,
+            input,
+            start_step,
+            std::env::current_dir().unwrap(),
+            max_retries,
+            rate_limit_retries,
+        )
+        .await
+    }
+
+    /// Run config with a custom FileTracker rooted at `tracker_root`.
+    /// Use this for tests that need to control file-change detection.
+    /// max_retries=10 (loop guard), rate_limit_retries=0 (no live API calls in tests).
+    async fn run_config_with_tracker(
+        yaml: &str,
+        input: &str,
+        start_step: Option<&str>,
+        tracker_root: std::path::PathBuf,
+    ) -> Result<ExecutionResult> {
+        run_config_inner(yaml, input, start_step, tracker_root, 10, 0).await
     }
 
     #[test]
@@ -1210,6 +1266,112 @@ steps:
         assert_eq!(
             result.steps_failed, 0,
             "stdout and stderr should both be captured correctly"
+        );
+    }
+
+    // --- fail-if-no-file-changes tests ---
+
+    #[tokio::test]
+    async fn test_fail_if_no_file_changes_fails_when_no_changes() {
+        // Given: a step with fail-if-no-file-changes: true whose command does NOT create any files
+        let dir = TempDir::new().unwrap();
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: "echo no file changes"
+    fail-if-no-file-changes: true
+  next_step:
+    command: "echo should not run"
+"#;
+        // When: executed in a temp dir where no files are written
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow fails with StepMadeNoFileChanges
+        assert!(result.is_err(), "expected Err but got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CruiseError::StepMadeNoFileChanges(_)),
+            "expected StepMadeNoFileChanges, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string().contains("implement"),
+            "error should mention step name, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_if_no_file_changes_succeeds_when_files_changed() {
+        // Given: a step with fail-if-no-file-changes: true whose command DOES create a file
+        let dir = TempDir::new().unwrap();
+        let output_file = dir.path().join("output.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch {}"
+    fail-if-no-file-changes: true
+"#,
+            output_file.display()
+        );
+        // When: executed in the temp dir (tracker detects the new file)
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow succeeds
+        assert!(result.is_ok(), "expected Ok but got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_fail_if_no_file_changes_not_set_continues_when_no_changes() {
+        // Given: a step WITHOUT fail-if-no-file-changes (default false) that does not change files
+        let dir = TempDir::new().unwrap();
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: "echo no changes"
+  next_step:
+    command: "echo second step"
+"#;
+        // When: executed
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow continues and completes successfully (regression: default behavior unchanged)
+        assert!(result.is_ok(), "expected Ok but got: {:?}", result);
+        let result = result.unwrap();
+        assert_eq!(result.steps_run, 2, "both steps should run");
+    }
+
+    #[tokio::test]
+    async fn test_fail_if_no_file_changes_with_if_file_changed_jumps_on_change() {
+        // Given: a step with BOTH fail-if-no-file-changes: true AND if.file-changed,
+        // where the command DOES change a file → file-changed jump should win, no failure
+        let dir = TempDir::new().unwrap();
+        let output_file = dir.path().join("output.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch {}"
+    fail-if-no-file-changes: true
+    if:
+      file-changed: implement
+  loop_back:
+    command: "echo retry"
+  done:
+    command: "echo done"
+"#,
+            output_file.display()
+        );
+        // When: executed with max_retries=1 to prevent infinite loop
+        // (implement writes a file → if.file-changed triggers jump back to implement)
+        let result = run_config_inner(&yaml, "", None, dir.path().to_path_buf(), 1, 0).await;
+        // Then: workflow does NOT return StepMadeNoFileChanges (files changed, so no-change failure is skipped)
+        assert!(
+            !matches!(&result, Err(CruiseError::StepMadeNoFileChanges(_))),
+            "should not fail with StepMadeNoFileChanges when files changed, got: {:?}",
+            result
         );
     }
 
