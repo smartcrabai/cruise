@@ -469,6 +469,7 @@ mod tests {
         assert_eq!(parsed.steps.len(), original.steps.len());
         assert_eq!(parsed.model, original.model);
         assert_eq!(parsed.plan_model, original.plan_model);
+        assert_eq!(parsed.pr_language, original.pr_language);
         assert_eq!(parsed.command, original.command);
         for key in original.steps.keys() {
             assert!(parsed.steps.contains_key(key), "missing step: {}", key);

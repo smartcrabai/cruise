@@ -2,6 +2,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub const DEFAULT_PR_LANGUAGE: &str = "English";
+
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
@@ -14,6 +16,10 @@ pub struct WorkflowConfig {
     /// Model to use for the built-in plan step (falls back to `model`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<String>,
+
+    /// Language to use for built-in PR title/body generation.
+    #[serde(default = "default_pr_language")]
+    pub pr_language: String,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -121,6 +127,10 @@ pub struct GroupConfig {
     pub max_retries: Option<usize>,
 }
 
+fn default_pr_language() -> String {
+    DEFAULT_PR_LANGUAGE.to_string()
+}
+
 impl WorkflowConfig {
     /// Parse a workflow config from a YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
@@ -156,6 +166,7 @@ impl WorkflowConfig {
             ],
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
+            pr_language: default_pr_language(),
             env: HashMap::new(),
             groups: HashMap::new(),
             steps,
@@ -266,6 +277,7 @@ steps:
         assert_eq!(config.command, vec!["claude", "-p"]);
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
+        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
     }
 
     #[test]
@@ -281,6 +293,31 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.model, Some("sonnet".to_string()));
         assert_eq!(config.plan_model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_pr_language_field() {
+        let yaml = r#"
+command: [claude, -p]
+pr_language: Japanese
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.pr_language, "Japanese");
+    }
+
+    #[test]
+    fn test_pr_language_defaults_to_english_when_omitted() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
     }
 
     #[test]
@@ -486,6 +523,7 @@ steps:
         assert_eq!(config.command, vec!["claude", "--model", "{model}", "-p"]);
         assert_eq!(config.model, Some("sonnet".to_string()));
         assert_eq!(config.plan_model, Some("opus".to_string()));
+        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
         assert_eq!(config.steps.len(), 2);
 
         let write_test = config.steps.get("write-tests").unwrap();
@@ -493,6 +531,12 @@ steps:
 
         let implement = config.steps.get("implement").unwrap();
         assert!(implement.prompt.as_deref().unwrap().contains("{plan}"));
+    }
+
+    #[test]
+    fn test_default_builtin_serializes_pr_language() {
+        let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin()).unwrap();
+        assert!(yaml.contains("pr_language: English"));
     }
 
     #[test]
