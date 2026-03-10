@@ -37,18 +37,7 @@ pub async fn run() -> Result<()> {
         }
 
         // Action menu.
-        let can_run = session.phase.is_runnable();
-
-        let mut actions = vec![];
-        if can_run {
-            actions.push(if session.phase.is_running() {
-                "Resume"
-            } else {
-                "Run"
-            });
-        }
-        actions.push("Delete");
-        actions.push("Back");
+        let actions = build_actions(&session.phase);
 
         let action = match inquire::Select::new("Action:", actions).prompt() {
             Ok(a) => a,
@@ -67,6 +56,13 @@ pub async fn run() -> Result<()> {
                 };
                 return crate::run_cmd::run(run_args).await;
             }
+            "Reset to Planned" => {
+                let mut s = session.clone();
+                s.reset_to_planned();
+                manager.save(&s)?;
+                eprintln!("{} Session {} reset to Planned.", style("✓").green(), s.id);
+                // Loop back to show updated list.
+            }
             "Delete" => {
                 manager.delete(&session.id)?;
                 eprintln!("{} Session {} deleted.", style("✓").green(), session.id);
@@ -76,6 +72,15 @@ pub async fn run() -> Result<()> {
                 // "Back" — loop to show session list again.
             }
         }
+    }
+}
+
+fn build_actions(phase: &SessionPhase) -> Vec<&'static str> {
+    match phase {
+        SessionPhase::Planned => vec!["Run", "Delete", "Back"],
+        SessionPhase::Running => vec!["Resume", "Reset to Planned", "Delete", "Back"],
+        SessionPhase::Completed => vec!["Reset to Planned", "Delete", "Back"],
+        SessionPhase::Failed(_) => vec!["Run", "Reset to Planned", "Delete", "Back"],
     }
 }
 
@@ -357,6 +362,42 @@ mod tests {
         assert!(
             label.contains('…'),
             "long input should be truncated: {label}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_actions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_actions_planned() {
+        assert_eq!(
+            build_actions(&SessionPhase::Planned),
+            vec!["Run", "Delete", "Back"]
+        );
+    }
+
+    #[test]
+    fn test_build_actions_running() {
+        assert_eq!(
+            build_actions(&SessionPhase::Running),
+            vec!["Resume", "Reset to Planned", "Delete", "Back"]
+        );
+    }
+
+    #[test]
+    fn test_build_actions_completed() {
+        assert_eq!(
+            build_actions(&SessionPhase::Completed),
+            vec!["Reset to Planned", "Delete", "Back"]
+        );
+    }
+
+    #[test]
+    fn test_build_actions_failed() {
+        assert_eq!(
+            build_actions(&SessionPhase::Failed("exit 1".to_string())),
+            vec!["Run", "Reset to Planned", "Delete", "Back"]
         );
     }
 }
