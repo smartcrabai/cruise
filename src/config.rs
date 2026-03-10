@@ -125,6 +125,10 @@ pub struct GroupConfig {
 
     /// Maximum number of retries for this group before skipping.
     pub max_retries: Option<usize>,
+
+    /// Steps that belong to this group (new explicit-block style).
+    #[serde(default)]
+    pub steps: IndexMap<String, StepConfig>,
 }
 
 fn default_pr_language() -> String {
@@ -177,11 +181,12 @@ impl WorkflowConfig {
 
 /// Validate group configuration:
 /// - All step `group` references must point to defined groups.
-/// - Steps in the same group must be consecutive in the IndexMap.
 /// - Steps with a group must not have individual `if` conditions.
+/// - Steps inside group definitions must not have nested group references or individual `if` conditions.
 pub fn validate_groups(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_step_groups(&config.steps, &config.groups)?;
     validate_step_groups(&config.after_pr, &config.groups)?;
+    validate_group_inner_steps(&config.groups)?;
     Ok(())
 }
 
@@ -190,43 +195,46 @@ fn validate_step_groups(
     groups: &std::collections::HashMap<String, GroupConfig>,
 ) -> crate::error::Result<()> {
     use crate::error::CruiseError;
-    use std::collections::HashSet;
-
-    let mut current_group: Option<&str> = None;
-    let mut seen_groups: HashSet<&str> = HashSet::new();
 
     for (step_name, step) in steps {
-        match step.group.as_deref() {
-            Some(group_name) => {
-                if !groups.contains_key(group_name) {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "step '{}' references undefined group '{}'",
-                        step_name, group_name
-                    )));
-                }
-                if step.if_condition.is_some() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "step '{}' has both a group and an individual 'if' condition; use only the group's 'if'",
-                        step_name
-                    )));
-                }
-                if current_group != Some(group_name) {
-                    if seen_groups.contains(group_name) {
-                        return Err(CruiseError::InvalidStepConfig(format!(
-                            "steps in group '{}' are not consecutive (step '{}' is out of order)",
-                            group_name, step_name
-                        )));
-                    }
-                    if let Some(prev) = current_group {
-                        seen_groups.insert(prev);
-                    }
-                    current_group = Some(group_name);
-                }
+        if let Some(group_name) = step.group.as_deref() {
+            if !groups.contains_key(group_name) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{}' references undefined group '{}'",
+                    step_name, group_name
+                )));
             }
-            None => {
-                if let Some(prev) = current_group.take() {
-                    seen_groups.insert(prev);
-                }
+            if step.if_condition.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{}' has both a group and an individual 'if' condition; use only the group's 'if'",
+                    step_name
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_group_inner_steps(
+    groups: &std::collections::HashMap<String, GroupConfig>,
+) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    for (group_name, group) in groups {
+        for (sub_name, sub_step) in &group.steps {
+            if sub_step.group.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "nested group call inside group '{}' at step '{}' is not allowed",
+                    group_name, sub_name
+                )));
+            }
+            if sub_step.if_condition.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group step '{}/{}' has an individual 'if' condition, \
+                     which is not allowed inside group steps",
+                    group_name, sub_name
+                )));
             }
         }
     }
@@ -600,15 +608,16 @@ command: [claude, -p]
 groups:
   review:
     max_retries: 2
+    steps:
+      simplify:
+        prompt: /simplify
+      ai-antipattern:
+        prompt: /ai-antipattern
 steps:
   build:
     command: cargo build
-  simplify:
+  review-pass:
     group: review
-    prompt: /simplify
-  ai-antipattern:
-    group: review
-    prompt: /ai-antipattern
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         assert!(validate_groups(&config).is_ok());
@@ -622,7 +631,6 @@ groups: {}
 steps:
   step1:
     group: nonexistent
-    command: echo hi
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
         let result = validate_groups(&config);
@@ -631,26 +639,28 @@ steps:
     }
 
     #[test]
-    fn test_validate_groups_non_consecutive() {
+    fn test_validate_groups_multiple_call_sites_ok() {
+        // New-style: same group invoked from multiple non-consecutive call sites is valid
         let yaml = r#"
 command: [claude, -p]
 groups:
   review:
     max_retries: 2
+    steps:
+      simplify:
+        prompt: /simplify
 steps:
-  step_a:
+  test1:
+    command: cargo test --lib
+  review-after-lib:
     group: review
-    command: echo a
-  step_b:
-    command: echo b
-  step_c:
+  test2:
+    command: cargo test --doc
+  review-after-doc:
     group: review
-    command: echo c
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap();
-        let result = validate_groups(&config);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not consecutive"));
+        assert!(validate_groups(&config).is_ok());
     }
 
     #[test]
@@ -660,10 +670,12 @@ command: [claude, -p]
 groups:
   review:
     max_retries: 2
+    steps:
+      step1:
+        command: echo hi
 steps:
-  step1:
+  call-review:
     group: review
-    command: echo hi
     if:
       file-changed: step1
 "#;
@@ -732,5 +744,102 @@ after-pr:
             StringOrVec::Single(s) => assert_eq!(s, "echo done"),
             _ => panic!("Expected Single command"),
         }
+    }
+
+    // --- New group schema: groups.<name>.steps ---
+
+    #[test]
+    fn test_group_config_with_steps_parse() {
+        // Given: YAML with groups that define steps inside them
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: test
+    max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+      coderabbit:
+        prompt: /cr
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: group has steps with correct count and order
+        let review = &config.groups["review"];
+        assert_eq!(review.max_retries, Some(3));
+        assert_eq!(review.steps.len(), 2);
+        let step_names: Vec<&str> = review.steps.keys().map(|s| s.as_str()).collect();
+        assert_eq!(step_names, vec!["simplify", "coderabbit"]);
+    }
+
+    #[test]
+    fn test_group_call_step_parse() {
+        // Given: YAML where a top-level step is a pure group call (no prompt/command)
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: group call step only has group set
+        let review_pass = config.steps.get("review-pass").unwrap();
+        assert_eq!(review_pass.group, Some("review".to_string()));
+        assert!(review_pass.prompt.is_none());
+        assert!(review_pass.command.is_none());
+    }
+
+    #[test]
+    fn test_group_call_same_group_multiple_call_sites_parse() {
+        // Given: YAML where same group is invoked from two different top-level steps
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test1:
+    command: cargo test --lib
+  review-after-lib:
+    group: review
+  test2:
+    command: cargo test --doc
+  review-after-doc:
+    group: review
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap();
+        // Then: both call sites reference the same group
+        assert_eq!(
+            config.steps["review-after-lib"].group,
+            Some("review".to_string())
+        );
+        assert_eq!(
+            config.steps["review-after-doc"].group,
+            Some("review".to_string())
+        );
+        // And: step order in top-level steps is preserved
+        let keys: Vec<&str> = config.steps.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["test1", "review-after-lib", "test2", "review-after-doc"]
+        );
     }
 }

@@ -15,6 +15,7 @@ mod session;
 mod spinner;
 mod step;
 mod variable;
+mod workflow;
 mod worktree;
 
 #[tokio::main(flavor = "current_thread")]
