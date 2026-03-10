@@ -161,6 +161,11 @@ groups:                   # step group definitions (optional)
     if:
       file-changed: test
     max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+      coderabbit:
+        prompt: /cr
 
 steps:
   step_name:
@@ -458,6 +463,11 @@ groups:
     if:
       file-changed: test
     max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+      coderabbit:
+        prompt: /cr
 
 steps:
   plan:
@@ -515,13 +525,8 @@ steps:
       {prev.stderr}
     next: test
 
-  simplify:
+  review-pass:
     group: review
-    prompt: /simplify
-
-  coderabbit:
-    group: review
-    prompt: /cr
 
 after-pr:
   label:
