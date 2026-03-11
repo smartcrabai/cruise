@@ -663,10 +663,10 @@ fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create a PR using `gh pr create`. Uses `--title`/`--body` if provided, otherwise `--fill`.
+/// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise `--fill`.
 /// Falls back to `gh pr view` if a PR already exists.
 fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
-    let mut gh_args = vec!["pr", "create", "--head", branch];
+    let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
     } else {
@@ -1409,12 +1409,14 @@ mod tests {
                 .trim(),
             worktree_head
         );
+        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
-            {
-                let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
-                gh_args.contains("pr create --head") && gh_args.contains("--fill")
-            },
-            "fake gh should receive a pr create invocation"
+            gh_args.contains("pr create --head") && gh_args.contains("--fill"),
+            "fake gh should receive a pr create invocation, got: {gh_args}"
+        );
+        assert!(
+            gh_args.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_args}"
         );
         worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
@@ -1457,6 +1459,11 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e:?}"))
                 .trim(),
             existing_head
+        );
+        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            gh_args.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_args}"
         );
         worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
@@ -2026,11 +2033,14 @@ steps:
                 .exists(),
             "run --all should write changes inside the session worktree"
         );
+        let gh_log_contents = fs::read_to_string(&gh_log).unwrap_or_default();
         assert!(
-            fs::read_to_string(&gh_log)
-                .unwrap_or_default()
-                .contains("pr create --head"),
+            gh_log_contents.contains("pr create --head"),
             "run --all should still invoke PR creation through gh"
+        );
+        assert!(
+            gh_log_contents.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_log_contents}"
         );
     }
 
