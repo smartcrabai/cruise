@@ -489,7 +489,7 @@ pub(crate) async fn run_prompt_step(
             let text = match crate::multiline_input::prompt_multiline(&prompt_text)? {
                 crate::multiline_input::InputResult::Submitted(t) => t,
                 crate::multiline_input::InputResult::Cancelled => {
-                    return Err(CruiseError::Other("input cancelled".to_string()));
+                    return Err(CruiseError::StepPaused);
                 }
             };
             vars.set_input(text);

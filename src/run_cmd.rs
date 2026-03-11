@@ -88,7 +88,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
         return run_all(args).await;
     }
 
-    run_single(args, WorkspaceOverride::RespectSession).await
+    match run_single(args, WorkspaceOverride::RespectSession).await {
+        Err(CruiseError::StepPaused) => {
+            eprintln!("Session paused. Resume with `cruise run`.");
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 #[expect(clippy::too_many_lines)]
@@ -203,13 +209,30 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         Err(e) => Err(e),
     };
 
-    session.completed_at = Some(current_iso8601());
-    session.phase = match &overall_result {
-        Ok(()) => SessionPhase::Completed,
-        Err(e) => SessionPhase::Failed(e.to_string()),
-    };
+    apply_run_result_to_session(session, &overall_result);
     manager.save(session)?;
     overall_result
+}
+
+/// Apply the result of a step execution to the session state.
+///
+/// - `Ok(())` → `Completed`
+/// - `Err(StepPaused)` → keep `Running` (session can be resumed with `cruise run`)
+/// - `Err(other)` → `Failed`
+fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
+    match result {
+        Ok(()) => {
+            session.phase = SessionPhase::Completed;
+            session.completed_at = Some(current_iso8601());
+        }
+        Err(CruiseError::StepPaused) => {
+            // Keep Running phase so the session can be resumed later.
+        }
+        Err(e) => {
+            session.phase = SessionPhase::Failed(e.to_string());
+            session.completed_at = Some(current_iso8601());
+        }
+    }
 }
 
 /// Log a resume message if the session is being restarted.
@@ -365,7 +388,7 @@ async fn run_after_pr_steps(
         return;
     };
     let after_compiled = compiled.to_after_pr_compiled();
-    if let Err(e) = execute_steps(
+    match execute_steps(
         &after_compiled,
         vars,
         tracker,
@@ -376,7 +399,10 @@ async fn run_after_pr_steps(
     )
     .await
     {
-        eprintln!("warning: after-pr steps failed: {e}");
+        Ok(_) | Err(CruiseError::StepPaused) => {}
+        Err(e) => {
+            eprintln!("warning: after-pr steps failed: {e}");
+        }
     }
 }
 
@@ -396,10 +422,14 @@ async fn run_all(args: RunArgs) -> Result<()> {
         };
         let run_result = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await;
         let interrupted = matches!(run_result, Err(CruiseError::Interrupted));
-        if let Err(e) = run_result
-            && !interrupted
-        {
-            eprintln!("warning: session {} encountered an error: {e}", session.id);
+        match run_result {
+            Err(CruiseError::StepPaused) => {
+                eprintln!("session {} paused by user", session.id);
+            }
+            Err(e) if !interrupted => {
+                eprintln!("warning: session {} encountered an error: {e}", session.id);
+            }
+            Ok(()) | Err(_) => {}
         }
         results.push(manager.load(&session.id)?);
         if interrupted {
@@ -2345,5 +2375,95 @@ steps:
                 line.chars().count()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_run_result_to_session() integration tests
+    // These test the finalization logic across engine → run_cmd → session.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_run_result_completed_sets_completed_phase() {
+        // Given: a Running session and a successful result
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying a successful result
+        apply_run_result_to_session(&mut session, &Ok(()));
+        // Then: session phase becomes Completed
+        assert!(
+            matches!(session.phase, SessionPhase::Completed),
+            "Expected Completed, got {:?}",
+            session.phase
+        );
+    }
+
+    #[test]
+    fn test_apply_run_result_step_paused_keeps_running_phase() {
+        // Given: a Running session and a StepPaused error
+        // (StepPaused means user pressed Esc — session should be resumable)
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying StepPaused
+        apply_run_result_to_session(&mut session, &Err(CruiseError::StepPaused));
+        // Then: session stays Running so it can be resumed later
+        assert!(
+            matches!(session.phase, SessionPhase::Running),
+            "Expected Running after StepPaused, got {:?}",
+            session.phase
+        );
+    }
+
+    #[test]
+    fn test_apply_run_result_other_error_sets_failed_phase() {
+        // Given: a Running session and a generic error
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying a generic command error
+        apply_run_result_to_session(
+            &mut session,
+            &Err(CruiseError::CommandError("some failure".to_string())),
+        );
+        // Then: session phase becomes Failed
+        assert!(
+            matches!(session.phase, SessionPhase::Failed(_)),
+            "Expected Failed, got {:?}",
+            session.phase
+        );
+    }
+
+    #[test]
+    fn test_apply_run_result_step_paused_does_not_set_completed_at() {
+        // Given: a session and StepPaused
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying StepPaused
+        apply_run_result_to_session(&mut session, &Err(CruiseError::StepPaused));
+        // Then: completed_at is not set (session is not finished)
+        assert!(
+            session.completed_at.is_none(),
+            "completed_at should not be set on pause"
+        );
+    }
+
+    #[test]
+    fn test_apply_run_result_completed_sets_completed_at() {
+        // Given: a Running session
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying success
+        apply_run_result_to_session(&mut session, &Ok(()));
+        // Then: completed_at is recorded
+        assert!(
+            session.completed_at.is_some(),
+            "completed_at should be set on completion"
+        );
+    }
+
+    #[test]
+    fn test_apply_run_result_failed_sets_completed_at() {
+        // Given: a Running session
+        let mut session = make_session("some task", SessionPhase::Running, None);
+        // When: applying a fatal error
+        apply_run_result_to_session(&mut session, &Err(CruiseError::Other("fatal".to_string())));
+        // Then: completed_at is recorded
+        assert!(
+            session.completed_at.is_some(),
+            "completed_at should be set on failure"
+        );
     }
 }

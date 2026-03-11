@@ -1,6 +1,6 @@
 use inquire::{InquireError, Select};
 
-use crate::error::Result;
+use crate::error::{CruiseError, Result};
 use crate::step::OptionChoice;
 
 /// Result of executing an option step.
@@ -33,10 +33,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
     let selected_label = match Select::new("Select an option", labels).prompt() {
         Ok(label) => label,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            return Ok(OptionResult {
-                next_step: None,
-                text_input: None,
-            });
+            return Err(CruiseError::StepPaused);
         }
         Err(e) => {
             return Err(crate::error::CruiseError::Other(format!(
@@ -59,10 +56,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
             let text = match crate::multiline_input::prompt_multiline(label)? {
                 crate::multiline_input::InputResult::Submitted(t) => t,
                 crate::multiline_input::InputResult::Cancelled => {
-                    return Ok(OptionResult {
-                        next_step: None,
-                        text_input: None,
-                    });
+                    return Err(CruiseError::StepPaused);
                 }
             };
 
@@ -129,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_option_result_cancel() {
+    fn test_option_result_no_fields() {
         let result = OptionResult {
             next_step: None,
             text_input: None,

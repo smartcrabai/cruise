@@ -46,6 +46,9 @@ pub enum CruiseError {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("step paused by user interrupt")]
+    StepPaused,
 }
 
 pub type Result<T> = std::result::Result<T, CruiseError>;
