@@ -141,21 +141,35 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     vars.set_named_file(PLAN_VAR, plan_path);
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
     let session_cell = RefCell::new(&mut session);
-    let exec_result = execute_steps(
-        &compiled,
-        &mut vars,
-        &mut tracker,
-        &start_step,
-        args.max_retries,
-        args.rate_limit_retries,
-        &|step| {
-            let mut s = session_cell.borrow_mut();
-            s.current_step = Some(step.to_string());
-            manager.save(&s)
-        },
-    )
-    .await;
+    let on_step_start = |step: &str| {
+        let mut s = session_cell.borrow_mut();
+        s.current_step = Some(step.to_string());
+        manager.save(&s)
+    };
+    let exec_result = tokio::select! {
+        result = execute_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &start_step,
+            args.max_retries,
+            args.rate_limit_retries,
+            &on_step_start,
+        ) => result,
+        _ = tokio::signal::ctrl_c() => Err(CruiseError::Interrupted),
+    };
     let session = session_cell.into_inner();
+
+    // Handle Ctrl+C: save as Suspended so the session can be resumed later.
+    if matches!(exec_result, Err(CruiseError::Interrupted)) {
+        eprintln!(
+            "\n{} Interrupted — session saved as Suspended.",
+            style("⏸").yellow().bold()
+        );
+        session.phase = SessionPhase::Suspended;
+        manager.save(session)?;
+        return Err(CruiseError::Interrupted);
+    }
 
     let overall_result = match exec_result {
         Ok(exec) => {
@@ -194,7 +208,9 @@ fn log_resume_message(session: &SessionState) {
         return;
     };
     match &session.phase {
-        SessionPhase::Running => eprintln!("{} Resuming from step: {}", style("↺").cyan(), step),
+        SessionPhase::Running | SessionPhase::Suspended => {
+            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step)
+        }
         SessionPhase::Failed(_) => {
             eprintln!(
                 "{} Retrying from failed step: {}",
@@ -356,11 +372,11 @@ async fn run_after_pr_steps(
 
 async fn run_all(args: RunArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
-    let planned_sessions = manager.planned()?;
+    let candidates = manager.run_all_candidates()?;
 
-    let mut results: Vec<SessionState> = Vec::with_capacity(planned_sessions.len());
+    let mut results: Vec<SessionState> = Vec::with_capacity(candidates.len());
 
-    for session in planned_sessions {
+    for session in candidates {
         let session_args = RunArgs {
             session: Some(session.id.clone()),
             all: false,
@@ -368,10 +384,17 @@ async fn run_all(args: RunArgs) -> Result<()> {
             rate_limit_retries: args.rate_limit_retries,
             dry_run: args.dry_run,
         };
-        if let Err(e) = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await {
+        let run_result = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await;
+        let interrupted = matches!(run_result, Err(CruiseError::Interrupted));
+        if let Err(e) = run_result
+            && !interrupted
+        {
             eprintln!("warning: session {} encountered an error: {e}", session.id);
         }
         results.push(manager.load(&session.id)?);
+        if interrupted {
+            break;
+        }
     }
 
     let summary = format_run_all_summary(&results);
@@ -970,6 +993,14 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                     style("✗").red().bold(),
                     truncated,
                     err
+                )
+            }
+            SessionPhase::Suspended => {
+                format!(
+                    "[{}] {} {} — Suspended",
+                    i + 1,
+                    style("⏸").yellow().bold(),
+                    truncated
                 )
             }
             SessionPhase::Planned | SessionPhase::Running => {
@@ -2017,6 +2048,82 @@ steps:
         s.phase = phase;
         s.pr_url = pr_url.map(str::to_string);
         s
+    }
+
+    // -----------------------------------------------------------------------
+    // format_run_all_summary — Suspended
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_run_all_summary_suspended_session_shows_suspended_indicator() {
+        // Given: Suspended セッションが結果に含まれる
+        let results = vec![make_session("add feature", SessionPhase::Suspended, None)];
+
+        // When
+        let summary = format_run_all_summary(&results);
+        let summary_plain = console::strip_ansi_codes(&summary).to_string();
+
+        // Then: セッションの input と "Suspended" マーカーが含まれる
+        assert!(
+            summary_plain.contains("add feature"),
+            "summary should contain input: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("Suspended"),
+            "summary should contain Suspended indicator: {summary_plain}"
+        );
+        assert!(
+            !summary_plain.is_empty(),
+            "summary should not be empty: {summary_plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_run_all_summary_mixed_with_suspended() {
+        // Given: Completed, Suspended, Failed の混合結果
+        let results = vec![
+            make_session(
+                "task a",
+                SessionPhase::Completed,
+                Some("https://github.com/org/repo/pull/1"),
+            ),
+            make_session("task b", SessionPhase::Suspended, None),
+            make_session(
+                "task c",
+                SessionPhase::Failed("build error".to_string()),
+                None,
+            ),
+        ];
+
+        // When
+        let summary = format_run_all_summary(&results);
+        let summary_plain = console::strip_ansi_codes(&summary).to_string();
+
+        // Then: 3 セッション全ての情報が含まれ、ヘッダーのカウントも正しい
+        assert!(
+            summary_plain.contains("task a"),
+            "summary should contain task a: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("task b"),
+            "summary should contain task b: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("task c"),
+            "summary should contain task c: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("=== Run All Summary (3 sessions) ==="),
+            "header should show correct count: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("Suspended"),
+            "summary should distinguish Suspended from Failed: {summary_plain}"
+        );
+        assert!(
+            summary_plain.contains("Failed"),
+            "summary should show Failed reason: {summary_plain}"
+        );
     }
 
     #[test]
