@@ -9,6 +9,21 @@ pub(crate) enum InputResult {
     Cancelled,
 }
 
+impl InputResult {
+    /// Convert into a plain `Result<String>`.
+    ///
+    /// `Submitted(text)` → `Ok(text)` preserving internal newlines.
+    /// `Cancelled`       → `Err(CruiseError::Other("input cancelled"))`.
+    pub(crate) fn into_result(self) -> crate::error::Result<String> {
+        match self {
+            InputResult::Submitted(text) => Ok(text),
+            InputResult::Cancelled => Err(crate::error::CruiseError::Other(
+                "input cancelled".to_string(),
+            )),
+        }
+    }
+}
+
 /// Display a multiline-capable prompt and return the user's input.
 ///
 /// Keys:
@@ -301,6 +316,41 @@ mod tests {
 
     fn buf_with(text: &str) -> InputBuffer {
         InputBuffer::from_text(text)
+    }
+
+    // ── InputResult::into_result ─────────────────────────────────────────────
+
+    #[test]
+    fn test_into_result_submitted_returns_text() {
+        // Given: Submitted の InputResult
+        let result = InputResult::Submitted("add feature X".to_string()).into_result();
+        // Then: Ok で同じ文字列が返る
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
+    }
+
+    #[test]
+    fn test_into_result_submitted_multiline_preserved() {
+        // Given: 複数行テキストを持つ Submitted
+        let multiline = "line1\nline2\nline3".to_string();
+        let result = InputResult::Submitted(multiline.clone()).into_result();
+        // Then: 内部改行がそのまま保持された Ok が返る
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), multiline);
+    }
+
+    #[test]
+    fn test_into_result_submitted_empty_string_returns_ok() {
+        // Given: 空文字列の Submitted（空入力を送信したケース）
+        let result = InputResult::Submitted(String::new()).into_result();
+        // Then: Ok("") が返る（空文字列は保持される）
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "");
+    }
+
+    #[test]
+    fn test_into_result_cancelled_returns_err() {
+        // Given: ユーザーが Esc/Ctrl+C でキャンセルした
+        let result = InputResult::Cancelled.into_result();
+        // Then: Err が返り、セッション作成前に処理を止められる
+        assert!(result.is_err(), "Cancelled should produce Err, got Ok");
     }
 
     // ── InputResult ────────────────────────────────────────────────────────────

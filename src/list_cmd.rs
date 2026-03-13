@@ -3,6 +3,7 @@ use inquire::InquireError;
 
 use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
 use crate::error::{CruiseError, Result};
+use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
 
 pub async fn run() -> Result<()> {
@@ -51,14 +52,9 @@ pub async fn run() -> Result<()> {
                     return crate::run_cmd::run(run_args).await;
                 }
                 "Replan" => {
-                    let text = match inquire::Text::new("Describe the changes needed:").prompt() {
-                        Ok(t) => t,
-                        Err(
-                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
-                        ) => {
-                            continue;
-                        }
-                        Err(e) => return Err(CruiseError::Other(format!("input error: {e}"))),
+                    let text = match prompt_multiline("Describe the changes needed:")? {
+                        InputResult::Submitted(t) => t,
+                        InputResult::Cancelled => continue,
                     };
                     crate::plan_cmd::replan_session(
                         &manager,
@@ -990,6 +986,54 @@ mod tests {
         assert!(
             !label.contains("Planned"),
             "AwaitingApproval label should NOT contain 'Planned': {label}"
+        );
+    }
+
+    // ── format_session_label: multiline input ─────────────────────────────────
+
+    #[test]
+    fn test_format_session_label_multiline_input_shows_first_line_only() {
+        // Given: session.input が複数行（Shift+Enter で改行を含む input）
+        let s = make_session(
+            "20260306143000",
+            "line1\nline2\nline3",
+            SessionPhase::Planned,
+        );
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: ラベルには第 1 行だけ現れ、残りの行は含まれない
+        assert!(
+            label.contains("line1"),
+            "label must contain first line: {label}"
+        );
+        assert!(
+            !label.contains("line2"),
+            "label must NOT contain second line: {label}"
+        );
+        assert!(
+            !label.contains("line3"),
+            "label must NOT contain third line: {label}"
+        );
+    }
+
+    #[test]
+    fn test_format_session_label_multiline_input_does_not_contain_newline_char() {
+        // Given: 複数行の input
+        let s = make_session(
+            "20260306143000",
+            "implement feature\nwith extra detail",
+            SessionPhase::Planned,
+        );
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: ラベル文字列に改行文字が含まれない（一覧 UI の 1 行として表示できる）
+        assert!(
+            !label.contains('\n'),
+            "label must not contain newline character: {label:?}"
         );
     }
 }

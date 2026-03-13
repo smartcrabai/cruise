@@ -366,9 +366,7 @@ where
 
 /// Prompt interactively for the initial plan input.
 fn prompt_for_plan_input() -> Result<String> {
-    inquire::Text::new("What would you like to implement?")
-        .prompt()
-        .map_err(|e| CruiseError::Other(format!("input error: {e}")))
+    prompt_multiline("What would you like to implement?")?.into_result()
 }
 
 #[cfg(test)]
@@ -468,5 +466,32 @@ mod tests {
 
         // Then: Ok with the original content is returned
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), content);
+    }
+
+    // ── resolve_input with multiline stdin ───────────────────────────────────
+
+    #[test]
+    fn test_resolve_input_multiline_from_stdin_preserves_internal_newlines() {
+        // Given: 複数行を含む stdin 入力（pipe 等）
+        let stdin = "line1\nline2\nline3\n".to_string();
+        let result = resolve_input(None, Some(stdin), || {
+            panic!("interactive prompt should not run")
+        });
+        // Then: 先頭・末尾の空白のみ trim され、内部改行は保持される
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            "line1\nline2\nline3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_input_multiline_trims_only_leading_trailing_whitespace() {
+        // Given: 先頭と末尾に余分な空白を持つ複数行 stdin 入力
+        let stdin = "  line1\nline2  \n".to_string();
+        let result = resolve_input(None, Some(stdin), || {
+            panic!("interactive prompt should not run")
+        });
+        // Then: 先頭・末尾の空白のみ除去され、中間の改行は保持される
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
     }
 }
