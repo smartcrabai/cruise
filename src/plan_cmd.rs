@@ -8,7 +8,7 @@ use crate::config::{WorkflowConfig, validate_fail_if_no_file_changes, validate_g
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
+use crate::session::{SessionManager, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
@@ -172,7 +172,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            session.phase = SessionPhase::Planned;
+            session.approve();
             manager.save(session)?;
             eprintln!(
                 "\n{} Session {} created.",
@@ -199,7 +199,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                session.phase = SessionPhase::Planned;
+                session.approve();
                 manager.save(session)?;
                 eprintln!(
                     "\n{} Session {} created.",
@@ -230,7 +230,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                session.phase = SessionPhase::Planned;
+                session.approve();
                 manager.save(session)?;
                 eprintln!(
                     "\n{} Executing session {}...",

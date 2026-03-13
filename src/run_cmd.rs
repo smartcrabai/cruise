@@ -99,6 +99,15 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         .session
         .map_or_else(|| select_pending_session(&manager), Ok)?;
     let mut session = manager.load(&session_id)?;
+
+    if !session.phase.is_runnable() {
+        return Err(CruiseError::Other(format!(
+            "Session {} is in '{}' phase and cannot be run. Approve it first with `cruise list`.",
+            session_id,
+            session.phase.label()
+        )));
+    }
+
     let config = manager.load_config(&session_id)?;
     validate_groups(&config)?;
     validate_fail_if_no_file_changes(&config)?;
@@ -1004,7 +1013,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                     truncated
                 )
             }
-            SessionPhase::Planned | SessionPhase::Running => {
+            SessionPhase::AwaitingApproval | SessionPhase::Planned | SessionPhase::Running => {
                 format!("[{}] ? {}", i + 1, truncated)
             }
         };
@@ -1253,6 +1262,7 @@ mod tests {
             "cruise.yaml".to_string(),
             input.to_string(),
         );
+        session.phase = SessionPhase::Planned;
         session.workspace_mode = WorkspaceMode::CurrentBranch;
         session.target_branch = Some(target_branch.to_string());
         session

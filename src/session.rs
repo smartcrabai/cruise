@@ -8,6 +8,8 @@ use crate::error::{CruiseError, Result};
 /// Phase of a session's lifecycle.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum SessionPhase {
+    /// Plan has been generated but not yet approved by the user.
+    AwaitingApproval,
     Planned,
     Running,
     Completed,
@@ -19,6 +21,7 @@ pub enum SessionPhase {
 impl SessionPhase {
     pub fn label(&self) -> &str {
         match self {
+            Self::AwaitingApproval => "Awaiting Approval",
             Self::Planned => "Planned",
             Self::Running => "Running",
             Self::Completed => "Completed",
@@ -83,7 +86,7 @@ impl SessionState {
         Self {
             id,
             base_dir,
-            phase: SessionPhase::Planned,
+            phase: SessionPhase::AwaitingApproval,
             config_source,
             input,
             current_step: None,
@@ -100,6 +103,18 @@ impl SessionState {
     /// Absolute path to the plan file for this session.
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
+    }
+
+    /// Approve the session, transitioning from `AwaitingApproval` to Planned.
+    ///
+    /// Panics if the session is not in `AwaitingApproval` phase.
+    pub fn approve(&mut self) {
+        assert!(
+            matches!(self.phase, SessionPhase::AwaitingApproval),
+            "approve() called on session in '{}' phase",
+            self.phase.label()
+        );
+        self.phase = SessionPhase::Planned;
     }
 
     /// Resets this session back to `Planned` state so it can be re-executed from scratch.
@@ -493,7 +508,7 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(loaded.id, id);
         assert_eq!(loaded.input, "add hello world");
-        assert!(matches!(loaded.phase, SessionPhase::Planned));
+        assert!(matches!(loaded.phase, SessionPhase::AwaitingApproval));
         assert!(loaded.current_step.is_none());
         assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
         assert_eq!(loaded.target_branch, None);
@@ -1143,5 +1158,194 @@ mod tests {
         assert!(s.current_step.is_none());
         assert_eq!(s.workspace_mode, WorkspaceMode::CurrentBranch);
         assert_eq!(s.target_branch.as_deref(), Some("feature/my-branch"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionPhase::AwaitingApproval
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_new_starts_in_awaiting_approval() {
+        // Given / When: 新規セッションを作成する
+        let s = SessionState::new(
+            "20260311100000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "some task".to_string(),
+        );
+
+        // Then: AwaitingApproval フェーズで開始する（Planned ではない）
+        assert!(
+            matches!(s.phase, SessionPhase::AwaitingApproval),
+            "new session should start in AwaitingApproval, got {:?}",
+            s.phase
+        );
+    }
+
+    #[test]
+    fn test_awaiting_approval_is_not_runnable() {
+        // Given: AwaitingApproval フェーズ
+        let phase = SessionPhase::AwaitingApproval;
+
+        // When / Then: is_runnable() は false を返す
+        assert!(
+            !phase.is_runnable(),
+            "AwaitingApproval should not be runnable"
+        );
+    }
+
+    #[test]
+    fn test_awaiting_approval_label_is_distinct() {
+        // Given: AwaitingApproval フェーズ
+        let phase = SessionPhase::AwaitingApproval;
+
+        // When / Then: 他のフェーズと重複しない明確なラベルを返す
+        let label = phase.label();
+        assert_eq!(label, "Awaiting Approval");
+        assert_ne!(label, SessionPhase::Planned.label());
+        assert_ne!(label, SessionPhase::Running.label());
+        assert_ne!(label, SessionPhase::Completed.label());
+        assert_ne!(label, SessionPhase::Failed("x".to_string()).label());
+    }
+
+    #[test]
+    fn test_pending_excludes_awaiting_approval() {
+        // Given: AwaitingApproval / Planned / Running / Failed / Completed の各セッションが存在する
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let awaiting = SessionState::new(
+            "20260311200000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "unapproved".to_string(),
+        );
+        // SessionState::new は AwaitingApproval で作成される
+        manager
+            .create(&awaiting)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut planned = SessionState::new(
+            "20260311200001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "approved".to_string(),
+        );
+        planned.phase = SessionPhase::Planned;
+        manager.create(&planned).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut running = SessionState::new(
+            "20260311200002".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "running".to_string(),
+        );
+        running.phase = SessionPhase::Running;
+        manager.create(&running).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: pending() を呼ぶ
+        let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: AwaitingApproval は含まれない。Planned・Running は含まれる
+        let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"20260311200000"),
+            "AwaitingApproval should NOT be in pending: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"20260311200001"),
+            "Planned should be in pending: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"20260311200002"),
+            "Running should be in pending: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_planned_excludes_awaiting_approval() {
+        // Given: AwaitingApproval と Planned の両セッションが存在する
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        // AwaitingApproval セッション（SessionState::new のデフォルト）
+        let awaiting = SessionState::new(
+            "20260311300000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "not yet approved".to_string(),
+        );
+        manager
+            .create(&awaiting)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut approved = SessionState::new(
+            "20260311300001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "approved task".to_string(),
+        );
+        approved.phase = SessionPhase::Planned;
+        manager
+            .create(&approved)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planned() を呼ぶ
+        let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: Planned のみ返され、AwaitingApproval は含まれない
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "20260311300001");
+        assert!(
+            !result.iter().any(|s| s.id == "20260311300000"),
+            "AwaitingApproval should NOT appear in planned()"
+        );
+    }
+
+    #[test]
+    fn test_awaiting_approval_session_roundtrip() {
+        // Given: AwaitingApproval フェーズのセッションを永続化する
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260311400000".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "pending approval".to_string(),
+        );
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: ロードする
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: AwaitingApproval フェーズが正しくデシリアライズされる
+        assert!(
+            matches!(loaded.phase, SessionPhase::AwaitingApproval),
+            "loaded phase should be AwaitingApproval, got {:?}",
+            loaded.phase
+        );
+    }
+
+    #[test]
+    fn test_approve_from_awaiting_approval() {
+        // Given: AwaitingApproval フェーズのセッション
+        let mut s = SessionState::new(
+            "20260311500000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        assert!(matches!(s.phase, SessionPhase::AwaitingApproval));
+
+        // When: approve() を呼ぶ
+        s.approve();
+
+        // Then: Planned フェーズになる
+        assert!(
+            matches!(s.phase, SessionPhase::Planned),
+            "approve should set phase to Planned, got {:?}",
+            s.phase
+        );
     }
 }
