@@ -7,7 +7,7 @@ pub struct ProcessLock {
 pub fn lock_process() -> ProcessLock {
     let guard = GLOBAL_PROCESS_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if std::env::current_dir().is_err() {
         let _ = std::env::set_current_dir("/");
     }
@@ -29,9 +29,10 @@ impl PathEnvGuard {
         if let Some(ref existing) = prev {
             paths.extend(std::env::split_paths(existing));
         }
-        let joined = std::env::join_paths(paths).expect("failed to join PATH");
         // SAFETY: the test holds GLOBAL_PROCESS_LOCK, so no other test mutates PATH concurrently.
-        unsafe { std::env::set_var("PATH", &joined) };
+        if let Ok(joined) = std::env::join_paths(paths) {
+            unsafe { std::env::set_var("PATH", &joined) };
+        }
         Self { prev, _lock: lock }
     }
 }

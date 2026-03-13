@@ -43,7 +43,7 @@ pub async fn run_prompt(
                     if let Some(cb) = on_retry {
                         cb(&msg);
                     } else {
-                        eprintln!("{}", msg);
+                        eprintln!("{msg}");
                     }
                     tokio::time::sleep(delay).await;
                     continue;
@@ -154,7 +154,7 @@ mod tests {
         let command = vec!["cat".to_string()];
         let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "test prompt");
     }
 
@@ -172,7 +172,7 @@ mod tests {
         env.insert("SOME_VAR".to_string(), "some_value".to_string());
         let result = run_prompt(&command, None, "prompt text", 0, &env, None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "prompt text");
     }
 
@@ -189,7 +189,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "hello model");
     }
 
@@ -204,7 +204,7 @@ mod tests {
         // When: run_prompt is called with an empty prompt (stdin ignored by the script)
         let result = run_prompt(&command, None, "", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stdout is in output and stderr is captured in stderr field
         assert_eq!(result.output.trim(), "out_text");
         assert_eq!(result.stderr.trim(), "err_text");
@@ -217,7 +217,7 @@ mod tests {
         // When: run_prompt is called
         let result = run_prompt(&command, None, "only stdout", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stderr field is empty, output contains stdin content
         assert_eq!(result.output, "only stdout");
         assert_eq!(result.stderr, "");

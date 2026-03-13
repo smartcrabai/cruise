@@ -12,15 +12,15 @@ pub struct WorktreeContext {
 
 /// Generate the default branch name for a session worktree.
 fn default_branch_name(session_id: &str, input: &str) -> String {
-    if !input.is_empty() {
+    if input.is_empty() {
+        format!("cruise/{session_id}")
+    } else {
         let sanitized = sanitize_branch_name(input);
         if sanitized.is_empty() {
-            format!("cruise/{}", session_id)
+            format!("cruise/{session_id}")
         } else {
-            format!("cruise/{}-{}", session_id, sanitized)
+            format!("cruise/{session_id}-{sanitized}")
         }
-    } else {
-        format!("cruise/{}", session_id)
     }
 }
 
@@ -41,9 +41,10 @@ pub fn setup_session_worktree(
 
     // Reuse existing worktree directory if present.
     if worktree_path.is_dir() {
-        let branch = existing_branch
-            .map(|b| b.to_string())
-            .unwrap_or_else(|| default_branch_name(session_id, input));
+        let branch = existing_branch.map_or_else(
+            || default_branch_name(session_id, input),
+            std::string::ToString::to_string,
+        );
         return Ok((
             WorktreeContext {
                 path: worktree_path,
@@ -62,7 +63,7 @@ pub fn setup_session_worktree(
         .arg(&worktree_path)
         .current_dir(base_dir)
         .output()
-        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {}", e)))?;
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -91,7 +92,7 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
         .arg(&ctx.path)
         .current_dir(&ctx.original_dir)
         .output()
-        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {}", e)))?;
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -102,7 +103,7 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
         .args(["branch", "-D", &ctx.branch])
         .current_dir(&ctx.original_dir)
         .output()
-        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {}", e)))?;
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -117,7 +118,7 @@ fn ensure_git_repo(dir: &Path) -> Result<()> {
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(dir)
         .output()
-        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {}", e)))?;
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
     if !output.status.success() {
         return Err(CruiseError::NotGitRepository);
@@ -230,27 +231,28 @@ mod tests {
                 .args(args)
                 .current_dir(dir)
                 .output()
-                .expect("git command failed");
+                .unwrap_or_else(|e| panic!("git command failed: {e:?}"));
         };
         run(&["init"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test"]);
-        fs::write(dir.join("README.md"), "init").unwrap();
+        fs::write(dir.join("README.md"), "init").unwrap_or_else(|e| panic!("{e:?}"));
         run(&["add", "."]);
         run(&["commit", "-m", "init"]);
     }
 
     #[test]
     fn test_setup_session_worktree_and_cleanup() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("myrepo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143000";
         let (ctx, reused) =
-            setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None).unwrap();
+            setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None)
+                .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert!(!reused, "should not be reused on first creation");
         assert!(ctx.path.exists(), "worktree directory should exist");
@@ -264,28 +266,29 @@ mod tests {
             "branch should contain sanitized input"
         );
 
-        cleanup_worktree(&ctx).unwrap();
+        cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!ctx.path.exists(), "worktree directory should be removed");
     }
 
     #[test]
     fn test_setup_session_worktree_empty_input() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("myrepo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143001";
-        let (ctx, _) = setup_session_worktree(&repo, session_id, "", &worktrees_dir, None).unwrap();
+        let (ctx, _) = setup_session_worktree(&repo, session_id, "", &worktrees_dir, None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert_eq!(ctx.branch, format!("cruise/{}", session_id));
-        cleanup_worktree(&ctx).unwrap();
+        assert_eq!(ctx.branch, format!("cruise/{session_id}"));
+        cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_setup_session_worktree_not_git_repo() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let worktrees_dir = tmp.path().join("worktrees");
         let result =
             setup_session_worktree(tmp.path(), "20260306143000", "task", &worktrees_dir, None);
@@ -318,46 +321,49 @@ mod tests {
 
     #[test]
     fn test_copy_worktree_includes() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("{e:?}"));
 
-        fs::write(src.join(".worktreeinclude"), ".env\n").unwrap();
-        fs::write(src.join(".env"), "SECRET=123").unwrap();
+        fs::write(src.join(".worktreeinclude"), ".env\n").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(src.join(".env"), "SECRET=123").unwrap_or_else(|e| panic!("{e:?}"));
 
-        copy_worktree_includes(&src, &dst).unwrap();
+        copy_worktree_includes(&src, &dst).unwrap_or_else(|e| panic!("{e:?}"));
 
         assert!(dst.join(".env").exists());
-        assert_eq!(fs::read_to_string(dst.join(".env")).unwrap(), "SECRET=123");
+        assert_eq!(
+            fs::read_to_string(dst.join(".env")).unwrap_or_else(|e| panic!("{e:?}")),
+            "SECRET=123"
+        );
     }
 
     #[test]
     fn test_copy_worktree_includes_directory() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("{e:?}"));
 
-        fs::write(src.join(".worktreeinclude"), ".cruise/\n").unwrap();
+        fs::write(src.join(".worktreeinclude"), ".cruise/\n").unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_dir = src.join(".cruise");
-        fs::create_dir_all(&cruise_dir).unwrap();
-        fs::write(cruise_dir.join("config.yaml"), "key: value").unwrap();
+        fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(cruise_dir.join("config.yaml"), "key: value").unwrap_or_else(|e| panic!("{e:?}"));
 
-        copy_worktree_includes(&src, &dst).unwrap();
+        copy_worktree_includes(&src, &dst).unwrap_or_else(|e| panic!("{e:?}"));
 
         assert!(dst.join(".cruise").join("config.yaml").exists());
     }
 
     #[test]
     fn test_copy_worktree_includes_missing_file() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("{e:?}"));
 
         let result = copy_worktree_includes(&src, &dst);
         assert!(result.is_ok());
@@ -365,20 +371,20 @@ mod tests {
 
     #[test]
     fn test_copy_worktree_includes_comments() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("{e:?}"));
 
         fs::write(
             src.join(".worktreeinclude"),
             "# this is a comment\n\n# another comment\n.env\n",
         )
-        .unwrap();
-        fs::write(src.join(".env"), "SECRET=123").unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(src.join(".env"), "SECRET=123").unwrap_or_else(|e| panic!("{e:?}"));
 
-        copy_worktree_includes(&src, &dst).unwrap();
+        copy_worktree_includes(&src, &dst).unwrap_or_else(|e| panic!("{e:?}"));
 
         assert!(dst.join(".env").exists());
     }

@@ -20,7 +20,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
     }
 
     // Build the label list shown to the user.
-    let labels: Vec<&str> = choices.iter().map(|c| c.label()).collect();
+    let labels: Vec<&str> = choices.iter().map(super::OptionChoice::label).collect();
 
     if labels.is_empty() {
         // Nothing to select — continue to the next step.
@@ -90,7 +90,7 @@ mod tests {
                 assert_eq!(label, "Option A");
                 assert_eq!(next, Some("step_a".to_string()));
             }
-            _ => panic!("Expected Selector"),
+            OptionChoice::TextInput { .. } => panic!("Expected Selector"),
         }
     }
 
@@ -105,7 +105,7 @@ mod tests {
                 assert_eq!(label, "Enter text");
                 assert_eq!(next, Some("next_step".to_string()));
             }
-            _ => panic!("Expected TextInput"),
+            OptionChoice::Selector { .. } => panic!("Expected TextInput"),
         }
     }
 
