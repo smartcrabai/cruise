@@ -43,7 +43,7 @@ pub async fn run_prompt(
                     if let Some(cb) = on_retry {
                         cb(&msg);
                     } else {
-                        eprintln!("{}", msg);
+                        eprintln!("{msg}");
                     }
                     tokio::time::sleep(delay).await;
                     continue;
@@ -150,11 +150,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_with_echo() {
+        let _guard = crate::test_support::lock_process();
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
         let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "test prompt");
     }
 
@@ -166,18 +167,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_with_env() {
+        let _guard = crate::test_support::lock_process();
         // cat echoes stdin regardless of env; verify env does not break execution.
         let command = vec!["cat".to_string()];
         let mut env = HashMap::new();
         env.insert("SOME_VAR".to_string(), "some_value".to_string());
         let result = run_prompt(&command, None, "prompt text", 0, &env, None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "prompt text");
     }
 
     #[tokio::test]
     async fn test_run_prompt_with_model_arg() {
+        let _guard = crate::test_support::lock_process();
         // "sh -c cat" ignores extra positional args (--model test-model become $0/$1 in sh).
         let command = vec!["sh".to_string(), "-c".to_string(), "cat".to_string()];
         let result = run_prompt(
@@ -189,12 +192,13 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "hello model");
     }
 
     #[tokio::test]
     async fn test_run_prompt_captures_stderr() {
+        let _guard = crate::test_support::lock_process();
         // Given: a command that writes to both stdout and stderr
         let command = vec![
             "sh".to_string(),
@@ -204,7 +208,7 @@ mod tests {
         // When: run_prompt is called with an empty prompt (stdin ignored by the script)
         let result = run_prompt(&command, None, "", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stdout is in output and stderr is captured in stderr field
         assert_eq!(result.output.trim(), "out_text");
         assert_eq!(result.stderr.trim(), "err_text");
@@ -212,12 +216,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_stderr_empty_when_no_stderr() {
+        let _guard = crate::test_support::lock_process();
         // Given: a command that writes only to stdout (cat echoes stdin)
         let command = vec!["cat".to_string()];
         // When: run_prompt is called
         let result = run_prompt(&command, None, "only stdout", 0, &HashMap::new(), None)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stderr field is empty, output contains stdin content
         assert_eq!(result.output, "only stdout");
         assert_eq!(result.stderr, "");

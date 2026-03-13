@@ -9,6 +9,21 @@ pub(crate) enum InputResult {
     Cancelled,
 }
 
+impl InputResult {
+    /// Convert into a plain `Result<String>`.
+    ///
+    /// `Submitted(text)` → `Ok(text)` preserving internal newlines.
+    /// `Cancelled`       → `Err(CruiseError::Other("input cancelled"))`.
+    pub(crate) fn into_result(self) -> crate::error::Result<String> {
+        match self {
+            InputResult::Submitted(text) => Ok(text),
+            InputResult::Cancelled => Err(crate::error::CruiseError::Other(
+                "input cancelled".to_string(),
+            )),
+        }
+    }
+}
+
 /// Display a multiline-capable prompt and return the user's input.
 ///
 /// Keys:
@@ -25,15 +40,9 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
     };
     use std::io::{Write, stdout};
 
-    let mut out = stdout();
-
-    // Print the prompt label on its own line, then save the position where
-    // the buffer will be rendered so we can redraw on each keystroke.
-    writeln!(out, "{}", message)?;
-    execute!(out, cursor::SavePosition)?;
-    out.flush()?;
-
     // RAII guard: ensures raw mode is disabled even if we return early.
+    // Defined before any statements so clippy does not complain about items
+    // appearing after statements.
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
@@ -41,8 +50,16 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         }
     }
 
+    let mut out = stdout();
+
+    // Print the prompt label on its own line, then save the position where
+    // the buffer will be rendered so we can redraw on each keystroke.
+    writeln!(out, "{message}")?;
+    execute!(out, cursor::SavePosition)?;
+    out.flush()?;
+
     terminal::enable_raw_mode()?;
-    let _guard = RawModeGuard;
+    let guard = RawModeGuard;
 
     let mut buf = InputBuffer::new();
 
@@ -57,13 +74,14 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
             if i > 0 {
                 write!(out, "\r\n")?;
             }
-            write!(out, "{}", line)?;
+            write!(out, "{line}")?;
         }
 
         // Reposition the terminal cursor at (cursor_row, cursor_col).
         execute!(out, cursor::RestorePosition)?;
         if buf.cursor_row > 0 {
-            execute!(out, cursor::MoveDown(buf.cursor_row as u16))?;
+            let rows = u16::try_from(buf.cursor_row).unwrap_or(u16::MAX);
+            execute!(out, cursor::MoveDown(rows))?;
         }
         execute!(out, cursor::MoveToColumn(buf.display_col()))?;
         out.flush()?;
@@ -101,8 +119,8 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         }
     };
 
-    // _guard drops here, disabling raw mode.
-    drop(_guard);
+    // `guard` drops here, disabling raw mode.
+    drop(guard);
 
     // Clear the draft and show the final submitted text (or nothing for Cancelled).
     execute!(
@@ -111,7 +129,7 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         Clear(ClearType::FromCursorDown)
     )?;
     if let InputResult::Submitted(ref text) = result {
-        writeln!(out, "{}", text)?;
+        writeln!(out, "{text}")?;
     }
     out.flush()?;
 
@@ -139,6 +157,22 @@ impl InputBuffer {
             lines: vec![String::new()],
             cursor_row: 0,
             cursor_col: 0,
+        }
+    }
+
+    /// Create a buffer pre-loaded with `text`, cursor positioned at the end.
+    #[cfg(test)]
+    fn from_text(text: &str) -> Self {
+        if text.is_empty() {
+            return Self::new();
+        }
+        let lines: Vec<String> = text.split('\n').map(ToString::to_string).collect();
+        let cursor_row = lines.len() - 1;
+        let cursor_col = lines[cursor_row].chars().count();
+        Self {
+            lines,
+            cursor_row,
+            cursor_col,
         }
     }
 
@@ -243,11 +277,12 @@ impl InputBuffer {
     /// as CJK ideographs that occupy two terminal columns each.
     fn display_col(&self) -> u16 {
         use unicode_width::UnicodeWidthChar;
-        self.lines[self.cursor_row]
+        let width: usize = self.lines[self.cursor_row]
             .chars()
             .take(self.cursor_col)
             .map(|c| c.width().unwrap_or(0))
-            .sum::<usize>() as u16
+            .sum();
+        u16::try_from(width).unwrap_or(u16::MAX)
     }
 
     /// Convert a char-index `col` within line `row` to a byte offset.
@@ -280,15 +315,42 @@ mod tests {
     // ── Test helpers ───────────────────────────────────────────────────────────
 
     fn buf_with(text: &str) -> InputBuffer {
-        let mut buf = InputBuffer::new();
-        for ch in text.chars() {
-            if ch == '\n' {
-                buf.insert_newline();
-            } else {
-                buf.insert_char(ch);
-            }
-        }
-        buf
+        InputBuffer::from_text(text)
+    }
+
+    // ── InputResult::into_result ─────────────────────────────────────────────
+
+    #[test]
+    fn test_into_result_submitted_returns_text() {
+        // Given: Submitted の InputResult
+        let result = InputResult::Submitted("add feature X".to_string()).into_result();
+        // Then: Ok で同じ文字列が返る
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
+    }
+
+    #[test]
+    fn test_into_result_submitted_multiline_preserved() {
+        // Given: 複数行テキストを持つ Submitted
+        let multiline = "line1\nline2\nline3".to_string();
+        let result = InputResult::Submitted(multiline.clone()).into_result();
+        // Then: 内部改行がそのまま保持された Ok が返る
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), multiline);
+    }
+
+    #[test]
+    fn test_into_result_submitted_empty_string_returns_ok() {
+        // Given: 空文字列の Submitted（空入力を送信したケース）
+        let result = InputResult::Submitted(String::new()).into_result();
+        // Then: Ok("") が返る（空文字列は保持される）
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "");
+    }
+
+    #[test]
+    fn test_into_result_cancelled_returns_err() {
+        // Given: ユーザーが Esc/Ctrl+C でキャンセルした
+        let result = InputResult::Cancelled.into_result();
+        // Then: Err が返り、セッション作成前に処理を止められる
+        assert!(result.is_err(), "Cancelled should produce Err, got Ok");
     }
 
     // ── InputResult ────────────────────────────────────────────────────────────
@@ -620,5 +682,69 @@ mod tests {
     #[test]
     fn test_text_single_empty_line_is_empty_string() {
         assert_eq!(InputBuffer::new().text(), "");
+    }
+
+    // ── InputBuffer::from_text ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_text_single_line_cursor_at_end() {
+        // Given: initial text "hello"
+        let buf = InputBuffer::from_text("hello");
+        // Then: text matches
+        assert_eq!(buf.text(), "hello");
+        // And: cursor is positioned at the end of the line
+        assert_eq!(buf.cursor_row, 0);
+        assert_eq!(buf.cursor_col, 5);
+    }
+
+    #[test]
+    fn test_from_text_multiline_cursor_at_end_of_last_line() {
+        // Given: multiline initial text
+        let buf = InputBuffer::from_text("hello\nworld");
+        // Then: text is preserved
+        assert_eq!(buf.text(), "hello\nworld");
+        // And: cursor is at end of last line
+        assert_eq!(buf.cursor_row, 1);
+        assert_eq!(buf.cursor_col, 5);
+    }
+
+    #[test]
+    fn test_from_text_empty_string_same_as_new() {
+        // Given: empty initial text
+        let buf = InputBuffer::from_text("");
+        // Then: text is empty
+        assert_eq!(buf.text(), "");
+        // And: cursor is at origin
+        assert_eq!(buf.cursor_row, 0);
+        assert_eq!(buf.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_from_text_can_append_after_initialization() {
+        // Given: buffer initialized with "hello"
+        let mut buf = InputBuffer::from_text("hello");
+        // When: a character is inserted at the current cursor (end)
+        buf.insert_char('!');
+        // Then: character is appended
+        assert_eq!(buf.text(), "hello!");
+    }
+
+    #[test]
+    fn test_from_text_three_lines_cursor_at_end() {
+        // Given: three-line initial text
+        let buf = InputBuffer::from_text("a\nbb\nccc");
+        // Then: text preserved and cursor at end of last line
+        assert_eq!(buf.text(), "a\nbb\nccc");
+        assert_eq!(buf.cursor_row, 2);
+        assert_eq!(buf.cursor_col, 3);
+    }
+
+    #[test]
+    fn test_from_text_unicode_initial_text() {
+        // Given: initial text with CJK characters
+        let buf = InputBuffer::from_text("あいう");
+        // Then: text preserved and cursor at char position 3 (not byte position)
+        assert_eq!(buf.text(), "あいう");
+        assert_eq!(buf.cursor_col, 3);
     }
 }

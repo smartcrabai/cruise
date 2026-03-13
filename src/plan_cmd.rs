@@ -8,7 +8,7 @@ use crate::config::{WorkflowConfig, validate_fail_if_no_file_changes, validate_g
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
+use crate::session::{SessionManager, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
@@ -103,7 +103,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let spinner = crate::spinner::Spinner::start("Cruising...");
     let env = std::collections::HashMap::new();
     let result = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
+        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
         let effective_model = plan_step.model.as_deref().or(config.model.as_deref());
         let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
         let (resolved_command, model_arg) = if has_placeholder {
@@ -172,7 +172,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            session.phase = SessionPhase::Planned;
+            session.approve();
             manager.save(session)?;
             eprintln!(
                 "\n{} Session {} created.",
@@ -199,7 +199,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                session.phase = SessionPhase::Planned;
+                session.approve();
                 manager.save(session)?;
                 eprintln!(
                     "\n{} Session {} created.",
@@ -230,7 +230,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                session.phase = SessionPhase::Planned;
+                session.approve();
                 manager.save(session)?;
                 eprintln!(
                     "\n{} Executing session {}...",
@@ -315,7 +315,8 @@ async fn run_plan_prompt(
     };
     let env = std::collections::HashMap::new();
     eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
-    run_prompt_step(vars, config, &step, rate_limit_retries, &env).await?;
+    let compiled = crate::workflow::compile(config.clone())?;
+    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env).await?;
     Ok(())
 }
 
@@ -365,9 +366,7 @@ where
 
 /// Prompt interactively for the initial plan input.
 fn prompt_for_plan_input() -> Result<String> {
-    inquire::Text::new("What would you like to implement?")
-        .prompt()
-        .map_err(|e| CruiseError::Other(format!("input error: {e}")))
+    prompt_multiline("What would you like to implement?")?.into_result()
 }
 
 #[cfg(test)]
@@ -381,7 +380,7 @@ mod tests {
         let result = resolve_input(Some("add feature X".to_string()), None, || {
             panic!("interactive prompt should not run")
         });
-        assert_eq!(result.unwrap(), "add feature X");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
     }
 
     #[test]
@@ -390,14 +389,20 @@ mod tests {
         let result = resolve_input(None, Some("  add feature from pipe\n".to_string()), || {
             panic!("interactive prompt should not run")
         });
-        assert_eq!(result.unwrap(), "add feature from pipe");
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            "add feature from pipe"
+        );
     }
 
     #[test]
     fn test_resolve_input_without_arg_or_stdin_uses_interactive_result() {
         // Given: no CLI arg or stdin input is available
         let result = resolve_input(None, None, || Ok("resume in place".to_string()));
-        assert_eq!(result.unwrap(), "resume in place");
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            "resume in place"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -407,7 +412,7 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_missing() {
         // Given: a path that does not exist
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
 
         // When
@@ -420,9 +425,9 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_is_empty() {
         // Given: plan file exists but is completely empty
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "").unwrap();
+        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
@@ -434,9 +439,9 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_is_whitespace_only() {
         // Given: plan file contains only whitespace characters
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "   \n\t\n  ").unwrap();
+        std::fs::write(&plan_path, "   \n\t\n  ").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
@@ -451,15 +456,42 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_content_when_file_has_real_content() {
         // Given: plan file has meaningful content
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
         let content = "# Implementation Plan\n\nStep 1: do something\n";
-        std::fs::write(&plan_path, content).unwrap();
+        std::fs::write(&plan_path, content).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
 
         // Then: Ok with the original content is returned
-        assert_eq!(result.unwrap(), content);
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), content);
+    }
+
+    // ── resolve_input with multiline stdin ───────────────────────────────────
+
+    #[test]
+    fn test_resolve_input_multiline_from_stdin_preserves_internal_newlines() {
+        // Given: 複数行を含む stdin 入力（pipe 等）
+        let stdin = "line1\nline2\nline3\n".to_string();
+        let result = resolve_input(None, Some(stdin), || {
+            panic!("interactive prompt should not run")
+        });
+        // Then: 先頭・末尾の空白のみ trim され、内部改行は保持される
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            "line1\nline2\nline3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_input_multiline_trims_only_leading_trailing_whitespace() {
+        // Given: 先頭と末尾に余分な空白を持つ複数行 stdin 入力
+        let stdin = "  line1\nline2  \n".to_string();
+        let result = resolve_input(None, Some(stdin), || {
+            panic!("interactive prompt should not run")
+        });
+        // Then: 先頭・末尾の空白のみ除去され、中間の改行は保持される
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
     }
 }

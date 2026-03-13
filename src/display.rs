@@ -14,7 +14,7 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
     // Top border
     let top = match title {
         Some(t) => {
-            let label = format!(" {} ", t);
+            let label = format!(" {t} ");
             let label_width = measure_text_width(&label);
             let remaining = box_width.saturating_sub(3 + label_width);
             format!(
@@ -150,5 +150,76 @@ mod tests {
     fn wrap_line_long_word() {
         let result = wrap_line("abcdefghij", 4);
         assert_eq!(result, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn test_truncate_short_string() {
+        // max より短い文字列はそのまま返る
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        // ちょうど max の文字列はそのまま返る
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        // max を超えると末尾に `…` が付与される
+        let result = truncate("hello world", 5);
+        assert_eq!(result, "hello…");
+    }
+
+    #[test]
+    fn test_truncate_multiline() {
+        // 複数行の場合は最初の行のみを使用
+        let result = truncate("first line\nsecond line", 20);
+        assert_eq!(result, "first line");
+    }
+
+    // ── truncate ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_short_single_line_returns_as_is() {
+        // Given: max より短い単一行
+        let result = truncate("hello", 80);
+        // Then: そのまま返る
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_single_line_appends_ellipsis() {
+        // Given: max を超える単一行
+        let result = truncate("abcde", 3);
+        // Then: 3 文字 + "…" で切り詰められる
+        assert_eq!(result, "abc…");
+    }
+
+    #[test]
+    fn test_truncate_multiline_returns_first_line_only() {
+        // Given: 複数行入力（セッション input が multiline になった場合を想定）
+        let result = truncate("line1\nline2\nline3", 80);
+        // Then: 最初の行のみ返る
+        assert_eq!(result, "line1");
+    }
+
+    #[test]
+    fn test_truncate_multiline_long_first_line_truncated() {
+        // Given: 長い第 1 行 + 短い第 2 行
+        let first = "a".repeat(100);
+        let input = format!("{first}\nshort");
+        let result = truncate(&input, 10);
+        // Then: 10 文字 + "…" で切り詰められ、"short" は含まれない
+        assert_eq!(result, format!("{}…", "a".repeat(10)));
+        assert!(!result.contains("short"));
+    }
+
+    #[test]
+    fn test_truncate_trims_leading_trailing_whitespace() {
+        // Given: 先頭・末尾に空白のある入力
+        let result = truncate("  hello  ", 80);
+        // Then: trim された文字列が返る
+        assert_eq!(result, "hello");
     }
 }

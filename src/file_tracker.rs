@@ -140,27 +140,31 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_test_dir() -> TempDir {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("file1.txt"), "content1").unwrap();
-        std::fs::write(dir.path().join("file2.txt"), "content2").unwrap();
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("file1.txt"), "content1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("file2.txt"), "content2")
+            .unwrap_or_else(|e| panic!("{e:?}"));
         dir
     }
 
     #[test]
     fn test_snapshot_captures_files() {
         let dir = setup_test_dir();
-        let snapshot = take_current_snapshot(dir.path()).unwrap();
+        let snapshot = take_current_snapshot(dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(snapshot.len(), 2);
     }
 
     #[test]
     fn test_excluded_dirs() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::write(dir.path().join(".git/config"), "git config").unwrap();
-        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir(dir.path().join(".git")).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join(".git/config"), "git config")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        let snapshot = take_current_snapshot(dir.path()).unwrap();
+        let snapshot = take_current_snapshot(dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(snapshot.len(), 1);
     }
 
@@ -168,46 +172,122 @@ mod tests {
     fn test_no_changes_detected() {
         let dir = setup_test_dir();
         let mut tracker = FileTracker::with_root(dir.path().to_path_buf());
-        tracker.take_snapshot("step1").unwrap();
-        assert!(!tracker.has_files_changed("step1").unwrap());
+        tracker
+            .take_snapshot("step1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            !tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
     fn test_file_modification_detected() {
         let dir = setup_test_dir();
         let mut tracker = FileTracker::with_root(dir.path().to_path_buf());
-        tracker.take_snapshot("step1").unwrap();
+        tracker
+            .take_snapshot("step1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        std::fs::write(dir.path().join("file1.txt"), "modified content").unwrap();
+        std::fs::write(dir.path().join("file1.txt"), "modified content")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker.has_files_changed("step1").unwrap());
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
     fn test_file_addition_detected() {
         let dir = setup_test_dir();
         let mut tracker = FileTracker::with_root(dir.path().to_path_buf());
-        tracker.take_snapshot("step1").unwrap();
+        tracker
+            .take_snapshot("step1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        std::fs::write(dir.path().join("new_file.txt"), "new content").unwrap();
+        std::fs::write(dir.path().join("new_file.txt"), "new content")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker.has_files_changed("step1").unwrap());
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
     fn test_file_deletion_detected() {
         let dir = setup_test_dir();
         let mut tracker = FileTracker::with_root(dir.path().to_path_buf());
-        tracker.take_snapshot("step1").unwrap();
+        tracker
+            .take_snapshot("step1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        std::fs::remove_file(dir.path().join("file1.txt")).unwrap();
+        std::fs::remove_file(dir.path().join("file1.txt")).unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker.has_files_changed("step1").unwrap());
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
     fn test_no_snapshot_returns_false() {
         let tracker = FileTracker::new();
-        assert!(!tracker.has_files_changed("nonexistent").unwrap());
+        assert!(
+            !tracker
+                .has_files_changed("nonexistent")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
+    }
+
+    #[test]
+    fn test_excluded_dirs_target() {
+        // Given: directory containing a file inside `target/`
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir(dir.path().join("target")).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("target/app.out"), "binary")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: snapshot taken
+        let snapshot = take_current_snapshot(dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only main.rs is captured; target/ is excluded
+        assert_eq!(snapshot.len(), 1, "target/ should be excluded");
+        let paths: Vec<_> = snapshot.keys().collect();
+        assert!(
+            paths[0].ends_with("main.rs"),
+            "expected main.rs, got: {:?}",
+            paths[0]
+        );
+    }
+
+    #[test]
+    fn test_excluded_dirs_node_modules() {
+        // Given: directory containing a file inside `node_modules/`
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("node_modules/lib.js"), "module.exports={}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("index.js"), "console.log('hi')")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: snapshot taken
+        let snapshot = take_current_snapshot(dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only index.js is captured; node_modules/ is excluded
+        assert_eq!(snapshot.len(), 1, "node_modules/ should be excluded");
+        let paths: Vec<_> = snapshot.keys().collect();
+        assert!(
+            paths[0].ends_with("index.js"),
+            "expected index.js, got: {:?}",
+            paths[0]
+        );
     }
 }
