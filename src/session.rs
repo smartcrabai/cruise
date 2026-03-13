@@ -12,6 +12,8 @@ pub enum SessionPhase {
     Running,
     Completed,
     Failed(String),
+    /// Process was interrupted (Ctrl+C or panic) mid-execution; can be resumed.
+    Suspended,
 }
 
 impl SessionPhase {
@@ -21,12 +23,16 @@ impl SessionPhase {
             Self::Running => "Running",
             Self::Completed => "Completed",
             Self::Failed(_) => "Failed",
+            Self::Suspended => "Suspended",
         }
     }
 
     /// Whether this phase allows (re-)execution.
     pub fn is_runnable(&self) -> bool {
-        matches!(self, Self::Planned | Self::Running | Self::Failed(_))
+        matches!(
+            self,
+            Self::Planned | Self::Running | Self::Failed(_) | Self::Suspended
+        )
     }
 }
 
@@ -207,11 +213,21 @@ impl SessionManager {
     }
 
     /// Return sessions in the Planned phase only.
+    #[cfg(test)]
     pub fn planned(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
             .into_iter()
             .filter(|s| s.phase == SessionPhase::Planned)
+            .collect())
+    }
+
+    /// Return sessions eligible for `run --all`: Planned or Suspended.
+    pub fn run_all_candidates(&self) -> Result<Vec<SessionState>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|s| matches!(s.phase, SessionPhase::Planned | SessionPhase::Suspended))
             .collect())
     }
 
@@ -916,6 +932,184 @@ mod tests {
         assert_eq!(
             s.worktree_branch,
             Some("cruise/20260309110000-running-task".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionPhase::Suspended — 基本プロパティ
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_suspended_phase_label() {
+        // Given: Suspended フェーズ
+        let phase = SessionPhase::Suspended;
+
+        // When
+        let label = phase.label();
+
+        // Then: "Suspended" を返す
+        assert_eq!(label, "Suspended");
+    }
+
+    #[test]
+    fn test_suspended_is_runnable() {
+        // Given: Suspended フェーズ
+        let phase = SessionPhase::Suspended;
+
+        // When / Then: resume 可能なので is_runnable() = true
+        assert!(
+            phase.is_runnable(),
+            "Suspended should be runnable (resumable)"
+        );
+    }
+
+    #[test]
+    fn test_suspended_serialize_deserialize_roundtrip() {
+        // Given: Suspended フェーズと current_step を持つセッションを保存
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260310100000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Suspended;
+        state.current_step = Some("implement".to_string());
+        manager.create(&state).unwrap();
+
+        // When: ディスクから再読み込み
+        let loaded = manager.load(&id).unwrap();
+
+        // Then: フェーズと current_step が正しく復元される
+        assert!(
+            matches!(loaded.phase, SessionPhase::Suspended),
+            "phase should be Suspended after roundtrip"
+        );
+        assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_pending_includes_suspended() {
+        // Given: Suspended / Completed の各フェーズのセッションが存在する
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut suspended = SessionState::new(
+            "20260310110000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "suspended-task".to_string(),
+        );
+        suspended.phase = SessionPhase::Suspended;
+        manager.create(&suspended).unwrap();
+
+        let mut completed = SessionState::new(
+            "20260310120000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "completed-task".to_string(),
+        );
+        completed.phase = SessionPhase::Completed;
+        manager.create(&completed).unwrap();
+
+        // When: pending() を呼ぶ
+        let pending = manager.pending().unwrap();
+
+        // Then: Suspended は pending に含まれ、Completed は含まれない
+        let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(&"20260310110000"),
+            "Suspended should be in pending"
+        );
+        assert!(
+            !ids.contains(&"20260310120000"),
+            "Completed should not be in pending"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionManager::run_all_candidates
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_run_all_candidates_returns_planned_and_suspended_only() {
+        // Given: 全フェーズのセッションが存在する
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for (id, phase) in [
+            ("20260310200000", SessionPhase::Planned),
+            ("20260310200001", SessionPhase::Suspended),
+            ("20260310200002", SessionPhase::Running),
+            ("20260310200003", SessionPhase::Completed),
+            ("20260310200004", SessionPhase::Failed("err".to_string())),
+        ] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = phase;
+            manager.create(&s).unwrap();
+        }
+
+        // When: run_all_candidates() を呼ぶ
+        let candidates = manager.run_all_candidates().unwrap();
+
+        // Then: Planned と Suspended のみ返される
+        assert_eq!(
+            candidates.len(),
+            2,
+            "only Planned and Suspended should be candidates"
+        );
+        let ids: Vec<&str> = candidates.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(&"20260310200000"),
+            "Planned should be included"
+        );
+        assert!(
+            ids.contains(&"20260310200001"),
+            "Suspended should be included"
+        );
+        assert!(
+            !ids.contains(&"20260310200002"),
+            "Running should NOT be included"
+        );
+        assert!(
+            !ids.contains(&"20260310200003"),
+            "Completed should NOT be included"
+        );
+        assert!(
+            !ids.contains(&"20260310200004"),
+            "Failed should NOT be included"
+        );
+    }
+
+    #[test]
+    fn test_run_all_candidates_empty_when_none_qualify() {
+        // Given: Completed セッションのみ存在する
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut s = SessionState::new(
+            "20260310210000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "done".to_string(),
+        );
+        s.phase = SessionPhase::Completed;
+        manager.create(&s).unwrap();
+
+        // When: run_all_candidates() を呼ぶ
+        let candidates = manager.run_all_candidates().unwrap();
+
+        // Then: 空リストが返される
+        assert!(
+            candidates.is_empty(),
+            "no candidates when only Completed exists"
         );
     }
 

@@ -121,7 +121,7 @@ pub async fn run() -> Result<()> {
 /// Returns the action menu items available for the given session.
 /// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
 /// "Open PR" appears for Completed sessions that have a PR URL.
-/// "Reset to Planned" appears for Running, Failed, and Completed.
+/// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
 /// "Delete" and "Back" are always present (in that order) at the end.
 fn session_actions(session: &SessionState) -> Vec<&'static str> {
     let mut actions = vec![];
@@ -130,7 +130,7 @@ fn session_actions(session: &SessionState) -> Vec<&'static str> {
             actions.push("Run");
             actions.push("Replan");
         }
-        SessionPhase::Running => {
+        SessionPhase::Running | SessionPhase::Suspended => {
             actions.push("Resume");
             actions.push("Reset to Planned");
         }
@@ -169,6 +169,7 @@ fn format_session_label(s: &SessionState) -> String {
         SessionPhase::Running => (style("▶").yellow(), style("Running").yellow()),
         SessionPhase::Completed => (style("✓").green(), style("Completed").green()),
         SessionPhase::Failed(_) => (style("✗").red(), style("Failed").red()),
+        SessionPhase::Suspended => (style("⏸").yellow(), style("Suspended").yellow()),
     };
     let date = format_session_date(&s.id);
     let suffix = format_suffix(s);
@@ -186,10 +187,10 @@ fn format_session_date(id: &str) -> String {
     format!("{month}/{day} {hour}:{min}")
 }
 
-/// Running 時は " [`step_name`]"、Completed+PR 時は " PR#N" を返す。
+/// Running/Suspended 時は " [`step_name`]"、Completed+PR 時は " PR#N" を返す。
 fn format_suffix(s: &SessionState) -> String {
     match &s.phase {
-        SessionPhase::Running => s
+        SessionPhase::Running | SessionPhase::Suspended => s
             .current_step
             .as_ref()
             .map(|step| format!(" [{step}]"))
@@ -635,6 +636,107 @@ mod tests {
     // -----------------------------------------------------------------------
     // session_actions — Reset to Planned coverage
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // session_actions — Suspended
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_suspended_exact() {
+        // Given / When / Then: Suspended のアクションリストが期待どおり
+        assert_eq!(
+            session_actions(&SessionPhase::Suspended),
+            vec!["Resume", "Reset to Planned", "Delete", "Back"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // format_suffix — Suspended
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_suffix_suspended_with_step_returns_step_bracket() {
+        // Given: Suspended フェーズ、current_step あり
+        let mut s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
+        s.current_step = Some("implement".to_string());
+
+        // When
+        let result = format_suffix(&s);
+
+        // Then: "[implement]" 形式
+        assert_eq!(result, " [implement]");
+    }
+
+    #[test]
+    fn test_format_suffix_suspended_without_step_returns_empty() {
+        // Given: Suspended フェーズ、current_step なし
+        let s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
+
+        // When
+        let result = format_suffix(&s);
+
+        // Then: 空文字
+        assert_eq!(result, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_session_label — Suspended
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_session_label_suspended_contains_phase_and_step() {
+        // Given: Suspended フェーズ、current_step あり
+        let mut s = make_session("20260310150000", "fix auth", SessionPhase::Suspended);
+        s.current_step = Some("test".to_string());
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: "Suspended" フェーズ表示と中断したステップ名を含む
+        assert!(
+            label.contains("Suspended"),
+            "should contain Suspended: {label}"
+        );
+        assert!(label.contains("[test]"), "should contain step: {label}");
+    }
+
+    // -----------------------------------------------------------------------
+    // session_actions — Delete/Back 末尾確認（Suspended を含む全フェーズ）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_delete_and_back_always_at_end_including_suspended() {
+        // Given: Suspended を含む全フェーズ
+        let phases = [
+            SessionPhase::Planned,
+            SessionPhase::Running,
+            SessionPhase::Completed,
+            SessionPhase::Failed("err".to_string()),
+            SessionPhase::Suspended,
+        ];
+
+        for phase in &phases {
+            // When
+            let actions = session_actions(phase);
+            let len = actions.len();
+
+            // Then: 末尾が Back、その前が Delete
+            assert!(
+                len >= 2,
+                "actions must have at least 2 items for {phase:?}: {actions:?}"
+            );
+            assert_eq!(
+                actions[len - 1],
+                "Back",
+                "Back should be last for {phase:?}: {actions:?}"
+            );
+            assert_eq!(
+                actions[len - 2],
+                "Delete",
+                "Delete should be second-to-last for {phase:?}: {actions:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_session_actions_planned_exact() {
