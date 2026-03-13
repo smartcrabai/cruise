@@ -91,6 +91,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     run_single(args, WorkspaceOverride::RespectSession).await
 }
 
+#[expect(clippy::too_many_lines)]
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
     let _current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(get_cruise_home()?);
@@ -209,7 +210,7 @@ fn log_resume_message(session: &SessionState) {
     };
     match &session.phase {
         SessionPhase::Running | SessionPhase::Suspended => {
-            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step)
+            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step);
         }
         SessionPhase::Failed(_) => {
             eprintln!(
@@ -2300,7 +2301,7 @@ steps:
         let refactor_line = summary
             .lines()
             .find(|l| l.contains("refactor cache layer"))
-            .expect("refactor cache layer line not found in summary");
+            .unwrap_or_else(|| panic!("refactor cache layer line not found in summary"));
         assert!(
             !refactor_line.contains("Failed") && !refactor_line.contains("✗"),
             "completed session should not show failure, got: {refactor_line:?}"
@@ -2310,7 +2311,7 @@ steps:
         let failed_line = summary
             .lines()
             .find(|l| l.contains("fix broken test"))
-            .expect("fix broken test line not found in summary");
+            .unwrap_or_else(|| panic!("fix broken test line not found in summary"));
         assert!(
             failed_line.contains("Failed: CI timeout"),
             "failed session should show failure prefix and error message, got: {failed_line:?}"
