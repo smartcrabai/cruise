@@ -29,7 +29,7 @@ impl ConfigSource {
     }
 }
 
-/// Resolve a workflow config, returning (yaml_content, source).
+/// Resolve a workflow config, returning (`yaml_content`, source).
 ///
 /// Resolution order:
 /// 1. `explicit` (`-c` flag) — error if file does not exist.
@@ -45,7 +45,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
             if e.kind() == std::io::ErrorKind::NotFound {
                 CruiseError::ConfigNotFound(path.to_string())
             } else {
-                CruiseError::Other(format!("failed to read '{}': {}", path, e))
+                CruiseError::Other(format!("failed to read '{path}': {e}"))
             }
         })?;
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
@@ -77,7 +77,8 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
         let files = collect_yaml_files(&cruise_dir);
         if !files.is_empty() {
             let path = if files.len() == 1 {
-                files.into_iter().next().unwrap()
+                let mut it = files.into_iter();
+                it.next().ok_or_else(|| CruiseError::Other("unexpected empty file list".to_string()))?
             } else {
                 prompt_select_config(&files)?
             };
@@ -90,7 +91,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 
     // 6. Built-in default.
     let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin())
-        .map_err(|e| CruiseError::Other(format!("failed to serialize built-in config: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to serialize built-in config: {e}")))?;
     Ok((yaml, ConfigSource::Builtin))
 }
 
@@ -102,8 +103,7 @@ fn try_read_local(name: &str) -> Result<Option<(String, PathBuf)>> {
         Ok(yaml) => Ok(Some((yaml, to_absolute(path)))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(CruiseError::Other(format!(
-            "failed to read '{}': {}",
-            name, e
+            "failed to read '{name}': {e}"
         ))),
     }
 }
@@ -140,7 +140,7 @@ fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
             p.is_file()
                 && matches!(
                     p.extension().and_then(|e| e.to_str()),
-                    Some("yaml") | Some("yml")
+                    Some("yaml" | "yml")
                 )
         })
         .collect();
@@ -170,7 +170,8 @@ fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
         Err(e) => return Err(CruiseError::Other(e.to_string())),
     };
 
-    let selection = names.iter().position(|n| n == &selected).unwrap();
+    let selection = names.iter().position(|n| n == &selected)
+        .ok_or_else(|| CruiseError::Other(format!("selected config not found: {selected}")))?;
     Ok(files[selection].clone())
 }
 
@@ -238,10 +239,10 @@ mod tests {
 
     #[test]
     fn test_resolve_explicit_ok() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "command: [echo]\nsteps:\n  s:\n    command: echo").unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let (yaml, source) = resolve_config(Some(&path)).unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        writeln!(tmp, "command: [echo]\nsteps:\n  s:\n    command: echo").unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().to_str().unwrap_or_else(|| panic!("unexpected None")).to_string();
+        let (yaml, source) = resolve_config(Some(&path)).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::Explicit(_)));
     }
@@ -257,16 +258,16 @@ mod tests {
     #[test]
     fn test_resolve_builtin_fallback() {
         // Run in a temp dir that has no cruise.yaml and no HOME/.cruise.
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Point HOME to a dir without .cruise to avoid ~/.cruise interference.
-        let fake_home = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("steps"));
         assert!(matches!(source, ConfigSource::Builtin));
     }
@@ -275,19 +276,19 @@ mod tests {
 
     #[test]
     fn test_resolve_local() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let config_path = tmp_dir.path().join("cruise.yaml");
         std::fs::write(
             &config_path,
             "command: [echo]\nsteps:\n  s:\n    command: echo",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::Local(_)));
     }
@@ -296,18 +297,18 @@ mod tests {
 
     #[test]
     fn test_resolve_local_yml() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join("cruise.yml"),
             "command: [echo]\nsteps:\n  s:\n    command: echo",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::Local(_)));
     }
@@ -316,18 +317,18 @@ mod tests {
 
     #[test]
     fn test_resolve_hidden_cruise_yaml() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join(".cruise.yaml"),
             "command: [echo]\nsteps:\n  s:\n    command: echo",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::Local(_)));
     }
@@ -336,18 +337,18 @@ mod tests {
 
     #[test]
     fn test_resolve_hidden_cruise_yml() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join(".cruise.yml"),
             "command: [echo]\nsteps:\n  s:\n    command: echo",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::Local(_)));
     }
@@ -356,14 +357,14 @@ mod tests {
 
     #[test]
     fn test_resolve_env_var_ok() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "command: [echo]\nsteps:\n  s:\n    command: echo").unwrap();
-        let path = tmp.path().to_str().unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        writeln!(tmp, "command: [echo]\nsteps:\n  s:\n    command: echo").unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().to_str().unwrap_or_else(|| panic!("unexpected None"));
 
         let _dir_guard = DirGuard::new();
         let _env_guard = EnvGuard::set("CRUISE_CONFIG", std::ffi::OsStr::new(path));
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("echo"));
         assert!(matches!(source, ConfigSource::EnvVar(_)));
     }
@@ -384,26 +385,26 @@ mod tests {
 
     #[test]
     fn test_env_var_takes_priority_over_local() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join("cruise.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: local",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
-        let mut env_tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut env_tmp = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
         writeln!(
             env_tmp,
             "command: [envvar]\nsteps:\n  s:\n    command: envvar"
         )
-        .unwrap();
-        let env_path = env_tmp.path().to_str().unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_path = env_tmp.path().to_str().unwrap_or_else(|| panic!("unexpected None"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::set("CRUISE_CONFIG", std::ffi::OsStr::new(env_path));
 
-        let (yaml, source) = resolve_config(None).unwrap();
+        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("envvar"));
         assert!(matches!(source, ConfigSource::EnvVar(_)));
     }
@@ -412,23 +413,23 @@ mod tests {
 
     #[test]
     fn test_local_takes_priority_over_hidden() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join("cruise.yaml"),
             "command: [visible]\nsteps:\n  s:\n    command: visible",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join(".cruise.yaml"),
             "command: [hidden]\nsteps:\n  s:\n    command: hidden",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        let (yaml, _source) = resolve_config(None).unwrap();
+        let (yaml, _source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(yaml.contains("visible"));
     }
 
@@ -436,23 +437,23 @@ mod tests {
 
     #[test]
     fn test_collect_yaml_files_sorted() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        std::fs::write(tmp_dir.path().join("b.yaml"), "").unwrap();
-        std::fs::write(tmp_dir.path().join("a.yml"), "").unwrap();
-        std::fs::write(tmp_dir.path().join("c.yaml"), "").unwrap();
-        std::fs::write(tmp_dir.path().join("d.txt"), "").unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(tmp_dir.path().join("b.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(tmp_dir.path().join("a.yml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(tmp_dir.path().join("c.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(tmp_dir.path().join("d.txt"), "").unwrap_or_else(|e| panic!("{e:?}"));
 
         let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
         let names: Vec<&str> = files
             .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .map(|p| p.file_name().unwrap_or_else(|| panic!("unexpected None")).to_str().unwrap_or_else(|| panic!("unexpected None")))
             .collect();
         assert_eq!(names, vec!["a.yml", "b.yaml", "c.yaml"]);
     }
 
     #[test]
     fn test_collect_yaml_files_empty_dir() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
         assert!(files.is_empty());
     }
@@ -463,15 +464,15 @@ mod tests {
     fn test_builtin_yaml_roundtrip() {
         use crate::config::WorkflowConfig;
         let original = WorkflowConfig::default_builtin();
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed = WorkflowConfig::from_yaml(&yaml).unwrap();
+        let yaml = serde_yaml::to_string(&original).unwrap_or_else(|e| panic!("{e:?}"));
+        let parsed = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(parsed.steps.len(), original.steps.len());
         assert_eq!(parsed.model, original.model);
         assert_eq!(parsed.plan_model, original.plan_model);
         assert_eq!(parsed.pr_language, original.pr_language);
         assert_eq!(parsed.command, original.command);
         for key in original.steps.keys() {
-            assert!(parsed.steps.contains_key(key), "missing step: {}", key);
+            assert!(parsed.steps.contains_key(key), "missing step: {key}");
         }
     }
 }

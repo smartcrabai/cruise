@@ -14,7 +14,7 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
     // Top border
     let top = match title {
         Some(t) => {
-            let label = format!(" {} ", t);
+            let label = format!(" {t} ");
             let label_width = measure_text_width(&label);
             let remaining = box_width.saturating_sub(3 + label_width);
             format!(

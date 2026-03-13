@@ -82,7 +82,7 @@ async fn execute_command(cmd: &str, env: &HashMap<String, String>) -> Result<Com
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !stderr.is_empty() {
-        eprint!("{}", stderr);
+        eprint!("{stderr}");
     }
     let success = output.status.success();
 
@@ -102,7 +102,8 @@ pub fn is_rate_limited(stderr: &str) -> bool {
 pub fn calculate_backoff(attempt: usize) -> Duration {
     let base_secs = 2u64;
     let max_secs = 60u64;
-    let secs = (base_secs * 2u64.pow((attempt as u32).saturating_sub(1))).min(max_secs);
+    let exp = u32::try_from(attempt).unwrap_or(u32::MAX).saturating_sub(1);
+    let secs = (base_secs * 2u64.pow(exp)).min(max_secs);
     Duration::from_secs(secs)
 }
 
@@ -150,20 +151,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_successful_command() {
-        let result = run_command("echo hello", 0, &HashMap::new()).await.unwrap();
+        let result = run_command("echo hello", 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_run_failing_command() {
-        let result = run_command("exit 1", 0, &HashMap::new()).await.unwrap();
+        let result = run_command("exit 1", 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_run_commands_sequential() {
         let cmds = vec!["echo a".to_string(), "echo b".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
@@ -171,13 +172,13 @@ mod tests {
     async fn test_run_commands_stops_on_failure() {
         // Second command would succeed but shouldn't run because first fails.
         let cmds = vec!["exit 1".to_string(), "echo ok".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_run_commands_empty() {
-        let result = run_commands(&[], 0, &HashMap::new()).await.unwrap();
+        let result = run_commands(&[], 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
@@ -185,7 +186,7 @@ mod tests {
     async fn test_run_command_captures_stderr() {
         let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new())
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
         assert!(result.stderr.contains("error msg"));
     }
@@ -197,7 +198,7 @@ mod tests {
         // The command echoes the env var; success means env was passed correctly.
         let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
@@ -208,7 +209,7 @@ mod tests {
             "echo step1".to_string(),
             "echo 'err_msg' >&2; exit 1".to_string(),
         ];
-        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap();
+        let result = run_commands(&cmds, 0, &HashMap::new()).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
         assert!(result.stderr.contains("err_msg"));
     }
@@ -220,7 +221,7 @@ mod tests {
         env.insert("VAR_B".to_string(), "beta".to_string());
         let result = run_command(r#"test "$VAR_A" = alpha && test "$VAR_B" = beta"#, 0, &env)
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
@@ -229,7 +230,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("GREETING".to_string(), "hello".to_string());
         // stdout is inherited (not captured), but success means the command ran.
-        let result = run_command("echo $GREETING", 0, &env).await.unwrap();
+        let result = run_command("echo $GREETING", 0, &env).await.unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 }

@@ -39,6 +39,13 @@ inherits = "release"
 [dev-dependencies]
 tempfile = "=3.27.0"
 
+[lints.clippy]
+allow_attributes = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+
 [workspace]
 resolver = "2"
 

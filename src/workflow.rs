@@ -82,55 +82,55 @@ fn expand_steps(
             // Old membership style: has group + prompt/command → migration error
             if step.prompt.is_some() || step.command.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                    "step '{}' uses old membership style (group + prompt/command). \
-                     Please migrate to groups.<name>.steps block style.",
-                    step_name
+                    "step '{step_name}' uses old membership style (group + prompt/command). \
+                     Please migrate to groups.<name>.steps block style."
                 )));
             }
 
             // Look up group definition
             let group_def = groups.get(group_name).ok_or_else(|| {
                 crate::error::CruiseError::InvalidStepConfig(format!(
-                    "step '{}' references undefined group '{}'",
-                    step_name, group_name
+                    "step '{step_name}' references undefined group '{group_name}'"
                 ))
             })?;
 
             // Empty group check
             if group_def.steps.is_empty() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                    "group '{}' is empty (no steps defined)",
-                    group_name
+                    "group '{group_name}' is empty (no steps defined)"
                 )));
             }
 
             // Validate and expand sub-steps
             let step_count = group_def.steps.len();
             // Non-empty is guaranteed by the is_empty check above.
-            let first_step = format!("{}/{}", step_name, group_def.steps.keys().next().unwrap());
-            let last_step = format!("{}/{}", step_name, group_def.steps.keys().last().unwrap());
+            let first_sub = group_def.steps.keys().next()
+                .ok_or_else(|| crate::error::CruiseError::InvalidStepConfig(
+                    format!("group '{group_name}' unexpectedly empty")))?;
+            let last_sub = group_def.steps.keys().last()
+                .ok_or_else(|| crate::error::CruiseError::InvalidStepConfig(
+                    format!("group '{group_name}' unexpectedly empty")))?;
+            let first_step = format!("{step_name}/{first_sub}");
+            let last_step = format!("{step_name}/{last_sub}");
             for (sub_name, sub_step) in &group_def.steps {
                 // Nested group call check
                 if sub_step.group.is_some() {
                     return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                        "nested group call inside group '{}' at step '{}' is not allowed",
-                        group_name, sub_name
+                        "nested group call inside group '{group_name}' at step '{sub_name}' is not allowed"
                     )));
                 }
                 // Individual `if` inside group step check
                 if sub_step.if_condition.is_some() {
                     return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                        "group step '{}/{}' has an individual 'if' condition, \
-                         which is not allowed inside group steps",
-                        group_name, sub_name
+                        "group step '{group_name}/{sub_name}' has an individual 'if' condition, \
+                         which is not allowed inside group steps"
                     )));
                 }
 
-                let key = format!("{}/{}", step_name, sub_name);
+                let key = format!("{step_name}/{sub_name}");
                 if flat.contains_key(&key) {
                     return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                        "expanded step key '{}' collides with an existing step name",
-                        key
+                        "expanded step key '{key}' collides with an existing step name"
                     )));
                 }
                 flat.insert(key, sub_step.clone());
@@ -165,11 +165,11 @@ mod tests {
     use crate::config::WorkflowConfig;
 
     fn parsed(yaml: &str) -> WorkflowConfig {
-        WorkflowConfig::from_yaml(yaml).unwrap()
+        WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"))
     }
 
     fn compiled(yaml: &str) -> CompiledWorkflow {
-        compile(parsed(yaml)).unwrap()
+        compile(parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"))
     }
 
     // -----------------------------------------------------------------------
@@ -179,18 +179,18 @@ mod tests {
     #[test]
     fn test_compile_non_group_steps_pass_through_unchanged() {
         // Given: workflow with no group calls
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 steps:
   step1:
     command: echo hello
   step2:
     command: echo world
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: steps are identical to the source
-        let keys: Vec<&str> = c.steps.keys().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = c.steps.keys().map(std::string::String::as_str).collect();
         assert_eq!(keys, vec!["step1", "step2"]);
         assert!(c.invocations.is_empty());
     }
@@ -198,7 +198,7 @@ steps:
     #[test]
     fn test_compile_group_call_expands_to_prefixed_steps() {
         // Given: workflow with one group call
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -212,11 +212,11 @@ steps:
     command: cargo test
   review-pass:
     group: review
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: group call is expanded with call-site prefix
-        let keys: Vec<&str> = c.steps.keys().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = c.steps.keys().map(std::string::String::as_str).collect();
         assert_eq!(
             keys,
             vec!["test", "review-pass/simplify", "review-pass/coderabbit"]
@@ -226,7 +226,7 @@ steps:
     #[test]
     fn test_compile_group_call_step_order_preserved() {
         // Given: group with three steps in a specific order
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -240,18 +240,18 @@ groups:
 steps:
   call:
     group: review
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: expanded steps appear in definition order
-        let keys: Vec<&str> = c.steps.keys().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = c.steps.keys().map(std::string::String::as_str).collect();
         assert_eq!(keys, vec!["call/alpha", "call/beta", "call/gamma"]);
     }
 
     #[test]
     fn test_compile_invocation_metadata_populated() {
         // Given: group with max_retries and if condition
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -268,11 +268,11 @@ steps:
     command: cargo test
   review-pass:
     group: review
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: invocation metadata reflects the group definition
-        let meta = c.invocations.get("review-pass").unwrap();
+        let meta = c.invocations.get("review-pass").unwrap_or_else(|| panic!("unexpected None"));
         assert_eq!(meta.max_retries, Some(3));
         assert!(meta.if_condition.is_some());
         assert_eq!(meta.first_step, "review-pass/simplify");
@@ -283,7 +283,7 @@ steps:
     #[test]
     fn test_compile_same_group_two_call_sites_independent_invocations() {
         // Given: same group invoked from two separate call sites
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -300,14 +300,14 @@ steps:
     command: cargo test --doc
   review-after-doc:
     group: review
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: each call site has its own invocation metadata entry
         assert!(c.invocations.contains_key("review-after-lib"));
         assert!(c.invocations.contains_key("review-after-doc"));
         // And: steps are interleaved in YAML order with per-call-site prefixes
-        let keys: Vec<&str> = c.steps.keys().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = c.steps.keys().map(std::string::String::as_str).collect();
         assert_eq!(
             keys,
             vec![
@@ -322,7 +322,7 @@ steps:
     #[test]
     fn test_compile_after_pr_group_call_expands() {
         // Given: after-pr contains a group call
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   notify:
@@ -337,11 +337,11 @@ steps:
 after-pr:
   post-notify:
     group: notify
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: after_pr steps are expanded
-        let keys: Vec<&str> = c.after_pr.keys().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = c.after_pr.keys().map(std::string::String::as_str).collect();
         assert_eq!(keys, vec!["post-notify/slack", "post-notify/email"]);
         // And: invocation metadata exists for after-pr call site
         assert!(c.after_pr_invocations.contains_key("post-notify"));
@@ -350,12 +350,12 @@ after-pr:
     #[test]
     fn test_compile_non_group_step_not_in_invocations() {
         // Given: workflow with no group calls
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 steps:
   step1:
     command: echo hello
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: invocations map is empty
@@ -370,24 +370,24 @@ steps:
     #[test]
     fn test_compile_undefined_group_returns_error() {
         // Given: a top-level step calls a group that is not defined
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 groups: {}
 steps:
   bad:
     group: nonexistent
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: error mentions undefined group
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("undefined group"));
+        assert!(result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string().contains("undefined group"));
     }
 
     #[test]
     fn test_compile_old_membership_style_returns_migration_error() {
         // Given: top-level step has both `group` and `prompt` (old membership style)
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -398,12 +398,12 @@ steps:
   step1:
     group: review
     prompt: /something
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: migration error pointing users to groups.<name>.steps
         assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let msg = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string();
         assert!(
             msg.contains("migration")
                 || msg.contains("groups.<name>.steps")
@@ -415,7 +415,7 @@ steps:
     #[test]
     fn test_compile_empty_group_returns_error() {
         // Given: a group is defined with no inner steps
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 groups:
   review:
@@ -423,13 +423,13 @@ groups:
 steps:
   call-review:
     group: review
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: error mentions empty group
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("empty"),
+            result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string().contains("empty"),
             "expected 'empty' in error"
         );
     }
@@ -437,7 +437,7 @@ steps:
     #[test]
     fn test_compile_nested_group_call_returns_error() {
         // Given: a step inside group.steps itself references another group
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   inner:
@@ -451,12 +451,12 @@ groups:
 steps:
   call-outer:
     group: outer
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: nested group call is rejected
         assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let msg = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string();
         assert!(
             msg.contains("nested") || msg.contains("group call") || msg.contains("group"),
             "expected nested-group-call error in: {msg}"
@@ -466,7 +466,7 @@ steps:
     #[test]
     fn test_compile_group_step_individual_if_returns_error() {
         // Given: a step inside group.steps has its own `if` condition
-        let yaml = r#"
+        let yaml = r"
 command: [claude, -p]
 groups:
   review:
@@ -478,13 +478,13 @@ groups:
 steps:
   call-review:
     group: review
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: individual `if` inside group step is rejected
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("if"),
+            result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string().contains("if"),
             "expected 'if' in error message"
         );
     }
@@ -493,7 +493,7 @@ steps:
     fn test_compile_step_key_collision_returns_error() {
         // Given: a regular step named "call/simplify" and a group call "call" that expands to
         // "call/simplify" — the expanded key collides with the existing regular step.
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 groups:
   review:
@@ -505,12 +505,12 @@ steps:
     command: echo manual
   call:
     group: review
-"#;
+";
         // When: compile is called
         let result = compile(parsed(yaml));
         // Then: error mentions collision
         assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let msg = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})")).to_string();
         assert!(
             msg.contains("collides"),
             "expected 'collides' in error message, got: {msg}"
@@ -520,7 +520,7 @@ steps:
     #[test]
     fn test_compile_group_step_preserves_fail_if_no_file_changes() {
         // Given: a group whose sub-step has fail-if-no-file-changes: true
-        let yaml = r#"
+        let yaml = r"
 command: [echo]
 groups:
   review:
@@ -531,11 +531,11 @@ groups:
 steps:
   run-review:
     group: review
-"#;
+";
         // When: compiled
         let c = compiled(yaml);
         // Then: the expanded step preserves fail_if_no_file_changes
-        let step = c.steps.get("run-review/implement").unwrap();
+        let step = c.steps.get("run-review/implement").unwrap_or_else(|| panic!("unexpected None"));
         assert!(
             step.fail_if_no_file_changes,
             "fail_if_no_file_changes should be preserved after compilation"

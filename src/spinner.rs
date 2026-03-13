@@ -29,7 +29,7 @@ impl Spinner {
             let mut i = 0usize;
             while !stop_clone.load(Ordering::Relaxed) {
                 {
-                    let _guard = lock_clone.lock().unwrap();
+                    let _guard = lock_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let _ = term.write_str(&format!("\r  {} {}", FRAMES[i % FRAMES.len()], msg));
                 }
                 std::thread::sleep(Duration::from_millis(80));
@@ -47,7 +47,7 @@ impl Spinner {
 
     /// Pause animation, run `f` (e.g. print a message), then resume.
     pub fn suspend<F: FnOnce()>(&self, f: F) {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = Term::stderr().clear_line();
         f();
     }

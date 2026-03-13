@@ -103,7 +103,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let spinner = crate::spinner::Spinner::start("Cruising...");
     let env = std::collections::HashMap::new();
     let result = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
+        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
         let effective_model = plan_step.model.as_deref().or(config.model.as_deref());
         let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
         let (resolved_command, model_arg) = if has_placeholder {
@@ -382,7 +382,7 @@ mod tests {
         let result = resolve_input(Some("add feature X".to_string()), None, || {
             panic!("interactive prompt should not run")
         });
-        assert_eq!(result.unwrap(), "add feature X");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
     }
 
     #[test]
@@ -391,14 +391,14 @@ mod tests {
         let result = resolve_input(None, Some("  add feature from pipe\n".to_string()), || {
             panic!("interactive prompt should not run")
         });
-        assert_eq!(result.unwrap(), "add feature from pipe");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature from pipe");
     }
 
     #[test]
     fn test_resolve_input_without_arg_or_stdin_uses_interactive_result() {
         // Given: no CLI arg or stdin input is available
         let result = resolve_input(None, None, || Ok("resume in place".to_string()));
-        assert_eq!(result.unwrap(), "resume in place");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "resume in place");
     }
 
     // -----------------------------------------------------------------------
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_missing() {
         // Given: a path that does not exist
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
 
         // When
@@ -421,9 +421,9 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_is_empty() {
         // Given: plan file exists but is completely empty
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "").unwrap();
+        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
@@ -435,9 +435,9 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_err_when_file_is_whitespace_only() {
         // Given: plan file contains only whitespace characters
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "   \n\t\n  ").unwrap();
+        std::fs::write(&plan_path, "   \n\t\n  ").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
@@ -452,15 +452,15 @@ mod tests {
     #[test]
     fn test_read_plan_non_empty_returns_content_when_file_has_real_content() {
         // Given: plan file has meaningful content
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan_path = tmp.path().join("plan.md");
         let content = "# Implementation Plan\n\nStep 1: do something\n";
-        std::fs::write(&plan_path, content).unwrap();
+        std::fs::write(&plan_path, content).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = read_plan_non_empty(&plan_path);
 
         // Then: Ok with the original content is returned
-        assert_eq!(result.unwrap(), content);
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), content);
     }
 }

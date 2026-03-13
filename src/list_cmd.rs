@@ -18,7 +18,7 @@ pub async fn run() -> Result<()> {
 
         // Build display labels with color-coded phase.
         let labels: Vec<String> = sessions.iter().map(format_session_label).collect();
-        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
 
         let selected = match inquire::Select::new("Select a session:", label_refs).prompt() {
             Ok(s) => s,
@@ -28,7 +28,9 @@ pub async fn run() -> Result<()> {
             Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
         };
 
-        let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
+        let Some(idx) = labels.iter().position(|l| l.as_str() == selected) else {
+            return Err(CruiseError::Other(format!("selected label not found: {selected}")));
+        };
         let mut session = sessions[idx].clone();
 
         loop {
@@ -172,7 +174,7 @@ fn format_session_label(s: &SessionState) -> String {
     format!("{icon} {date} {phase_str} {input_preview}{suffix}")
 }
 
-/// "YYYYMMDDHHmmss" → "MM/DD HH:MM"
+/// "`YYYYMMDDHHmmss`" → "MM/DD HH:MM"
 fn format_session_date(id: &str) -> String {
     let (Some(month), Some(day), Some(hour), Some(min)) =
         (id.get(4..6), id.get(6..8), id.get(8..10), id.get(10..12))
@@ -182,7 +184,7 @@ fn format_session_date(id: &str) -> String {
     format!("{month}/{day} {hour}:{min}")
 }
 
-/// Running 時は " [step_name]"、Completed+PR 時は " PR#N" を返す。
+/// Running 時は " [`step_name`]"、Completed+PR 時は " PR#N" を返す。
 fn format_suffix(s: &SessionState) -> String {
     match &s.phase {
         SessionPhase::Running => s
@@ -194,7 +196,7 @@ fn format_suffix(s: &SessionState) -> String {
             .pr_url
             .as_ref()
             .map(|url| {
-                let num = url.trim_end_matches('/').rsplit('/').next().unwrap();
+                let num = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
                 format!(" PR#{num}")
             })
             .unwrap_or_default(),
@@ -343,8 +345,8 @@ mod tests {
         let actions = session_actions(&session);
 
         // Then: "Run" は "Replan" より前に位置する（主要アクションが先頭）
-        let run_pos = actions.iter().position(|&a| a == "Run").unwrap();
-        let replan_pos = actions.iter().position(|&a| a == "Replan").unwrap();
+        let run_pos = actions.iter().position(|&a| a == "Run").unwrap_or_else(|| panic!("unexpected None"));
+        let replan_pos = actions.iter().position(|&a| a == "Replan").unwrap_or_else(|| panic!("unexpected None"));
         assert!(
             run_pos < replan_pos,
             "Run should come before Replan in actions list"
@@ -697,9 +699,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::{fs, io::Read};
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
         let log_path = tmp.path().join("gh.log");
 
         // fake gh: 引数をログに記録して exit 0
@@ -711,10 +713,10 @@ mod tests {
                 log_path.display()
             ),
         )
-        .unwrap();
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut perms = fs::metadata(&script_path).unwrap_or_else(|e| panic!("{e:?}")).permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
+        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
         let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
 
@@ -726,9 +728,9 @@ mod tests {
         // ログを確認: "pr view <url> --web" が渡されていること
         let mut log_content = String::new();
         fs::File::open(&log_path)
-            .unwrap()
+            .unwrap_or_else(|e| panic!("{e:?}"))
             .read_to_string(&mut log_content)
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             log_content.contains("pr view"),
             "gh should receive 'pr view': {log_content}"
@@ -749,16 +751,16 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
 
         // fake gh: 常に exit 1
         let script_path = bin_dir.join("gh");
-        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap();
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut perms = fs::metadata(&script_path).unwrap_or_else(|e| panic!("{e:?}")).permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
+        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
         let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
 

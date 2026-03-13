@@ -43,8 +43,7 @@ pub enum OptionChoice {
 impl OptionChoice {
     pub fn label(&self) -> &str {
         match self {
-            OptionChoice::Selector { label, .. } => label,
-            OptionChoice::TextInput { label, .. } => label,
+            OptionChoice::Selector { label, .. } | OptionChoice::TextInput { label, .. } => label,
         }
     }
 }
@@ -173,7 +172,7 @@ mod tests {
     #[test]
     fn test_prompt_step_conversion() {
         let config = make_prompt_step();
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         match kind {
             StepKind::Prompt(step) => {
                 assert_eq!(step.prompt, "Hello {input}");
@@ -187,7 +186,7 @@ mod tests {
     #[test]
     fn test_command_step_conversion_single() {
         let config = make_command_step();
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         match kind {
             StepKind::Command(step) => {
                 assert_eq!(step.command, vec!["cargo test"]);
@@ -205,7 +204,7 @@ mod tests {
             ])),
             ..Default::default()
         };
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         match kind {
             StepKind::Command(step) => {
                 assert_eq!(step.command, vec!["cargo fmt", "cargo test"]);
@@ -217,7 +216,7 @@ mod tests {
     #[test]
     fn test_option_step_conversion() {
         let config = make_option_step();
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         match kind {
             StepKind::Option(step) => {
                 assert_eq!(step.choices.len(), 2);
@@ -226,16 +225,16 @@ mod tests {
                         assert_eq!(label, "Continue");
                         assert_eq!(next, &Some("next_step".to_string()));
                     }
-                    _ => panic!("Expected Selector"),
+                    OptionChoice::TextInput { .. } => panic!("Expected Selector"),
                 }
                 match &step.choices[1] {
                     OptionChoice::Selector { next, .. } => {
                         assert_eq!(next, &None);
                     }
-                    _ => panic!("Expected Selector"),
+                    OptionChoice::TextInput { .. } => panic!("Expected Selector"),
                 }
             }
-            _ => panic!("Expected Option step"),
+            StepKind::Prompt(_) | StepKind::Command(_) => panic!("Expected Option step"),
         }
     }
 
@@ -249,7 +248,7 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         match kind {
             StepKind::Option(step) => {
                 assert_eq!(step.choices.len(), 1);
@@ -258,10 +257,10 @@ mod tests {
                         assert_eq!(label, "Enter text");
                         assert_eq!(next, &Some("next".to_string()));
                     }
-                    _ => panic!("Expected TextInput choice"),
+                    OptionChoice::Selector { .. } => panic!("Expected TextInput choice"),
                 }
             }
-            _ => panic!("Expected Option step"),
+            StepKind::Prompt(_) | StepKind::Command(_) => panic!("Expected Option step"),
         }
     }
 
@@ -276,7 +275,7 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let err = StepKind::try_from(config).unwrap_err();
+        let err = StepKind::try_from(config).map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
@@ -287,7 +286,7 @@ mod tests {
             command: Some(StringOrVec::Multiple(vec![])),
             ..Default::default()
         };
-        let err = StepKind::try_from(config).unwrap_err();
+        let err = StepKind::try_from(config).map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
@@ -301,14 +300,14 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let err = StepKind::try_from(config).unwrap_err();
+        let err = StepKind::try_from(config).map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
     #[test]
     fn test_invalid_step_conversion() {
         let config = StepConfig::default();
-        let err = StepKind::try_from(config).unwrap_err();
+        let err = StepKind::try_from(config).map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
     }
 
@@ -320,7 +319,7 @@ mod tests {
             command: Some(StringOrVec::Single("cargo test".to_string())),
             ..Default::default()
         };
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(kind, StepKind::Prompt(_)));
     }
 
@@ -334,7 +333,7 @@ mod tests {
             ..Default::default()
         };
         // IfCondition does not affect StepKind conversion; the engine handles it.
-        let kind = StepKind::try_from(config).unwrap();
+        let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(kind, StepKind::Command(_)));
     }
 }
