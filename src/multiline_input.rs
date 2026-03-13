@@ -25,15 +25,9 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
     };
     use std::io::{Write, stdout};
 
-    let mut out = stdout();
-
-    // Print the prompt label on its own line, then save the position where
-    // the buffer will be rendered so we can redraw on each keystroke.
-    writeln!(out, "{}", message)?;
-    execute!(out, cursor::SavePosition)?;
-    out.flush()?;
-
     // RAII guard: ensures raw mode is disabled even if we return early.
+    // Defined before any statements so clippy does not complain about items
+    // appearing after statements.
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
@@ -41,8 +35,16 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         }
     }
 
+    let mut out = stdout();
+
+    // Print the prompt label on its own line, then save the position where
+    // the buffer will be rendered so we can redraw on each keystroke.
+    writeln!(out, "{message}")?;
+    execute!(out, cursor::SavePosition)?;
+    out.flush()?;
+
     terminal::enable_raw_mode()?;
-    let _guard = RawModeGuard;
+    let guard = RawModeGuard;
 
     let mut buf = InputBuffer::new();
 
@@ -57,13 +59,14 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
             if i > 0 {
                 write!(out, "\r\n")?;
             }
-            write!(out, "{}", line)?;
+            write!(out, "{line}")?;
         }
 
         // Reposition the terminal cursor at (cursor_row, cursor_col).
         execute!(out, cursor::RestorePosition)?;
         if buf.cursor_row > 0 {
-            execute!(out, cursor::MoveDown(buf.cursor_row as u16))?;
+            let rows = u16::try_from(buf.cursor_row).unwrap_or(u16::MAX);
+            execute!(out, cursor::MoveDown(rows))?;
         }
         execute!(out, cursor::MoveToColumn(buf.display_col()))?;
         out.flush()?;
@@ -101,8 +104,8 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         }
     };
 
-    // _guard drops here, disabling raw mode.
-    drop(_guard);
+    // `guard` drops here, disabling raw mode.
+    drop(guard);
 
     // Clear the draft and show the final submitted text (or nothing for Cancelled).
     execute!(
@@ -111,7 +114,7 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
         Clear(ClearType::FromCursorDown)
     )?;
     if let InputResult::Submitted(ref text) = result {
-        writeln!(out, "{}", text)?;
+        writeln!(out, "{text}")?;
     }
     out.flush()?;
 
@@ -243,11 +246,12 @@ impl InputBuffer {
     /// as CJK ideographs that occupy two terminal columns each.
     fn display_col(&self) -> u16 {
         use unicode_width::UnicodeWidthChar;
-        self.lines[self.cursor_row]
+        let width: usize = self.lines[self.cursor_row]
             .chars()
             .take(self.cursor_col)
             .map(|c| c.width().unwrap_or(0))
-            .sum::<usize>() as u16
+            .sum();
+        u16::try_from(width).unwrap_or(u16::MAX)
     }
 
     /// Convert a char-index `col` within line `row` to a byte offset.
