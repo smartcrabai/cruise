@@ -6,6 +6,12 @@ use std::collections::HashMap;
 use crate::config::{IfCondition, StepConfig, WorkflowConfig};
 use crate::error::Result;
 
+type ExpandedSteps = (
+    IndexMap<String, StepConfig>,
+    HashMap<String, InvocationMeta>,
+    HashMap<String, String>,
+);
+
 /// Metadata for a single group invocation (one call site in top-level steps).
 /// Keyed by the call-site step name (e.g. "review-pass").
 #[derive(Debug, Clone)]
@@ -43,6 +49,29 @@ pub struct CompiledWorkflow {
     pub invocations: HashMap<String, InvocationMeta>,
     /// Invocation metadata for group calls in `after_pr`, keyed by call-site name.
     pub after_pr_invocations: HashMap<String, InvocationMeta>,
+    /// Precomputed mapping from expanded step name → call-site name, for `steps`.
+    pub step_to_invocation: HashMap<String, String>,
+    /// Precomputed mapping from expanded step name → call-site name, for `after_pr`.
+    pub after_pr_step_to_invocation: HashMap<String, String>,
+}
+
+impl CompiledWorkflow {
+    /// Create a new `CompiledWorkflow` that runs the `after_pr` phase as its main steps.
+    pub fn to_after_pr_compiled(&self) -> Self {
+        Self {
+            command: self.command.clone(),
+            model: self.model.clone(),
+            plan_model: self.plan_model.clone(),
+            env: self.env.clone(),
+            pr_language: self.pr_language.clone(),
+            steps: self.after_pr.clone(),
+            invocations: self.after_pr_invocations.clone(),
+            step_to_invocation: self.after_pr_step_to_invocation.clone(),
+            after_pr: IndexMap::new(),
+            after_pr_invocations: HashMap::new(),
+            after_pr_step_to_invocation: HashMap::new(),
+        }
+    }
 }
 
 /// Compile a [`WorkflowConfig`] into a flat [`CompiledWorkflow`].
@@ -51,8 +80,9 @@ pub struct CompiledWorkflow {
 /// nested calls, individual `if` in group steps) and expands all group call
 /// steps into their constituent sub-steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
-    let (steps, invocations) = expand_steps(&config.steps, &config.groups)?;
-    let (after_pr, after_pr_invocations) = expand_steps(&config.after_pr, &config.groups)?;
+    let (steps, invocations, step_to_invocation) = expand_steps(&config.steps, &config.groups)?;
+    let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
+        expand_steps(&config.after_pr, &config.groups)?;
 
     Ok(CompiledWorkflow {
         command: config.command,
@@ -64,18 +94,18 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         after_pr,
         invocations,
         after_pr_invocations,
+        step_to_invocation,
+        after_pr_step_to_invocation,
     })
 }
 
 fn expand_steps(
     steps: &IndexMap<String, StepConfig>,
     groups: &HashMap<String, crate::config::GroupConfig>,
-) -> Result<(
-    IndexMap<String, StepConfig>,
-    HashMap<String, InvocationMeta>,
-)> {
+) -> Result<ExpandedSteps> {
     let mut flat: IndexMap<String, StepConfig> = IndexMap::new();
     let mut invocations: HashMap<String, InvocationMeta> = HashMap::new();
+    let mut step_to_invocation: HashMap<String, String> = HashMap::new();
 
     for (step_name, step) in steps {
         if let Some(group_name) = &step.group {
@@ -137,6 +167,7 @@ fn expand_steps(
                         "expanded step key '{key}' collides with an existing step name"
                     )));
                 }
+                step_to_invocation.insert(key.clone(), step_name.clone());
                 flat.insert(key, sub_step.clone());
             }
 
@@ -156,7 +187,7 @@ fn expand_steps(
         }
     }
 
-    Ok((flat, invocations))
+    Ok((flat, invocations, step_to_invocation))
 }
 
 // ---------------------------------------------------------------------------

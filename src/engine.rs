@@ -39,19 +39,6 @@ enum StepOutcome {
     Done,
 }
 
-/// Build a map from each step name to its invocation call-site.
-fn build_step_to_invocation(compiled: &CompiledWorkflow) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for call_site in compiled.invocations.keys() {
-        for step_name in compiled.steps.keys() {
-            if step_name.starts_with(&format!("{call_site}/")) {
-                map.insert(step_name.clone(), call_site.clone());
-            }
-        }
-    }
-    map
-}
-
 /// Check whether the group containing `current_step` has exhausted its retry budget.
 ///
 /// Returns `Some(StepOutcome)` when the group should be skipped entirely.
@@ -187,9 +174,9 @@ pub async fn execute_steps(
 ) -> Result<ExecutionResult> {
     let mut current_step = start_step.to_string();
     let workflow_start = Instant::now();
-    let step_to_invocation = build_step_to_invocation(compiled);
+    let step_to_invocation = &compiled.step_to_invocation;
     let mut state = LoopState {
-        step_to_invocation: &step_to_invocation,
+        step_to_invocation,
         group_retry_counts: HashMap::new(),
         counters: LoopCounters {
             run: 0,

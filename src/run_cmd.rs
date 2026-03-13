@@ -338,13 +338,7 @@ async fn run_after_pr_steps(
     let Some(first_step) = compiled.after_pr.keys().next() else {
         return;
     };
-    let after_compiled = CompiledWorkflow {
-        steps: compiled.after_pr.clone(),
-        invocations: compiled.after_pr_invocations.clone(),
-        after_pr: indexmap::IndexMap::new(),
-        after_pr_invocations: std::collections::HashMap::new(),
-        ..compiled.clone()
-    };
+    let after_compiled = compiled.to_after_pr_compiled();
     if let Err(e) = execute_steps(
         &after_compiled,
         vars,
