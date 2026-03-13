@@ -1157,9 +1157,18 @@ steps:
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: the no_file_changes condition is set with fail=true
-        let implement = config.steps.get("implement").unwrap_or_else(|| panic!("step not found"));
-        let if_cond = implement.if_condition.as_ref().unwrap_or_else(|| panic!("if_condition not set"));
-        let no_change = if_cond.no_file_changes.as_ref().unwrap_or_else(|| panic!("no_file_changes not set"));
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        let no_change = if_cond
+            .no_file_changes
+            .as_ref()
+            .unwrap_or_else(|| panic!("no_file_changes not set"));
         assert!(no_change.fail, "fail should be true");
         assert!(!no_change.retry, "retry should be false");
     }
@@ -1179,9 +1188,18 @@ steps:
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: the no_file_changes condition is set with retry=true
-        let implement = config.steps.get("implement").unwrap_or_else(|| panic!("step not found"));
-        let if_cond = implement.if_condition.as_ref().unwrap_or_else(|| panic!("if_condition not set"));
-        let no_change = if_cond.no_file_changes.as_ref().unwrap_or_else(|| panic!("no_file_changes not set"));
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        let no_change = if_cond
+            .no_file_changes
+            .as_ref()
+            .unwrap_or_else(|| panic!("no_file_changes not set"));
         assert!(!no_change.fail, "fail should be false");
         assert!(no_change.retry, "retry should be true");
     }
@@ -1202,10 +1220,22 @@ steps:
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: both fields are present
-        let implement = config.steps.get("implement").unwrap_or_else(|| panic!("step not found"));
-        let if_cond = implement.if_condition.as_ref().unwrap_or_else(|| panic!("if_condition not set"));
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
         assert_eq!(if_cond.file_changed, Some("implement".to_string()));
-        assert!(if_cond.no_file_changes.as_ref().unwrap_or_else(|| panic!("no_file_changes not set")).retry);
+        assert!(
+            if_cond
+                .no_file_changes
+                .as_ref()
+                .unwrap_or_else(|| panic!("no_file_changes not set"))
+                .retry
+        );
     }
 
     // --- if.no-file-changes validation tests ---

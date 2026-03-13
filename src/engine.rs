@@ -255,7 +255,10 @@ struct LoopState<'a> {
 }
 
 /// Execute one iteration of the step loop, returning the next step or Done.
-#[expect(clippy::too_many_lines, reason = "step loop logic is inherently complex")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "step loop logic is inherently complex"
+)]
 async fn step_loop_iteration(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -1763,7 +1766,10 @@ steps:
         // When: executed (nfc retry fires on first attempt, then files change, then done)
         let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
         // Then: workflow succeeds
-        assert!(result.is_ok(), "expected Ok after retry on unchanged: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok after retry on unchanged: {result:?}"
+        );
         assert_eq!(
             result.unwrap_or_else(|e| panic!("{e:?}")).run,
             3,
