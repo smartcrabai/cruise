@@ -93,73 +93,122 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
     let _current_dir_guard = CurrentDirGuard::capture()?;
-
     let manager = SessionManager::new(get_cruise_home()?);
-
-    // Determine which session to run.
-    let session_id = match args.session {
-        Some(id) => id,
-        None => select_pending_session(&manager)?,
-    };
-
+    let session_id = args
+        .session
+        .map_or_else(|| select_pending_session(&manager), Ok)?;
     let mut session = manager.load(&session_id)?;
-
-    // Load config from session dir.
     let config = manager.load_config(&session_id)?;
     validate_groups(&config)?;
     validate_fail_if_no_file_changes(&config)?;
 
     if args.dry_run {
-        eprintln!("{}", style(format!("Session: {}", session_id)).dim());
-        return print_dry_run(&config, session.current_step.as_deref());
+        eprintln!("{}", style(format!("Session: {session_id}")).dim());
+        print_dry_run(&config, session.current_step.as_deref());
+        return Ok(());
     }
 
     let compiled = crate::workflow::compile(config)?;
-
     let effective_workspace_mode = match workspace_override {
         WorkspaceOverride::RespectSession => session.workspace_mode,
         WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
     };
-
     if effective_workspace_mode == WorkspaceMode::Worktree {
         ensure_gh_available()?;
     }
-
-    // Determine start step.
-    let start_step = session.current_step.clone().map(Ok).unwrap_or_else(|| {
-        compiled
-            .steps
-            .keys()
-            .next()
-            .ok_or_else(|| CruiseError::Other("config has no steps".to_string()))
-            .cloned()
-    })?;
-
-    // Show resume message if restarting an interrupted session.
-    if let Some(ref step) = session.current_step {
-        match &session.phase {
-            SessionPhase::Running => {
-                eprintln!("{} Resuming from step: {}", style("↺").cyan(), step);
-            }
-            SessionPhase::Failed(_) => {
-                eprintln!(
-                    "{} Retrying from failed step: {}",
-                    style("↺").yellow(),
-                    step
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // chdir to base_dir.
-    let base_dir = session.base_dir.clone();
-    std::env::set_current_dir(&base_dir)?;
-
+    let start_step = session.current_step.clone().map_or_else(
+        || {
+            compiled
+                .steps
+                .keys()
+                .next()
+                .ok_or_else(|| CruiseError::Other("config has no steps".to_string()))
+                .cloned()
+        },
+        Ok,
+    )?;
+    log_resume_message(&session);
+    std::env::set_current_dir(session.base_dir.clone())?;
     let execution_workspace =
         prepare_execution_workspace(&manager, &session, effective_workspace_mode)?;
+    update_session_workspace(&mut session, &execution_workspace);
+    session.phase = SessionPhase::Running;
+    manager.save(&session)?;
+    std::env::set_current_dir(execution_workspace.path())?;
 
-    match &execution_workspace {
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path);
+    let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
+    let session_cell = RefCell::new(&mut session);
+    let exec_result = execute_steps(
+        &compiled,
+        &mut vars,
+        &mut tracker,
+        &start_step,
+        args.max_retries,
+        args.rate_limit_retries,
+        &|step| {
+            let mut s = session_cell.borrow_mut();
+            s.current_step = Some(step.to_string());
+            manager.save(&s)
+        },
+    )
+    .await;
+    let session = session_cell.into_inner();
+
+    let overall_result = match exec_result {
+        Ok(exec) => {
+            let _ = (exec.run, exec.skipped, exec.failed);
+            match &execution_workspace {
+                ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
+                ExecutionWorkspace::Worktree { ctx, .. } => {
+                    handle_worktree_pr(
+                        ctx,
+                        &compiled,
+                        &mut vars,
+                        &mut tracker,
+                        session,
+                        args.rate_limit_retries,
+                        args.max_retries,
+                    )
+                    .await
+                }
+            }
+        }
+        Err(e) => Err(e),
+    };
+
+    session.completed_at = Some(current_iso8601());
+    session.phase = match &overall_result {
+        Ok(()) => SessionPhase::Completed,
+        Err(e) => SessionPhase::Failed(e.to_string()),
+    };
+    manager.save(session)?;
+    overall_result
+}
+
+/// Log a resume message if the session is being restarted.
+fn log_resume_message(session: &SessionState) {
+    let Some(ref step) = session.current_step else {
+        return;
+    };
+    match &session.phase {
+        SessionPhase::Running => eprintln!("{} Resuming from step: {}", style("↺").cyan(), step),
+        SessionPhase::Failed(_) => {
+            eprintln!(
+                "{} Retrying from failed step: {}",
+                style("↺").yellow(),
+                step
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Update session workspace fields from the chosen execution workspace.
+fn update_session_workspace(session: &mut SessionState, ws: &ExecutionWorkspace) {
+    match ws {
         ExecutionWorkspace::Worktree { ctx, reused } => {
             let suffix = if *reused { " (reused)" } else { "" };
             eprintln!(
@@ -178,164 +227,131 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             session.pr_url = None;
         }
     }
+}
 
-    session.phase = SessionPhase::Running;
-    manager.save(&session)?;
+/// Handle PR creation and after-PR steps for a worktree execution.
+async fn handle_worktree_pr(
+    ctx: &worktree::WorktreeContext,
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    session: &mut SessionState,
+    rate_limit_retries: usize,
+    max_retries: usize,
+) -> Result<()> {
+    let (pr_title, pr_body) = generate_pr_description(compiled, vars, rate_limit_retries).await;
 
-    // chdir to the execution workspace.
-    std::env::set_current_dir(execution_workspace.path())?;
-
-    // Set up variables.
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path);
-
-    let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
-
-    // Use RefCell for interior mutability in the callback.
-    let session_cell = RefCell::new(&mut session);
-
-    let exec_result = execute_steps(
-        &compiled,
-        &mut vars,
-        &mut tracker,
-        &start_step,
-        args.max_retries,
-        args.rate_limit_retries,
-        &|step| {
-            let mut s = session_cell.borrow_mut();
-            s.current_step = Some(step.to_string());
-            manager.save(&s)
-        },
-    )
-    .await;
-
-    let session = session_cell.into_inner();
-
-    let overall_result = match exec_result {
-        Ok(_) => match &execution_workspace {
-            ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
-            ExecutionWorkspace::Worktree { ctx, .. } => {
-                let (pr_title, pr_body) = match build_pr_prompt(&mut vars, &compiled) {
-                    Err(e) => {
-                        eprintln!("warning: PR prompt resolution failed: {}", e);
-                        (String::new(), String::new())
+    match attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body) {
+        Ok(pr_attempt) => {
+            pr_attempt.report();
+            match pr_attempt {
+                PrAttemptOutcome::Created { url, .. } => {
+                    eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+                    if let Some(number) = extract_last_path_segment(&url) {
+                        vars.set_named_value(PR_NUMBER_VAR, number);
                     }
-                    Ok(pr_prompt) => {
-                        let pr_model = compiled.model.as_deref();
-                        let has_placeholder =
-                            compiled.command.iter().any(|s| s.contains("{model}"));
-                        let (resolved_command, model_arg) = if has_placeholder {
-                            (
-                                resolve_command_with_model(&compiled.command, pr_model),
-                                None,
-                            )
-                        } else {
-                            (compiled.command.clone(), pr_model.map(str::to_string))
-                        };
-                        let spinner =
-                            crate::spinner::Spinner::start("Generating PR description...");
-                        let env = std::collections::HashMap::new();
-                        let llm_output = {
-                            let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{}", msg));
-                            match crate::step::prompt::run_prompt(
-                                &resolved_command,
-                                model_arg.as_deref(),
-                                &pr_prompt,
-                                args.rate_limit_retries,
-                                &env,
-                                Some(&on_retry),
-                            )
-                            .await
-                            {
-                                Ok(r) => r.output,
-                                Err(e) => {
-                                    eprintln!("warning: PR description generation failed: {}", e);
-                                    String::new()
-                                }
-                            }
-                        };
-                        drop(spinner);
-                        let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
-                        if pr_title.is_empty() && !llm_output.trim().is_empty() {
-                            let truncated: String = llm_output.chars().take(500).collect();
-                            eprintln!(
-                                "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
-                                style("⚠").yellow(),
-                                truncated
-                            );
-                        }
-                        (pr_title, pr_body)
-                    }
-                };
-
-                match attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body) {
-                    Ok(pr_attempt) => {
-                        pr_attempt.report();
-                        match pr_attempt {
-                            PrAttemptOutcome::Created { url, .. } => {
-                                eprintln!("{} PR created: {}", style("✓").green().bold(), url);
-                                if let Some(number) = extract_last_path_segment(&url) {
-                                    vars.set_named_value(PR_NUMBER_VAR, number);
-                                }
-                                vars.set_named_value(PR_URL_VAR, url.clone());
-                                session.pr_url = Some(url);
-
-                                // Run after_pr steps if any.
-                                if let Some(first_step) = compiled.after_pr.keys().next() {
-                                    let after_compiled = CompiledWorkflow {
-                                        steps: compiled.after_pr.clone(),
-                                        invocations: compiled.after_pr_invocations.clone(),
-                                        after_pr: indexmap::IndexMap::new(),
-                                        after_pr_invocations: std::collections::HashMap::new(),
-                                        ..compiled.clone()
-                                    };
-                                    if let Err(e) = execute_steps(
-                                        &after_compiled,
-                                        &mut vars,
-                                        &mut tracker,
-                                        first_step,
-                                        args.max_retries,
-                                        args.rate_limit_retries,
-                                        &|_| Ok(()),
-                                    )
-                                    .await
-                                    {
-                                        eprintln!("warning: after-pr steps failed: {}", e);
-                                    }
-                                }
-                                Ok(())
-                            }
-                            PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
-                                "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
-                                ctx.branch
-                            ))),
-                            PrAttemptOutcome::CreateFailed { error, .. } => {
-                                eprintln!("warning: PR creation failed: {}", error);
-                                Ok(())
-                            }
-                        }
-                    }
-                    Err(e) => Err(e),
+                    vars.set_named_value(PR_URL_VAR, url.clone());
+                    session.pr_url = Some(url);
+                    run_after_pr_steps(compiled, vars, tracker, max_retries, rate_limit_retries)
+                        .await;
+                    Ok(())
+                }
+                PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
+                    "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
+                    ctx.branch
+                ))),
+                PrAttemptOutcome::CreateFailed { error, .. } => {
+                    eprintln!("warning: PR creation failed: {error}");
+                    Ok(())
                 }
             }
-        },
+        }
         Err(e) => Err(e),
-    };
-
-    match &overall_result {
-        Ok(()) => {
-            session.phase = SessionPhase::Completed;
-            session.completed_at = Some(current_iso8601());
-        }
-        Err(e) => {
-            session.phase = SessionPhase::Failed(e.to_string());
-            session.completed_at = Some(current_iso8601());
-        }
     }
-    manager.save(session)?;
+}
 
-    overall_result
+/// Generate a PR title and body using the LLM, returning empty strings on failure.
+async fn generate_pr_description(
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    rate_limit_retries: usize,
+) -> (String, String) {
+    let pr_prompt = match build_pr_prompt(vars, compiled) {
+        Err(e) => {
+            eprintln!("warning: PR prompt resolution failed: {e}");
+            return (String::new(), String::new());
+        }
+        Ok(p) => p,
+    };
+    let pr_model = compiled.model.as_deref();
+    let has_placeholder = compiled.command.iter().any(|s| s.contains("{model}"));
+    let (resolved_command, model_arg) = if has_placeholder {
+        (
+            resolve_command_with_model(&compiled.command, pr_model),
+            None,
+        )
+    } else {
+        (compiled.command.clone(), pr_model.map(str::to_string))
+    };
+    let spinner = crate::spinner::Spinner::start("Generating PR description...");
+    let env = std::collections::HashMap::new();
+    let llm_output = {
+        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+        match crate::step::prompt::run_prompt(
+            &resolved_command,
+            model_arg.as_deref(),
+            &pr_prompt,
+            rate_limit_retries,
+            &env,
+            Some(&on_retry),
+        )
+        .await
+        {
+            Ok(r) => r.output,
+            Err(e) => {
+                eprintln!("warning: PR description generation failed: {e}");
+                String::new()
+            }
+        }
+    };
+    drop(spinner);
+    let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
+    if pr_title.is_empty() && !llm_output.trim().is_empty() {
+        let truncated: String = llm_output.chars().take(500).collect();
+        eprintln!(
+            "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
+            style("⚠").yellow(),
+            truncated
+        );
+    }
+    (pr_title, pr_body)
+}
+
+/// Run the after-PR workflow steps, logging any errors.
+async fn run_after_pr_steps(
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    max_retries: usize,
+    rate_limit_retries: usize,
+) {
+    let Some(first_step) = compiled.after_pr.keys().next() else {
+        return;
+    };
+    let after_compiled = compiled.to_after_pr_compiled();
+    if let Err(e) = execute_steps(
+        &after_compiled,
+        vars,
+        tracker,
+        first_step,
+        max_retries,
+        rate_limit_retries,
+        &|_| Ok(()),
+    )
+    .await
+    {
+        eprintln!("warning: after-pr steps failed: {e}");
+    }
 }
 
 async fn run_all(args: RunArgs) -> Result<()> {
@@ -571,7 +587,7 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> 
         .args(["add", "-A"])
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git add: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run git add: {e}")))?;
     if !add.status.success() {
         let stderr = String::from_utf8_lossy(&add.stderr);
         return Err(CruiseError::Other(format!(
@@ -585,7 +601,7 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> 
         .args(["diff", "--cached", "--quiet"])
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git diff: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run git diff: {e}")))?;
     if diff.status.success() {
         // No changes to commit
         return Ok(CommitOutcome::NoChanges);
@@ -596,7 +612,7 @@ fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> 
         .args(["commit", "-m", message])
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git commit: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run git commit: {e}")))?;
     if !commit.status.success() {
         let stderr = String::from_utf8_lossy(&commit.stderr);
         return Err(CruiseError::Other(format!(
@@ -613,7 +629,7 @@ fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
         .args(["push", "-u", "origin", branch])
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git push: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run git push: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CruiseError::Other(format!(
@@ -628,16 +644,16 @@ fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
 /// Falls back to `gh pr view` if a PR already exists.
 fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
     let mut gh_args = vec!["pr", "create", "--head", branch];
-    if !title.is_empty() {
-        gh_args.extend(["--title", title, "--body", body]);
-    } else {
+    if title.is_empty() {
         gh_args.push("--fill");
+    } else {
+        gh_args.extend(["--title", title, "--body", body]);
     }
     let output = std::process::Command::new("gh")
         .args(&gh_args)
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {e}")))?;
 
     if output.status.success()
         && let Some(url) = gh_output_line(&output.stdout)
@@ -650,7 +666,7 @@ fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Res
         .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
         .current_dir(worktree_path)
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {}", e)))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {e}")))?;
 
     if fallback.status.success()
         && let Some(url) = gh_output_line(&fallback.stdout)
@@ -661,8 +677,7 @@ fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Res
     let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
     Err(CruiseError::Other(format!(
-        "gh pr create failed: {}; gh pr view also failed: {}",
-        create_stderr, view_stderr
+        "gh pr create failed: {create_stderr}; gh pr view also failed: {view_stderr}"
     )))
 }
 
@@ -679,7 +694,7 @@ fn extract_last_path_segment(url: &str) -> Option<String> {
         .next()
         .map(|s| s.split_once(['?', '#']).map_or(s, |(prefix, _)| prefix))
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Verify that `gh` CLI is available in PATH.
@@ -732,7 +747,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
             )
         })
         .collect();
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
 
     let selected = match inquire::Select::new("Select a session to run:", label_refs).prompt() {
         Ok(s) => s,
@@ -744,7 +759,10 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
         Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
     };
 
-    let idx = labels.iter().position(|l| l.as_str() == selected).unwrap();
+    let idx = labels
+        .iter()
+        .position(|l| l.as_str() == selected)
+        .ok_or_else(|| CruiseError::Other(format!("selected session not found: {selected}")))?;
     Ok(pending[idx].id.clone())
 }
 
@@ -795,7 +813,7 @@ fn skip_newline(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-/// Iterate over (byte_offset_of_line_start, line_content) pairs in `s`.
+/// Iterate over (`byte_offset_of_line_start`, `line_content`) pairs in `s`.
 ///
 /// Uses `split('\n')` so that the raw byte length (including any trailing `\r`
 /// from CRLF line endings) is used for offset accounting, while the returned
@@ -915,11 +933,11 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
 /// Format a summary of all sessions run by `run --all`.
 /// Returns an empty string if `results` is empty.
 fn format_run_all_summary(results: &[SessionState]) -> String {
+    const MAX_INPUT_CHARS: usize = 60;
+
     if results.is_empty() {
         return String::new();
     }
-
-    const MAX_INPUT_CHARS: usize = 60;
 
     let mut lines = Vec::with_capacity(results.len() + 1);
     lines.push(format!(
@@ -974,45 +992,14 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
-    struct PathEnvGuard {
-        prev: Option<std::ffi::OsString>,
-        _lock: crate::test_support::ProcessLock,
-    }
-
-    impl PathEnvGuard {
-        fn prepend(dir: &Path) -> Self {
-            let lock = crate::test_support::lock_process();
-            let prev = std::env::var_os("PATH");
-            let mut paths = vec![dir.to_path_buf()];
-            if let Some(ref existing) = prev {
-                paths.extend(std::env::split_paths(existing));
-            }
-            let joined = std::env::join_paths(paths).expect("failed to join PATH");
-            // SAFETY: the test holds GLOBAL_PROCESS_LOCK, so no other test mutates PATH concurrently.
-            unsafe { std::env::set_var("PATH", &joined) };
-            Self { prev, _lock: lock }
-        }
-    }
-
-    impl Drop for PathEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: the test holds GLOBAL_PROCESS_LOCK for the lifetime of the guard.
-            unsafe {
-                if let Some(ref prev) = self.prev {
-                    std::env::set_var("PATH", prev);
-                } else {
-                    std::env::remove_var("PATH");
-                }
-            }
-        }
-    }
+    use crate::test_support::PathEnvGuard;
 
     fn run_git_ok(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
-            .expect("git command failed to start");
+            .unwrap_or_else(|e| panic!("git command failed to start: {e}"));
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
@@ -1026,7 +1013,7 @@ mod tests {
             .args(args)
             .current_dir(dir)
             .output()
-            .expect("git command failed to start");
+            .unwrap_or_else(|e| panic!("git command failed to start: {e}"));
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
@@ -1040,7 +1027,7 @@ mod tests {
         run_git_ok(dir, &["init"]);
         run_git_ok(dir, &["config", "user.email", "test@example.com"]);
         run_git_ok(dir, &["config", "user.name", "Test"]);
-        fs::write(dir.join("README.md"), "init").unwrap();
+        fs::write(dir.join("README.md"), "init").unwrap_or_else(|e| panic!("{e:?}"));
         run_git_ok(dir, &["add", "."]);
         run_git_ok(dir, &["commit", "-m", "init"]);
         run_git_ok(dir, &["branch", "-M", "main"]);
@@ -1048,24 +1035,32 @@ mod tests {
 
     fn create_worktree(tmp: &TempDir, session_id: &str) -> (PathBuf, worktree::WorktreeContext) {
         let repo = tmp.path().join("repo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
 
         // Set up a local bare repo as "origin" so git push works in tests
         let bare = tmp.path().join("origin.git");
         run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
-        run_git_ok(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare.to_str().unwrap_or_else(|| panic!("unexpected None")),
+            ],
+        );
 
         let worktrees_dir = tmp.path().join("worktrees");
         let (ctx, reused) =
             worktree::setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None)
-                .unwrap();
+                .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!reused, "test worktree should be created fresh");
         (repo, ctx)
     }
 
     fn install_fake_gh(bin_dir: &Path, log_path: &Path, head_path: &Path, url: &str) {
-        fs::create_dir_all(bin_dir).unwrap();
+        fs::create_dir_all(bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1077,10 +1072,12 @@ mod tests {
                 head_path.display(),
                 url
             );
-            fs::write(&script_path, script).unwrap();
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            fs::write(&script_path, script).unwrap_or_else(|e| panic!("{e:?}"));
+            let mut perms = fs::metadata(&script_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
+            fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
         }
         #[cfg(windows)]
         {
@@ -1096,7 +1093,7 @@ mod tests {
     }
 
     fn install_logging_gh(bin_dir: &Path, log_path: &Path, url: &str) {
-        fs::create_dir_all(bin_dir).unwrap();
+        fs::create_dir_all(bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1108,10 +1105,12 @@ mod tests {
                 url,
                 url
             );
-            fs::write(&script_path, script).unwrap();
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            fs::write(&script_path, script).unwrap_or_else(|e| panic!("{e:?}"));
+            let mut perms = fs::metadata(&script_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
+            fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
         }
         #[cfg(windows)]
         {
@@ -1130,7 +1129,7 @@ mod tests {
         prev_home: Option<std::ffi::OsString>,
         prev_path: Option<std::ffi::OsString>,
         prev_dir: PathBuf,
-        _lock: crate::test_support::ProcessLock,
+        lock: crate::test_support::ProcessLock,
     }
 
     impl ProcessStateGuard {
@@ -1138,7 +1137,7 @@ mod tests {
             let lock = crate::test_support::lock_process();
             let prev_home = std::env::var_os("HOME");
             let prev_path = std::env::var_os("PATH");
-            let prev_dir = std::env::current_dir().expect("failed to capture current dir");
+            let prev_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             unsafe {
                 std::env::set_var("HOME", home);
             }
@@ -1146,23 +1145,26 @@ mod tests {
                 prev_home,
                 prev_path,
                 prev_dir,
-                _lock: lock,
+                lock,
             }
         }
 
-        fn prepend_path(&mut self, dir: &Path) {
+        fn prepend_path(&self, dir: &Path) {
+            // `self.lock` ensures the caller holds a `ProcessStateGuard` (and therefore the process lock).
+            let _ = &self.lock;
             let mut paths = vec![dir.to_path_buf()];
             if let Some(existing) = std::env::var_os("PATH") {
                 paths.extend(std::env::split_paths(&existing));
             }
-            let joined = std::env::join_paths(paths).expect("failed to join PATH");
-            unsafe {
-                std::env::set_var("PATH", joined);
+            if let Ok(joined) = std::env::join_paths(paths) {
+                unsafe { std::env::set_var("PATH", joined) };
             }
         }
 
-        fn set_current_dir(&mut self, dir: &Path) {
-            std::env::set_current_dir(dir).expect("failed to set current dir");
+        fn set_current_dir(&self, dir: &Path) {
+            // `self.lock` ensures the caller holds a `ProcessStateGuard` (and therefore the process lock).
+            let _ = &self.lock;
+            let _ = std::env::set_current_dir(dir);
         }
     }
 
@@ -1189,12 +1191,20 @@ mod tests {
 
     fn create_repo_with_origin(tmp: &TempDir) -> PathBuf {
         let repo = tmp.path().join("repo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
 
         let bare = tmp.path().join("origin.git");
         run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
-        run_git_ok(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare.to_str().unwrap_or_else(|| panic!("unexpected None")),
+            ],
+        );
 
         repo
     }
@@ -1218,8 +1228,8 @@ mod tests {
 
     fn write_config(manager: &SessionManager, session_id: &str, yaml: &str) {
         let session_dir = manager.sessions_dir().join(session_id);
-        fs::create_dir_all(&session_dir).unwrap();
-        fs::write(session_dir.join("config.yaml"), yaml).unwrap();
+        fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(session_dir.join("config.yaml"), yaml).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     fn single_command_config(step_name: &str, command: &str) -> String {
@@ -1242,8 +1252,9 @@ mod tests {
             yaml.push_str(pr_language_yaml);
         }
         yaml.push_str("steps:\n  implement:\n    prompt: test\n");
-        let config = crate::config::WorkflowConfig::from_yaml(&yaml).unwrap();
-        crate::workflow::compile(config).unwrap()
+        let config =
+            crate::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"))
     }
 
     fn make_pr_prompt_vars() -> VariableStore {
@@ -1269,7 +1280,7 @@ mod tests {
         let mut vars = make_pr_prompt_vars();
 
         // When: building the PR prompt
-        let prompt = build_pr_prompt(&mut vars, &config).unwrap();
+        let prompt = build_pr_prompt(&mut vars, &config).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the configured language is injected into the prompt
         assert!(
@@ -1289,7 +1300,7 @@ mod tests {
         let mut vars = make_pr_prompt_vars();
 
         // When: building the PR prompt
-        let prompt = build_pr_prompt(&mut vars, &config).unwrap();
+        let prompt = build_pr_prompt(&mut vars, &config).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the prompt falls back to the built-in English default
         assert!(
@@ -1300,7 +1311,7 @@ mod tests {
 
     #[test]
     fn test_attempt_pr_creation_skips_gh_when_branch_has_no_commits() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let (_repo, ctx) = create_worktree(&tmp, "20260307225900");
         let bin_dir = tmp.path().join("bin");
         let log_path = tmp.path().join("gh.log");
@@ -1313,7 +1324,8 @@ mod tests {
         );
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "test task", "", "").unwrap();
+        let result =
+            attempt_pr_creation(&ctx, "test task", "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(result, PrAttemptOutcome::SkippedNoCommits);
         assert!(
@@ -1324,15 +1336,15 @@ mod tests {
             !head_path.exists(),
             "gh should not observe HEAD when skipped"
         );
-        worktree::cleanup_worktree(&ctx).unwrap();
+        worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let (repo, ctx) = create_worktree(&tmp, "20260307225901");
         let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
-        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap_or_else(|e| panic!("{e:?}"));
 
         let bin_dir = tmp.path().join("bin");
         let log_path = tmp.path().join("gh.log");
@@ -1341,7 +1353,8 @@ mod tests {
         install_fake_gh(&bin_dir, &log_path, &head_path, url);
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "add feature", "", "").unwrap();
+        let result =
+            attempt_pr_creation(&ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1360,25 +1373,27 @@ mod tests {
             "helper should create a new commit"
         );
         assert_eq!(
-            fs::read_to_string(&head_path).unwrap().trim(),
+            fs::read_to_string(&head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             worktree_head
         );
         assert!(
             {
-                let gh_args = fs::read_to_string(&log_path).unwrap();
+                let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
                 gh_args.contains("pr create --head") && gh_args.contains("--fill")
             },
             "fake gh should receive a pr create invocation"
         );
-        worktree::cleanup_worktree(&ctx).unwrap();
+        worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_attempt_pr_creation_reuses_existing_branch_commits() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let (repo, ctx) = create_worktree(&tmp, "20260307225902");
         let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
-        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap_or_else(|e| panic!("{e:?}"));
         run_git_ok(&ctx.path, &["add", "."]);
         run_git_ok(&ctx.path, &["commit", "-m", "existing commit"]);
 
@@ -1392,7 +1407,8 @@ mod tests {
         install_fake_gh(&bin_dir, &log_path, &head_path, url);
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "rerun without changes", "", "").unwrap();
+        let result = attempt_pr_creation(&ctx, "rerun without changes", "", "")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1406,10 +1422,12 @@ mod tests {
             existing_head
         );
         assert_eq!(
-            fs::read_to_string(&head_path).unwrap().trim(),
+            fs::read_to_string(&head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             existing_head
         );
-        worktree::cleanup_worktree(&ctx).unwrap();
+        worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     // --- parse_pr_metadata tests ---
@@ -1629,7 +1647,9 @@ Previously, emojis were used as user icons."#;
 
         // Then: returns a "Cannot specify both --all and a session ID" error
         assert!(result.is_err(), "expected error but got Ok");
-        let msg = result.unwrap_err().to_string();
+        let msg = result
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
+            .to_string();
         assert!(
             msg.contains("Cannot specify both --all and a session ID"),
             "unexpected error message: {msg}"
@@ -1639,9 +1659,9 @@ Previously, emojis were used as user icons."#;
     #[tokio::test]
     async fn test_run_all_returns_ok_when_no_planned_sessions() {
         // Given: empty cruise home with no planned sessions
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".cruise");
-        std::fs::create_dir_all(cruise_home.join("sessions")).unwrap();
+        std::fs::create_dir_all(cruise_home.join("sessions")).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Hold the lock in a narrow scope so it is dropped before the await.
         let orig_home = {
@@ -1683,15 +1703,15 @@ Previously, emojis were used as user icons."#;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_current_branch_mode_keeps_changes_in_base_repo_and_skips_pr_flow() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309120000";
         let session = make_current_branch_session(session_id, &repo, "edit in place", "main");
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
@@ -1709,7 +1729,7 @@ Previously, emojis were used as user icons."#;
             "expected current-branch mode to succeed: {result:?}"
         );
 
-        let loaded = manager.load(session_id).unwrap();
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             loaded.worktree_path.is_none(),
             "current-branch mode should not persist a worktree path"
@@ -1727,7 +1747,7 @@ Previously, emojis were used as user icons."#;
             "current-branch mode should write changes into the base repository"
         );
         assert_eq!(
-            fs::read_to_string(repo.join("current-branch.txt")).unwrap(),
+            fs::read_to_string(repo.join("current-branch.txt")).unwrap_or_else(|e| panic!("{e:?}")),
             "direct"
         );
         assert!(
@@ -1746,16 +1766,16 @@ Previously, emojis were used as user icons."#;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_current_branch_mode_errors_when_branch_has_changed() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309121000";
         let session =
             make_current_branch_session(session_id, &repo, "stay on planned branch", "main");
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
@@ -1774,7 +1794,9 @@ Previously, emojis were used as user icons."#;
             result.is_err(),
             "expected current-branch mode to reject a branch mismatch"
         );
-        let message = result.unwrap_err().to_string();
+        let message = result
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
+            .to_string();
         assert!(message.contains("branch"), "unexpected error: {message}");
         assert!(message.contains("main"), "unexpected error: {message}");
         assert!(
@@ -1785,22 +1807,22 @@ Previously, emojis were used as user icons."#;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_current_branch_mode_errors_when_working_tree_is_dirty() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309122000";
         let session = make_current_branch_session(session_id, &repo, "edit dirty tree", "main");
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
             &single_command_config("edit", "printf more > new-file.txt"),
         );
 
-        fs::write(repo.join("already-dirty.txt"), "dirty").unwrap();
+        fs::write(repo.join("already-dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
 
         let bin_dir = tmp.path().join("bin");
         let gh_log = tmp.path().join("gh.log");
@@ -1812,21 +1834,23 @@ Previously, emojis were used as user icons."#;
             result.is_err(),
             "expected current-branch mode to reject a dirty working tree"
         );
-        let message = result.unwrap_err().to_string();
+        let message = result
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
+            .to_string();
         assert!(message.contains("dirty"), "unexpected error: {message}");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_current_branch_mode_errors_on_detached_head() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309123000";
         let session = make_current_branch_session(session_id, &repo, "edit detached head", "main");
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
@@ -1845,27 +1869,29 @@ Previously, emojis were used as user icons."#;
             result.is_err(),
             "expected current-branch mode to reject detached HEAD"
         );
-        let message = result.unwrap_err().to_string();
+        let message = result
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
+            .to_string();
         assert!(message.contains("detached"), "unexpected error: {message}");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_current_branch_mode_resumes_from_saved_step_without_pr_flow() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309124000";
         let mut session = make_current_branch_session(session_id, &repo, "resume in place", "main");
         session.phase = SessionPhase::Running;
         session.current_step = Some("second".to_string());
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
-            r#"command:
+            r"command:
   - cat
 steps:
   first:
@@ -1874,7 +1900,7 @@ steps:
   second:
     command: |
       printf second > second.txt
-"#,
+",
         );
 
         let bin_dir = tmp.path().join("bin");
@@ -1888,7 +1914,7 @@ steps:
             "expected current-branch resume to succeed: {result:?}"
         );
 
-        let loaded = manager.load(session_id).unwrap();
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             loaded.worktree_path.is_none(),
             "current-branch resume should not persist a worktree path"
@@ -1913,15 +1939,15 @@ steps:
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_all_forces_worktree_even_for_current_branch_sessions() {
-        let tmp = TempDir::new().unwrap();
-        let mut process = ProcessStateGuard::new(tmp.path());
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap());
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309125000";
         let session = make_current_branch_session(session_id, &repo, "batch run", "main");
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(
             &manager,
             session_id,
@@ -1943,7 +1969,7 @@ steps:
         .await;
         assert!(result.is_ok(), "expected run --all to succeed: {result:?}");
 
-        let loaded = manager.load(session_id).unwrap();
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             loaded.worktree_path.is_some(),
             "run --all should still use a worktree execution path"
