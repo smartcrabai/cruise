@@ -72,7 +72,7 @@ fn check_group_retry_skip(
     Some(next.map_or(StepOutcome::Done, StepOutcome::Next))
 }
 
-/// Take pre-execution snapshots (per-step and per-group) as needed.
+/// Take pre-execution snapshots (per-step, per-group, and per-attempt NFC) as needed.
 fn take_pre_snapshots(
     compiled: &CompiledWorkflow,
     tracker: &mut FileTracker,
@@ -80,7 +80,8 @@ fn take_pre_snapshots(
     step_call_site: Option<&str>,
     has_if_file_changed: bool,
     fail_if_no_file_changes: bool,
-) -> Result<Option<String>> {
+    has_no_file_changes_condition: bool,
+) -> Result<(Option<String>, Option<String>)> {
     if has_if_file_changed {
         tracker.take_snapshot(current_step)?;
     }
@@ -89,6 +90,13 @@ fn take_pre_snapshots(
         if !tracker.has_snapshot(&key) {
             tracker.take_snapshot(&key)?;
         }
+        Some(key)
+    } else {
+        None
+    };
+    let nfc_key = if has_no_file_changes_condition {
+        let key = nfc_snapshot_key(current_step);
+        tracker.take_snapshot(&key)?;
         Some(key)
     } else {
         None
@@ -106,7 +114,7 @@ fn take_pre_snapshots(
             tracker.take_snapshot(&group_snapshot_key(call_site))?;
         }
     }
-    Ok(nochange_key)
+    Ok((nochange_key, nfc_key))
 }
 
 /// Determine the next-step override from file-change conditions after step execution.
@@ -234,6 +242,10 @@ struct LoopState<'a> {
 }
 
 /// Execute one iteration of the step loop, returning the next step or Done.
+#[expect(
+    clippy::too_many_lines,
+    reason = "step loop logic is inherently complex"
+)]
 async fn step_loop_iteration(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -286,18 +298,18 @@ async fn step_loop_iteration(
     let step_next = step_config.next.clone();
     let merged_env = resolve_env(&compiled.env, &step_config.env, vars)?;
     let kind = StepKind::try_from(step_config.clone())?;
-    let step_if_file_changed = step_config
-        .if_condition
-        .as_ref()
-        .and_then(|c| c.file_changed.as_deref());
+    let if_cond = step_config.if_condition.as_ref();
+    let step_if_file_changed = if_cond.and_then(|c| c.file_changed.as_deref());
+    let nfc_cond = if_cond.and_then(|c| c.no_file_changes.as_ref());
 
-    let nochange_key = take_pre_snapshots(
+    let (nochange_key, nfc_key) = take_pre_snapshots(
         compiled,
         tracker,
         current_step,
         step_call_site,
-        step_if_file_changed.is_some(),
+        step_if_file_changed.is_some() && nfc_cond.is_none(),
         step_config.fail_if_no_file_changes,
+        nfc_cond.is_some(),
     )?;
     let option_next = execute_step_kind(
         &kind,
@@ -317,15 +329,34 @@ async fn step_loop_iteration(
         return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
     }
 
+    let nfc_retry = if let Some(ref key) = nfc_key
+        && let Some(nfc) = nfc_cond
+        && !tracker.has_files_changed(key)?
+    {
+        if nfc.fail {
+            return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
+        }
+        nfc.retry
+    } else {
+        false
+    };
+
     let if_next = resolve_if_next(
         compiled,
         tracker,
         current_step,
         step_call_site,
-        step_if_file_changed,
+        if nfc_cond.is_none() {
+            step_if_file_changed
+        } else {
+            None
+        },
         &mut state.group_retry_counts,
     )?;
-    let effective_next = if_next.or(option_next).or(step_next);
+    let effective_next = if_next
+        .or(nfc_retry.then(|| current_step.to_string()))
+        .or(option_next)
+        .or(step_next);
     let next_step = get_next_step(&compiled.steps, current_step, effective_next.as_deref());
 
     if let Some(ref next) = next_step {
@@ -423,6 +454,11 @@ fn group_snapshot_key(group_name: &str) -> String {
 /// Build the `FileTracker` snapshot key for a fail-if-no-file-changes check.
 fn nochange_snapshot_key(step_name: &str) -> String {
     format!("__nochange__{step_name}")
+}
+
+/// Build the `FileTracker` snapshot key for an if.no-file-changes check.
+fn nfc_snapshot_key(step_name: &str) -> String {
+    format!("__nfc__{step_name}")
 }
 
 /// Format a duration as a human-readable string.
@@ -1454,6 +1490,277 @@ steps:
         assert!(
             !matches!(&result, Err(CruiseError::StepMadeNoFileChanges(_))),
             "should not fail with StepMadeNoFileChanges when files changed, got: {result:?}"
+        );
+    }
+
+    // --- if.no-file-changes tests (new syntax) ---
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_fail_fails_when_no_changes() {
+        // Given: a step with if.no-file-changes.fail: true whose command does NOT create any files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: "echo no file changes"
+    if:
+      no-file-changes:
+        fail: true
+  next_step:
+    command: "echo should not run"
+"#;
+        // When: executed in a temp dir where no files are written
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow fails with StepMadeNoFileChanges
+        assert!(result.is_err(), "expected Err but got Ok");
+        let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert!(
+            matches!(err, CruiseError::StepMadeNoFileChanges(_)),
+            "expected StepMadeNoFileChanges, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("implement"),
+            "error should mention step name, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_fail_ok_when_files_changed() {
+        // Given: a step with if.no-file-changes.fail: true whose command DOES create a file
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let output_file = dir.path().join("output.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch {}"
+    if:
+      no-file-changes:
+        fail: true
+"#,
+            output_file.display()
+        );
+        // When: executed in the temp dir (tracker detects the new file)
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow succeeds
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_retry_reruns_step_when_no_changes() {
+        // Given: a step with if.no-file-changes.retry: true and a counter file
+        // The step runs N times before creating a file (simulated with a counter).
+        // Counter is stored OUTSIDE the tracked dir so it doesn't cause spurious change detection.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let counter_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}")); // not tracked
+        let output_file = dir.path().join("output.txt");
+        let counter_file = counter_dir.path().join("counter.txt");
+        // Write initial counter value
+        std::fs::write(&counter_file, "0").unwrap_or_else(|e| panic!("{e:?}"));
+        // The command increments counter and creates output.txt only when counter reaches 2.
+        // On attempt 1: counter 0→1, no output.txt → no tracked file change → nfc retry fires.
+        // On attempt 2: counter 1→2, output.txt created → tracked file change → proceed to done.
+        let yaml = format!(
+            r#"
+command: [sh, -c]
+steps:
+  implement:
+    command: >-
+      COUNT=$(cat {counter}) &&
+      NEW=$((COUNT+1)) &&
+      echo $NEW > {counter} &&
+      if [ $NEW -ge 2 ]; then touch {output}; fi
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#,
+            counter = counter_file.display(),
+            output = output_file.display()
+        );
+        // When: executed
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow succeeds after retry (implement ran twice, then done)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")).run,
+            3,
+            "implement (×2 attempts) + done = 3 executions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_retry_triggers_loop_protection() {
+        // Given: a step with if.no-file-changes.retry: true that NEVER creates any files
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: "echo no changes ever"
+    if:
+      no-file-changes:
+        retry: true
+"#;
+        // When: executed with max_retries=3 (loop protection kicks in)
+        let result = run_config_with_retries(yaml, "", None, 3, 0).await;
+        // Then: workflow fails with LoopProtection
+        assert!(result.is_err(), "expected Err but got Ok");
+        let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert!(
+            matches!(err, CruiseError::LoopProtection(_, _, _)),
+            "expected LoopProtection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_retry_not_triggered_when_files_changed() {
+        // Given: a step with if.no-file-changes.retry: true that DOES create a file
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let output_file = dir.path().join("output.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch {}"
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#,
+            output_file.display()
+        );
+        // When: executed
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow runs both steps (no retry loop)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result.run, 2, "both steps should run (no extra retry)");
+    }
+
+    #[tokio::test]
+    async fn test_if_file_changed_and_no_file_changes_retry_combo() {
+        // Given: a step with BOTH if.file-changed (jump) and if.no-file-changes.retry,
+        // where the command DOES change a file.
+        // When no-file-changes is set, the file-changed snapshot is suppressed (no-file-changes
+        // takes precedence for change detection). Files changed → no-file-changes does NOT trigger,
+        // workflow proceeds to the sequential next step.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let output_file = dir.path().join("output.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch {}"
+    if:
+      file-changed: implement
+      no-file-changes:
+        retry: true
+  loop_back:
+    command: "echo jumped here"
+  done:
+    command: "echo done"
+"#,
+            output_file.display()
+        );
+        // When: executed
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow completes without retry (files changed, nfc does not trigger)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        // implement → loop_back → done = 3 steps
+        let r = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(r.run, 3, "implement + loop_back + done should all run");
+    }
+
+    #[tokio::test]
+    async fn test_if_no_file_changes_snapshot_per_attempt() {
+        // Given: a step with if.no-file-changes.retry: true
+        // First attempt: no tracked changes → retry (nfc snapshot taken fresh, fires retry)
+        // Second attempt: tracked file created → proceed
+        // This verifies that snapshot is taken fresh each attempt (not reused from first visit).
+        // Counter is stored OUTSIDE the tracked dir so it doesn't cause spurious change detection.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let counter_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}")); // not tracked
+        let output_file = dir.path().join("output.txt");
+        let counter_file = counter_dir.path().join("count.txt");
+        std::fs::write(&counter_file, "0").unwrap_or_else(|e| panic!("{e:?}"));
+        // Step creates output.txt only on second call (N >= 1).
+        // Attempt 1: N=0 → no output.txt, counter changes (untracked) → nfc retry fires.
+        // Attempt 2: N=1 → output.txt created (tracked) → nfc doesn't fire → proceed to done.
+        let yaml = format!(
+            r#"
+command: [sh, -c]
+steps:
+  implement:
+    command: >-
+      N=$(cat {counter}) &&
+      echo $((N+1)) > {counter} &&
+      if [ $N -ge 1 ]; then touch {output}; fi
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#,
+            counter = counter_file.display(),
+            output = output_file.display()
+        );
+        // When: executed with sufficient retries
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow proceeds after retry (snapshot was per-attempt, not global)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let r = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(r.run, 3, "implement (×2 attempts) + done = 3 executions");
+    }
+
+    #[tokio::test]
+    async fn test_if_file_changed_and_no_file_changes_retry_combo_unchanged() {
+        // Given: a step with BOTH if.file-changed (jump) and if.no-file-changes.retry,
+        // where the first attempt does NOT change any tracked files → no-file-changes.retry fires.
+        // Counter is stored OUTSIDE the tracked dir so it doesn't cause spurious change detection.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let counter_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}")); // not tracked
+        let output_file = dir.path().join("output.txt");
+        let counter_file = counter_dir.path().join("count.txt");
+        std::fs::write(&counter_file, "0").unwrap_or_else(|e| panic!("{e:?}"));
+        // Attempt 1: N=0 → counter increments (untracked), no output.txt → nfc retry fires.
+        // Attempt 2: N=1 → counter increments (untracked), output.txt created (tracked) → proceed.
+        // (file-changed snapshot is suppressed when no-file-changes is set; step exits to done.)
+        let yaml = format!(
+            r#"
+command: [sh, -c]
+steps:
+  implement:
+    command: >-
+      N=$(cat {counter}) &&
+      echo $((N+1)) > {counter} &&
+      if [ $N -ge 1 ]; then touch {output}; fi
+    if:
+      file-changed: implement
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#,
+            counter = counter_file.display(),
+            output = output_file.display()
+        );
+        // When: executed (nfc retry fires on first attempt, then files change, then done)
+        let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow succeeds
+        assert!(
+            result.is_ok(),
+            "expected Ok after retry on unchanged: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")).run,
+            3,
+            "implement (×2 attempts) + done = 3 executions"
         );
     }
 

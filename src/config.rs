@@ -112,12 +112,30 @@ pub struct OptionItem {
     pub next: Option<String>,
 }
 
+/// Action to take when no tracked file changes are detected after a step.
+///
+/// Exactly one of `fail` or `retry` must be true.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct NoFileChangesCondition {
+    /// If true, abort the workflow with an error when no file changes are detected.
+    #[serde(default)]
+    pub fail: bool,
+
+    /// If true, re-execute the current step when no file changes are detected.
+    #[serde(default)]
+    pub retry: bool,
+}
+
 /// Conditional execution rule.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IfCondition {
     /// Only execute this step if the given step's snapshot differs from the current state.
     #[serde(rename = "file-changed")]
     pub file_changed: Option<String>,
+
+    /// Action to take when no tracked file changes are detected after this step.
+    #[serde(rename = "no-file-changes")]
+    pub no_file_changes: Option<NoFileChangesCondition>,
 }
 
 /// Group configuration for grouping related steps.
@@ -198,6 +216,80 @@ pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error
             )));
         }
     }
+    Ok(())
+}
+
+/// Validate `if.no-file-changes` usage across all steps and groups.
+///
+/// Enforces:
+/// - `fail` and `retry` cannot both be true in the same `no-file-changes` object.
+/// - An empty (all-false) `no-file-changes` object is rejected.
+/// - `if.no-file-changes` in `after-pr` steps is rejected.
+/// - `if.no-file-changes` in group-level `if` is rejected.
+/// - Legacy `fail-if-no-file-changes` and new `if.no-file-changes` cannot both be set on the same step.
+pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    // Reject no-file-changes at group level.
+    for (group_name, group) in &config.groups {
+        if let Some(ref if_cond) = group.if_condition
+            && if_cond.no_file_changes.is_some()
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "group '{group_name}' uses if.no-file-changes, which is not supported at the group level",
+            )));
+        }
+    }
+
+    // Reject no-file-changes in after-pr steps.
+    for (name, step) in &config.after_pr {
+        if let Some(ref if_cond) = step.if_condition
+            && if_cond.no_file_changes.is_some()
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' in after-pr uses if.no-file-changes, which is not supported in after-pr steps",
+            )));
+        }
+    }
+
+    // Validate regular steps.
+    for (name, step) in &config.steps {
+        // Reject legacy + new coexistence.
+        if step.fail_if_no_file_changes
+            && let Some(ref if_cond) = step.if_condition
+            && if_cond.no_file_changes.is_some()
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses both fail-if-no-file-changes and if.no-file-changes; use only one",
+            )));
+        }
+
+        if let Some(ref if_cond) = step.if_condition
+            && let Some(ref nfc) = if_cond.no_file_changes
+        {
+            // Mutually exclusive: fail and retry cannot both be true.
+            if nfc.fail && nfc.retry {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' if.no-file-changes has both fail and retry set to true; they are mutually exclusive",
+                )));
+            }
+            // At least one of fail or retry must be set.
+            if !nfc.fail && !nfc.retry {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' if.no-file-changes requires either fail or retry to be true",
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run all config validations (groups, fail-if-no-file-changes, if-conditions).
+pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    validate_groups(config)?;
+    validate_fail_if_no_file_changes(config)?;
+    validate_if_conditions(config)?;
     Ok(())
 }
 
@@ -1045,6 +1137,296 @@ steps:
         assert_eq!(
             keys,
             vec!["test1", "review-after-lib", "test2", "review-after-doc"]
+        );
+    }
+
+    // --- if.no-file-changes parse tests ---
+
+    #[test]
+    fn test_if_no_file_changes_fail_parses() {
+        // Given: a step with if.no-file-changes.fail: true
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        fail: true
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: the no_file_changes condition is set with fail=true
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        let no_change = if_cond
+            .no_file_changes
+            .as_ref()
+            .unwrap_or_else(|| panic!("no_file_changes not set"));
+        assert!(no_change.fail, "fail should be true");
+        assert!(!no_change.retry, "retry should be false");
+    }
+
+    #[test]
+    fn test_if_no_file_changes_retry_parses() {
+        // Given: a step with if.no-file-changes.retry: true
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        retry: true
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: the no_file_changes condition is set with retry=true
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        let no_change = if_cond
+            .no_file_changes
+            .as_ref()
+            .unwrap_or_else(|| panic!("no_file_changes not set"));
+        assert!(!no_change.fail, "fail should be false");
+        assert!(no_change.retry, "retry should be true");
+    }
+
+    #[test]
+    fn test_if_no_file_changes_and_file_changed_coexist_in_parse() {
+        // Given: a step with both if.file-changed and if.no-file-changes
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      file-changed: implement
+      no-file-changes:
+        retry: true
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: both fields are present
+        let implement = config
+            .steps
+            .get("implement")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = implement
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        assert_eq!(if_cond.file_changed, Some("implement".to_string()));
+        assert!(
+            if_cond
+                .no_file_changes
+                .as_ref()
+                .unwrap_or_else(|| panic!("no_file_changes not set"))
+                .retry
+        );
+    }
+
+    // --- if.no-file-changes validation tests ---
+
+    #[test]
+    fn test_validate_if_conditions_rejects_fail_and_retry_both_true() {
+        // Given: a step with both fail: true and retry: true
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        fail: true
+        retry: true
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: returns an error because fail and retry are mutually exclusive
+        assert!(result.is_err(), "expected Err but got Ok");
+        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        assert!(
+            msg.contains("fail") || msg.contains("retry"),
+            "error should mention fail/retry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_if_conditions_rejects_empty_no_file_changes() {
+        // Given: a step with no-file-changes: {} (all defaults false)
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes: {}
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: returns an error because neither fail nor retry is set
+        assert!(result.is_err(), "expected Err for empty no-file-changes");
+    }
+
+    #[test]
+    fn test_validate_if_conditions_rejects_no_file_changes_in_after_pr() {
+        // Given: an after-pr step with if.no-file-changes.fail: true
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+after-pr:
+  notify:
+    command: echo done
+    if:
+      no-file-changes:
+        fail: true
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: returns an error because no-file-changes in after-pr is unsupported
+        assert!(
+            result.is_err(),
+            "expected Err for after-pr + no-file-changes"
+        );
+        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        assert!(
+            msg.contains("after-pr") || msg.contains("notify"),
+            "error should mention after-pr step, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_if_conditions_rejects_no_file_changes_in_group_if() {
+        // Given: a group with if.no-file-changes set (group-level no-file-changes is unsupported)
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    if:
+      no-file-changes:
+        fail: true
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: returns an error because no-file-changes in group-level if is unsupported
+        assert!(
+            result.is_err(),
+            "expected Err for group-level no-file-changes"
+        );
+        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        assert!(
+            msg.contains("group") || msg.contains("review"),
+            "error should mention group, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_if_conditions_rejects_legacy_and_new_syntax_together() {
+        // Given: a step with BOTH old fail-if-no-file-changes and new if.no-file-changes
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    fail-if-no-file-changes: true
+    if:
+      no-file-changes:
+        fail: true
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: returns an error because both syntaxes cannot coexist
+        assert!(
+            result.is_err(),
+            "expected Err when both legacy and new syntax are used"
+        );
+    }
+
+    #[test]
+    fn test_validate_if_conditions_ok_for_fail_true() {
+        // Given: a step with if.no-file-changes.fail: true (valid)
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        fail: true
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: no error
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_if_conditions_ok_for_retry_true() {
+        // Given: a step with if.no-file-changes.retry: true (valid)
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: echo done
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: no error
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_if_conditions_ok_for_legacy_fail_if_no_file_changes_alone() {
+        // Given: a step with legacy fail-if-no-file-changes: true (no new syntax)
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    fail-if-no-file-changes: true
+";
+        // When: validate_if_conditions is called
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        // Then: no error — legacy field alone is accepted (backward compatibility)
+        assert!(
+            result.is_ok(),
+            "legacy fail-if-no-file-changes alone should pass validate_if_conditions, got: {result:?}"
         );
     }
 }
