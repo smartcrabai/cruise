@@ -579,14 +579,20 @@ fn attempt_pr_creation(
     title: &str,
     body: &str,
 ) -> Result<PrAttemptOutcome> {
-    let commit_outcome = commit_changes(&ctx.path, message)?;
+    let trimmed_title = title.trim();
+    let commit_message = if trimmed_title.is_empty() {
+        message
+    } else {
+        trimmed_title
+    };
+    let commit_outcome = commit_changes(&ctx.path, commit_message)?;
     if branch_commit_count(ctx)? == 0 {
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
 
     push_branch(&ctx.path, &ctx.branch)?;
 
-    match create_pr(&ctx.path, &ctx.branch, title, body) {
+    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body) {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
@@ -1413,44 +1419,37 @@ mod tests {
 
     #[test]
     fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let (repo, ctx) = create_worktree(&tmp, "20260307225901");
-        let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
-        fs::write(ctx.path.join("feature.txt"), "hello").unwrap_or_else(|e| panic!("{e:?}"));
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260307225901",
+            "https://github.com/owner/repo/pull/2",
+        );
+        let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let bin_dir = tmp.path().join("bin");
-        let log_path = tmp.path().join("gh.log");
-        let head_path = tmp.path().join("gh-head.txt");
-        let url = "https://github.com/owner/repo/pull/2";
-        install_fake_gh(&bin_dir, &log_path, &head_path, url);
-        let _path_guard = PathEnvGuard::prepend(&bin_dir);
-
-        let result =
-            attempt_pr_creation(&ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap();
 
         assert_eq!(
             result,
             PrAttemptOutcome::Created {
-                url: url.to_string(),
+                url: f.url.clone(),
                 commit_outcome: CommitOutcome::Created,
             }
         );
         assert_eq!(
-            git_stdout_ok(&ctx.path, &["log", "-1", "--pretty=%s"]),
+            git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%s"]),
             "add feature"
         );
-        let worktree_head = git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]);
+        let worktree_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(
             worktree_head, base_head,
             "helper should create a new commit"
         );
         assert_eq!(
-            fs::read_to_string(&head_path)
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .trim(),
+            fs::read_to_string(&f.head_path).unwrap().trim(),
             worktree_head
         );
-        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_args = fs::read_to_string(&f.log_path).unwrap();
         assert!(
             gh_args.contains("pr create --head") && gh_args.contains("--fill"),
             "fake gh should receive a pr create invocation, got: {gh_args}"
@@ -1459,54 +1458,168 @@ mod tests {
             gh_args.contains("--draft"),
             "gh pr create should include --draft flag, got: {gh_args}"
         );
-        worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+        worktree::cleanup_worktree(&f.ctx).unwrap();
     }
 
     #[test]
     fn test_attempt_pr_creation_reuses_existing_branch_commits() {
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let (repo, ctx) = create_worktree(&tmp, "20260307225902");
-        let base_head = git_stdout_ok(&repo, &["rev-parse", "HEAD"]);
-        fs::write(ctx.path.join("feature.txt"), "hello").unwrap_or_else(|e| panic!("{e:?}"));
-        run_git_ok(&ctx.path, &["add", "."]);
-        run_git_ok(&ctx.path, &["commit", "-m", "existing commit"]);
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260307225902",
+            "https://github.com/owner/repo/pull/3",
+        );
+        let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
+        run_git_ok(&f.ctx.path, &["add", "."]);
+        run_git_ok(&f.ctx.path, &["commit", "-m", "existing commit"]);
 
-        let existing_head = git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]);
+        let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let bin_dir = tmp.path().join("bin");
-        let log_path = tmp.path().join("gh.log");
-        let head_path = tmp.path().join("gh-head.txt");
-        let url = "https://github.com/owner/repo/pull/3";
-        install_fake_gh(&bin_dir, &log_path, &head_path, url);
-        let _path_guard = PathEnvGuard::prepend(&bin_dir);
-
-        let result = attempt_pr_creation(&ctx, "rerun without changes", "", "")
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "").unwrap();
 
         assert_eq!(
             result,
             PrAttemptOutcome::Created {
-                url: url.to_string(),
+                url: f.url.clone(),
                 commit_outcome: CommitOutcome::NoChanges,
             }
         );
         assert_eq!(
-            git_stdout_ok(&ctx.path, &["rev-parse", "HEAD"]),
+            git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]),
             existing_head
         );
         assert_eq!(
-            fs::read_to_string(&head_path)
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .trim(),
+            fs::read_to_string(&f.head_path).unwrap().trim(),
             existing_head
         );
-        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            gh_args.contains("--draft"),
-            "gh pr create should include --draft flag, got: {gh_args}"
+        worktree::cleanup_worktree(&f.ctx).unwrap();
+    }
+
+    struct PrTestFixture {
+        repo: PathBuf,
+        ctx: worktree::WorktreeContext,
+        _path_guard: PathEnvGuard,
+        log_path: PathBuf,
+        head_path: PathBuf,
+        url: String,
+    }
+
+    fn setup_pr_test(tmp: &TempDir, session_id: &str, url: &str) -> PrTestFixture {
+        let (repo, ctx) = create_worktree(tmp, session_id);
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        let log_path = tmp.path().join("gh.log");
+        let head_path = tmp.path().join("gh-head.txt");
+        install_fake_gh(&bin_dir, &log_path, &head_path, url);
+        let _path_guard = PathEnvGuard::prepend(&bin_dir);
+
+        PrTestFixture {
+            repo,
+            ctx,
+            _path_guard,
+            log_path,
+            head_path,
+            url: url.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_uses_pr_title_as_commit_message_when_title_is_present() {
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260310pr_title_commit_01",
+            "https://github.com/owner/repo/pull/10",
         );
-        worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let pr_title = "feat: add user icon registration";
+        let result =
+            attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "").unwrap();
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: f.url.clone(),
+                commit_outcome: CommitOutcome::Created
+            }
+        );
+        assert_eq!(
+            git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%s"]),
+            pr_title,
+            "commit subject should equal the PR title when title is non-empty"
+        );
+        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        assert!(
+            gh_args.contains("--title") && gh_args.contains(pr_title),
+            "fake gh should receive --title with the PR title; got: {gh_args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap();
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_falls_back_to_message_when_pr_title_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260310pr_title_commit_02",
+            "https://github.com/owner/repo/pull/11",
+        );
+
+        let fallback = "implement user icon feature";
+        let result = attempt_pr_creation(&f.ctx, fallback, "", "").unwrap();
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: f.url.clone(),
+                commit_outcome: CommitOutcome::Created
+            }
+        );
+        assert_eq!(
+            git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%s"]),
+            fallback,
+            "commit subject should equal the fallback message when PR title is empty"
+        );
+        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        assert!(
+            gh_args.contains("--fill"),
+            "fake gh should receive --fill when PR title is empty; got: {gh_args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap();
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_treats_whitespace_only_title_as_empty() {
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260310pr_title_commit_03",
+            "https://github.com/owner/repo/pull/12",
+        );
+
+        let fallback = "implement user icon feature";
+        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap();
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: f.url.clone(),
+                commit_outcome: CommitOutcome::Created
+            }
+        );
+        assert_eq!(
+            git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%s"]),
+            fallback,
+            "whitespace-only title should be treated as empty and use fallback message"
+        );
+        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        assert!(
+            gh_args.contains("--fill"),
+            "fake gh should receive --fill when PR title is whitespace-only; got: {gh_args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap();
     }
 
     // --- parse_pr_metadata tests ---
