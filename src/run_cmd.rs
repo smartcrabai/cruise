@@ -213,7 +213,9 @@ fn load_run_all_result_state(
     fallback: &SessionState,
 ) -> Result<SessionState> {
     let contents = manager.inspect_state_file(&fallback.id)?;
-    if let SessionFileContents::Parsed { state, .. } = contents { Ok(*state) } else {
+    if let SessionFileContents::Parsed { state, .. } = contents {
+        Ok(*state)
+    } else {
         let state_path = manager.state_path(&fallback.id);
         let message = session_state_conflict_message(&state_path, &contents);
         let mut state = fallback.clone();
@@ -307,11 +309,8 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let on_step_start = |step: &str| {
         let mut s = session_cell.borrow_mut();
         s.current_step = Some(step.to_string());
-        let fingerprint = save_session_state_with_conflict_resolution(
-            &manager,
-            &s,
-            session_fingerprint.get(),
-        )?;
+        let fingerprint =
+            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
         session_fingerprint.set(fingerprint);
         Ok(())
     };
@@ -1706,7 +1705,8 @@ steps:
         );
         let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result =
+            attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1725,7 +1725,9 @@ steps:
             "helper should create a new commit"
         );
         assert_eq!(
-            fs::read_to_string(&f.head_path).unwrap_or_else(|e| panic!("{e:?}")).trim(),
+            fs::read_to_string(&f.head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             worktree_head
         );
         let gh_args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1755,7 +1757,8 @@ steps:
         let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1769,7 +1772,9 @@ steps:
             existing_head
         );
         assert_eq!(
-            fs::read_to_string(&f.head_path).unwrap_or_else(|e| panic!("{e:?}")).trim(),
+            fs::read_to_string(&f.head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             existing_head
         );
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1815,8 +1820,8 @@ steps:
         );
 
         let pr_title = "feat: add user icon registration";
-        let result =
-            attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1848,7 +1853,8 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result =
+            attempt_pr_creation(&f.ctx, fallback, "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1880,7 +1886,8 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result =
+            attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -2438,8 +2445,9 @@ steps:
         assert!(matches!(loaded.phase, SessionPhase::Completed));
         assert_eq!(loaded.current_step.as_deref(), Some("second"));
         assert!(repo.join("second.txt").exists());
-        let log = fs::read_to_string(&log_path)
-            .unwrap_or_else(|e| panic!("conflict resolution should be logged for overwrite tests: {e:?}"));
+        let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
+            panic!("conflict resolution should be logged for overwrite tests: {e:?}")
+        });
         assert!(
             log.contains("overwrite"),
             "expected overwrite decision in log, got: {log}"
@@ -2486,8 +2494,9 @@ steps:
             !repo.join("second.txt").exists(),
             "aborting on conflict should prevent later steps from running"
         );
-        let log = fs::read_to_string(&log_path)
-            .unwrap_or_else(|e| panic!("conflict resolution should be logged for abort tests: {e:?}"));
+        let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
+            panic!("conflict resolution should be logged for abort tests: {e:?}")
+        });
         assert!(
             log.contains("abort"),
             "expected abort decision in log, got: {log}"
@@ -2553,7 +2562,8 @@ steps:
             session_id,
             |_| repo.clone(),
             |manager, id| {
-                fs::write(manager.state_path(id), "{invalid json").unwrap_or_else(|e| panic!("{e:?}"));
+                fs::write(manager.state_path(id), "{invalid json")
+                    .unwrap_or_else(|e| panic!("{e:?}"));
             },
         );
         let (result, ()) = tokio::join!(run_fut, mutate_fut);
@@ -2729,13 +2739,13 @@ steps:
             &manager,
             session_id,
             |state| {
-                state
-                    .worktree_path
-                    .clone()
-                    .unwrap_or_else(|| panic!("run --all should persist a worktree path before step execution"))
+                state.worktree_path.clone().unwrap_or_else(|| {
+                    panic!("run --all should persist a worktree path before step execution")
+                })
             },
             |manager, id| {
-                fs::write(manager.state_path(id), "{invalid json").unwrap_or_else(|e| panic!("{e:?}"));
+                fs::write(manager.state_path(id), "{invalid json")
+                    .unwrap_or_else(|e| panic!("{e:?}"));
             },
         );
         let (result, ()) = tokio::join!(run_fut, mutate_fut);

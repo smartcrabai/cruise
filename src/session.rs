@@ -632,8 +632,12 @@ mod tests {
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: loading with fingerprint and inspecting the same file
-        let (loaded, load_fingerprint) = manager.load_with_fingerprint(&id).unwrap_or_else(|e| panic!("{e:?}"));
-        let inspected = manager.inspect_state_file(&id).unwrap_or_else(|e| panic!("{e:?}"));
+        let (loaded, load_fingerprint) = manager
+            .load_with_fingerprint(&id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let inspected = manager
+            .inspect_state_file(&id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: both APIs observe the same parsed state and fingerprint
         assert_eq!(loaded, state);
@@ -661,9 +665,14 @@ mod tests {
         state.current_step = Some("write-test-first".to_string());
 
         // When: saving and then loading with fingerprints
-        std::fs::create_dir_all(manager.sessions_dir().join(&state.id)).unwrap_or_else(|e| panic!("{e:?}"));
-        let saved_fingerprint = manager.save_with_fingerprint(&state).unwrap_or_else(|e| panic!("{e:?}"));
-        let (loaded, loaded_fingerprint) = manager.load_with_fingerprint(&state.id).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir_all(manager.sessions_dir().join(&state.id))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let saved_fingerprint = manager
+            .save_with_fingerprint(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let (loaded, loaded_fingerprint) = manager
+            .load_with_fingerprint(&state.id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the state and fingerprint round-trip exactly
         assert_eq!(loaded, state);
@@ -678,10 +687,13 @@ mod tests {
         let id = "20260310130002";
         let session_dir = manager.sessions_dir().join(id);
         std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(session_dir.join("state.json"), "{not valid json").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(session_dir.join("state.json"), "{not valid json")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: inspecting the state file
-        let inspected = manager.inspect_state_file(id).unwrap_or_else(|e| panic!("{e:?}"));
+        let inspected = manager
+            .inspect_state_file(id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: invalid contents are returned with an error and a consistent fingerprint
         match inspected {
@@ -692,7 +704,10 @@ mod tests {
                 );
                 assert_eq!(
                     Some(fingerprint),
-                    manager.inspect_state_file(id).unwrap_or_else(|e| panic!("{e:?}")).fingerprint()
+                    manager
+                        .inspect_state_file(id)
+                        .unwrap_or_else(|e| panic!("{e:?}"))
+                        .fingerprint()
                 );
             }
             other => panic!("expected invalid contents, got {other:?}"),
@@ -706,7 +721,9 @@ mod tests {
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
         // When: inspecting a missing state file
-        let inspected = manager.inspect_state_file("20260310130003").unwrap_or_else(|e| panic!("{e:?}"));
+        let inspected = manager
+            .inspect_state_file("20260310130003")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the file is reported as missing without error
         assert_eq!(inspected, SessionFileContents::Missing);
