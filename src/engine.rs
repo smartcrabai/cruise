@@ -12,6 +12,7 @@ use crate::step::option::run_option;
 use crate::step::prompt::run_prompt;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
+use crate::workflow::CompiledWorkflow;
 
 /// Result of a completed `execute_steps` run.
 #[derive(Debug)]
@@ -27,7 +28,7 @@ pub struct ExecutionResult {
 /// `on_step_start` is called with the step name before each step executes,
 /// allowing the caller to persist the current step for resume support.
 pub async fn execute_steps(
-    config: &WorkflowConfig,
+    compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     start_step: &str,
@@ -38,60 +39,52 @@ pub async fn execute_steps(
     // Edge counters for loop protection: (from, to) → visit count.
     let mut edge_counts: HashMap<(String, String), usize> = HashMap::new();
     let mut current_step = start_step.to_string();
-    let mut total_steps = config.steps.len();
+    let mut total_steps = compiled.steps.len();
     let mut step_index = 0usize;
     let workflow_start = Instant::now();
     let mut steps_run = 0usize;
     let mut steps_skipped = 0usize;
     let mut steps_failed = 0usize;
 
-    // (A) Pre-calculate group info.
-    let mut group_first: HashMap<String, String> = HashMap::new();
-    let mut group_last: HashMap<String, String> = HashMap::new();
-    let mut group_size: HashMap<String, usize> = HashMap::new();
-    let mut step_to_group: HashMap<String, String> = HashMap::new();
+    // (A) Pre-calculate step-to-invocation mapping from compiled invocations.
+    let mut step_to_invocation: HashMap<String, String> = HashMap::new();
     let mut group_retry_counts: HashMap<String, usize> = HashMap::new();
-    for (name, step) in &config.steps {
-        if let Some(group_name) = &step.group {
-            step_to_group.insert(name.clone(), group_name.clone());
-            group_first
-                .entry(group_name.clone())
-                .or_insert_with(|| name.clone());
-            group_last.insert(group_name.clone(), name.clone());
-            *group_size.entry(group_name.clone()).or_insert(0) += 1;
+    for call_site in compiled.invocations.keys() {
+        for step_name in compiled.steps.keys() {
+            if step_name.starts_with(&format!("{}/", call_site)) {
+                step_to_invocation.insert(step_name.clone(), call_site.clone());
+            }
         }
     }
 
     loop {
-        let step_config = config
+        let step_config = compiled
             .steps
             .get(&current_step)
             .ok_or_else(|| CruiseError::StepNotFound(current_step.clone()))?;
 
-        let step_group_name = step_to_group.get(&current_step).map(|s| s.as_str());
+        let step_call_site = step_to_invocation.get(&current_step).map(|s| s.as_str());
 
         // (B) Group max_retries skip check (before individual should_skip).
-        if let Some(group_name) = step_group_name {
-            let is_first = group_first.get(group_name) == Some(&current_step);
+        if let Some(call_site) = step_call_site {
+            let meta = compiled.invocations.get(call_site);
+            let is_first = meta.is_some_and(|m| m.first_step == current_step);
             if is_first
-                && let Some(group_cfg) = config.groups.get(group_name)
-                && let Some(max) = group_cfg.max_retries
-                && group_retry_counts.get(group_name).copied().unwrap_or(0) >= max
+                && let Some(invoc) = meta
+                && let Some(max) = invoc.max_retries
+                && group_retry_counts.get(call_site).copied().unwrap_or(0) >= max
             {
                 eprintln!(
                     "  {} group '{}' max retries ({}) reached, skipping",
                     style("→").yellow(),
-                    group_name,
+                    call_site,
                     max
                 );
-                let last_step = group_last
-                    .get(group_name)
-                    .cloned()
-                    .unwrap_or_else(|| current_step.clone());
-                let count = group_size.get(group_name).copied().unwrap_or(1);
+                let last_step = invoc.last_step.clone();
+                let count = invoc.step_count;
                 step_index += count;
                 steps_skipped += count;
-                match get_next_step(config, &last_step, None) {
+                match get_next_step(&compiled.steps, &last_step, None) {
                     Some(next) => {
                         current_step = next;
                         continue;
@@ -111,7 +104,7 @@ pub async fn execute_steps(
             step_index += 1;
             steps_skipped += 1;
             eprintln!("{} {}", style("→").yellow(), msg);
-            match get_next_step(config, &current_step, None) {
+            match get_next_step(&compiled.steps, &current_step, None) {
                 Some(next) => {
                     current_step = next;
                     continue;
@@ -136,7 +129,7 @@ pub async fn execute_steps(
 
         let step_start = Instant::now();
         let step_next = step_config.next.clone();
-        let merged_env = resolve_env(&config.env, &step_config.env, vars)?;
+        let merged_env = resolve_env(&compiled.env, &step_config.env, vars)?;
         let kind = StepKind::try_from(step_config.clone())?;
 
         let if_cond = step_config.if_condition.as_ref();
@@ -176,23 +169,24 @@ pub async fn execute_steps(
         };
 
         // (C) Group snapshot at start of group.
-        if let Some(group_name) = step_group_name {
-            let is_first = group_first.get(group_name) == Some(&current_step);
+        if let Some(call_site) = step_call_site {
+            let meta = compiled.invocations.get(call_site);
+            let is_first = meta.is_some_and(|m| m.first_step == current_step);
             if is_first
-                && let Some(group_cfg) = config.groups.get(group_name)
-                && group_cfg
+                && let Some(invoc) = meta
+                && invoc
                     .if_condition
                     .as_ref()
                     .is_some_and(|c| c.file_changed.is_some())
             {
-                tracker.take_snapshot(&group_snapshot_key(group_name))?;
+                tracker.take_snapshot(&group_snapshot_key(call_site))?;
             }
         }
 
         let option_next = match &kind {
             StepKind::Prompt(step) => {
                 let output =
-                    run_prompt_step(vars, config, step, rate_limit_retries, &merged_env).await?;
+                    run_prompt_step(vars, compiled, step, rate_limit_retries, &merged_env).await?;
                 let elapsed = step_start.elapsed();
                 if !output.is_empty() {
                     eprint!("{}", output);
@@ -267,21 +261,20 @@ pub async fn execute_steps(
         };
 
         // (D) Group file-change check at end of group.
-        let group_if_next = if let Some(group_name) = step_group_name {
-            let is_last = group_last.get(group_name) == Some(&current_step);
+        let group_if_next = if let Some(call_site) = step_call_site {
+            let meta = compiled.invocations.get(call_site);
+            let is_last = meta.is_some_and(|m| m.last_step == current_step);
             if is_last
-                && let Some(group_cfg) = config.groups.get(group_name)
-                && let Some(ref if_cond) = group_cfg.if_condition
+                && let Some(invoc) = meta
+                && let Some(ref if_cond) = invoc.if_condition
                 && let Some(ref target) = if_cond.file_changed
             {
-                if tracker.has_files_changed(&group_snapshot_key(group_name))? {
-                    *group_retry_counts
-                        .entry(group_name.to_string())
-                        .or_insert(0) += 1;
+                if tracker.has_files_changed(&group_snapshot_key(call_site))? {
+                    *group_retry_counts.entry(call_site.to_string()).or_insert(0) += 1;
                     eprintln!(
                         "  {} files changed in group '{}', jumping to: {}",
                         style("↻").cyan(),
-                        group_name,
+                        call_site,
                         target
                     );
                     Some(target.clone())
@@ -300,7 +293,7 @@ pub async fn execute_steps(
             .or(group_if_next)
             .or(option_next)
             .or(step_next);
-        let next_step = get_next_step(config, &current_step, effective_next.as_deref());
+        let next_step = get_next_step(&compiled.steps, &current_step, effective_next.as_deref());
 
         // Loop protection.
         if let Some(ref next) = next_step {
@@ -437,7 +430,7 @@ pub(crate) fn resolve_command_with_model(
 /// Execute a prompt step, updating variable state and returning the LLM output.
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
-    config: &WorkflowConfig,
+    compiled: &CompiledWorkflow,
     step: &PromptStep,
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
@@ -459,17 +452,20 @@ pub(crate) async fn run_prompt_step(
     }
     let prompt = vars.resolve(&step.prompt)?;
 
-    let effective_model = step.model.as_deref().or(config.model.as_deref());
+    let effective_model = step.model.as_deref().or(compiled.model.as_deref());
 
-    let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
+    let has_placeholder = compiled.command.iter().any(|s| s.contains("{model}"));
 
     let (resolved_command, model_arg) = if has_placeholder {
         (
-            resolve_command_with_model(&config.command, effective_model),
+            resolve_command_with_model(&compiled.command, effective_model),
             None,
         )
     } else {
-        (config.command.clone(), effective_model.map(str::to_string))
+        (
+            compiled.command.clone(),
+            effective_model.map(str::to_string),
+        )
     };
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
@@ -551,7 +547,7 @@ pub(crate) fn run_option_step(
 
 /// Determine the next step: explicit next > IndexMap order > None (end).
 pub(crate) fn get_next_step(
-    config: &WorkflowConfig,
+    steps: &indexmap::IndexMap<String, crate::config::StepConfig>,
     current: &str,
     explicit_next: Option<&str>,
 ) -> Option<String> {
@@ -560,7 +556,7 @@ pub(crate) fn get_next_step(
     }
 
     let mut found = false;
-    for key in config.steps.keys() {
+    for key in steps.keys() {
         if found {
             return Some(key.clone());
         }
@@ -696,12 +692,13 @@ mod tests {
     ) -> Result<ExecutionResult> {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap();
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root);
-        let first_step = config.steps.keys().next().unwrap().clone();
+        let first_step = compiled.steps.keys().next().unwrap().clone();
         let step = start_step.unwrap_or(&first_step).to_string();
         execute_steps(
-            &config,
+            &compiled,
             &mut vars,
             &mut tracker,
             &step,
@@ -809,14 +806,14 @@ steps:
 "#;
         let config = make_config(yaml);
         assert_eq!(
-            get_next_step(&config, "step_a", None),
+            get_next_step(&config.steps, "step_a", None),
             Some("step_b".to_string())
         );
         assert_eq!(
-            get_next_step(&config, "step_b", None),
+            get_next_step(&config.steps, "step_b", None),
             Some("step_c".to_string())
         );
-        assert_eq!(get_next_step(&config, "step_c", None), None);
+        assert_eq!(get_next_step(&config.steps, "step_c", None), None);
     }
 
     #[test]
@@ -833,7 +830,7 @@ steps:
 "#;
         let config = make_config(yaml);
         assert_eq!(
-            get_next_step(&config, "step_a", Some("step_c")),
+            get_next_step(&config.steps, "step_a", Some("step_c")),
             Some("step_c".to_string())
         );
     }
@@ -847,7 +844,7 @@ steps:
     command: echo hello
 "#;
         let config = make_config(yaml);
-        assert_eq!(get_next_step(&config, "only_step", None), None);
+        assert_eq!(get_next_step(&config.steps, "only_step", None), None);
     }
 
     #[tokio::test]
@@ -1273,15 +1270,24 @@ steps:
     command: "echo world"
 "#;
         let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap();
         let mut vars = VariableStore::new(String::new());
         let mut tracker = FileTracker::with_root(std::env::current_dir().unwrap());
         let mut called_steps: Vec<String> = Vec::new();
         let called_ref = std::cell::RefCell::new(&mut called_steps);
 
-        let result = execute_steps(&config, &mut vars, &mut tracker, "step1", 10, 0, &|step| {
-            called_ref.borrow_mut().push(step.to_string());
-            Ok(())
-        })
+        let result = execute_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            "step1",
+            10,
+            0,
+            &|step| {
+                called_ref.borrow_mut().push(step.to_string());
+                Ok(())
+            },
+        )
         .await;
 
         assert!(result.is_ok());
@@ -1745,6 +1751,27 @@ steps:
         assert_eq!(
             format_duration(std::time::Duration::from_millis(5500)),
             "5.5s"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_pointing_to_nonexistent_step() {
+        // Given: a step whose `next` points to a step that doesn't exist
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+    next: nonexistent
+"#;
+        // When: the workflow runs
+        let result = run_config(yaml, "test", None).await;
+        // Then: StepNotFound error is returned
+        assert!(result.is_err(), "expected an error but got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CruiseError::StepNotFound(ref s) if s == "nonexistent"),
+            "expected StepNotFound(\"nonexistent\"), got: {err:?}"
         );
     }
 }

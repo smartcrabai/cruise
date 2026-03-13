@@ -205,4 +205,46 @@ mod tests {
         let tracker = FileTracker::new();
         assert!(!tracker.has_files_changed("nonexistent").unwrap());
     }
+
+    #[test]
+    fn test_excluded_dirs_target() {
+        // Given: directory containing a file inside `target/`
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/app.out"), "binary").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        // When: snapshot taken
+        let snapshot = take_current_snapshot(dir.path()).unwrap();
+
+        // Then: only main.rs is captured; target/ is excluded
+        assert_eq!(snapshot.len(), 1, "target/ should be excluded");
+        let paths: Vec<_> = snapshot.keys().collect();
+        assert!(
+            paths[0].ends_with("main.rs"),
+            "expected main.rs, got: {:?}",
+            paths[0]
+        );
+    }
+
+    #[test]
+    fn test_excluded_dirs_node_modules() {
+        // Given: directory containing a file inside `node_modules/`
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/lib.js"), "module.exports={}").unwrap();
+        std::fs::write(dir.path().join("index.js"), "console.log('hi')").unwrap();
+
+        // When: snapshot taken
+        let snapshot = take_current_snapshot(dir.path()).unwrap();
+
+        // Then: only index.js is captured; node_modules/ is excluded
+        assert_eq!(snapshot.len(), 1, "node_modules/ should be excluded");
+        let paths: Vec<_> = snapshot.keys().collect();
+        assert!(
+            paths[0].ends_with("index.js"),
+            "expected index.js, got: {:?}",
+            paths[0]
+        );
+    }
 }

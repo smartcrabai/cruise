@@ -151,4 +151,30 @@ mod tests {
         let result = wrap_line("abcdefghij", 4);
         assert_eq!(result, vec!["abcd", "efgh", "ij"]);
     }
+
+    #[test]
+    fn test_truncate_short_string() {
+        // max より短い文字列はそのまま返る
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        // ちょうど max の文字列はそのまま返る
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        // max を超えると末尾に `…` が付与される
+        let result = truncate("hello world", 5);
+        assert_eq!(result, "hello…");
+    }
+
+    #[test]
+    fn test_truncate_multiline() {
+        // 複数行の場合は最初の行のみを使用
+        let result = truncate("first line\nsecond line", 20);
+        assert_eq!(result, "first line");
+    }
 }

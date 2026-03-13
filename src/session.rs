@@ -913,4 +913,28 @@ mod tests {
             Some("cruise/20260309110000-running-task".to_string())
         );
     }
+
+    #[test]
+    fn test_reset_to_planned_preserves_workspace_mode_and_target_branch() {
+        // Given: CurrentBranch モード + target_branch 設定済みの Running セッション
+        let mut s = SessionState::new(
+            "20260310120000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "direct mode task".to_string(),
+        );
+        s.phase = SessionPhase::Running;
+        s.current_step = Some("implement".to_string());
+        s.workspace_mode = WorkspaceMode::CurrentBranch;
+        s.target_branch = Some("feature/my-branch".to_string());
+
+        // When
+        s.reset_to_planned();
+
+        // Then: 実行状態はクリアされるが workspace_mode / target_branch は保持
+        assert!(matches!(s.phase, SessionPhase::Planned));
+        assert!(s.current_step.is_none());
+        assert_eq!(s.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(s.target_branch.as_deref(), Some("feature/my-branch"));
+    }
 }

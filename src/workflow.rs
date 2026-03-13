@@ -33,6 +33,8 @@ pub struct CompiledWorkflow {
     pub model: Option<String>,
     pub plan_model: Option<String>,
     pub env: HashMap<String, String>,
+    /// Language to use for PR title/body generation.
+    pub pr_language: String,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -57,6 +59,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         model: config.model,
         plan_model: config.plan_model,
         env: config.env,
+        pr_language: config.pr_language,
         steps,
         after_pr,
         invocations,
@@ -483,6 +486,59 @@ steps:
         assert!(
             result.unwrap_err().to_string().contains("if"),
             "expected 'if' in error message"
+        );
+    }
+
+    #[test]
+    fn test_compile_step_key_collision_returns_error() {
+        // Given: a regular step named "call/simplify" and a group call "call" that expands to
+        // "call/simplify" — the expanded key collides with the existing regular step.
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: echo simplify
+steps:
+  call/simplify:
+    command: echo manual
+  call:
+    group: review
+"#;
+        // When: compile is called
+        let result = compile(parsed(yaml));
+        // Then: error mentions collision
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("collides"),
+            "expected 'collides' in error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compile_group_step_preserves_fail_if_no_file_changes() {
+        // Given: a group whose sub-step has fail-if-no-file-changes: true
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      implement:
+        command: cargo build
+        fail-if-no-file-changes: true
+steps:
+  run-review:
+    group: review
+"#;
+        // When: compiled
+        let c = compiled(yaml);
+        // Then: the expanded step preserves fail_if_no_file_changes
+        let step = c.steps.get("run-review/implement").unwrap();
+        assert!(
+            step.fail_if_no_file_changes,
+            "fail_if_no_file_changes should be preserved after compilation"
         );
     }
 }
