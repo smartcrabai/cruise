@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use console::style;
@@ -11,7 +12,8 @@ use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::plan_cmd::PLAN_VAR;
 use crate::session::{
-    SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
+    SessionFileContents, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
+    WorkspaceMode, current_iso8601, get_cruise_home,
 };
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -21,11 +23,26 @@ const PR_LANGUAGE_VAR: &str = "pr.language";
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
+const SESSION_STATE_CONFLICT_ABORT_LABEL: &str = "Abort run";
+const SESSION_STATE_CONFLICT_OVERWRITE_LABEL: &str = "Overwrite external state";
+
+#[cfg(test)]
+const TEST_STATE_CONFLICT_ACTION_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_ACTION";
+#[cfg(test)]
+const TEST_STATE_CONFLICT_LOG_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_LOG";
+#[cfg(test)]
+const TEST_STDIN_IS_TERMINAL_ENV: &str = "CRUISE_TEST_STDIN_IS_TERMINAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceOverride {
     RespectSession,
     ForceWorktree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStateConflictChoice {
+    Abort,
+    Overwrite,
 }
 
 enum ExecutionWorkspace {
@@ -78,6 +95,136 @@ fn build_pr_prompt(vars: &mut VariableStore, compiled: &CompiledWorkflow) -> Res
     vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
 }
 
+fn save_session_state_with_conflict_resolution(
+    manager: &SessionManager,
+    session: &SessionState,
+    expected_fingerprint: SessionStateFingerprint,
+) -> Result<SessionStateFingerprint> {
+    // Single read: inspect gives us both the fingerprint and parsed contents.
+    let current_contents = manager.inspect_state_file(&session.id)?;
+    let current_fingerprint = current_contents.fingerprint();
+    if current_fingerprint == Some(expected_fingerprint) {
+        return manager.save_with_fingerprint(session);
+    }
+
+    // Conflict detected — build a user-facing message from the already-read contents.
+    let state_path = manager.state_path(&session.id);
+    let message = session_state_conflict_message(&state_path, &current_contents);
+
+    if !stdin_is_terminal() {
+        return Err(CruiseError::SessionStateConflict(message));
+    }
+
+    match prompt_for_session_state_conflict(&message)? {
+        SessionStateConflictChoice::Abort => {
+            #[cfg(test)]
+            record_session_state_conflict_choice("abort");
+            Err(CruiseError::SessionStateConflictAborted(message))
+        }
+        SessionStateConflictChoice::Overwrite => {
+            #[cfg(test)]
+            record_session_state_conflict_choice("overwrite");
+            manager.save_with_fingerprint(session)
+        }
+    }
+}
+
+fn session_state_conflict_message(path: &Path, current_contents: &SessionFileContents) -> String {
+    match current_contents {
+        SessionFileContents::Missing => {
+            format!(
+                "{} was deleted while the session was running",
+                path.display()
+            )
+        }
+        SessionFileContents::Parsed { .. } => {
+            format!(
+                "{} changed externally while the session was running",
+                path.display()
+            )
+        }
+        SessionFileContents::Invalid { error, .. } => format!(
+            "{} changed externally and now contains invalid JSON: {}",
+            path.display(),
+            error
+        ),
+    }
+}
+
+fn prompt_for_session_state_conflict(message: &str) -> Result<SessionStateConflictChoice> {
+    #[cfg(test)]
+    if let Some(choice) = test_session_state_conflict_choice() {
+        return Ok(choice);
+    }
+
+    eprintln!("{} {}", style("⚠").yellow().bold(), message);
+    let options = vec![
+        SESSION_STATE_CONFLICT_ABORT_LABEL,
+        SESSION_STATE_CONFLICT_OVERWRITE_LABEL,
+    ];
+    match inquire::Select::new("How should cruise proceed?", options).prompt() {
+        Ok(choice) if choice == SESSION_STATE_CONFLICT_ABORT_LABEL => {
+            Ok(SessionStateConflictChoice::Abort)
+        }
+        Ok(_) => Ok(SessionStateConflictChoice::Overwrite),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            Ok(SessionStateConflictChoice::Abort)
+        }
+        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+}
+
+fn stdin_is_terminal() -> bool {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var(TEST_STDIN_IS_TERMINAL_ENV) {
+        return value == "1";
+    }
+
+    std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+fn test_session_state_conflict_choice() -> Option<SessionStateConflictChoice> {
+    std::env::var(TEST_STATE_CONFLICT_ACTION_ENV)
+        .ok()
+        .and_then(|value| match value.as_str() {
+            "abort" => Some(SessionStateConflictChoice::Abort),
+            "overwrite" => Some(SessionStateConflictChoice::Overwrite),
+            _ => None,
+        })
+}
+
+#[cfg(test)]
+fn record_session_state_conflict_choice(choice: &str) {
+    if let Ok(path) = std::env::var(TEST_STATE_CONFLICT_LOG_ENV)
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        use std::io::Write;
+
+        let _ = writeln!(file, "{choice}");
+    }
+}
+
+fn load_run_all_result_state(
+    manager: &SessionManager,
+    fallback: &SessionState,
+) -> Result<SessionState> {
+    let contents = manager.inspect_state_file(&fallback.id)?;
+    if let SessionFileContents::Parsed { state, .. } = contents {
+        Ok(*state)
+    } else {
+        let state_path = manager.state_path(&fallback.id);
+        let message = session_state_conflict_message(&state_path, &contents);
+        let mut state = fallback.clone();
+        state.phase = SessionPhase::Failed(message);
+        state.completed_at = Some(current_iso8601());
+        Ok(state)
+    }
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.all {
         if args.session.is_some() {
@@ -104,7 +251,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let session_id = args
         .session
         .map_or_else(|| select_pending_session(&manager), Ok)?;
-    let mut session = manager.load(&session_id)?;
+    let (mut session, initial_fingerprint) = manager.load_with_fingerprint(&session_id)?;
 
     if !session.phase.is_runnable() {
         return Err(CruiseError::Other(format!(
@@ -149,7 +296,8 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         prepare_execution_workspace(&manager, &session, effective_workspace_mode)?;
     update_session_workspace(&mut session, &execution_workspace);
     session.phase = SessionPhase::Running;
-    manager.save(&session)?;
+    let initial_fingerprint =
+        save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
     std::env::set_current_dir(execution_workspace.path())?;
 
     let plan_path = session.plan_path(&manager.sessions_dir());
@@ -157,10 +305,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     vars.set_named_file(PLAN_VAR, plan_path);
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
     let session_cell = RefCell::new(&mut session);
+    let session_fingerprint = Cell::new(initial_fingerprint);
     let on_step_start = |step: &str| {
         let mut s = session_cell.borrow_mut();
         s.current_step = Some(step.to_string());
-        manager.save(&s)
+        let fingerprint =
+            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
+        session_fingerprint.set(fingerprint);
+        Ok(())
     };
     let exec_result = tokio::select! {
         result = execute_steps(
@@ -209,8 +361,17 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         Err(e) => Err(e),
     };
 
+    if let Err(e) = &overall_result
+        && matches!(
+            e,
+            CruiseError::SessionStateConflict(_) | CruiseError::SessionStateConflictAborted(_)
+        )
+    {
+        return overall_result;
+    }
+
     apply_run_result_to_session(session, &overall_result);
-    manager.save(session)?;
+    save_session_state_with_conflict_resolution(&manager, session, session_fingerprint.get())?;
     overall_result
 }
 
@@ -431,7 +592,7 @@ async fn run_all(args: RunArgs) -> Result<()> {
             }
             Ok(()) | Err(_) => {}
         }
-        results.push(manager.load(&session.id)?);
+        results.push(load_run_all_result_state(&manager, &session)?);
         if interrupted {
             break;
         }
@@ -1206,6 +1367,7 @@ mod tests {
         prev_home: Option<std::ffi::OsString>,
         prev_path: Option<std::ffi::OsString>,
         prev_dir: PathBuf,
+        extra_env: Vec<(String, Option<std::ffi::OsString>)>,
         lock: crate::test_support::ProcessLock,
     }
 
@@ -1222,6 +1384,7 @@ mod tests {
                 prev_home,
                 prev_path,
                 prev_dir,
+                extra_env: Vec::new(),
                 lock,
             }
         }
@@ -1243,6 +1406,27 @@ mod tests {
             let _ = &self.lock;
             let _ = std::env::set_current_dir(dir);
         }
+
+        fn set_env(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            self.remember_env(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+
+        fn remove_env(&mut self, key: &str) {
+            self.remember_env(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+
+        fn remember_env(&mut self, key: &str) {
+            if self.extra_env.iter().all(|(existing, _)| existing != key) {
+                self.extra_env
+                    .push((key.to_string(), std::env::var_os(key)));
+            }
+        }
     }
 
     impl Drop for ProcessStateGuard {
@@ -1251,6 +1435,14 @@ mod tests {
                 let _ = std::env::set_current_dir("/");
             }
             unsafe {
+                for (key, previous) in self.extra_env.iter().rev() {
+                    if let Some(value) = previous {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+
                 if let Some(ref prev_home) = self.prev_home {
                     std::env::set_var("HOME", prev_home);
                 } else {
@@ -1322,6 +1514,92 @@ mod tests {
             rate_limit_retries: 0,
             dry_run: false,
         }
+    }
+
+    fn blocking_conflict_config() -> String {
+        r"command:
+  - cat
+steps:
+  first:
+    command: |
+      while [ ! -f proceed.txt ]; do sleep 0.05; done
+  second:
+    command: |
+      printf second > second.txt
+"
+        .to_string()
+    }
+
+    fn setup_current_branch_conflict_session(
+        tmp: &TempDir,
+        session_id: &str,
+        input: &str,
+    ) -> (ProcessStateGuard, PathBuf, SessionManager) {
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session = make_current_branch_session(session_id, &repo, input, "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &blocking_conflict_config());
+
+        (process, repo, manager)
+    }
+
+    fn configure_conflict_test_env(
+        process: &mut ProcessStateGuard,
+        is_terminal: bool,
+        action: Option<&str>,
+        log_path: &Path,
+    ) {
+        process.set_env(
+            TEST_STDIN_IS_TERMINAL_ENV,
+            if is_terminal { "1" } else { "0" },
+        );
+        if let Some(action) = action {
+            process.set_env(TEST_STATE_CONFLICT_ACTION_ENV, action);
+        } else {
+            process.remove_env(TEST_STATE_CONFLICT_ACTION_ENV);
+        }
+        process.set_env(TEST_STATE_CONFLICT_LOG_ENV, log_path);
+    }
+
+    async fn wait_for_session_step(manager: &SessionManager, session_id: &str, step: &str) {
+        for _ in 0..200 {
+            if let Ok(state) = manager.load(session_id)
+                && matches!(state.phase, SessionPhase::Running)
+                && state.current_step.as_deref() == Some(step)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        panic!("timed out waiting for session {session_id} to reach step {step}");
+    }
+
+    async fn mutate_state_after_first_step<F, G>(
+        manager: &SessionManager,
+        session_id: &str,
+        workspace_path: G,
+        mutate: F,
+    ) where
+        F: FnOnce(&SessionManager, &str),
+        G: FnOnce(&SessionState) -> PathBuf,
+    {
+        wait_for_session_step(manager, session_id, "first").await;
+        let state = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        let workspace = workspace_path(&state);
+        mutate(manager, session_id);
+        fs::write(workspace.join("proceed.txt"), "go").unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    fn write_external_failed_state(manager: &SessionManager, session_id: &str) {
+        let mut external = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        external.phase = SessionPhase::Failed("external edit".to_string());
+        external.current_step = Some("external-step".to_string());
+        manager.save(&external).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     fn make_pr_prompt_config(pr_language_yaml: Option<&str>) -> CompiledWorkflow {
@@ -1419,7 +1697,7 @@ mod tests {
 
     #[test]
     fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
             "20260307225901",
@@ -1427,7 +1705,8 @@ mod tests {
         );
         let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap();
+        let result =
+            attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1446,10 +1725,12 @@ mod tests {
             "helper should create a new commit"
         );
         assert_eq!(
-            fs::read_to_string(&f.head_path).unwrap().trim(),
+            fs::read_to_string(&f.head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             worktree_head
         );
-        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        let gh_args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             gh_args.contains("pr create --head") && gh_args.contains("--fill"),
             "fake gh should receive a pr create invocation, got: {gh_args}"
@@ -1458,12 +1739,12 @@ mod tests {
             gh_args.contains("--draft"),
             "gh pr create should include --draft flag, got: {gh_args}"
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_attempt_pr_creation_reuses_existing_branch_commits() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
             "20260307225902",
@@ -1476,7 +1757,8 @@ mod tests {
         let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "").unwrap();
+        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1490,16 +1772,19 @@ mod tests {
             existing_head
         );
         assert_eq!(
-            fs::read_to_string(&f.head_path).unwrap().trim(),
+            fs::read_to_string(&f.head_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .trim(),
             existing_head
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     struct PrTestFixture {
         repo: PathBuf,
         ctx: worktree::WorktreeContext,
-        _path_guard: PathEnvGuard,
+        #[expect(dead_code)]
+        path_guard: PathEnvGuard,
         log_path: PathBuf,
         head_path: PathBuf,
         url: String,
@@ -1507,18 +1792,18 @@ mod tests {
 
     fn setup_pr_test(tmp: &TempDir, session_id: &str, url: &str) -> PrTestFixture {
         let (repo, ctx) = create_worktree(tmp, session_id);
-        fs::write(ctx.path.join("feature.txt"), "hello").unwrap();
+        fs::write(ctx.path.join("feature.txt"), "hello").unwrap_or_else(|e| panic!("{e:?}"));
 
         let bin_dir = tmp.path().join("bin");
         let log_path = tmp.path().join("gh.log");
         let head_path = tmp.path().join("gh-head.txt");
         install_fake_gh(&bin_dir, &log_path, &head_path, url);
-        let _path_guard = PathEnvGuard::prepend(&bin_dir);
+        let path_guard = PathEnvGuard::prepend(&bin_dir);
 
         PrTestFixture {
             repo,
             ctx,
-            _path_guard,
+            path_guard,
             log_path,
             head_path,
             url: url.to_string(),
@@ -1527,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_attempt_pr_creation_uses_pr_title_as_commit_message_when_title_is_present() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
             "20260310pr_title_commit_01",
@@ -1535,8 +1820,8 @@ mod tests {
         );
 
         let pr_title = "feat: add user icon registration";
-        let result =
-            attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "").unwrap();
+        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1550,17 +1835,17 @@ mod tests {
             pr_title,
             "commit subject should equal the PR title when title is non-empty"
         );
-        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        let gh_args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             gh_args.contains("--title") && gh_args.contains(pr_title),
             "fake gh should receive --title with the PR title; got: {gh_args}"
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_attempt_pr_creation_falls_back_to_message_when_pr_title_is_empty() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
             "20260310pr_title_commit_02",
@@ -1568,7 +1853,8 @@ mod tests {
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "", "").unwrap();
+        let result =
+            attempt_pr_creation(&f.ctx, fallback, "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1582,17 +1868,17 @@ mod tests {
             fallback,
             "commit subject should equal the fallback message when PR title is empty"
         );
-        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        let gh_args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             gh_args.contains("--fill"),
             "fake gh should receive --fill when PR title is empty; got: {gh_args}"
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn test_attempt_pr_creation_treats_whitespace_only_title_as_empty() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
             "20260310pr_title_commit_03",
@@ -1600,7 +1886,8 @@ mod tests {
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap();
+        let result =
+            attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1614,12 +1901,12 @@ mod tests {
             fallback,
             "whitespace-only title should be treated as empty and use fallback message"
         );
-        let gh_args = fs::read_to_string(&f.log_path).unwrap();
+        let gh_args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
             gh_args.contains("--fill"),
             "fake gh should receive --fill when PR title is whitespace-only; got: {gh_args}"
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     // --- parse_pr_metadata tests ---
@@ -2130,6 +2417,220 @@ steps:
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_conflict_overwrite_continues_and_logs_choice() {
+        // Given: a running current-branch session whose state.json is edited externally mid-run
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session_id = "20260310140000";
+        let (mut process, repo, manager) =
+            setup_current_branch_conflict_session(&tmp, session_id, "overwrite external state");
+        let log_path = tmp.path().join("conflict-overwrite.log");
+        configure_conflict_test_env(&mut process, true, Some("overwrite"), &log_path);
+
+        // When: the run reaches the next step after an external edit and the user chooses overwrite
+        let run_fut = run(run_args(session_id));
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |_| repo.clone(),
+            write_external_failed_state,
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: the run completes using the in-memory state and records the conflict decision
+        assert!(
+            result.is_ok(),
+            "overwrite choice should allow the run to continue: {result:?}"
+        );
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(loaded.phase, SessionPhase::Completed));
+        assert_eq!(loaded.current_step.as_deref(), Some("second"));
+        assert!(repo.join("second.txt").exists());
+        let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
+            panic!("conflict resolution should be logged for overwrite tests: {e:?}")
+        });
+        assert!(
+            log.contains("overwrite"),
+            "expected overwrite decision in log, got: {log}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_conflict_abort_preserves_external_state() {
+        // Given: a running current-branch session whose state.json is edited externally mid-run
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session_id = "20260310140001";
+        let (mut process, repo, manager) =
+            setup_current_branch_conflict_session(&tmp, session_id, "abort on conflict");
+        let log_path = tmp.path().join("conflict-abort.log");
+        configure_conflict_test_env(&mut process, true, Some("abort"), &log_path);
+
+        // When: the run reaches the next step after an external edit and the user chooses abort
+        let run_fut = run(run_args(session_id));
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |_| repo.clone(),
+            write_external_failed_state,
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: the run stops, leaves the external state untouched, and does not execute later steps
+        match result {
+            Err(CruiseError::SessionStateConflictAborted(message)) => {
+                assert!(
+                    message.contains("state.json"),
+                    "abort message should mention state.json: {message}"
+                );
+            }
+            other => panic!("expected SessionStateConflictAborted, got {other:?}"),
+        }
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(loaded.current_step.as_deref(), Some("external-step"));
+        assert!(matches!(
+            loaded.phase,
+            SessionPhase::Failed(ref message) if message == "external edit"
+        ));
+        assert!(
+            !repo.join("second.txt").exists(),
+            "aborting on conflict should prevent later steps from running"
+        );
+        let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
+            panic!("conflict resolution should be logged for abort tests: {e:?}")
+        });
+        assert!(
+            log.contains("abort"),
+            "expected abort decision in log, got: {log}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_conflict_noninteractive_returns_error_without_prompt() {
+        // Given: a running session with an external state edit and stdin treated as non-terminal
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session_id = "20260310140002";
+        let (mut process, repo, manager) =
+            setup_current_branch_conflict_session(&tmp, session_id, "noninteractive conflict");
+        let log_path = tmp.path().join("conflict-noninteractive.log");
+        configure_conflict_test_env(&mut process, false, None, &log_path);
+
+        // When: the run hits the conflicting save point in noninteractive mode
+        let run_fut = run(run_args(session_id));
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |_| repo.clone(),
+            write_external_failed_state,
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: the run errors immediately and preserves the externally edited state
+        match result {
+            Err(CruiseError::SessionStateConflict(message)) => {
+                assert!(
+                    message.contains("state.json"),
+                    "noninteractive conflict should mention state.json: {message}"
+                );
+            }
+            other => panic!("expected SessionStateConflict, got {other:?}"),
+        }
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(loaded.current_step.as_deref(), Some("external-step"));
+        assert!(matches!(
+            loaded.phase,
+            SessionPhase::Failed(ref message) if message == "external edit"
+        ));
+        assert!(
+            !repo.join("second.txt").exists(),
+            "noninteractive conflicts should stop before later steps run"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_conflict_abort_preserves_invalid_state_file() {
+        // Given: a running session whose state.json becomes invalid JSON before the next save
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session_id = "20260310140003";
+        let (mut process, repo, manager) =
+            setup_current_branch_conflict_session(&tmp, session_id, "invalid json conflict");
+        let log_path = tmp.path().join("conflict-invalid-json.log");
+        configure_conflict_test_env(&mut process, true, Some("abort"), &log_path);
+
+        // When: the run reaches the conflicting save point and the user aborts
+        let run_fut = run(run_args(session_id));
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |_| repo.clone(),
+            |manager, id| {
+                fs::write(manager.state_path(id), "{invalid json")
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            },
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: the invalid external file is preserved and later steps do not run
+        match result {
+            Err(CruiseError::SessionStateConflictAborted(message)) => {
+                assert!(
+                    message.contains("state.json"),
+                    "abort message should mention state.json: {message}"
+                );
+            }
+            other => panic!("expected SessionStateConflictAborted, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(manager.state_path(session_id)).unwrap_or_else(|e| panic!("{e:?}")),
+            "{invalid json"
+        );
+        assert!(
+            !repo.join("second.txt").exists(),
+            "aborting on invalid external JSON should stop before later steps run"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_conflict_noninteractive_preserves_missing_state_file() {
+        // Given: a running session whose state.json is deleted before the next save
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session_id = "20260310140004";
+        let (mut process, repo, manager) =
+            setup_current_branch_conflict_session(&tmp, session_id, "missing state conflict");
+        let log_path = tmp.path().join("conflict-missing.log");
+        configure_conflict_test_env(&mut process, false, None, &log_path);
+
+        // When: the run reaches the conflicting save point in noninteractive mode
+        let run_fut = run(run_args(session_id));
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |_| repo.clone(),
+            |manager, id| {
+                fs::remove_file(manager.state_path(id)).unwrap_or_else(|e| panic!("{e:?}"));
+            },
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: the run returns a conflict error and leaves the file deleted
+        match result {
+            Err(CruiseError::SessionStateConflict(message)) => {
+                assert!(
+                    message.contains("state.json"),
+                    "missing-file conflict should mention state.json: {message}"
+                );
+            }
+            other => panic!("expected SessionStateConflict, got {other:?}"),
+        }
+        assert!(
+            !manager.state_path(session_id).exists(),
+            "noninteractive conflict should preserve the missing state file"
+        );
+        assert!(
+            !repo.join("second.txt").exists(),
+            "noninteractive missing-file conflicts should stop before later steps run"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_all_forces_worktree_even_for_current_branch_sessions() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let process = ProcessStateGuard::new(tmp.path());
@@ -2195,6 +2696,72 @@ steps:
         assert!(
             gh_log_contents.contains("--draft"),
             "gh pr create should include --draft flag, got: {gh_log_contents}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_all_preserves_invalid_external_state_without_failing_summary_reload() {
+        // Given: a planned session that will abort on a state.json conflict and leave invalid JSON
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260310140005";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "run all conflict".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &blocking_conflict_config());
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/105");
+        process.prepend_path(&bin_dir);
+
+        let log_path = tmp.path().join("run-all-conflict.log");
+        configure_conflict_test_env(&mut process, true, Some("abort"), &log_path);
+
+        // When: run --all hits the conflict, aborts that session, and tries to build its summary
+        let run_fut = run(RunArgs {
+            session: None,
+            all: true,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            dry_run: false,
+        });
+        let mutate_fut = mutate_state_after_first_step(
+            &manager,
+            session_id,
+            |state| {
+                state.worktree_path.clone().unwrap_or_else(|| {
+                    panic!("run --all should persist a worktree path before step execution")
+                })
+            },
+            |manager, id| {
+                fs::write(manager.state_path(id), "{invalid json")
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            },
+        );
+        let (result, ()) = tokio::join!(run_fut, mutate_fut);
+
+        // Then: run --all still returns Ok and leaves the invalid external file untouched
+        assert!(
+            result.is_ok(),
+            "run --all should not fail when summary reload sees preserved invalid state: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(manager.state_path(session_id)).unwrap_or_else(|e| panic!("{e:?}")),
+            "{invalid json"
+        );
+        assert!(
+            !gh_log.exists(),
+            "the aborted conflict session should not reach PR creation"
         );
     }
 
