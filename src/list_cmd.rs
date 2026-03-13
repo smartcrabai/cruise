@@ -645,7 +645,7 @@ mod tests {
     fn test_session_actions_suspended_exact() {
         // Given / When / Then: Suspended のアクションリストが期待どおり
         assert_eq!(
-            session_actions(&SessionPhase::Suspended),
+            session_actions(&make_session("test", "test", SessionPhase::Suspended)),
             vec!["Resume", "Reset to Planned", "Delete", "Back"]
         );
     }
@@ -717,7 +717,7 @@ mod tests {
 
         for phase in &phases {
             // When
-            let actions = session_actions(phase);
+            let actions = session_actions(&make_session("test", "test", phase.clone()));
             let len = actions.len();
 
             // Then: 末尾が Back、その前が Delete

@@ -91,6 +91,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     run_single(args, WorkspaceOverride::RespectSession).await
 }
 
+#[expect(clippy::too_many_lines)]
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
     let _current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(get_cruise_home()?);
@@ -209,7 +210,7 @@ fn log_resume_message(session: &SessionState) {
     };
     match &session.phase {
         SessionPhase::Running | SessionPhase::Suspended => {
-            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step)
+            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step);
         }
         SessionPhase::Failed(_) => {
             eprintln!(
@@ -663,10 +664,10 @@ fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create a PR using `gh pr create`. Uses `--title`/`--body` if provided, otherwise `--fill`.
+/// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise `--fill`.
 /// Falls back to `gh pr view` if a PR already exists.
 fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
-    let mut gh_args = vec!["pr", "create", "--head", branch];
+    let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
     } else {
@@ -1409,12 +1410,14 @@ mod tests {
                 .trim(),
             worktree_head
         );
+        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
-            {
-                let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
-                gh_args.contains("pr create --head") && gh_args.contains("--fill")
-            },
-            "fake gh should receive a pr create invocation"
+            gh_args.contains("pr create --head") && gh_args.contains("--fill"),
+            "fake gh should receive a pr create invocation, got: {gh_args}"
+        );
+        assert!(
+            gh_args.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_args}"
         );
         worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
@@ -1457,6 +1460,11 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e:?}"))
                 .trim(),
             existing_head
+        );
+        let gh_args = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            gh_args.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_args}"
         );
         worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
@@ -2026,11 +2034,14 @@ steps:
                 .exists(),
             "run --all should write changes inside the session worktree"
         );
+        let gh_log_contents = fs::read_to_string(&gh_log).unwrap_or_default();
         assert!(
-            fs::read_to_string(&gh_log)
-                .unwrap_or_default()
-                .contains("pr create --head"),
+            gh_log_contents.contains("pr create --head"),
             "run --all should still invoke PR creation through gh"
+        );
+        assert!(
+            gh_log_contents.contains("--draft"),
+            "gh pr create should include --draft flag, got: {gh_log_contents}"
         );
     }
 
@@ -2290,7 +2301,7 @@ steps:
         let refactor_line = summary
             .lines()
             .find(|l| l.contains("refactor cache layer"))
-            .expect("refactor cache layer line not found in summary");
+            .unwrap_or_else(|| panic!("refactor cache layer line not found in summary"));
         assert!(
             !refactor_line.contains("Failed") && !refactor_line.contains("✗"),
             "completed session should not show failure, got: {refactor_line:?}"
@@ -2300,7 +2311,7 @@ steps:
         let failed_line = summary
             .lines()
             .find(|l| l.contains("fix broken test"))
-            .expect("fix broken test line not found in summary");
+            .unwrap_or_else(|| panic!("fix broken test line not found in summary"));
         assert!(
             failed_line.contains("Failed: CI timeout"),
             "failed session should show failure prefix and error message, got: {failed_line:?}"

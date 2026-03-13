@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn test_suspended_serialize_deserialize_roundtrip() {
         // Given: Suspended フェーズと current_step を持つセッションを保存
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260310100000".to_string();
         let mut state = SessionState::new(
@@ -977,10 +977,10 @@ mod tests {
         );
         state.phase = SessionPhase::Suspended;
         state.current_step = Some("implement".to_string());
-        manager.create(&state).unwrap();
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: ディスクから再読み込み
-        let loaded = manager.load(&id).unwrap();
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: フェーズと current_step が正しく復元される
         assert!(
@@ -993,7 +993,7 @@ mod tests {
     #[test]
     fn test_pending_includes_suspended() {
         // Given: Suspended / Completed の各フェーズのセッションが存在する
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
         let mut suspended = SessionState::new(
@@ -1003,7 +1003,9 @@ mod tests {
             "suspended-task".to_string(),
         );
         suspended.phase = SessionPhase::Suspended;
-        manager.create(&suspended).unwrap();
+        manager
+            .create(&suspended)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         let mut completed = SessionState::new(
             "20260310120000".to_string(),
@@ -1012,10 +1014,12 @@ mod tests {
             "completed-task".to_string(),
         );
         completed.phase = SessionPhase::Completed;
-        manager.create(&completed).unwrap();
+        manager
+            .create(&completed)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: pending() を呼ぶ
-        let pending = manager.pending().unwrap();
+        let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: Suspended は pending に含まれ、Completed は含まれない
         let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
@@ -1036,7 +1040,7 @@ mod tests {
     #[test]
     fn test_run_all_candidates_returns_planned_and_suspended_only() {
         // Given: 全フェーズのセッションが存在する
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
         for (id, phase) in [
@@ -1053,11 +1057,13 @@ mod tests {
                 "task".to_string(),
             );
             s.phase = phase;
-            manager.create(&s).unwrap();
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
         }
 
         // When: run_all_candidates() を呼ぶ
-        let candidates = manager.run_all_candidates().unwrap();
+        let candidates = manager
+            .run_all_candidates()
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: Planned と Suspended のみ返される
         assert_eq!(
@@ -1091,7 +1097,7 @@ mod tests {
     #[test]
     fn test_run_all_candidates_empty_when_none_qualify() {
         // Given: Completed セッションのみ存在する
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
         let mut s = SessionState::new(
@@ -1101,10 +1107,12 @@ mod tests {
             "done".to_string(),
         );
         s.phase = SessionPhase::Completed;
-        manager.create(&s).unwrap();
+        manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: run_all_candidates() を呼ぶ
-        let candidates = manager.run_all_candidates().unwrap();
+        let candidates = manager
+            .run_all_candidates()
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: 空リストが返される
         assert!(
