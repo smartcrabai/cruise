@@ -325,7 +325,7 @@ mod tests {
         // Given: Submitted の InputResult
         let result = InputResult::Submitted("add feature X".to_string()).into_result();
         // Then: Ok で同じ文字列が返る
-        assert_eq!(result.unwrap(), "add feature X");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
         let multiline = "line1\nline2\nline3".to_string();
         let result = InputResult::Submitted(multiline.clone()).into_result();
         // Then: 内部改行がそのまま保持された Ok が返る
-        assert_eq!(result.unwrap(), multiline);
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), multiline);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
         // Given: 空文字列の Submitted（空入力を送信したケース）
         let result = InputResult::Submitted(String::new()).into_result();
         // Then: Ok("") が返る（空文字列は保持される）
-        assert_eq!(result.unwrap(), "");
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "");
     }
 
     #[test]
