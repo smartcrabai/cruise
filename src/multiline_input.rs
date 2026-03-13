@@ -145,6 +145,22 @@ impl InputBuffer {
         }
     }
 
+    /// Create a buffer pre-loaded with `text`, cursor positioned at the end.
+    #[cfg(test)]
+    fn from_text(text: &str) -> Self {
+        if text.is_empty() {
+            return Self::new();
+        }
+        let lines: Vec<String> = text.split('\n').map(ToString::to_string).collect();
+        let cursor_row = lines.len() - 1;
+        let cursor_col = lines[cursor_row].chars().count();
+        Self {
+            lines,
+            cursor_row,
+            cursor_col,
+        }
+    }
+
     /// Insert a regular character at the current cursor position.
     fn insert_char(&mut self, ch: char) {
         let byte_pos = self.char_to_byte(self.cursor_row, self.cursor_col);
@@ -284,15 +300,7 @@ mod tests {
     // ── Test helpers ───────────────────────────────────────────────────────────
 
     fn buf_with(text: &str) -> InputBuffer {
-        let mut buf = InputBuffer::new();
-        for ch in text.chars() {
-            if ch == '\n' {
-                buf.insert_newline();
-            } else {
-                buf.insert_char(ch);
-            }
-        }
-        buf
+        InputBuffer::from_text(text)
     }
 
     // ── InputResult ────────────────────────────────────────────────────────────
@@ -624,5 +632,69 @@ mod tests {
     #[test]
     fn test_text_single_empty_line_is_empty_string() {
         assert_eq!(InputBuffer::new().text(), "");
+    }
+
+    // ── InputBuffer::from_text ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_text_single_line_cursor_at_end() {
+        // Given: initial text "hello"
+        let buf = InputBuffer::from_text("hello");
+        // Then: text matches
+        assert_eq!(buf.text(), "hello");
+        // And: cursor is positioned at the end of the line
+        assert_eq!(buf.cursor_row, 0);
+        assert_eq!(buf.cursor_col, 5);
+    }
+
+    #[test]
+    fn test_from_text_multiline_cursor_at_end_of_last_line() {
+        // Given: multiline initial text
+        let buf = InputBuffer::from_text("hello\nworld");
+        // Then: text is preserved
+        assert_eq!(buf.text(), "hello\nworld");
+        // And: cursor is at end of last line
+        assert_eq!(buf.cursor_row, 1);
+        assert_eq!(buf.cursor_col, 5);
+    }
+
+    #[test]
+    fn test_from_text_empty_string_same_as_new() {
+        // Given: empty initial text
+        let buf = InputBuffer::from_text("");
+        // Then: text is empty
+        assert_eq!(buf.text(), "");
+        // And: cursor is at origin
+        assert_eq!(buf.cursor_row, 0);
+        assert_eq!(buf.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_from_text_can_append_after_initialization() {
+        // Given: buffer initialized with "hello"
+        let mut buf = InputBuffer::from_text("hello");
+        // When: a character is inserted at the current cursor (end)
+        buf.insert_char('!');
+        // Then: character is appended
+        assert_eq!(buf.text(), "hello!");
+    }
+
+    #[test]
+    fn test_from_text_three_lines_cursor_at_end() {
+        // Given: three-line initial text
+        let buf = InputBuffer::from_text("a\nbb\nccc");
+        // Then: text preserved and cursor at end of last line
+        assert_eq!(buf.text(), "a\nbb\nccc");
+        assert_eq!(buf.cursor_row, 2);
+        assert_eq!(buf.cursor_col, 3);
+    }
+
+    #[test]
+    fn test_from_text_unicode_initial_text() {
+        // Given: initial text with CJK characters
+        let buf = InputBuffer::from_text("あいう");
+        // Then: text preserved and cursor at char position 3 (not byte position)
+        assert_eq!(buf.text(), "あいう");
+        assert_eq!(buf.cursor_col, 3);
     }
 }
