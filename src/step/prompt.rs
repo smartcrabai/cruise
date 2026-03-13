@@ -150,6 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_with_echo() {
+        let _guard = crate::test_support::lock_process();
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
         let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new(), None)
@@ -166,6 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_with_env() {
+        let _guard = crate::test_support::lock_process();
         // cat echoes stdin regardless of env; verify env does not break execution.
         let command = vec!["cat".to_string()];
         let mut env = HashMap::new();
@@ -178,6 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_with_model_arg() {
+        let _guard = crate::test_support::lock_process();
         // "sh -c cat" ignores extra positional args (--model test-model become $0/$1 in sh).
         let command = vec!["sh".to_string(), "-c".to_string(), "cat".to_string()];
         let result = run_prompt(
@@ -195,6 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_captures_stderr() {
+        let _guard = crate::test_support::lock_process();
         // Given: a command that writes to both stdout and stderr
         let command = vec![
             "sh".to_string(),
@@ -212,6 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_stderr_empty_when_no_stderr() {
+        let _guard = crate::test_support::lock_process();
         // Given: a command that writes only to stdout (cat echoes stdin)
         let command = vec!["cat".to_string()];
         // When: run_prompt is called
