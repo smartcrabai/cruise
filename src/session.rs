@@ -1221,7 +1221,9 @@ mod tests {
             "unapproved".to_string(),
         );
         // SessionState::new は AwaitingApproval で作成される
-        manager.create(&awaiting).unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create(&awaiting)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         let mut planned = SessionState::new(
             "20260311200001".to_string(),
@@ -1273,7 +1275,9 @@ mod tests {
             "cruise.yaml".to_string(),
             "not yet approved".to_string(),
         );
-        manager.create(&awaiting).unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create(&awaiting)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         let mut approved = SessionState::new(
             "20260311300001".to_string(),
@@ -1282,7 +1286,9 @@ mod tests {
             "approved task".to_string(),
         );
         approved.phase = SessionPhase::Planned;
-        manager.create(&approved).unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create(&approved)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: planned() を呼ぶ
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
