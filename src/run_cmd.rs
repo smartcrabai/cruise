@@ -935,7 +935,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                 let pr = result
                     .pr_url
                     .as_deref()
-                    .map(|u| format!(" {} {u}", style("→").yellow()))
+                    .map(|url| format!(" {} {url}", style("→").yellow()))
                     .unwrap_or_default();
                 format!(
                     "[{}] {} {}{}",
@@ -2076,8 +2076,8 @@ steps:
             "summary should contain input: {summary}"
         );
         assert!(
-            summary.contains("CI timeout") || summary.contains("Failed") || summary.contains("✗"),
-            "summary should indicate failure: {summary}"
+            summary.contains("Failed: CI timeout"),
+            "summary should contain failure prefix and error message: {summary}"
         );
     }
 
@@ -2114,14 +2114,69 @@ steps:
             "summary should contain second input: {summary}"
         );
         assert!(
-            summary.contains("build error") || summary.contains("Failed") || summary.contains("✗"),
-            "summary should indicate failure for second session: {summary}"
+            summary.contains("Failed: build error"),
+            "summary should contain failure prefix and error message for second session: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_format_run_all_summary_mixed_with_completed_no_pr() {
+        // Given: 3 sessions — success with PR, completed without PR, and explicit failure
+        let results = vec![
+            make_session(
+                "add auth module",
+                SessionPhase::Completed,
+                Some("https://github.com/org/repo/pull/10"),
+            ),
+            make_session("refactor cache layer", SessionPhase::Completed, None),
+            make_session(
+                "fix broken test",
+                SessionPhase::Failed("CI timeout".to_string()),
+                None,
+            ),
+        ];
+
+        // When
+        let summary = format_run_all_summary(&results);
+
+        // Then: first session shows success with PR URL
+        assert!(
+            summary.contains("add auth module"),
+            "summary should contain first session: {summary}"
+        );
+        assert!(
+            summary.contains("https://github.com/org/repo/pull/10"),
+            "summary should show PR URL for success: {summary}"
+        );
+
+        // Then: second completed session remains a success even without PR URL
+        assert!(
+            summary.contains("refactor cache layer"),
+            "summary should contain second session: {summary}"
+        );
+        let refactor_line = summary
+            .lines()
+            .find(|l| l.contains("refactor cache layer"))
+            .expect("refactor cache layer line not found in summary");
+        assert!(
+            !refactor_line.contains("Failed") && !refactor_line.contains("✗"),
+            "completed session should not show failure, got: {refactor_line:?}"
+        );
+
+        // Then: third session shows failure prefix and error message
+        let failed_line = summary
+            .lines()
+            .find(|l| l.contains("fix broken test"))
+            .expect("fix broken test line not found in summary");
+        assert!(
+            failed_line.contains("Failed: CI timeout"),
+            "failed session should show failure prefix and error message, got: {failed_line:?}"
         );
     }
 
     #[test]
     fn test_format_run_all_summary_long_input_is_truncated() {
-        // Given: session with a very long input
+        // Given: completed session with a very long input
         let long_input = "a".repeat(200);
         let results = vec![make_session(&long_input, SessionPhase::Completed, None)];
 
