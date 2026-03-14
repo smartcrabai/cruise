@@ -1429,4 +1429,226 @@ steps:
             "legacy fail-if-no-file-changes alone should pass validate_if_conditions, got: {result:?}"
         );
     }
+
+    // --- JSON Schema tests ---
+
+    fn load_schema() -> &'static serde_json::Value {
+        use std::sync::OnceLock;
+        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::from_str(include_str!("../cruise-schema.json"))
+                .unwrap_or_else(|e| panic!("cruise-schema.json is not valid JSON: {e}"))
+        })
+    }
+
+    /// Returns the "properties" object from a `$defs/{def_name}` definition.
+    fn def_properties<'a>(
+        schema: &'a serde_json::Value,
+        def_name: &str,
+    ) -> &'a serde_json::Map<String, serde_json::Value> {
+        schema["$defs"][def_name]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{def_name} properties not found in schema $defs"))
+    }
+
+    /// Asserts that all `expected_fields` exist as keys in `props`.
+    fn assert_has_fields(
+        props: &serde_json::Map<String, serde_json::Value>,
+        expected_fields: &[&str],
+        type_name: &str,
+    ) {
+        for field in expected_fields {
+            assert!(
+                props.contains_key(*field),
+                "{type_name} schema must contain field '{field}'"
+            );
+        }
+    }
+
+    /// Asserts that `field_def` uses `oneOf` containing the given type variants.
+    fn assert_oneof_types(
+        field_def: &serde_json::Value,
+        expected_types: &[&str],
+        field_name: &str,
+    ) {
+        assert!(
+            field_def.get("oneOf").is_some(),
+            "{field_name} must use 'oneOf'; got: {field_def}"
+        );
+        let one_of = field_def["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field_name} oneOf must be a JSON array"));
+        for expected in expected_types {
+            assert!(
+                one_of.iter().any(|v| v["type"].as_str() == Some(expected)),
+                "{field_name} oneOf must include '{expected}' variant"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_is_valid_json() {
+        let schema = load_schema();
+        assert!(schema.is_object(), "schema root must be a JSON object");
+    }
+
+    #[test]
+    fn test_schema_has_meta_fields() {
+        let schema = load_schema();
+        assert!(
+            schema.get("$schema").is_some(),
+            "schema must have a $schema field"
+        );
+        assert_eq!(
+            schema["type"].as_str(),
+            Some("object"),
+            "root type must be 'object'"
+        );
+        assert!(
+            schema.get("properties").is_some(),
+            "schema must have properties"
+        );
+    }
+
+    #[test]
+    fn test_schema_workflow_config_required_fields() {
+        let schema = load_schema();
+        let required = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("schema must have a 'required' array"));
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("command")),
+            "'command' must be in required"
+        );
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("steps")),
+            "'steps' must be in required"
+        );
+    }
+
+    #[test]
+    fn test_schema_workflow_config_has_expected_properties() {
+        let schema = load_schema();
+        let props = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("schema must have a 'properties' object"));
+        assert_has_fields(
+            props,
+            &[
+                "command",
+                "model",
+                "plan_model",
+                "pr_language",
+                "env",
+                "groups",
+                "steps",
+                "after-pr",
+            ],
+            "WorkflowConfig",
+        );
+    }
+
+    #[test]
+    fn test_schema_command_is_array_of_strings() {
+        let schema = load_schema();
+        let command_prop = &schema["properties"]["command"];
+        assert_eq!(
+            command_prop["type"].as_str(),
+            Some("array"),
+            "command must have type 'array'"
+        );
+        assert_eq!(
+            command_prop["items"]["type"].as_str(),
+            Some("string"),
+            "command items must have type 'string'"
+        );
+    }
+
+    fn assert_object_map_property(schema: &serde_json::Value, prop_name: &str) {
+        let prop = &schema["properties"][prop_name];
+        assert_eq!(
+            prop["type"].as_str(),
+            Some("object"),
+            "{prop_name} must have type 'object'"
+        );
+        assert!(
+            prop.get("additionalProperties").is_some(),
+            "{prop_name} must define additionalProperties"
+        );
+    }
+
+    #[test]
+    fn test_schema_steps_is_object_with_step_config() {
+        let schema = load_schema();
+        assert_object_map_property(schema, "steps");
+    }
+
+    #[test]
+    fn test_schema_step_config_has_expected_properties() {
+        let schema = load_schema();
+        let step_props = def_properties(schema, "StepConfig");
+        assert_has_fields(
+            step_props,
+            &[
+                "model",
+                "prompt",
+                "instruction",
+                "plan",
+                "option",
+                "command",
+                "next",
+                "skip",
+                "if",
+                "env",
+                "group",
+                "fail-if-no-file-changes",
+            ],
+            "StepConfig",
+        );
+    }
+
+    #[test]
+    fn test_schema_step_command_is_string_or_array() {
+        let schema = load_schema();
+        let step_props = def_properties(schema, "StepConfig");
+        assert_oneof_types(&step_props["command"], &["string", "array"], "step command");
+    }
+
+    #[test]
+    fn test_schema_step_skip_is_boolean_or_string() {
+        let schema = load_schema();
+        let step_props = def_properties(schema, "StepConfig");
+        assert_oneof_types(&step_props["skip"], &["boolean", "string"], "step skip");
+    }
+
+    #[test]
+    fn test_schema_if_condition_has_file_changed() {
+        let schema = load_schema();
+        let if_props = def_properties(schema, "IfCondition");
+        assert_has_fields(if_props, &["file-changed"], "IfCondition");
+    }
+
+    #[test]
+    fn test_schema_option_item_has_expected_properties() {
+        let schema = load_schema();
+        let option_item_props = def_properties(schema, "OptionItem");
+        assert_has_fields(
+            option_item_props,
+            &["selector", "text-input", "next"],
+            "OptionItem",
+        );
+    }
+
+    #[test]
+    fn test_schema_group_config_has_expected_properties() {
+        let schema = load_schema();
+        let group_props = def_properties(schema, "GroupConfig");
+        assert_has_fields(group_props, &["if", "max_retries", "steps"], "GroupConfig");
+    }
+
+    #[test]
+    fn test_schema_after_pr_is_object_with_step_config() {
+        let schema = load_schema();
+        assert_object_map_property(schema, "after-pr");
+    }
 }
