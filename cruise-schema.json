@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["command", "steps"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor support"
+    },
+    "command": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The base command to run (e.g. [\"claude\", \"-p\"])"
+    },
+    "model": {
+      "type": "string",
+      "description": "Default model to use for all steps"
+    },
+    "plan_model": {
+      "type": "string",
+      "description": "Model to use for plan generation steps"
+    },
+    "pr_language": {
+      "type": "string",
+      "description": "Language for PR descriptions"
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Environment variables to set for all steps"
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/GroupConfig"
+      },
+      "description": "Named groups of steps with optional conditions and retry logic"
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/StepConfig"
+      },
+      "description": "Named workflow steps"
+    },
+    "after-pr": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/StepConfig"
+      },
+      "description": "Steps to run after a PR is created"
+    }
+  },
+  "$defs": {
+    "StepConfig": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model to use for this step (overrides workflow-level model)"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Prompt text to send to the LLM"
+        },
+        "instruction": {
+          "type": "string",
+          "description": "Instruction text for the step"
+        },
+        "plan": {
+          "type": "string",
+          "description": "Plan reference for this step"
+        },
+        "option": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OptionItem"
+          },
+          "description": "Interactive selection options"
+        },
+        "command": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Shell command to execute (string or array of strings)"
+        },
+        "next": {
+          "type": "string",
+          "description": "Next step to execute after this one"
+        },
+        "skip": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Whether to skip this step (boolean or variable reference)"
+        },
+        "if": {
+          "$ref": "#/$defs/IfCondition",
+          "description": "Condition that must be true for this step to run"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables to set for this step"
+        },
+        "group": {
+          "type": "string",
+          "description": "Group this step belongs to"
+        },
+        "fail-if-no-file-changes": {
+          "type": "boolean",
+          "description": "Fail the step if no files were changed"
+        }
+      }
+    },
+    "IfCondition": {
+      "type": "object",
+      "properties": {
+        "file-changed": {
+          "type": "string",
+          "description": "Step name to jump to if files were changed during this step's execution"
+        }
+      }
+    },
+    "OptionItem": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "Display label for this option"
+        },
+        "text-input": {
+          "type": "string",
+          "description": "Prompt label for free-form text input (mutually exclusive with selector)"
+        },
+        "next": {
+          "type": "string",
+          "description": "Next step to execute when this option is selected"
+        }
+      }
+    },
+    "GroupConfig": {
+      "type": "object",
+      "properties": {
+        "if": {
+          "$ref": "#/$defs/IfCondition",
+          "description": "Condition that must be true for the group to run"
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of retries for steps in this group"
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/StepConfig"
+          },
+          "description": "Named steps belonging to this group"
+        }
+      }
+    }
+  }
+}
