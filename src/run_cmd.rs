@@ -261,7 +261,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         )));
     }
 
-    let config = manager.load_config(&session_id)?;
+    let config = manager.load_config(&session)?;
     validate_config(&config)?;
 
     if args.dry_run {
@@ -270,7 +270,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         return Ok(());
     }
 
-    let compiled = crate::workflow::compile(config)?;
+    let mut compiled = crate::workflow::compile(config)?;
     let effective_workspace_mode = match workspace_override {
         WorkspaceOverride::RespectSession => session.workspace_mode,
         WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
@@ -303,6 +303,25 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path);
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
+    let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>> =
+        session.config_path.as_ref().map(|path| {
+            let path = path.clone();
+            let last_mtime = Cell::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
+            Box::new(move || {
+                let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                if current_mtime == last_mtime.get() {
+                    return Ok(None);
+                }
+                let yaml = std::fs::read_to_string(&path).map_err(|e| {
+                    CruiseError::Other(format!("failed to read config {}: {}", path.display(), e))
+                })?;
+                let config = crate::config::WorkflowConfig::from_yaml(&yaml)
+                    .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+                let compiled = crate::workflow::compile(config)?;
+                last_mtime.set(current_mtime);
+                Ok(Some(compiled))
+            }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>
+        });
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let on_step_start = |step: &str| {
@@ -315,13 +334,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     };
     let exec_result = tokio::select! {
         result = execute_steps(
-            &compiled,
+            &mut compiled,
             &mut vars,
             &mut tracker,
             &start_step,
             args.max_retries,
             args.rate_limit_retries,
             &on_step_start,
+            config_reloader.as_deref(),
         ) => result,
         _ = tokio::signal::ctrl_c() => Err(CruiseError::Interrupted),
     };
@@ -547,15 +567,16 @@ async fn run_after_pr_steps(
     let Some(first_step) = compiled.after_pr.keys().next() else {
         return;
     };
-    let after_compiled = compiled.to_after_pr_compiled();
+    let mut after_compiled = compiled.to_after_pr_compiled();
     match execute_steps(
-        &after_compiled,
+        &mut after_compiled,
         vars,
         tracker,
         first_step,
         max_retries,
         rate_limit_retries,
         &|_| Ok(()),
+        None,
     )
     .await
     {

@@ -71,6 +71,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         source.display_string(),
         input.trim().to_string(),
     );
+    session.config_path = source.path().cloned();
     manager.create(&session)?;
 
     // Save config.yaml copy to session dir.
@@ -257,7 +258,7 @@ pub(crate) async fn replan_session(
     feedback: String,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    let config = manager.load_config(&session.id)?;
+    let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path);

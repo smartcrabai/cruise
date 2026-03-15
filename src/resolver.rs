@@ -27,6 +27,14 @@ impl ConfigSource {
             }
         }
     }
+
+    /// Returns the path to the config file, or `None` for the built-in default.
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => Some(p),
+            Self::Builtin => None,
+        }
+    }
 }
 
 /// Resolve a workflow config, returning (`yaml_content`, source).
