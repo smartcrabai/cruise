@@ -1389,7 +1389,7 @@ steps:
     command: "echo world"
 "#;
         let config = make_config(yaml);
-        let mut compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(String::new());
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
