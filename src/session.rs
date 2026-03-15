@@ -79,6 +79,9 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Absolute path to the original config file (None for builtin or old sessions).
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +133,7 @@ impl SessionState {
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
             pr_url: None,
+            config_path: None,
         }
     }
 
@@ -327,8 +331,11 @@ impl SessionManager {
     }
 
     /// Load the workflow config for a session.
-    pub fn load_config(&self, id: &str) -> Result<crate::config::WorkflowConfig> {
-        let config_path = self.sessions_dir().join(id).join("config.yaml");
+    pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
+        let config_path = state.config_path.clone().unwrap_or_else(|| {
+            // Backward-compatible fallback: session-local copy
+            self.sessions_dir().join(&state.id).join("config.yaml")
+        });
         let yaml = std::fs::read_to_string(&config_path).map_err(|e| {
             CruiseError::Other(format!(
                 "failed to read session config {}: {}",
@@ -1033,7 +1040,9 @@ mod tests {
         std::fs::write(manager.sessions_dir().join(&id).join("config.yaml"), yaml)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        let config = manager.load_config(&id).unwrap_or_else(|e| panic!("{e:?}"));
+        let config = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(config.command, vec!["echo".to_string()]);
         assert!(config.steps.contains_key("test"));
@@ -1059,7 +1068,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let err = manager
-            .load_config(&id)
+            .load_config(&state)
             .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
 
         assert!(matches!(err, CruiseError::ConfigParseError(_)));
@@ -1540,5 +1549,138 @@ mod tests {
             "approve should set phase to Planned, got {:?}",
             s.phase
         );
+    }
+
+    // --- config_path フィールド & load_config 変更のテスト ---
+
+    #[test]
+    fn test_session_state_config_path_defaults_to_none_on_new() {
+        // Given/When: SessionState::new() を引数なしで作成
+        let state = SessionState::new(
+            "20260314120000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        // Then: config_path は None
+        assert!(state.config_path.is_none());
+    }
+
+    #[test]
+    fn test_session_state_backward_compat_config_path_none() {
+        // Given: config_path フィールドを含まない旧形式 JSON
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260314120002".to_string();
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        // config_path フィールドなしの旧形式
+        let json = serde_json::json!({
+            "id": id,
+            "base_dir": "/repo",
+            "phase": "Planned",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-03-14T12:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        std::fs::write(session_dir.join("state.json"), json.to_string())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: 旧形式の JSON を読み込む
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: config_path は None にデフォルト
+        assert!(
+            loaded.config_path.is_none(),
+            "config_path should default to None for old sessions"
+        );
+    }
+
+    #[test]
+    fn test_session_load_config_reads_from_config_path_when_set() {
+        // Given: 外部ファイルを指す config_path を持つセッション
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260314120003".to_string();
+
+        // 外部 YAML ファイルを作成
+        let config_file = tmp.path().join("external_cruise.yaml");
+        let yaml = "command:\n  - cat\nsteps:\n  check:\n    command: \"true\"\n";
+        std::fs::write(&config_file, yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            config_file.display().to_string(),
+            "task".to_string(),
+        );
+        state.config_path = Some(config_file);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: config_path からロード
+        let config = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: 外部ファイルの内容が読み込まれる
+        assert_eq!(config.command, vec!["cat".to_string()]);
+        assert!(config.steps.contains_key("check"));
+    }
+
+    #[test]
+    fn test_session_load_config_falls_back_to_session_dir_when_config_path_none() {
+        // Given: config_path が None のセッション（後方互換フォールバック）
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260314120004".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        // config_path は None のまま
+        assert!(state.config_path.is_none());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // セッションディレクトリの config.yaml にフォールバックとして書き込む
+        let yaml = "command:\n  - bash\nsteps:\n  fallback_step:\n    command: \"true\"\n";
+        std::fs::write(manager.sessions_dir().join(&id).join("config.yaml"), yaml)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: load_config を呼ぶ
+        let config = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: フォールバックのセッションディレクトリ config.yaml が読まれる
+        assert_eq!(config.command, vec!["bash".to_string()]);
+        assert!(config.steps.contains_key("fallback_step"));
+    }
+
+    #[test]
+    fn test_session_load_config_config_path_not_found_returns_error() {
+        // Given: config_path が存在しないファイルを指しているセッション
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260314120005".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.config_path = Some(PathBuf::from("/nonexistent/cruise.yaml"));
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: 存在しないファイルを参照する load_config
+        let result = manager.load_config(&state);
+
+        // Then: エラーが返る
+        assert!(result.is_err());
     }
 }

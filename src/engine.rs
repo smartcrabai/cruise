@@ -171,20 +171,25 @@ fn resolve_if_next(
 ///
 /// `on_step_start` is called with the step name before each step executes,
 /// allowing the caller to persist the current step for resume support.
+///
+/// If `config_reloader` is provided, it is called before each step to check
+/// for updated workflow configuration. The update is applied only when the
+/// current step exists in the new configuration.
+#[expect(clippy::too_many_arguments)]
 pub async fn execute_steps(
-    compiled: &CompiledWorkflow,
+    compiled: &mut CompiledWorkflow,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     start_step: &str,
     max_retries: usize,
     rate_limit_retries: usize,
     on_step_start: &dyn Fn(&str) -> Result<()>,
+    config_reloader: Option<&dyn Fn() -> Result<Option<CompiledWorkflow>>>,
 ) -> Result<ExecutionResult> {
     let mut current_step = start_step.to_string();
     let workflow_start = Instant::now();
-    let step_to_invocation = &compiled.step_to_invocation;
+
     let mut state = LoopState {
-        step_to_invocation,
         group_retry_counts: HashMap::new(),
         counters: LoopCounters {
             run: 0,
@@ -199,6 +204,17 @@ pub async fn execute_steps(
     };
 
     loop {
+        // Reload config between steps if a reloader is provided.
+        if let Some(reloader) = config_reloader
+            && let Some(new_compiled) = reloader()?
+            && new_compiled.steps.contains_key(current_step.as_str())
+        {
+            state.counters.total_steps = new_compiled.steps.len();
+            *compiled = new_compiled;
+            state.group_retry_counts.clear();
+            state.edge_counts.clear();
+        }
+
         let outcome = step_loop_iteration(
             compiled,
             vars,
@@ -232,8 +248,7 @@ pub async fn execute_steps(
 }
 
 /// Shared mutable state for the execution loop.
-struct LoopState<'a> {
-    step_to_invocation: &'a HashMap<String, String>,
+struct LoopState {
     group_retry_counts: HashMap<String, usize>,
     counters: LoopCounters,
     max_retries: usize,
@@ -251,14 +266,14 @@ async fn step_loop_iteration(
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     current_step: &str,
-    state: &mut LoopState<'_>,
+    state: &mut LoopState,
     on_step_start: &dyn Fn(&str) -> Result<()>,
 ) -> Result<StepOutcome> {
     let step_config = compiled
         .steps
         .get(current_step)
         .ok_or_else(|| CruiseError::StepNotFound(current_step.to_string()))?;
-    let step_call_site = state
+    let step_call_site = compiled
         .step_to_invocation
         .get(current_step)
         .map(std::string::String::as_str);
@@ -774,10 +789,11 @@ mod tests {
         tracker_root: std::path::PathBuf,
         max_retries: usize,
         rate_limit_retries: usize,
+        config_reloader: Option<&dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>>>,
     ) -> Result<ExecutionResult> {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
-        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root);
         let first_step = compiled
@@ -788,13 +804,14 @@ mod tests {
             .clone();
         let step = start_step.unwrap_or(&first_step).to_string();
         execute_steps(
-            &compiled,
+            &mut compiled,
             &mut vars,
             &mut tracker,
             &step,
             max_retries,
             rate_limit_retries,
             &|_| Ok(()),
+            config_reloader,
         )
         .await
     }
@@ -813,6 +830,7 @@ mod tests {
             std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
             max_retries,
             rate_limit_retries,
+            None,
         )
         .await
     }
@@ -826,7 +844,7 @@ mod tests {
         start_step: Option<&str>,
         tracker_root: std::path::PathBuf,
     ) -> Result<ExecutionResult> {
-        run_config_inner(yaml, input, start_step, tracker_root, 10, 0).await
+        run_config_inner(yaml, input, start_step, tracker_root, 10, 0, None).await
     }
 
     #[test]
@@ -1339,7 +1357,7 @@ steps:
     command: "echo world"
 "#;
         let config = make_config(yaml);
-        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(String::new());
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
@@ -1347,7 +1365,7 @@ steps:
         let called_ref = std::cell::RefCell::new(&mut called_steps);
 
         let result = execute_steps(
-            &compiled,
+            &mut compiled,
             &mut vars,
             &mut tracker,
             "step1",
@@ -1357,6 +1375,7 @@ steps:
                 called_ref.borrow_mut().push(step.to_string());
                 Ok(())
             },
+            None,
         )
         .await;
 
@@ -1485,7 +1504,7 @@ steps:
         );
         // When: executed with max_retries=1 to prevent infinite loop
         // (implement writes a file → if.file-changed triggers jump back to implement)
-        let result = run_config_inner(&yaml, "", None, dir.path().to_path_buf(), 1, 0).await;
+        let result = run_config_inner(&yaml, "", None, dir.path().to_path_buf(), 1, 0, None).await;
         // Then: workflow does NOT return StepMadeNoFileChanges (files changed, so no-change failure is skipped)
         assert!(
             !matches!(&result, Err(CruiseError::StepMadeNoFileChanges(_))),
@@ -1826,6 +1845,103 @@ steps:
         assert!(
             matches!(err, CruiseError::StepNotFound(ref s) if s == "nonexistent"),
             "expected StepNotFound(\"nonexistent\"), got: {err:?}"
+        );
+    }
+
+    // --- config_reloader テスト ---
+
+    #[tokio::test]
+    async fn test_execute_steps_config_reloader_not_triggered_when_no_change() {
+        // Given: reloader が None を返す（変更なし）
+        let yaml = "command: [echo]\nsteps:\n  s1:\n    command: echo hi\n";
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+        let reloader = move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None) // 変更なし
+        };
+        // When: reloader が常に None を返して実行
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
+            10,
+            0,
+            Some(&reloader),
+        )
+        .await;
+        // Then: 正常完了し、reloader が呼ばれている
+        assert!(result.is_ok());
+        assert!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "reloader should have been called at least once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_config_reloader_updates_compiled_when_changed() {
+        // Given: 最初は step1 だけの config、reloader が step1+step2 を返す
+        let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
+        let updated_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo updated\n  step2:\n    command: echo extra\n";
+        let updated_config = make_config(updated_yaml);
+        let updated_compiled =
+            crate::workflow::compile(updated_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let updated = std::sync::Arc::new(std::sync::Mutex::new(Some(updated_compiled)));
+        let reloader = {
+            let updated = updated.clone();
+            move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
+                // 初回だけ更新済み config を返す
+                Ok(updated.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
+            }
+        };
+        // When: reloader が更新済み config を返す
+        let result = run_config_inner(
+            original_yaml,
+            "",
+            None,
+            std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
+            10,
+            0,
+            Some(&reloader),
+        )
+        .await;
+        // Then: 正常完了する（更新後の config でステップが実行される）
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_config_reloader_keeps_old_config_when_step_missing() {
+        // Given: 現在実行中のステップが新しい config に存在しない
+        let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
+        // 新 config には step1 が存在しない
+        let new_yaml = "command: [echo]\nsteps:\n  completely_different:\n    command: echo new\n";
+        let new_config = make_config(new_yaml);
+        let new_compiled = crate::workflow::compile(new_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let new = std::sync::Arc::new(std::sync::Mutex::new(Some(new_compiled)));
+        let reloader = {
+            let new = new.clone();
+            move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
+                Ok(new.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
+            }
+        };
+        // When: reloader が現在のステップを含まない config を返す
+        let result = run_config_inner(
+            original_yaml,
+            "",
+            None,
+            std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
+            10,
+            0,
+            Some(&reloader),
+        )
+        .await;
+        // Then: 旧 config を維持して正常完了する（step1 が実行される）
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")).run,
+            1,
+            "step1 should have run with old config"
         );
     }
 }
