@@ -116,13 +116,19 @@ The interactive session list shows a menu of actions depending on the session's 
 
 | Phase | Available Actions |
 |-------|-------------------|
+| **AwaitingApproval** | Approve, Delete, Back |
 | **Planned** | Run, Replan, Delete, Back |
 | **Running** | Resume, Reset to Planned, Delete, Back |
+| **Suspended** | Resume, Reset to Planned, Delete, Back |
 | **Failed** | Run, Reset to Planned, Delete, Back |
-| **Completed** | Reset to Planned, Delete, Back |
+| **Completed** | Open PR*, Reset to Planned, Delete, Back |
 
+\* Open PR is shown only when the session has a PR URL.
+
+- **Approve** — Approve the plan and transition the session to the Planned phase.
 - **Run / Resume** — Execute (or continue) the session.
 - **Replan** — Provide feedback to re-generate the plan; the session stays in the Planned phase.
+- **Open PR** — Open the session's pull request in the browser via `gh pr view --web`.
 - **Reset to Planned** — Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
 - **Delete** — Permanently remove the session.
 - **Back** — Return to the session list.
@@ -348,20 +354,36 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
-#### Fail if no file changes (`fail-if-no-file-changes`)
+#### No file changes detection (`if.no-file-changes`)
 
-When a step has `fail-if-no-file-changes: true`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any tracked files, the workflow fails immediately and the session transitions to the `Failed` state.
+When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any tracked files, the configured action is taken. Two modes are available:
 
-This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files:
+- **`fail: true`** — Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
+- **`retry: true`** — Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
 
 ```yaml
 steps:
   implement:
     prompt: "Implement the feature described in {plan}"
-    fail-if-no-file-changes: true   # fail immediately if no files were modified
+    if:
+      no-file-changes:
+        fail: true
+
+  fix:
+    prompt: "Fix the issue"
+    if:
+      no-file-changes:
+        retry: true
 ```
 
-> **Note:** `fail-if-no-file-changes` cannot be used in `after-pr` steps. Since `after-pr` steps run in a warning-only context (errors are downgraded to warnings), the field would never abort the run as intended and is therefore rejected at validation time.
+**Constraints:**
+- `fail` and `retry` are mutually exclusive — exactly one must be true.
+- Cannot be used in `after-pr` steps (rejected at validation time).
+- Cannot be used at the group level (`if` in group definitions).
+- Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
+- Can be combined with `if: file-changed` on the same step, but when both are present, `no-file-changes` takes priority for change detection.
+
+The legacy `fail-if-no-file-changes: true` syntax is still supported and is equivalent to `if: { no-file-changes: { fail: true } }`.
 
 ### Step Groups
 
@@ -428,7 +450,7 @@ steps:
 
 `cruise run` always executes the workflow inside an isolated git worktree at `~/.cruise/worktrees/<session-id>/`, keeping the main working tree clean.
 
-- A new branch `cruise/<timestamp>-<sanitized-input>` is created and checked out in the worktree.
+- A new branch `cruise/<session-id>-<sanitized-input>` is created and checked out in the worktree.
 - The worktree is retained until the PR is closed or merged; run `cruise clean` to delete it.
 
 ### Copying files into the worktree
