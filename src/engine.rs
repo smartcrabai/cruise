@@ -2196,4 +2196,208 @@ steps:
             "choose (option) + final should run; middle should be skipped via next=final"
         );
     }
+
+    // ── Group file-changed loop tests ─────────────────────────────────────────
+    // These tests verify the group-level `if.file-changed` loop mechanism used
+    // by the new `implement` group pattern in the default workflow config.
+
+    #[tokio::test]
+    async fn test_group_file_changed_loops_back_when_files_change() {
+        // Given: a group with if.file-changed: pre-implement,
+        // and a command that creates a new file on the first run only
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let new_file = dir.path().join("impl.rs");
+        let done_file = dir.path().join("done.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+groups:
+  implement:
+    if:
+      file-changed: pre-implement
+    steps:
+      write:
+        command: "test -f {new_file} || echo 'impl' > {new_file}"
+      check:
+        command: "echo checked"
+steps:
+  pre-implement:
+    command: "true"
+  implement-pass:
+    group: implement
+  done:
+    command: "echo done > {done_file}"
+"#,
+            new_file = new_file.display(),
+            done_file = done_file.display()
+        );
+        // When: executed
+        let r = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: new_file was created (first group pass executed)
+        assert!(
+            new_file.exists(),
+            "new_file should have been created by the group"
+        );
+        // And: done step was reached
+        assert!(
+            done_file.exists(),
+            "done step should be reached after group loops complete"
+        );
+        // And: group looped exactly twice (pass1: create file, pass2: no change)
+        // pre-implement(1) + pass1 write+check(2) + pre-implement again(1) + pass2 write+check(2) + done(1) = 7
+        assert_eq!(
+            r.run, 7,
+            "expected 7 steps: pre-implement + group pass 1 (2 steps) + re-run pre-implement + group pass 2 (2 steps) + done"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_group_file_changed_exits_when_no_files_change() {
+        // Given: a group with if.file-changed: pre-implement,
+        // but the commands never change any files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let done_file = dir.path().join("done.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+groups:
+  implement:
+    if:
+      file-changed: pre-implement
+    steps:
+      noop1:
+        command: "echo no-op"
+      noop2:
+        command: "echo also-no-op"
+steps:
+  pre-implement:
+    command: "true"
+  implement-pass:
+    group: implement
+  done:
+    command: "echo done > {done_file}"
+"#,
+            done_file = done_file.display()
+        );
+        // When: executed
+        let r = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: done step was reached (group ran once and exited without looping)
+        assert!(
+            done_file.exists(),
+            "done step should be reached immediately after group with no file changes"
+        );
+        // And: exactly 4 steps ran: pre-implement + 2 group steps + done
+        assert_eq!(
+            r.run, 4,
+            "expected 4 steps (pre-implement + 2 group steps + done)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_group_max_retries_stops_loop_after_budget_exhausted() {
+        // Given: a group with max_retries: 2 and a command that always changes files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let counter_file = dir.path().join("counter.txt");
+        let done_file = dir.path().join("done.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+groups:
+  implement:
+    if:
+      file-changed: pre-implement
+    max_retries: 2
+    steps:
+      work:
+        command: "echo x >> {counter_file}"
+steps:
+  pre-implement:
+    command: "true"
+  implement-pass:
+    group: implement
+  done:
+    command: "echo done > {done_file}"
+"#,
+            counter_file = counter_file.display(),
+            done_file = done_file.display()
+        );
+        // When: executed
+        let r = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: done step was reached after the group was skipped
+        assert!(
+            done_file.exists(),
+            "done step should be reached after group skipped due to max_retries"
+        );
+        // And: the work step ran exactly max_retries (2) times
+        let content = std::fs::read_to_string(&counter_file)
+            .unwrap_or_else(|e| panic!("failed to read counter file: {e}"));
+        let line_count = content.lines().count();
+        assert_eq!(
+            line_count, 2,
+            "group should run exactly 2 times with max_retries=2"
+        );
+        // And: step count matches: pre-implement(1) + pass1 work(1) + pre-implement(1) + pass2 work(1) + pre-implement(1) + done(1) = 6
+        assert_eq!(
+            r.run, 6,
+            "expected 6 steps: pre-implement ×3 + 2 group passes (1 step each) + done"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_implement_group_pattern_completes_with_two_iterations() {
+        // Given: the full implement-group pattern from the default.yaml plan:
+        //   pre-implement → implement-pass (group) → done
+        // The group creates two files on first pass (tests_file, impl_file),
+        // then on second pass the files already exist → no change → group exits.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let tests_file = dir.path().join("tests.rs");
+        let impl_file = dir.path().join("impl.rs");
+        let done_file = dir.path().join("done.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+groups:
+  implement:
+    if:
+      file-changed: pre-implement
+    max_retries: 5
+    steps:
+      write-test-first:
+        command: "test -f {tests_file} || echo 'test code' > {tests_file}"
+      implement-after-tests:
+        command: "test -f {impl_file} || echo 'impl code' > {impl_file}"
+      test:
+        command: "echo tests-pass"
+steps:
+  pre-implement:
+    command: "true"
+  implement-pass:
+    group: implement
+  done:
+    command: "echo done > {done_file}"
+"#,
+            tests_file = tests_file.display(),
+            impl_file = impl_file.display(),
+            done_file = done_file.display()
+        );
+        // When: executed
+        let r = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: both files were created (group executed the write steps)
+        assert!(tests_file.exists(), "tests_file should have been created");
+        assert!(impl_file.exists(), "impl_file should have been created");
+        // And: group looped exactly twice (pass1: create files, pass2: no change)
+        // pre-implement(1) + pass1(3) + pre-implement again(1) + pass2(3) + done(1) = 9
+        assert_eq!(
+            r.run, 9,
+            "expected 9 steps: pre-implement + group pass 1 (3 steps) + re-run pre-implement + group pass 2 (3 steps) + done"
+        );
+    }
 }

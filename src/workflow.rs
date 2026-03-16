@@ -599,4 +599,146 @@ steps:
             "fail_if_no_file_changes should be preserved after compilation"
         );
     }
+
+    // ── New default.yaml config pattern tests ─────────────────────────────────
+    // Verify the new implement-group config pattern (plan section 3.3) compiles
+    // correctly, and that the step naming convention is as expected.
+
+    #[test]
+    fn test_compile_implement_group_with_file_changed_loop_pattern() {
+        // Given: the new implement-group config pattern from the plan
+        // (pre-implement → implement-pass group → review-pass group)
+        let yaml = r#"
+command: [claude, -p]
+groups:
+  implement:
+    if:
+      file-changed: pre-implement
+    max_retries: 5
+    steps:
+      write-test-first:
+        prompt: /write-test-first
+      implement-after-tests:
+        prompt: /implement-after-tests
+      test:
+        command: cargo test
+  review:
+    if:
+      file-changed: implement-pass/test
+    max_retries: 4
+    steps:
+      simplify:
+        prompt: /simplify
+      ai-antipattern:
+        prompt: /ai-antipattern
+steps:
+  pre-implement:
+    command: "true"
+  implement-pass:
+    group: implement
+  review-pass:
+    group: review
+"#;
+        // When: compiled
+        let c = compiled(yaml);
+        // Then: implement group expands to prefixed steps
+        assert!(
+            c.steps.contains_key("pre-implement"),
+            "pre-implement should be a top-level step"
+        );
+        assert!(
+            c.steps.contains_key("implement-pass/write-test-first"),
+            "implement group steps should expand with call-site prefix"
+        );
+        assert!(
+            c.steps.contains_key("implement-pass/implement-after-tests"),
+            "implement group steps should expand with call-site prefix"
+        );
+        assert!(
+            c.steps.contains_key("implement-pass/test"),
+            "implement-pass/test should exist as the expanded step name"
+        );
+        assert!(
+            c.steps.contains_key("review-pass/simplify"),
+            "review group steps should expand with call-site prefix"
+        );
+        assert!(
+            c.steps.contains_key("review-pass/ai-antipattern"),
+            "review group steps should expand with call-site prefix"
+        );
+        // And: implement invocation metadata is correct
+        let impl_meta = c
+            .invocations
+            .get("implement-pass")
+            .unwrap_or_else(|| panic!("implement-pass invocation should exist"));
+        assert_eq!(impl_meta.first_step, "implement-pass/write-test-first");
+        assert_eq!(impl_meta.last_step, "implement-pass/test");
+        assert_eq!(impl_meta.step_count, 3);
+        assert_eq!(impl_meta.max_retries, Some(5));
+        let impl_if = impl_meta
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("implement-pass if_condition should be set"));
+        assert_eq!(
+            impl_if.file_changed.as_deref(),
+            Some("pre-implement"),
+            "implement group file-changed target should be pre-implement"
+        );
+        // And: review invocation metadata has the correct file-changed target
+        // (implement-pass/test — the expanded step name after test moves into implement group)
+        let review_meta = c
+            .invocations
+            .get("review-pass")
+            .unwrap_or_else(|| panic!("review-pass invocation should exist"));
+        let review_if = review_meta
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("review-pass if_condition should be set"));
+        assert_eq!(
+            review_if.file_changed.as_deref(),
+            Some("implement-pass/test"),
+            "review group file-changed target should be implement-pass/test (expanded step name)"
+        );
+    }
+
+    #[test]
+    fn test_compile_group_file_changed_target_accepts_expanded_step_name() {
+        // Given: a group whose file-changed target is an expanded step name (call-site/step)
+        // This verifies that compile() does NOT validate file-changed target existence,
+        // and accepts cross-group references in the form "call-site/step-name"
+        let yaml = r"
+command: [claude, -p]
+groups:
+  implement:
+    steps:
+      test:
+        command: cargo test
+  review:
+    if:
+      file-changed: implement-pass/test
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  implement-pass:
+    group: implement
+  review-pass:
+    group: review
+";
+        // When: compiled
+        // Then: no error — file-changed targets are not validated at compile time
+        let c = compiled(yaml);
+        let review_meta = c
+            .invocations
+            .get("review-pass")
+            .unwrap_or_else(|| panic!("review-pass invocation should exist"));
+        let review_if = review_meta
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition should be set"));
+        assert_eq!(
+            review_if.file_changed.as_deref(),
+            Some("implement-pass/test")
+        );
+    }
 }
