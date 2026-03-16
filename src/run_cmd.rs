@@ -10,6 +10,7 @@ use crate::config::{DEFAULT_PR_LANGUAGE, validate_config};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
+use crate::option_handler::CliOptionHandler;
 use crate::plan_cmd::PLAN_VAR;
 use crate::session::{
     SessionFileContents, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
@@ -270,7 +271,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         return Ok(());
     }
 
-    let mut compiled = crate::workflow::compile(config)?;
+    let compiled = crate::workflow::compile(config)?;
     let effective_workspace_mode = match workspace_override {
         WorkspaceOverride::RespectSession => session.workspace_mode,
         WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
@@ -332,17 +333,17 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         session_fingerprint.set(fingerprint);
         Ok(())
     };
+    let ctx = crate::engine::ExecutionContext {
+        compiled: &compiled,
+        max_retries: args.max_retries,
+        rate_limit_retries: args.rate_limit_retries,
+        on_step_start: &on_step_start,
+        cancel_token: None,
+        option_handler: &CliOptionHandler,
+        config_reloader: config_reloader.as_deref(),
+    };
     let exec_result = tokio::select! {
-        result = execute_steps(
-            &mut compiled,
-            &mut vars,
-            &mut tracker,
-            &start_step,
-            args.max_retries,
-            args.rate_limit_retries,
-            &on_step_start,
-            config_reloader.as_deref(),
-        ) => result,
+        result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,
         _ = tokio::signal::ctrl_c() => Err(CruiseError::Interrupted),
     };
     let session = session_cell.into_inner();
@@ -567,19 +568,17 @@ async fn run_after_pr_steps(
     let Some(first_step) = compiled.after_pr.keys().next() else {
         return;
     };
-    let mut after_compiled = compiled.to_after_pr_compiled();
-    match execute_steps(
-        &mut after_compiled,
-        vars,
-        tracker,
-        first_step,
+    let after_compiled = compiled.to_after_pr_compiled();
+    let ctx = crate::engine::ExecutionContext {
+        compiled: &after_compiled,
         max_retries,
         rate_limit_retries,
-        &|_| Ok(()),
-        None,
-    )
-    .await
-    {
+        on_step_start: &|_| Ok(()),
+        cancel_token: None,
+        option_handler: &CliOptionHandler,
+        config_reloader: None,
+    };
+    match execute_steps(&ctx, vars, tracker, first_step).await {
         Ok(_) | Err(CruiseError::StepPaused) => {}
         Err(e) => {
             eprintln!("warning: after-pr steps failed: {e}");

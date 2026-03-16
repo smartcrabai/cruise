@@ -3,12 +3,13 @@ use std::time::Instant;
 
 use console::style;
 
+use crate::cancellation::CancellationToken;
 use crate::condition::should_skip;
 use crate::config::{SkipCondition, WorkflowConfig};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
+use crate::option_handler::OptionHandler;
 use crate::step::command::run_commands;
-use crate::step::option::run_option;
 use crate::step::prompt::run_prompt;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
@@ -20,6 +21,21 @@ pub struct ExecutionResult {
     pub run: usize,
     pub skipped: usize,
     pub failed: usize,
+}
+
+/// Immutable context shared across the execution loop.
+///
+/// Groups the "configuration" parameters that are threaded unchanged through
+/// `execute_steps` → `step_loop_iteration` → `execute_step_kind`, keeping each
+/// function's signature short enough that Clippy is happy.
+pub struct ExecutionContext<'a> {
+    pub compiled: &'a CompiledWorkflow,
+    pub max_retries: usize,
+    pub rate_limit_retries: usize,
+    pub on_step_start: &'a dyn Fn(&str) -> Result<()>,
+    pub cancel_token: Option<&'a CancellationToken>,
+    pub option_handler: &'a dyn OptionHandler,
+    pub config_reloader: Option<&'a dyn Fn() -> Result<Option<CompiledWorkflow>>>,
 }
 
 /// Mutable counters threaded through the execution loop.
@@ -168,27 +184,15 @@ fn resolve_if_next(
 }
 
 /// Execute workflow steps starting from `start_step`.
-///
-/// `on_step_start` is called with the step name before each step executes,
-/// allowing the caller to persist the current step for resume support.
-///
-/// If `config_reloader` is provided, it is called before each step to check
-/// for updated workflow configuration. The update is applied only when the
-/// current step exists in the new configuration.
-#[expect(clippy::too_many_arguments)]
 pub async fn execute_steps(
-    compiled: &mut CompiledWorkflow,
+    ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     start_step: &str,
-    max_retries: usize,
-    rate_limit_retries: usize,
-    on_step_start: &dyn Fn(&str) -> Result<()>,
-    config_reloader: Option<&dyn Fn() -> Result<Option<CompiledWorkflow>>>,
 ) -> Result<ExecutionResult> {
     let mut current_step = start_step.to_string();
     let workflow_start = Instant::now();
-
+    let mut reloaded: Option<CompiledWorkflow> = None;
     let mut state = LoopState {
         group_retry_counts: HashMap::new(),
         counters: LoopCounters {
@@ -196,34 +200,34 @@ pub async fn execute_steps(
             skipped: 0,
             failed: 0,
             step_index: 0,
-            total_steps: compiled.steps.len(),
+            total_steps: ctx.compiled.steps.len(),
         },
-        max_retries,
-        rate_limit_retries,
         edge_counts: HashMap::new(),
     };
 
     loop {
         // Reload config between steps if a reloader is provided.
-        if let Some(reloader) = config_reloader
+        if let Some(reloader) = ctx.config_reloader
             && let Some(new_compiled) = reloader()?
             && new_compiled.steps.contains_key(current_step.as_str())
         {
             state.counters.total_steps = new_compiled.steps.len();
-            *compiled = new_compiled;
             state.group_retry_counts.clear();
             state.edge_counts.clear();
+            reloaded = Some(new_compiled);
         }
-
-        let outcome = step_loop_iteration(
-            compiled,
-            vars,
-            tracker,
-            &current_step,
-            &mut state,
-            on_step_start,
-        )
-        .await?;
+        let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
+        let active_ctx = ExecutionContext {
+            compiled: active_compiled,
+            max_retries: ctx.max_retries,
+            rate_limit_retries: ctx.rate_limit_retries,
+            on_step_start: ctx.on_step_start,
+            cancel_token: ctx.cancel_token,
+            option_handler: ctx.option_handler,
+            config_reloader: None,
+        };
+        let outcome =
+            step_loop_iteration(&active_ctx, vars, tracker, &current_step, &mut state).await?;
         match outcome {
             StepOutcome::Next(next) => current_step = next,
             StepOutcome::Done => break,
@@ -251,8 +255,6 @@ pub async fn execute_steps(
 struct LoopState {
     group_retry_counts: HashMap<String, usize>,
     counters: LoopCounters,
-    max_retries: usize,
-    rate_limit_retries: usize,
     edge_counts: HashMap<(String, String), usize>,
 }
 
@@ -262,24 +264,25 @@ struct LoopState {
     reason = "step loop logic is inherently complex"
 )]
 async fn step_loop_iteration(
-    compiled: &CompiledWorkflow,
+    ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     current_step: &str,
     state: &mut LoopState,
-    on_step_start: &dyn Fn(&str) -> Result<()>,
 ) -> Result<StepOutcome> {
-    let step_config = compiled
+    let step_config = ctx
+        .compiled
         .steps
         .get(current_step)
         .ok_or_else(|| CruiseError::StepNotFound(current_step.to_string()))?;
-    let step_call_site = compiled
+    let step_call_site = ctx
+        .compiled
         .step_to_invocation
         .get(current_step)
         .map(std::string::String::as_str);
 
     if let Some(outcome) = check_group_retry_skip(
-        compiled,
+        ctx.compiled,
         current_step,
         step_call_site,
         &state.group_retry_counts,
@@ -292,7 +295,7 @@ async fn step_loop_iteration(
         state.counters.step_index += 1;
         state.counters.skipped += 1;
         eprintln!("{} skipping: {}", style("→").yellow(), current_step);
-        return Ok(get_next_step(&compiled.steps, current_step, None)
+        return Ok(get_next_step(&ctx.compiled.steps, current_step, None)
             .map_or(StepOutcome::Done, StepOutcome::Next));
     }
 
@@ -307,18 +310,26 @@ async fn step_loop_iteration(
         ))
         .bold()
     );
-    on_step_start(current_step)?;
+    (ctx.on_step_start)(current_step)?;
+
+    // Check for cancellation after saving state (allows resume from this step later).
+    // This must happen after `on_step_start` so the caller can persist which step to resume at.
+    if let Some(token) = ctx.cancel_token
+        && token.is_cancelled()
+    {
+        return Ok(StepOutcome::Done);
+    }
 
     let step_start = Instant::now();
     let step_next = step_config.next.clone();
-    let merged_env = resolve_env(&compiled.env, &step_config.env, vars)?;
+    let merged_env = resolve_env(&ctx.compiled.env, &step_config.env, vars)?;
     let kind = StepKind::try_from(step_config.clone())?;
     let if_cond = step_config.if_condition.as_ref();
     let step_if_file_changed = if_cond.and_then(|c| c.file_changed.as_deref());
     let nfc_cond = if_cond.and_then(|c| c.no_file_changes.as_ref());
 
     let (nochange_key, nfc_key) = take_pre_snapshots(
-        compiled,
+        ctx.compiled,
         tracker,
         current_step,
         step_call_site,
@@ -327,10 +338,9 @@ async fn step_loop_iteration(
         nfc_cond.is_some(),
     )?;
     let option_next = execute_step_kind(
+        ctx,
         &kind,
         vars,
-        compiled,
-        state.rate_limit_retries,
         &merged_env,
         step_start,
         &mut state.counters.failed,
@@ -357,7 +367,7 @@ async fn step_loop_iteration(
     };
 
     let if_next = resolve_if_next(
-        compiled,
+        ctx.compiled,
         tracker,
         current_step,
         step_call_site,
@@ -372,17 +382,17 @@ async fn step_loop_iteration(
         .or(nfc_retry.then(|| current_step.to_string()))
         .or(option_next)
         .or(step_next);
-    let next_step = get_next_step(&compiled.steps, current_step, effective_next.as_deref());
+    let next_step = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
 
     if let Some(ref next) = next_step {
         let edge = (current_step.to_string(), next.clone());
         let count = state.edge_counts.entry(edge).or_insert(0);
         *count += 1;
-        if *count > state.max_retries {
+        if *count > ctx.max_retries {
             return Err(CruiseError::LoopProtection(
                 current_step.to_string(),
                 next.clone(),
-                state.max_retries,
+                ctx.max_retries,
             ));
         }
     }
@@ -392,10 +402,9 @@ async fn step_loop_iteration(
 
 /// Execute a single step kind and return the option-selected next step (if any).
 async fn execute_step_kind(
+    ctx: &ExecutionContext<'_>,
     kind: &StepKind,
     vars: &mut VariableStore,
-    compiled: &CompiledWorkflow,
-    rate_limit_retries: usize,
     merged_env: &HashMap<String, String>,
     step_start: Instant,
     failed: &mut usize,
@@ -403,7 +412,8 @@ async fn execute_step_kind(
     match kind {
         StepKind::Prompt(step) => {
             let output =
-                run_prompt_step(vars, compiled, step, rate_limit_retries, merged_env).await?;
+                run_prompt_step(vars, ctx.compiled, step, ctx.rate_limit_retries, merged_env)
+                    .await?;
             let elapsed = step_start.elapsed();
             if !output.is_empty() {
                 eprint!("{output}");
@@ -412,7 +422,7 @@ async fn execute_step_kind(
             Ok(None)
         }
         StepKind::Command(step) => {
-            let success = run_command_step(vars, step, rate_limit_retries, merged_env).await?;
+            let success = run_command_step(vars, step, ctx.rate_limit_retries, merged_env).await?;
             let elapsed = step_start.elapsed();
             if !success {
                 *failed += 1;
@@ -421,7 +431,7 @@ async fn execute_step_kind(
             Ok(None)
         }
         StepKind::Option(step) => {
-            let result = run_option_step(vars, step)?;
+            let result = run_option_step(vars, step, ctx.option_handler)?;
             let elapsed = step_start.elapsed();
             log_step_result(elapsed, true);
             Ok(result)
@@ -622,6 +632,7 @@ pub(crate) async fn run_command_step(
 pub(crate) fn run_option_step(
     vars: &mut VariableStore,
     step: &OptionStep,
+    option_handler: &dyn OptionHandler,
 ) -> Result<Option<String>> {
     let desc = step
         .plan
@@ -633,7 +644,7 @@ pub(crate) fn run_option_step(
         })
         .transpose()?;
 
-    let result = run_option(&step.choices, desc.as_deref())?;
+    let result = option_handler.select_option(&step.choices, desc.as_deref())?;
 
     if let Some(ref text) = result.text_input {
         vars.set_prev_input(Some(text.clone()));
@@ -765,8 +776,10 @@ pub(crate) fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancellation::CancellationToken;
     use crate::config::WorkflowConfig;
     use crate::file_tracker::FileTracker;
+    use crate::option_handler::{NoOpOptionHandler, OptionHandler};
     use crate::variable::VariableStore;
     use tempfile::TempDir;
 
@@ -782,6 +795,10 @@ mod tests {
         run_config_with_retries(yaml, input, start_step, 10, 0).await
     }
 
+    // Core test helper: compile `yaml`, build an `ExecutionContext`, and run.
+    // `on_step_start` is always a no-op in this helper; tests that need a custom
+    // callback build `ExecutionContext` directly (see `test_on_step_start_callback_called`).
+    #[expect(clippy::too_many_arguments)]
     async fn run_config_inner(
         yaml: &str,
         input: &str,
@@ -790,10 +807,12 @@ mod tests {
         max_retries: usize,
         rate_limit_retries: usize,
         config_reloader: Option<&dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>>>,
+        cancel_token: Option<&CancellationToken>,
+        option_handler: &dyn OptionHandler,
     ) -> Result<ExecutionResult> {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
-        let mut compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root);
         let first_step = compiled
@@ -803,17 +822,16 @@ mod tests {
             .unwrap_or_else(|| panic!("unexpected None"))
             .clone();
         let step = start_step.unwrap_or(&first_step).to_string();
-        execute_steps(
-            &mut compiled,
-            &mut vars,
-            &mut tracker,
-            &step,
+        let ctx = ExecutionContext {
+            compiled: &compiled,
             max_retries,
             rate_limit_retries,
-            &|_| Ok(()),
+            on_step_start: &|_| Ok(()),
+            cancel_token,
+            option_handler,
             config_reloader,
-        )
-        .await
+        };
+        execute_steps(&ctx, &mut vars, &mut tracker, &step).await
     }
 
     async fn run_config_with_retries(
@@ -831,20 +849,33 @@ mod tests {
             max_retries,
             rate_limit_retries,
             None,
+            None,
+            &NoOpOptionHandler,
         )
         .await
     }
 
-    /// Run config with a custom `FileTracker` rooted at `tracker_root`.
-    /// Use this for tests that need to control file-change detection.
-    /// `max_retries=10` (loop guard), `rate_limit_retries=0` (no live API calls in tests).
+    // Run config with a custom `FileTracker` rooted at `tracker_root`.
+    // Use this for tests that need to control file-change detection.
+    // max_retries=10 (loop guard), rate_limit_retries=0 (no live API calls in tests).
     async fn run_config_with_tracker(
         yaml: &str,
         input: &str,
         start_step: Option<&str>,
         tracker_root: std::path::PathBuf,
     ) -> Result<ExecutionResult> {
-        run_config_inner(yaml, input, start_step, tracker_root, 10, 0, None).await
+        run_config_inner(
+            yaml,
+            input,
+            start_step,
+            tracker_root,
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+        )
+        .await
     }
 
     #[test]
@@ -1357,27 +1388,26 @@ steps:
     command: "echo world"
 "#;
         let config = make_config(yaml);
-        let mut compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(String::new());
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let mut called_steps: Vec<String> = Vec::new();
         let called_ref = std::cell::RefCell::new(&mut called_steps);
 
-        let result = execute_steps(
-            &mut compiled,
-            &mut vars,
-            &mut tracker,
-            "step1",
-            10,
-            0,
-            &|step| {
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|step| {
                 called_ref.borrow_mut().push(step.to_string());
                 Ok(())
             },
-            None,
-        )
-        .await;
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+        };
+        let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
 
         assert!(result.is_ok());
         assert_eq!(called_steps, vec!["step1", "step2"]);
@@ -1504,7 +1534,18 @@ steps:
         );
         // When: executed with max_retries=1 to prevent infinite loop
         // (implement writes a file → if.file-changed triggers jump back to implement)
-        let result = run_config_inner(&yaml, "", None, dir.path().to_path_buf(), 1, 0, None).await;
+        let result = run_config_inner(
+            &yaml,
+            "",
+            None,
+            dir.path().to_path_buf(),
+            1,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+        )
+        .await;
         // Then: workflow does NOT return StepMadeNoFileChanges (files changed, so no-change failure is skipped)
         assert!(
             !matches!(&result, Err(CruiseError::StepMadeNoFileChanges(_))),
@@ -1869,6 +1910,8 @@ steps:
             10,
             0,
             Some(&reloader),
+            None,
+            &NoOpOptionHandler,
         )
         .await;
         // Then: 正常完了し、reloader が呼ばれている
@@ -1904,6 +1947,8 @@ steps:
             10,
             0,
             Some(&reloader),
+            None,
+            &NoOpOptionHandler,
         )
         .await;
         // Then: 正常完了する（更新後の config でステップが実行される）
@@ -1934,6 +1979,8 @@ steps:
             10,
             0,
             Some(&reloader),
+            None,
+            &NoOpOptionHandler,
         )
         .await;
         // Then: 旧 config を維持して正常完了する（step1 が実行される）
@@ -1942,6 +1989,211 @@ steps:
             result.unwrap_or_else(|e| panic!("{e:?}")).run,
             1,
             "step1 should have run with old config"
+        );
+    }
+
+    // ── Helpers for cancel/option tests ──────────────────────────────────────
+
+    // Run a workflow with an explicit cancel token and option handler.
+    async fn run_with_options(
+        yaml: &str,
+        start: &str,
+        cancel_token: Option<&CancellationToken>,
+        handler: &dyn OptionHandler,
+    ) -> Result<ExecutionResult> {
+        run_config_inner(
+            yaml,
+            "",
+            Some(start),
+            std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
+            10,
+            0,
+            None,
+            cancel_token,
+            handler,
+        )
+        .await
+    }
+
+    // ── CancellationToken integration tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_steps_none_cancel_token_runs_all_steps() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo hello"
+  step2:
+    command: "echo world"
+"#;
+        let result = run_with_options(yaml, "step1", None, &NoOpOptionHandler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result.run, 2, "both steps should run with no cancel token");
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_active_cancel_token_runs_normally() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo hello"
+  step2:
+    command: "echo world"
+"#;
+        let token = CancellationToken::new(); // not cancelled
+        let result = run_with_options(yaml, "step1", Some(&token), &NoOpOptionHandler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            result.run, 2,
+            "both steps should run with uncancelled token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_pre_cancelled_token_skips_all_steps() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo should not run"
+  step2:
+    command: "echo also not run"
+"#;
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = run_with_options(yaml, "step1", Some(&token), &NoOpOptionHandler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            result.run, 0,
+            "no steps should run when token is pre-cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_cancel_between_steps_stops_at_boundary() {
+        // Given: a three-step workflow where the token is cancelled during on_step_start of step2
+        // (i.e. after step1 runs, before step2 executes)
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo first"
+  step2:
+    command: "echo second"
+  step3:
+    command: "echo third"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+        // on_step_start is called before the cancel check: cancel on the 2nd call (step2)
+        let call_count = std::cell::Cell::new(0usize);
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_step| {
+                let n = call_count.get();
+                if n >= 1 {
+                    // step2 (second call): cancel so the token check fires after on_step_start
+                    token_clone.cancel();
+                }
+                call_count.set(n + 1);
+                Ok(())
+            },
+            cancel_token: Some(&token),
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+        };
+        // When: execute_steps runs; step2's on_step_start triggers cancellation
+        let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
+        // Then: step1 ran (run=1); step2's on_step_start was called but step2 did not execute
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            result.run, 1,
+            "only step1 should run; step2 cancelled before execution, step3 never reached"
+        );
+    }
+
+    // ── OptionHandler integration tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_steps_option_handler_not_called_for_command_steps() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo hello"
+  step2:
+    command: "echo world"
+"#;
+        let handler = crate::option_handler::FirstChoiceOptionHandler::new();
+        let result = run_with_options(yaml, "step1", None, &handler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        assert_eq!(
+            handler.call_count(),
+            0,
+            "option handler should not be called for command steps"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_option_step_calls_handler() {
+        let yaml = r#"
+command: [echo]
+steps:
+  choose:
+    option:
+      - selector: "Continue"
+        next: done
+      - selector: "Cancel"
+  done:
+    command: "echo done"
+"#;
+        let handler = crate::option_handler::FirstChoiceOptionHandler::new();
+        let result = run_with_options(yaml, "choose", None, &handler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        assert_eq!(
+            handler.call_count(),
+            1,
+            "option handler should be called exactly once for the option step"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_option_step_handler_next_step_followed() {
+        let yaml = r#"
+command: [echo]
+steps:
+  choose:
+    option:
+      - selector: "Skip to final"
+        next: final
+      - selector: "Go middle"
+        next: middle
+  middle:
+    command: "exit 1"
+  final:
+    command: "echo reached_final"
+"#;
+        let handler = crate::option_handler::FirstChoiceOptionHandler::new();
+        let result = run_with_options(yaml, "choose", None, &handler).await;
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            result.run, 2,
+            "choose (option) + final should run; middle should be skipped via next=final"
         );
     }
 }
