@@ -74,9 +74,11 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     session.config_path = source.path().cloned();
     manager.create(&session)?;
 
-    // Save config.yaml copy to session dir.
-    let session_dir = manager.sessions_dir().join(&session_id);
-    std::fs::write(session_dir.join("config.yaml"), &yaml)?;
+    // Save config.yaml copy to session dir only for built-in config (no external file path).
+    if session.config_path.is_none() {
+        let session_dir = manager.sessions_dir().join(&session_id);
+        std::fs::write(session_dir.join("config.yaml"), &yaml)?;
+    }
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
