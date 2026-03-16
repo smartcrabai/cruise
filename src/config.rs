@@ -159,11 +159,16 @@ fn default_pr_language() -> String {
 
 impl WorkflowConfig {
     /// Parse a workflow config from a YAML string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the YAML is invalid or does not match the expected schema.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
     }
 
     /// Build the built-in default workflow config in code (no YAML file required).
+    #[must_use]
     pub fn default_builtin() -> Self {
         let mut steps = IndexMap::new();
 
@@ -207,6 +212,10 @@ impl WorkflowConfig {
 /// downgraded to a printed warning and the workflow continues.  A step with
 /// `fail-if-no-file-changes: true` would therefore never abort the run as
 /// intended.  Reject it explicitly at validation time instead.
+///
+/// # Errors
+///
+/// Returns an error if any `after-pr` step uses `fail-if-no-file-changes`.
 pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
     for (name, step) in &config.after_pr {
@@ -227,6 +236,10 @@ pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error
 /// - `if.no-file-changes` in `after-pr` steps is rejected.
 /// - `if.no-file-changes` in group-level `if` is rejected.
 /// - Legacy `fail-if-no-file-changes` and new `if.no-file-changes` cannot both be set on the same step.
+///
+/// # Errors
+///
+/// Returns an error if any validation rule is violated.
 pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
@@ -286,6 +299,10 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
 }
 
 /// Run all config validations (groups, fail-if-no-file-changes, if-conditions).
+///
+/// # Errors
+///
+/// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_groups(config)?;
     validate_fail_if_no_file_changes(config)?;
@@ -297,6 +314,10 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// - All step `group` references must point to defined groups.
 /// - Steps with a group must not have individual `if` conditions.
 /// - Steps inside group definitions must not have nested group references or individual `if` conditions.
+///
+/// # Errors
+///
+/// Returns an error if any group configuration is invalid.
 pub fn validate_groups(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_step_groups(&config.steps, &config.groups)?;
     validate_step_groups(&config.after_pr, &config.groups)?;

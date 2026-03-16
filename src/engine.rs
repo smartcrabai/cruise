@@ -184,6 +184,10 @@ fn resolve_if_next(
 }
 
 /// Execute workflow steps starting from `start_step`.
+///
+/// # Errors
+///
+/// Returns an error if a step fails fatally or an I/O operation fails.
 pub async fn execute_steps(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
@@ -686,7 +690,7 @@ fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
 }
 
 /// Print a dry-run summary of the workflow flow.
-pub(crate) fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
+pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
 

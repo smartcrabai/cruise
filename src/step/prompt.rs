@@ -14,12 +14,16 @@ pub struct PromptResult {
 }
 
 /// Invoke the LLM command with optional rate-limit retry.
-pub async fn run_prompt(
+///
+/// # Errors
+///
+/// Returns an error if the LLM process fails to spawn or returns a fatal error.
+pub async fn run_prompt<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
     max_retries: usize,
-    env: &HashMap<String, String>,
+    env: &HashMap<String, String, S>,
     on_retry: Option<&dyn Fn(&str)>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
@@ -55,11 +59,11 @@ pub async fn run_prompt(
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-async fn execute_prompt(
+async fn execute_prompt<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
-    env: &HashMap<String, String>,
+    env: &HashMap<String, String, S>,
 ) -> Result<(String, String)> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(

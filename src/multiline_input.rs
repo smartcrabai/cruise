@@ -2,7 +2,7 @@ use crate::error::Result;
 
 /// Result of a multiline input prompt.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum InputResult {
+pub enum InputResult {
     /// User confirmed the input with Enter.
     Submitted(String),
     /// User cancelled with Escape or Ctrl+C.
@@ -14,7 +14,11 @@ impl InputResult {
     ///
     /// `Submitted(text)` → `Ok(text)` preserving internal newlines.
     /// `Cancelled`       → `Err(CruiseError::Other("input cancelled"))`.
-    pub(crate) fn into_result(self) -> crate::error::Result<String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the user cancelled the input.
+    pub fn into_result(self) -> crate::error::Result<String> {
         match self {
             InputResult::Submitted(text) => Ok(text),
             InputResult::Cancelled => Err(crate::error::CruiseError::Other(

@@ -62,6 +62,7 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
 }
 
 /// Truncate `s` to `max` characters (first line only), appending `…` if truncated.
+#[must_use]
 pub fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
     let first_line = s.lines().next().unwrap_or(s);

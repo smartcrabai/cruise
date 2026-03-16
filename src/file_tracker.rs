@@ -35,6 +35,7 @@ pub struct FileTracker {
 const EXCLUDED_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
 impl FileTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             root: PathBuf::from("."),
@@ -42,7 +43,8 @@ impl FileTracker {
         }
     }
 
-    pub(crate) fn with_root(root: PathBuf) -> Self {
+    #[must_use]
+    pub fn with_root(root: PathBuf) -> Self {
         Self {
             root,
             snapshots: HashMap::new(),
@@ -50,6 +52,10 @@ impl FileTracker {
     }
 
     /// Capture a snapshot of the root directory and associate it with `step_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be read.
     pub fn take_snapshot(&mut self, step_name: &str) -> Result<()> {
         let snapshot = take_current_snapshot(&self.root)?;
         self.snapshots.insert(step_name.to_string(), snapshot);
@@ -57,12 +63,17 @@ impl FileTracker {
     }
 
     /// Returns true if a snapshot already exists for `step_name`.
+    #[must_use]
     pub fn has_snapshot(&self, step_name: &str) -> bool {
         self.snapshots.contains_key(step_name)
     }
 
     /// Compare the snapshot for `step_name` against the current state.
     /// Returns `false` if no snapshot exists for that step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be read.
     pub fn has_files_changed(&self, step_name: &str) -> Result<bool> {
         let Some(old_snapshot) = self.snapshots.get(step_name) else {
             return Ok(false);

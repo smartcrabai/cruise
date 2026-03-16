@@ -19,6 +19,7 @@ pub enum ConfigSource {
 }
 
 impl ConfigSource {
+    #[must_use]
     pub fn display_string(&self) -> String {
         match self {
             Self::Builtin => "config: (builtin default)".to_string(),
@@ -29,6 +30,7 @@ impl ConfigSource {
     }
 
     /// Returns the path to the config file, or `None` for the built-in default.
+    #[must_use]
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => Some(p),
@@ -45,6 +47,10 @@ impl ConfigSource {
 /// 3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`.
 /// 4. `~/.cruise/*.yaml` / `*.yml` — auto-select if exactly one, else prompt.
 /// 6. Built-in default.
+///
+/// # Errors
+///
+/// Returns an error if an explicitly specified config file is not found or cannot be read.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag).
     if let Some(path) = explicit {

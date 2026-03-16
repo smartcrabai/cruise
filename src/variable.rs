@@ -34,6 +34,7 @@ pub enum NamedVariable {
 }
 
 impl VariableStore {
+    #[must_use]
     pub fn new(input: String) -> Self {
         Self {
             input,
@@ -73,12 +74,16 @@ impl VariableStore {
         self.input = input;
     }
 
+    #[must_use]
     pub fn input_is_empty(&self) -> bool {
         self.input.is_empty()
     }
 
     /// Resolve all `{variable_name}` placeholders in `template`.
-    /// Returns an error for any undefined variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the template references an undefined variable.
     pub fn resolve(&self, template: &str) -> Result<String> {
         let mut result = String::new();
         let mut chars = template.chars().peekable();
@@ -114,6 +119,10 @@ impl VariableStore {
     }
 
     /// Look up a variable by name and return its value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` does not correspond to a defined variable.
     pub fn get_variable(&self, name: &str) -> Result<String> {
         match name {
             "input" => Ok(self.input.clone()),

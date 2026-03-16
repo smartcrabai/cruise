@@ -20,6 +20,7 @@ impl Default for CancellationToken {
 
 impl CancellationToken {
     /// Create a new, uncancelled token.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -27,13 +28,12 @@ impl CancellationToken {
     }
 
     /// Signal cancellation. After this call, `is_cancelled()` returns `true` on all clones.
-    // Called from Tauri GUI event handlers; production wiring added when GUI is integrated.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 
     /// Returns `true` if `cancel()` has been called on this token or any of its clones.
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }

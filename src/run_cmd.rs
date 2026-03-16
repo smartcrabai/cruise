@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use console::style;
 use inquire::InquireError;
 
+use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
 use crate::config::{DEFAULT_PR_LANGUAGE, validate_config};
 use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
@@ -333,18 +334,22 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         session_fingerprint.set(fingerprint);
         Ok(())
     };
+    let cancel_token = CancellationToken::new();
     let ctx = crate::engine::ExecutionContext {
         compiled: &compiled,
         max_retries: args.max_retries,
         rate_limit_retries: args.rate_limit_retries,
         on_step_start: &on_step_start,
-        cancel_token: None,
+        cancel_token: Some(&cancel_token),
         option_handler: &CliOptionHandler,
         config_reloader: config_reloader.as_deref(),
     };
     let exec_result = tokio::select! {
         result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,
-        _ = tokio::signal::ctrl_c() => Err(CruiseError::Interrupted),
+        _ = tokio::signal::ctrl_c() => {
+            cancel_token.cancel();
+            Err(CruiseError::Interrupted)
+        },
     };
     let session = session_cell.into_inner();
 
@@ -1249,7 +1254,7 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
-    use crate::test_support::PathEnvGuard;
+    use crate::test_binary_support::PathEnvGuard;
 
     fn run_git_ok(dir: &Path, args: &[&str]) {
         let output = Command::new("git")

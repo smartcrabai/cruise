@@ -14,6 +14,10 @@ pub struct OptionResult {
 }
 
 /// Display an interactive selection menu and return the user's choice.
+///
+/// # Errors
+///
+/// Returns an error if the user interaction fails or the choices list is invalid.
 pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result<OptionResult> {
     if let Some(desc) = description {
         crate::display::print_bordered(desc, Some("Plan"));

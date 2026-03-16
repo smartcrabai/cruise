@@ -846,7 +846,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
 
         let url = "https://github.com/owner/repo/pull/42";
         let result = open_pr_in_browser(url);
@@ -892,7 +892,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
 
         let result = open_pr_in_browser("https://github.com/owner/repo/pull/1");
 

@@ -19,6 +19,7 @@ pub enum SessionPhase {
 }
 
 impl SessionPhase {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::AwaitingApproval => "Awaiting Approval",
@@ -31,6 +32,7 @@ impl SessionPhase {
     }
 
     /// Whether this phase allows (re-)execution.
+    #[must_use]
     pub fn is_runnable(&self) -> bool {
         matches!(
             self,
@@ -107,6 +109,7 @@ pub(crate) enum SessionFileContents {
 }
 
 impl SessionFileContents {
+    #[must_use]
     pub(crate) fn fingerprint(&self) -> Option<SessionStateFingerprint> {
         match self {
             Self::Missing => None,
@@ -118,6 +121,7 @@ impl SessionFileContents {
 }
 
 impl SessionState {
+    #[must_use]
     pub fn new(id: String, base_dir: PathBuf, config_source: String, input: String) -> Self {
         Self {
             id,
@@ -138,11 +142,14 @@ impl SessionState {
     }
 
     /// Absolute path to the plan file for this session.
+    #[must_use]
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
     }
 
     /// Approve the session, transitioning from `AwaitingApproval` to Planned.
+    ///
+    /// # Panics
     ///
     /// Panics if the session is not in `AwaitingApproval` phase.
     pub fn approve(&mut self) {
@@ -166,6 +173,7 @@ impl SessionState {
     }
 
     /// Returns a `WorktreeContext` if the session has a valid, existing worktree.
+    #[must_use]
     pub fn worktree_context(&self) -> Option<crate::worktree::WorktreeContext> {
         let path = self.worktree_path.as_ref()?;
         let branch = self.worktree_branch.as_ref()?;
@@ -186,26 +194,34 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[must_use]
     pub fn new(base: PathBuf) -> Self {
         Self { base }
     }
 
     /// Get the sessions directory.
+    #[must_use]
     pub fn sessions_dir(&self) -> PathBuf {
         self.base.join("sessions")
     }
 
     /// Get the worktrees directory.
+    #[must_use]
     pub fn worktrees_dir(&self) -> PathBuf {
         self.base.join("worktrees")
     }
 
     /// Generate a new unique session ID from current UTC time.
+    #[must_use]
     pub fn new_session_id() -> String {
         current_timestamp_id()
     }
 
     /// Create a new session directory and persist the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or the state cannot be written.
     pub fn create(&self, state: &SessionState) -> Result<()> {
         let session_dir = self.sessions_dir().join(&state.id);
         std::fs::create_dir_all(&session_dir)?;
@@ -214,12 +230,20 @@ impl SessionManager {
     }
 
     /// Load a session by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session file does not exist or cannot be parsed.
     pub fn load(&self, id: &str) -> Result<SessionState> {
         let (state, _) = self.load_with_fingerprint(id)?;
         Ok(state)
     }
 
     /// Persist a session state to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state cannot be serialized or written to disk.
     pub fn save(&self, state: &SessionState) -> Result<()> {
         self.save_with_fingerprint(state)?;
         Ok(())
@@ -242,6 +266,11 @@ impl SessionManager {
         Ok((state, fingerprint))
     }
 
+    /// Inspect the raw state file for a session without deserializing it fully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read.
     pub(crate) fn inspect_state_file(&self, id: &str) -> Result<SessionFileContents> {
         let path = self.state_path(id);
         let bytes = match std::fs::read(&path) {
@@ -281,6 +310,10 @@ impl SessionManager {
     }
 
     /// List all sessions sorted by ID ascending (oldest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn list(&self) -> Result<Vec<SessionState>> {
         let sessions_dir = self.sessions_dir();
         if !sessions_dir.exists() {
@@ -303,6 +336,10 @@ impl SessionManager {
     }
 
     /// Return sessions in a runnable phase (pending execution).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn pending(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
@@ -312,6 +349,10 @@ impl SessionManager {
     }
 
     /// Return sessions in the Planned phase only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     #[cfg(test)]
     pub fn planned(&self) -> Result<Vec<SessionState>> {
         Ok(self
@@ -322,6 +363,10 @@ impl SessionManager {
     }
 
     /// Return sessions eligible for `run --all`: Planned or Suspended.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn run_all_candidates(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
@@ -331,6 +376,10 @@ impl SessionManager {
     }
 
     /// Load the workflow config for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be read or parsed.
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
         let config_path = state.config_path.clone().unwrap_or_else(|| {
             // Backward-compatible fallback: session-local copy
@@ -348,6 +397,10 @@ impl SessionManager {
     }
 
     /// Delete a session directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be removed.
     pub fn delete(&self, id: &str) -> Result<()> {
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
@@ -357,6 +410,10 @@ impl SessionManager {
     }
 
     /// Remove Completed sessions whose PR is closed or merged (checked via `gh`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session list cannot be read or a session cannot be deleted.
     pub fn cleanup_by_pr_status(&self) -> Result<CleanupReport> {
         let sessions = self.list()?;
         let mut report = CleanupReport::default();
@@ -426,6 +483,7 @@ pub struct CleanupReport {
 }
 
 /// Get the cruise home directory: `~/.cruise/`
+#[must_use]
 pub fn cruise_home() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
@@ -433,11 +491,16 @@ pub fn cruise_home() -> Option<PathBuf> {
 }
 
 /// Get the cruise home directory or return an error.
+///
+/// # Errors
+///
+/// Returns an error if the `HOME` environment variable is not set.
 pub fn get_cruise_home() -> crate::error::Result<PathBuf> {
     cruise_home().ok_or_else(|| crate::error::CruiseError::Other("HOME not set".to_string()))
 }
 
 /// Generate a session ID from current UTC time: `YYYYMMDDHHmmss`.
+#[must_use]
 pub fn current_timestamp_id() -> String {
     let secs = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,6 +511,7 @@ pub fn current_timestamp_id() -> String {
 }
 
 /// Format current UTC time as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+#[must_use]
 pub fn current_iso8601() -> String {
     let secs = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
