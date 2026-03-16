@@ -1,3 +1,4 @@
+mod cancellation;
 mod clean_cmd;
 mod cli;
 mod condition;
@@ -8,6 +9,7 @@ mod error;
 mod file_tracker;
 mod list_cmd;
 mod multiline_input;
+mod option_handler;
 mod plan_cmd;
 mod resolver;
 mod run_cmd;
