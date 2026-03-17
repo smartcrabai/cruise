@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import type { ChoiceDto, Session, SessionPhase, WorkflowEvent } from "./types";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, WorkflowEvent } from "./types";
 import {
+  approveSession,
   cancelSession,
   cleanSessions,
+  createSession,
+  discardSession,
+  fixSession,
   getSessionLog,
+  listConfigs,
   listSessions,
   respondToOption,
   runSession,
 } from "./lib/commands";
+import { DirectoryPicker } from "./components/DirectoryPicker";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,13 +56,15 @@ interface SessionSidebarProps {
   selectedId: string | null;
   onSelect: (session: Session) => void;
   onNewSession: () => void;
+  onRefreshRef?: React.MutableRefObject<(() => void) | null>;
 }
 
-function SessionSidebar({ selectedId, onSelect, onNewSession }: SessionSidebarProps) {
+function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
+  const [cleanMessage, setCleanMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -82,14 +91,21 @@ function SessionSidebar({ selectedId, onSelect, onNewSession }: SessionSidebarPr
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (onRefreshRef) {
+      onRefreshRef.current = load;
+    }
+  }, [load, onRefreshRef]);
+
   async function handleClean() {
     setCleaning(true);
+    setCleanMessage(null);
     try {
       const result = await cleanSessions();
-      alert(`Removed ${result.deleted} session(s). Skipped: ${result.skipped}`);
+      setCleanMessage(`${result.deleted} deleted (skipped: ${result.skipped})`);
       void load();
     } catch (e) {
-      alert(`Clean failed: ${e}`);
+      setCleanMessage(`Error: ${e}`);
     } finally {
       setCleaning(false);
     }
@@ -98,31 +114,36 @@ function SessionSidebar({ selectedId, onSelect, onNewSession }: SessionSidebarPr
   return (
     <div className="h-full flex flex-col">
       {/* Sidebar header */}
-      <div className="px-3 py-3 border-b border-gray-800 flex items-center justify-between gap-2">
-        <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => void load()}
-            className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
-            title="Refresh"
-          >
-            ↻
-          </button>
-          <button
-            onClick={() => void handleClean()}
-            disabled={cleaning}
-            className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-            title="Clean completed sessions"
-          >
-            {cleaning ? "…" : "Clean"}
-          </button>
-          <button
-            onClick={onNewSession}
-            className="px-2 py-1 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded"
-          >
-            + New
-          </button>
+      <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => void load()}
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
+              title="Refresh"
+            >
+              ↻
+            </button>
+            <button
+              onClick={() => void handleClean()}
+              disabled={cleaning}
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
+              title="Clean completed sessions"
+            >
+              {cleaning ? "…" : "Clean"}
+            </button>
+            <button
+              onClick={onNewSession}
+              className="px-2 py-1 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded"
+            >
+              + New
+            </button>
+          </div>
         </div>
+        {cleanMessage && (
+          <p className="text-xs text-gray-400">{cleanMessage}</p>
+        )}
       </div>
 
       {/* Session list */}
@@ -171,7 +192,7 @@ interface OptionDialogProps {
 }
 
 function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
-  const [textValue, setTextValue] = useState("");
+  const [textValues, setTextValues] = useState<Record<string, string>>({});
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
@@ -198,15 +219,20 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    value={textValue}
-                    onChange={(e) => setTextValue(e.target.value)}
+                    value={textValues[choice.label] ?? ""}
+                    onChange={(e) =>
+                      setTextValues((prev) => ({
+                        ...prev,
+                        [choice.label]: e.target.value,
+                      }))
+                    }
                     className="flex-1 border border-gray-700 bg-gray-800 rounded px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500"
                     placeholder="Type here…"
                     onKeyDown={(e) => {
                       if (e.key === "Enter")
                         onRespond({
                           nextStep: choice.next ?? undefined,
-                          textInput: textValue,
+                          textInput: textValues[choice.label] ?? "",
                         });
                     }}
                   />
@@ -214,7 +240,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                     onClick={() =>
                       onRespond({
                         nextStep: choice.next ?? undefined,
-                        textInput: textValue,
+                        textInput: textValues[choice.label] ?? "",
                       })
                     }
                     className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
@@ -394,15 +420,15 @@ function WorkflowRunner({ session }: WorkflowRunnerProps) {
         </div>
 
         {session.prUrl && (
-          <a
-            href={session.prUrl}
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            onClick={() => void openUrl(session.prUrl!)}
+            aria-label="Open Pull Request in browser"
             className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 hover:underline"
           >
             PR: {session.prUrl.split("/").slice(-2).join(" #")}
             <span className="text-xs">↗</span>
-          </a>
+          </button>
         )}
 
         <div className="text-sm text-gray-400 italic">{session.input}</div>
@@ -532,24 +558,281 @@ function WorkflowRunner({ session }: WorkflowRunnerProps) {
   );
 }
 
-// ─── EmptyState / NewSessionPlaceholder ───────────────────────────────────────
+// ─── EmptyState ───────────────────────────────────────────────────────────────
 
 function EmptyState() {
   return (
     <div className="h-full flex items-center justify-center">
-      <p className="text-gray-600 text-sm">サイドバーからセッションを選択してください</p>
+      <p className="text-gray-600 text-sm">Select a session from the sidebar</p>
     </div>
   );
 }
 
-function NewSessionPlaceholder() {
+// ─── NewSessionForm ────────────────────────────────────────────────────────────
+
+type PlanPhase = "input" | "generating" | "generated" | "fixing";
+
+interface NewSessionFormProps {
+  onCreated: (sessionId: string) => void;
+}
+
+function NewSessionForm({ onCreated }: NewSessionFormProps) {
+  const [configs, setConfigs] = useState<ConfigEntry[]>([]);
+  const [configPath, setConfigPath] = useState<string>("");
+  const [baseDir, setBaseDir] = useState<string>("");
+  const [input, setInput] = useState<string>("");
+  const [planPhase, setPlanPhase] = useState<PlanPhase>("input");
+  const [planContent, setPlanContent] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<string>("");
+
+  // Load configs and default base_dir on mount
+  useEffect(() => {
+    void listConfigs().then(setConfigs).catch(() => {});
+    // Use the most recently updated session's baseDir as default
+    void listSessions()
+      .then((sessions) => {
+        if (sessions.length > 0) {
+          const latest = [...sessions].sort((a, b) =>
+            (b.updatedAt ?? b.createdAt).localeCompare(a.updatedAt ?? a.createdAt)
+          )[0];
+          setBaseDir(latest.baseDir);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleGenerate() {
+    if (!input.trim()) return;
+    setError(null);
+    setPlanPhase("generating");
+
+    const channel = new Channel<PlanEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === "planGenerated") {
+        setPlanContent(event.data.content);
+        setPlanPhase("generated");
+      } else if (event.event === "planFailed") {
+        setError(event.data.error);
+        setPlanPhase("input");
+      }
+    };
+
+    try {
+      const id = await createSession(
+        {
+          input: input.trim(),
+          configPath: configPath || undefined,
+          baseDir: baseDir || ".",
+        },
+        channel
+      );
+      setSessionId(id);
+    } catch (e) {
+      setError(String(e));
+      setPlanPhase("input");
+    }
+  }
+
+  async function handleApprove() {
+    if (!sessionId) return;
+    setError(null);
+    try {
+      await approveSession(sessionId);
+      onCreated(sessionId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDiscard() {
+    if (!sessionId) return;
+    setError(null);
+    try {
+      await discardSession(sessionId);
+    } catch {
+      // ignore discard errors
+    }
+    setSessionId(null);
+    setPlanContent("");
+    setPlanPhase("input");
+  }
+
+  async function handleFix() {
+    if (!sessionId || !feedback.trim()) return;
+    setError(null);
+    setPlanPhase("generating");
+
+    const channel = new Channel<PlanEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === "planGenerated") {
+        setPlanContent(event.data.content);
+        setPlanPhase("generated");
+        setFeedback("");
+      } else if (event.event === "planFailed") {
+        setError(event.data.error);
+        setPlanPhase("generated");
+      }
+    };
+
+    try {
+      await fixSession({ sessionId, feedback: feedback.trim() }, channel);
+    } catch (e) {
+      setError(String(e));
+      setPlanPhase("generated");
+    }
+  }
+
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="text-center space-y-2">
-        <p className="text-gray-400 text-sm font-medium">新規セッションを作成</p>
-        <p className="text-gray-600 text-xs">
-          CLIから <code className="bg-gray-800 px-1 py-0.5 rounded text-gray-300">cruise plan</code> を実行してください
-        </p>
+    <div className="h-full flex flex-col overflow-auto">
+      <div className="px-6 pt-6 pb-4 border-b border-gray-800">
+        <h1 className="text-lg font-semibold text-gray-100">New Session</h1>
+      </div>
+
+      <div className="flex-1 overflow-auto p-6 space-y-5">
+        {/* Error banner */}
+        {error && (
+          <div className="bg-red-900/40 border border-red-700 rounded px-4 py-3 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {/* Input form */}
+        {(planPhase === "input" || planPhase === "generating") && (
+          <>
+            {/* Config selector */}
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
+              <select
+                value={configPath}
+                onChange={(e) => setConfigPath(e.target.value)}
+                disabled={planPhase === "generating"}
+                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+              >
+                <option value="">Default (builtin)</option>
+                {configs.map((c) => (
+                  <option key={c.path} value={c.path}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Base dir */}
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
+              <DirectoryPicker
+                value={baseDir}
+                onChange={setBaseDir}
+                disabled={planPhase === "generating"}
+                placeholder="e.g. /Users/you/projects/myapp"
+              />
+            </div>
+
+            {/* Task input */}
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                disabled={planPhase === "generating"}
+                rows={4}
+                placeholder="Describe what you want to implement…"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none disabled:opacity-50"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleGenerate();
+                }}
+              />
+            </div>
+
+            <button
+              onClick={() => void handleGenerate()}
+              disabled={planPhase === "generating" || !input.trim()}
+              className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {planPhase === "generating" ? (
+                <>
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                  Generating plan…
+                </>
+              ) : (
+                "Generate plan"
+              )}
+            </button>
+          </>
+        )}
+
+        {/* Plan review */}
+        {(planPhase === "generated" || planPhase === "fixing") && (
+          <>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-500 uppercase tracking-wide">Generated Plan</span>
+              </div>
+              <pre className="bg-gray-900 border border-gray-700 rounded p-4 text-xs text-gray-300 font-mono whitespace-pre-wrap overflow-auto max-h-80">
+                {planContent}
+              </pre>
+            </div>
+
+            {/* Fix feedback */}
+            {planPhase === "fixing" && (
+              <div className="space-y-1.5">
+                <label className="text-xs text-gray-500 uppercase tracking-wide">Fix Instructions</label>
+                <textarea
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                  rows={3}
+                  autoFocus
+                  placeholder="Describe how to revise the plan…"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleFix();
+                  }}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void handleFix()}
+                    disabled={!feedback.trim()}
+                    className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Apply Fix
+                  </button>
+                  <button
+                    onClick={() => setPlanPhase("generated")}
+                    className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            {planPhase === "generated" && (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void handleApprove()}
+                  className="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600"
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => setPlanPhase("fixing")}
+                  className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
+                >
+                  Fix
+                </button>
+                <button
+                  onClick={() => void handleDiscard()}
+                  className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-gray-800"
+                >
+                  Discard
+                </button>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -560,21 +843,38 @@ function NewSessionPlaceholder() {
 export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [view, setView] = useState<"session" | "new">("session");
+  const sidebarRefreshRef = useRef<(() => void) | null>(null);
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
-      {/* サイドバー */}
+      {/* Sidebar */}
       <aside className="w-72 flex-shrink-0 border-r border-gray-800 flex flex-col">
         <SessionSidebar
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
+          onRefreshRef={sidebarRefreshRef}
         />
       </aside>
-      {/* メインコンテンツ */}
+      {/* Main content */}
       <main className="flex-1 overflow-auto">
         {view === "new" ? (
-          <NewSessionPlaceholder />
+          <NewSessionForm
+            onCreated={(id) => {
+              sidebarRefreshRef.current?.();
+              // Navigate to the created session after a brief refresh
+              setTimeout(async () => {
+                try {
+                  const { getSession } = await import("./lib/commands");
+                  const session = await getSession(id);
+                  setSelectedSession(session);
+                  setView("session");
+                } catch {
+                  setView("session");
+                }
+              }, 300);
+            }}
+          />
         ) : selectedSession ? (
           <WorkflowRunner session={selectedSession} />
         ) : (

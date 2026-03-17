@@ -2811,14 +2811,14 @@ steps:
 
     #[test]
     fn test_format_run_all_summary_suspended_session_shows_suspended_indicator() {
-        // Given: Suspended セッションが結果に含まれる
+        // Given: a Suspended session is included in the results
         let results = vec![make_session("add feature", SessionPhase::Suspended, None)];
 
         // When
         let summary = format_run_all_summary(&results);
         let summary_plain = console::strip_ansi_codes(&summary).to_string();
 
-        // Then: セッションの input と "Suspended" マーカーが含まれる
+        // Then: the session's input and "Suspended" marker are included
         assert!(
             summary_plain.contains("add feature"),
             "summary should contain input: {summary_plain}"
@@ -2835,7 +2835,7 @@ steps:
 
     #[test]
     fn test_format_run_all_summary_mixed_with_suspended() {
-        // Given: Completed, Suspended, Failed の混合結果
+        // Given: mixed results of Completed, Suspended, and Failed
         let results = vec![
             make_session(
                 "task a",
@@ -2854,7 +2854,7 @@ steps:
         let summary = format_run_all_summary(&results);
         let summary_plain = console::strip_ansi_codes(&summary).to_string();
 
-        // Then: 3 セッション全ての情報が含まれ、ヘッダーのカウントも正しい
+        // Then: information for all 3 sessions is included and the header count is correct
         assert!(
             summary_plain.contains("task a"),
             "summary should contain task a: {summary_plain}"

@@ -326,34 +326,34 @@ mod tests {
 
     #[test]
     fn test_into_result_submitted_returns_text() {
-        // Given: Submitted の InputResult
+        // Given: a Submitted InputResult
         let result = InputResult::Submitted("add feature X".to_string()).into_result();
-        // Then: Ok で同じ文字列が返る
+        // Then: returns Ok with the same string
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
     }
 
     #[test]
     fn test_into_result_submitted_multiline_preserved() {
-        // Given: 複数行テキストを持つ Submitted
+        // Given: a Submitted result with multiline text
         let multiline = "line1\nline2\nline3".to_string();
         let result = InputResult::Submitted(multiline.clone()).into_result();
-        // Then: 内部改行がそのまま保持された Ok が返る
+        // Then: returns Ok with internal newlines preserved
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), multiline);
     }
 
     #[test]
     fn test_into_result_submitted_empty_string_returns_ok() {
-        // Given: 空文字列の Submitted（空入力を送信したケース）
+        // Given: a Submitted result with an empty string (case where empty input was submitted)
         let result = InputResult::Submitted(String::new()).into_result();
-        // Then: Ok("") が返る（空文字列は保持される）
+        // Then: returns Ok("") (empty string is preserved)
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "");
     }
 
     #[test]
     fn test_into_result_cancelled_returns_err() {
-        // Given: ユーザーが Esc/Ctrl+C でキャンセルした
+        // Given: the user cancelled with Esc/Ctrl+C
         let result = InputResult::Cancelled.into_result();
-        // Then: Err が返り、セッション作成前に処理を止められる
+        // Then: returns Err, allowing processing to stop before session creation
         assert!(result.is_err(), "Cancelled should produce Err, got Ok");
     }
 
