@@ -265,12 +265,6 @@ impl SessionManager {
         self.sessions_dir().join(id).join("state.json")
     }
 
-    /// Get the path to the run log file for a session.
-    #[must_use]
-    pub fn log_path(&self, id: &str) -> PathBuf {
-        self.sessions_dir().join(id).join("run.log")
-    }
-
     pub(crate) fn load_with_fingerprint(
         &self,
         id: &str,

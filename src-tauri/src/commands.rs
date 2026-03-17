@@ -202,7 +202,7 @@ pub fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
 #[tauri::command]
 pub fn get_session_log(session_id: String) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
-    let log_path = manager.log_path(&session_id);
+    let log_path = manager.sessions_dir().join(&session_id).join("run.log");
     match std::fs::read_to_string(&log_path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -313,7 +313,7 @@ pub async fn run_session(
     let channel_for_emitter = channel.clone();
     let sid_for_spawn = session_id.clone();
     let sid_for_emitter = session_id.clone();
-    let log_path = manager.log_path(&session_id);
+    let log_path = manager.sessions_dir().join(&session_id).join("run.log");
 
     let exec_result = tokio::task::spawn_blocking(
         move || -> cruise::error::Result<cruise::engine::ExecutionResult> {
