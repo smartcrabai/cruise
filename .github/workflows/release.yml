@@ -327,8 +327,8 @@ jobs:
 
           # Read signatures and find updater bundle filenames (v2 mode)
           # macOS: .app.tar.gz, Linux: .AppImage (re-used), Windows: .exe (re-used)
-          read_sig() { for f in "$@"; do [ -f "$f" ] && tr -d '\n' < "$f" && return; done; }
-          find_file() { for f in "$@"; do [ -f "$f" ] && basename "$f" && return; done; }
+          read_sig() { for f in "$@"; do if [ -f "$f" ]; then tr -d '\n' < "$f"; return; fi; done; }
+          find_file() { for f in "$@"; do if [ -f "$f" ]; then basename "$f"; return; fi; done; }
 
           MAC_SIG=$(read_sig tauri-artifacts/*.app.tar.gz.sig)
           LINUX_SIG=$(read_sig tauri-artifacts/*.AppImage.sig)
