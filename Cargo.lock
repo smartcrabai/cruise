@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "cruise"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -5700,18 +5700,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.45"
+version = "0.8.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd39c326cd6bc61b074fb82a7d84c198b12e285d3bd823c06288df4260e5c9c6"
+checksum = "5c5030500cb2d66bdfbb4ebc9563be6ce7005a4b5d0f26be0c523870fe372ca6"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.45"
+version = "0.8.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fa105d53b3e76c0f85fbd785aa2d997206182d70379f7a89d453b4c27f70778"
+checksum = "a5f86989a046a79640b9d8867c823349a139367bda96549794fcc3313ce91f4e"
 dependencies = [
  "proc-macro2",
  "quote",
