@@ -66,6 +66,18 @@ impl ExecutionWorkspace {
     }
 }
 
+/// Returns a safe fallback directory when `set_current_dir` fails.
+fn fallback_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var("SYSTEMDRIVE").unwrap_or_else(|_| "C:".into()) + "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
+}
+
 struct CurrentDirGuard {
     original: PathBuf,
 }
@@ -81,7 +93,7 @@ impl CurrentDirGuard {
 impl Drop for CurrentDirGuard {
     fn drop(&mut self) {
         if std::env::set_current_dir(&self.original).is_err() {
-            let _ = std::env::set_current_dir("/");
+            let _ = std::env::set_current_dir(fallback_root());
         }
     }
 }
@@ -1246,6 +1258,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
@@ -1390,6 +1403,7 @@ mod tests {
 
     struct ProcessStateGuard {
         prev_home: Option<std::ffi::OsString>,
+        prev_userprofile: Option<std::ffi::OsString>,
         prev_path: Option<std::ffi::OsString>,
         prev_dir: PathBuf,
         extra_env: Vec<(String, Option<std::ffi::OsString>)>,
@@ -1400,13 +1414,16 @@ mod tests {
         fn new(home: &Path) -> Self {
             let lock = crate::test_support::lock_process();
             let prev_home = std::env::var_os("HOME");
+            let prev_userprofile = std::env::var_os("USERPROFILE");
             let prev_path = std::env::var_os("PATH");
-            let prev_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            let prev_dir = std::env::current_dir().unwrap_or_else(|_| fallback_root());
             unsafe {
                 std::env::set_var("HOME", home);
+                std::env::set_var("USERPROFILE", home);
             }
             Self {
                 prev_home,
+                prev_userprofile,
                 prev_path,
                 prev_dir,
                 extra_env: Vec::new(),
@@ -1457,7 +1474,7 @@ mod tests {
     impl Drop for ProcessStateGuard {
         fn drop(&mut self) {
             if std::env::set_current_dir(&self.prev_dir).is_err() {
-                let _ = std::env::set_current_dir("/");
+                let _ = std::env::set_current_dir(fallback_root());
             }
             unsafe {
                 for (key, previous) in self.extra_env.iter().rev() {
@@ -1472,6 +1489,12 @@ mod tests {
                     std::env::set_var("HOME", prev_home);
                 } else {
                     std::env::remove_var("HOME");
+                }
+
+                if let Some(ref prev_userprofile) = self.prev_userprofile {
+                    std::env::set_var("USERPROFILE", prev_userprofile);
+                } else {
+                    std::env::remove_var("USERPROFILE");
                 }
 
                 if let Some(ref prev_path) = self.prev_path {

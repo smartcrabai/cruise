@@ -6,20 +6,26 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install taplo
+        if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@e24b8b7a939c6a537188f34a4163cb153dd85cf6 # v2
         with:
           tool: taplo-cli
 
       - name: Lint Cargo.toml
+        if: matrix.os == 'ubuntu-latest'
         run: taplo lint Cargo.toml
 
       - name: Check Cargo.toml formatting
+        if: matrix.os == 'ubuntu-latest'
         run: taplo fmt --check --option reorder_keys=true Cargo.toml
 
       - name: Cache Rust dependencies
@@ -32,9 +38,11 @@ jobs:
         run: cargo test --all-features
 
       - name: Run clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt -- --check
 
   test-tauri:

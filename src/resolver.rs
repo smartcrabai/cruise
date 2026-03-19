@@ -86,8 +86,8 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
     }
 
     // 5. ~/.cruise/*.yaml / *.yml
-    if let Ok(home) = std::env::var("HOME") {
-        let cruise_dir = PathBuf::from(home).join(".cruise");
+    if let Some(home) = home::home_dir() {
+        let cruise_dir = home.join(".cruise");
         let files = collect_yaml_files(&cruise_dir);
         if !files.is_empty() {
             let path = if files.len() == 1 {

@@ -11,6 +11,7 @@ mod list_cmd;
 mod multiline_input;
 mod option_handler;
 mod plan_cmd;
+mod platform;
 mod resolver;
 mod run_cmd;
 mod session;

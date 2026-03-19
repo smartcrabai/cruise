@@ -191,6 +191,7 @@ mod tests {
         assert_eq!(args, vec!["claude", "-p", "--model", "claude-opus-4-5"]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_with_echo() {
         let _guard = crate::test_support::lock_process();
@@ -225,6 +226,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_with_env() {
         let _guard = crate::test_support::lock_process();
@@ -246,6 +248,7 @@ mod tests {
         assert_eq!(result.output, "prompt text");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_with_model_arg() {
         let _guard = crate::test_support::lock_process();
@@ -265,6 +268,7 @@ mod tests {
         assert_eq!(result.output, "hello model");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_captures_stderr() {
         let _guard = crate::test_support::lock_process();
@@ -291,6 +295,7 @@ mod tests {
         assert_eq!(result.stderr.trim(), "err_text");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_stderr_empty_when_no_stderr() {
         let _guard = crate::test_support::lock_process();
