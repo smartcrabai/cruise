@@ -4,7 +4,7 @@ edition = "2024"
 license = "MIT"
 name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
-version = "0.1.12"
+version = "0.1.13"
 
 [dependencies]
 anyhow = "1.0.102"
