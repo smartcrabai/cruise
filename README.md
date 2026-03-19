@@ -22,6 +22,16 @@ cargo install cruise
 brew install smartcrabai/tap/cruise
 ```
 
+### GUI (Desktop App)
+
+A desktop GUI is also available. Download the latest installer from [GitHub Releases](https://github.com/smartcrabai/cruise/releases):
+
+| Platform | Format |
+|----------|--------|
+| macOS (Apple Silicon) | `.dmg` |
+| Linux (x86_64) | `.deb`, `.AppImage` |
+| Windows (x86_64) | `.msi`, `.exe` |
+
 ## Usage
 
 ```sh
