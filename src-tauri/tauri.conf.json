@@ -28,6 +28,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ5OTkzNzgxRkQyMTQ5RDcKUldUWFNTSDlnVGVaU1RCSnNQMHJlT0k0UGhJa2FqckFOMVlnd3Zvb0RkMnI3ekQ1V0lzWnd5akcK",
+      "endpoints": [
+        "https://github.com/smartcrabai/cruise/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

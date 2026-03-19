@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { Update } from "./lib/updater";
+import { checkForUpdate, downloadAndInstall } from "./lib/updater";
 import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, WorkflowEvent } from "./types";
 import {
   approveSession,
@@ -989,6 +991,102 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
   );
 }
 
+// ─── UpdateNotification ──────────────────────────────────────────────────────
+
+type UpdateState = "available" | "downloading" | "error";
+
+function UpdateNotification() {
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [state, setState] = useState<UpdateState>("available");
+  const [progress, setProgress] = useState({ downloaded: 0, total: 0 });
+  const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void checkForUpdate().then((u) => {
+        if (u) setUpdate(u);
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (!update) return null;
+
+  async function handleInstall() {
+    if (!update) return;
+    setState("downloading");
+    setProgress({ downloaded: 0, total: 0 });
+    try {
+      await downloadAndInstall(update, (chunk, contentLength) => {
+        if (contentLength !== undefined) {
+          setProgress({ downloaded: 0, total: contentLength });
+        } else {
+          setProgress((prev) => ({
+            ...prev,
+            downloaded: prev.downloaded + chunk,
+          }));
+        }
+      });
+    } catch (e) {
+      setState("error");
+      setErrorMsg(String(e));
+    }
+  }
+
+  const pct = progress.total > 0 ? Math.round((progress.downloaded / progress.total) * 100) : 0;
+
+  return (
+    <div className="fixed top-4 right-4 z-50 w-80 bg-gray-900 border border-gray-700 rounded-lg shadow-xl p-4 space-y-3">
+      {state === "available" && (
+        <>
+          <div className="text-sm text-gray-200 font-medium">
+            Update available: v{update.version}
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => void handleInstall()}
+              className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+            >
+              Update Now
+            </button>
+            <button
+              onClick={() => setUpdate(null)}
+              className="px-3 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
+            >
+              Later
+            </button>
+          </div>
+        </>
+      )}
+      {state === "downloading" && (
+        <>
+          <div className="text-sm text-gray-200">Downloading update…</div>
+          <div className="w-full bg-gray-800 rounded-full h-2">
+            <div
+              className="bg-blue-500 h-2 rounded-full transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          {progress.total > 0 && (
+            <div className="text-xs text-gray-500">{pct}%</div>
+          )}
+        </>
+      )}
+      {state === "error" && (
+        <>
+          <div className="text-sm text-red-400">Update failed: {errorMsg}</div>
+          <button
+            onClick={() => setUpdate(null)}
+            className="px-3 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
+          >
+            Dismiss
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -998,6 +1096,7 @@ export default function App() {
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
+      <UpdateNotification />
       {/* Sidebar */}
       <aside className="w-72 flex-shrink-0 border-r border-gray-800 flex flex-col">
         <SessionSidebar
