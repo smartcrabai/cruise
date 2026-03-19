@@ -130,7 +130,9 @@ fn new_session_manager() -> std::result::Result<SessionManager, String> {
 #[tauri::command]
 pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, String> {
     let expanded = if path.starts_with('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = home::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         format!("{}{}", home, &path[1..])
     } else {
         path

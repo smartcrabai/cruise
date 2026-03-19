@@ -1146,6 +1146,7 @@ steps:
         assert!(result.is_ok(), "step env override did not work: {result:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_env_variable_resolution() {
         let yaml = r#"
@@ -1172,6 +1173,7 @@ steps:
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prev_success_true_propagation() {
         let yaml = r#"
@@ -1189,6 +1191,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prev_success_false_after_failure() {
         let yaml = r#"
@@ -1223,6 +1226,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prev_stderr_propagation() {
         let yaml = r#"
@@ -1259,6 +1263,7 @@ steps:
         assert!(result.is_ok(), "next field should skip step2: {result:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_env_prev_success_variable() {
         let yaml = r#"
@@ -1278,6 +1283,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prompt_output_as_prev_output() {
         let yaml = r#"
@@ -1295,6 +1301,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prev_output_accessible_in_subsequent_steps() {
         let yaml = r#"
@@ -1312,6 +1319,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_command_list_partial_failure() {
         let yaml = r#"
@@ -1351,6 +1359,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_skipped_step_preserves_prev_vars() {
         let yaml = r#"
@@ -1371,6 +1380,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_prompt_to_command_chain() {
         let yaml = r#"
@@ -1426,6 +1436,7 @@ steps:
         assert_eq!(called_steps, vec!["step1", "step2"]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_prompt_step_stdout_still_captured_when_stderr_present() {
         // Given: an LLM command that writes specific content to stdout and noise to stderr
@@ -1482,6 +1493,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_fail_if_no_file_changes_succeeds_when_files_changed() {
         // Given: a step with fail-if-no-file-changes: true whose command DOES create a file
@@ -1523,6 +1535,7 @@ steps:
         assert_eq!(result.run, 2, "both steps should run");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_fail_if_no_file_changes_with_if_file_changed_jumps_on_change() {
         // Given: a step with BOTH fail-if-no-file-changes: true AND if.file-changed,
@@ -1598,6 +1611,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_no_file_changes_fail_ok_when_files_changed() {
         // Given: a step with if.no-file-changes.fail: true whose command DOES create a file
@@ -1621,6 +1635,7 @@ steps:
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_no_file_changes_retry_reruns_step_when_no_changes() {
         // Given: a step with if.no-file-changes.retry: true and a counter file
@@ -1688,6 +1703,7 @@ steps:
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_no_file_changes_retry_not_triggered_when_files_changed() {
         // Given: a step with if.no-file-changes.retry: true that DOES create a file
@@ -1715,6 +1731,7 @@ steps:
         assert_eq!(result.run, 2, "both steps should run (no extra retry)");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_file_changed_and_no_file_changes_retry_combo() {
         // Given: a step with BOTH if.file-changed (jump) and if.no-file-changes.retry,
@@ -1750,6 +1767,7 @@ steps:
         assert_eq!(r.run, 3, "implement + loop_back + done should all run");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_no_file_changes_snapshot_per_attempt() {
         // Given: a step with if.no-file-changes.retry: true
@@ -1791,6 +1809,7 @@ steps:
         assert_eq!(r.run, 3, "implement (×2 attempts) + done = 3 executions");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_if_file_changed_and_no_file_changes_retry_combo_unchanged() {
         // Given: a step with BOTH if.file-changed (jump) and if.no-file-changes.retry,

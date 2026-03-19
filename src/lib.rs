@@ -16,6 +16,7 @@ pub mod worktree;
 // Display utilities and input handling, available to library consumers.
 pub mod display;
 pub mod multiline_input;
+pub(crate) mod platform;
 mod spinner;
 
 #[cfg(test)]

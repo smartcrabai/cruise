@@ -6,47 +6,6 @@ name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
 version = "0.1.16"
 
-[dependencies]
-anyhow = "1.0.102"
-clap = { version = "4.5.60", features = ["derive"] }
-console = "0.16.2"
-crossterm = "0.29"
-indexmap = { version = "2.13.0", features = ["serde"] }
-inquire = "0.9"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9.34"
-sha2 = "0.10.9"
-thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = [
-  "rt",
-  "macros",
-  "process",
-  "io-util",
-  "time",
-  "signal",
-] }
-unicode-width = "0.2"
-walkdir = "2.5.0"
-
-[profile.release]
-codegen-units = 1
-lto = true
-strip = true
-
-[profile.dist]
-inherits = "release"
-
-[dev-dependencies]
-tempfile = "=3.27.0"
-
-[lints.clippy]
-allow_attributes = "deny"
-dbg_macro = "deny"
-expect_used = "deny"
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-
 [workspace]
 default-members = ["."]
 members = [".", "src-tauri"]
@@ -65,7 +24,7 @@ ci = "github"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # The installers to generate for each app
-installers = ["shell", "homebrew"]
+installers = ["shell", "homebrew", "powershell"]
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # A GitHub repo to push Homebrew formulas to
@@ -81,3 +40,45 @@ targets = [
 ]
 # Whether to install an updater program
 install-updater = false
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.5.60", features = ["derive"] }
+console = "0.16.2"
+crossterm = "0.29"
+home = "0.5"
+indexmap = { version = "2.13.0", features = ["serde"] }
+inquire = "0.9"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tokio = { version = "1.49.0", features = [
+  "rt",
+  "macros",
+  "process",
+  "io-util",
+  "time",
+  "signal",
+] }
+unicode-width = "0.2"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
+[profile.dist]
+inherits = "release"
+
+[lints.clippy]
+allow_attributes = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"

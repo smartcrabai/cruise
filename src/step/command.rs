@@ -74,13 +74,14 @@ pub async fn run_command<S: std::hash::BuildHasher>(
     }
 }
 
-/// Run `sh -c cmd`, streaming stdout and capturing stderr.
+/// Run the platform shell with `cmd`, streaming stdout and capturing stderr.
 async fn execute_command<S: std::hash::BuildHasher>(
     cmd: &str,
     env: &HashMap<String, String, S>,
 ) -> Result<CommandResult> {
-    let output = Command::new("sh")
-        .arg("-c")
+    let (shell, flag) = crate::platform::shell_command();
+    let output = Command::new(shell)
+        .arg(flag)
         .arg(cmd)
         .envs(env)
         .stdout(std::process::Stdio::inherit())
@@ -205,6 +206,7 @@ mod tests {
         assert!(result.success);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_captures_stderr() {
         let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new())
@@ -214,6 +216,7 @@ mod tests {
         assert!(result.stderr.contains("error msg"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_with_env() {
         let mut env = HashMap::new();
@@ -225,6 +228,7 @@ mod tests {
         assert!(result.success);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_commands_partial_failure_stderr() {
         // Second command fails with a message written to stderr.
@@ -239,6 +243,7 @@ mod tests {
         assert!(result.stderr.contains("err_msg"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_multiple_env_vars() {
         let mut env = HashMap::new();
@@ -250,6 +255,7 @@ mod tests {
         assert!(result.success);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_env_in_echo() {
         let mut env = HashMap::new();
