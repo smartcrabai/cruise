@@ -4,7 +4,7 @@ edition = "2024"
 license = "MIT"
 name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
-version = "0.1.16"
+version = "0.1.17"
 
 [workspace]
 default-members = ["."]
