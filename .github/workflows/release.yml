@@ -233,6 +233,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -273,6 +275,8 @@ jobs:
         run: |
           mkdir -p tauri-artifacts
           find target/release/bundle/dmg -name "*.dmg" -exec cp {} tauri-artifacts/ \;
+          find target/release/bundle/macos -name "*.app.tar.gz" -exec cp {} tauri-artifacts/ \;
+          find target/release/bundle/macos -name "*.app.tar.gz.sig" -exec cp {} tauri-artifacts/ \;
 
       - name: Collect artifacts (Linux)
         if: matrix.platform == 'linux-x86_64'
@@ -281,6 +285,7 @@ jobs:
           mkdir -p tauri-artifacts
           find target/release/bundle/deb -name "*.deb" -exec cp {} tauri-artifacts/ \;
           find target/release/bundle/appimage -name "*.AppImage" -exec cp {} tauri-artifacts/ \;
+          find target/release/bundle/appimage -name "*.AppImage.sig" -exec cp {} tauri-artifacts/ \;
 
       - name: Collect artifacts (Windows)
         if: matrix.platform == 'windows-x86_64'
@@ -288,13 +293,76 @@ jobs:
         run: |
           mkdir -p tauri-artifacts
           find target/release/bundle/msi -name "*.msi" -exec cp {} tauri-artifacts/ \;
+          find target/release/bundle/msi -name "*.msi.sig" -exec cp {} tauri-artifacts/ \;
           find target/release/bundle/nsis -name "*.exe" -exec cp {} tauri-artifacts/ \;
+          find target/release/bundle/nsis -name "*.exe.sig" -exec cp {} tauri-artifacts/ \;
 
       - name: Upload Tauri artifacts
         uses: actions/upload-artifact@v6
         with:
           name: artifacts-tauri-${{ matrix.platform }}
           path: tauri-artifacts/
+
+  # Generate latest.json for the Tauri updater
+  generate-updater-json:
+    needs:
+      - plan
+      - build-tauri
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.build-tauri.result == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download Tauri artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-tauri-*
+          path: tauri-artifacts/
+          merge-multiple: true
+
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPO="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+
+          # Read signatures and find updater bundle filenames (v2 mode)
+          # macOS: .app.tar.gz, Linux: .AppImage (re-used), Windows: .exe (re-used)
+          read_sig() { for f in "$@"; do [ -f "$f" ] && tr -d '\n' < "$f" && return; done; }
+          find_file() { for f in "$@"; do [ -f "$f" ] && basename "$f" && return; done; }
+
+          MAC_SIG=$(read_sig tauri-artifacts/*.app.tar.gz.sig)
+          LINUX_SIG=$(read_sig tauri-artifacts/*.AppImage.sig)
+          WIN_SIG=$(read_sig tauri-artifacts/*-setup.exe.sig)
+          MAC_FILE=$(find_file tauri-artifacts/*.app.tar.gz)
+          LINUX_FILE=$(find_file tauri-artifacts/*.AppImage)
+          WIN_FILE=$(find_file tauri-artifacts/*-setup.exe)
+
+          # Build latest.json with jq for proper escaping
+          PLATFORMS='{}'
+          if [ -n "$MAC_SIG" ] && [ -n "$MAC_FILE" ]; then
+            PLATFORMS=$(echo "$PLATFORMS" | jq --arg sig "$MAC_SIG" --arg url "$REPO/$MAC_FILE" \
+              '. + {"darwin-aarch64": {signature: $sig, url: $url}}')
+          fi
+          if [ -n "$LINUX_SIG" ] && [ -n "$LINUX_FILE" ]; then
+            PLATFORMS=$(echo "$PLATFORMS" | jq --arg sig "$LINUX_SIG" --arg url "$REPO/$LINUX_FILE" \
+              '. + {"linux-x86_64": {signature: $sig, url: $url}}')
+          fi
+          if [ -n "$WIN_SIG" ] && [ -n "$WIN_FILE" ]; then
+            PLATFORMS=$(echo "$PLATFORMS" | jq --arg sig "$WIN_SIG" --arg url "$REPO/$WIN_FILE" \
+              '. + {"windows-x86_64": {signature: $sig, url: $url}}')
+          fi
+
+          mkdir -p updater-output
+          jq -n --arg ver "$VERSION" --arg date "$PUB_DATE" --argjson platforms "$PLATFORMS" \
+            '{version: $ver, pub_date: $date, platforms: $platforms}' > updater-output/latest.json
+
+          cat updater-output/latest.json
+
+      - name: Upload latest.json
+        uses: actions/upload-artifact@v6
+        with:
+          name: artifacts-updater-json
+          path: updater-output/latest.json
 
   # Determines if we should publish/announce
   host:
@@ -303,8 +371,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-tauri
+      - generate-updater-json
     # Only run if we're "publishing", and only if plan, local, global and tauri didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-tauri.result == 'skipped' || needs.build-tauri.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-tauri.result == 'skipped' || needs.build-tauri.result == 'success') && (needs.generate-updater-json.result == 'skipped' || needs.generate-updater-json.result == 'success') }}
     permissions:
       contents: write
     env:
