@@ -184,6 +184,10 @@ fn resolve_if_next(
 }
 
 /// Execute workflow steps starting from `start_step`.
+///
+/// # Errors
+///
+/// Returns an error if a step fails fatally or an I/O operation fails.
 pub async fn execute_steps(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
@@ -411,9 +415,15 @@ async fn execute_step_kind(
 ) -> Result<Option<String>> {
     match kind {
         StepKind::Prompt(step) => {
-            let output =
-                run_prompt_step(vars, ctx.compiled, step, ctx.rate_limit_retries, merged_env)
-                    .await?;
+            let output = run_prompt_step(
+                vars,
+                ctx.compiled,
+                step,
+                ctx.rate_limit_retries,
+                merged_env,
+                ctx.cancel_token,
+            )
+            .await?;
             let elapsed = step_start.elapsed();
             if !output.is_empty() {
                 eprint!("{output}");
@@ -500,7 +510,8 @@ pub(crate) fn format_duration(d: std::time::Duration) -> String {
 }
 
 /// Resolve the `{model}` placeholder in a command, or strip `--model {model}` if no model.
-pub(crate) fn resolve_command_with_model(
+#[must_use]
+pub fn resolve_command_with_model(
     command: &[String],
     effective_model: Option<&str>,
 ) -> Vec<String> {
@@ -542,6 +553,7 @@ pub(crate) async fn run_prompt_step(
     step: &PromptStep,
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<String> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -586,6 +598,7 @@ pub(crate) async fn run_prompt_step(
             rate_limit_retries,
             env,
             Some(&on_retry),
+            cancel_token,
         )
         .await
     };
@@ -686,7 +699,7 @@ fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
 }
 
 /// Print a dry-run summary of the workflow flow.
-pub(crate) fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
+pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
 
@@ -1889,19 +1902,19 @@ steps:
         );
     }
 
-    // --- config_reloader テスト ---
+    // --- config_reloader tests ---
 
     #[tokio::test]
     async fn test_execute_steps_config_reloader_not_triggered_when_no_change() {
-        // Given: reloader が None を返す（変更なし）
+        // Given: reloader returns None (no change)
         let yaml = "command: [echo]\nsteps:\n  s1:\n    command: echo hi\n";
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_clone = call_count.clone();
         let reloader = move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
             count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(None) // 変更なし
+            Ok(None) // no change
         };
-        // When: reloader が常に None を返して実行
+        // When: running with reloader that always returns None
         let result = run_config_inner(
             yaml,
             "",
@@ -1914,7 +1927,7 @@ steps:
             &NoOpOptionHandler,
         )
         .await;
-        // Then: 正常完了し、reloader が呼ばれている
+        // Then: completes successfully and reloader has been called
         assert!(result.is_ok());
         assert!(
             call_count.load(std::sync::atomic::Ordering::SeqCst) >= 1,
@@ -1924,7 +1937,7 @@ steps:
 
     #[tokio::test]
     async fn test_execute_steps_config_reloader_updates_compiled_when_changed() {
-        // Given: 最初は step1 だけの config、reloader が step1+step2 を返す
+        // Given: initial config with only step1, reloader returns step1+step2
         let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
         let updated_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo updated\n  step2:\n    command: echo extra\n";
         let updated_config = make_config(updated_yaml);
@@ -1934,11 +1947,11 @@ steps:
         let reloader = {
             let updated = updated.clone();
             move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
-                // 初回だけ更新済み config を返す
+                // return the updated config only on the first call
                 Ok(updated.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
             }
         };
-        // When: reloader が更新済み config を返す
+        // When: reloader returns the updated config
         let result = run_config_inner(
             original_yaml,
             "",
@@ -1951,15 +1964,15 @@ steps:
             &NoOpOptionHandler,
         )
         .await;
-        // Then: 正常完了する（更新後の config でステップが実行される）
+        // Then: completes successfully (steps executed with the updated config)
         assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     }
 
     #[tokio::test]
     async fn test_execute_steps_config_reloader_keeps_old_config_when_step_missing() {
-        // Given: 現在実行中のステップが新しい config に存在しない
+        // Given: the currently executing step does not exist in the new config
         let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
-        // 新 config には step1 が存在しない
+        // the new config does not contain step1
         let new_yaml = "command: [echo]\nsteps:\n  completely_different:\n    command: echo new\n";
         let new_config = make_config(new_yaml);
         let new_compiled = crate::workflow::compile(new_config).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1970,7 +1983,7 @@ steps:
                 Ok(new.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
             }
         };
-        // When: reloader が現在のステップを含まない config を返す
+        // When: reloader returns a config that does not contain the current step
         let result = run_config_inner(
             original_yaml,
             "",
@@ -1983,7 +1996,7 @@ steps:
             &NoOpOptionHandler,
         )
         .await;
-        // Then: 旧 config を維持して正常完了する（step1 が実行される）
+        // Then: retains the old config and completes successfully (step1 is executed)
         assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
         assert_eq!(
             result.unwrap_or_else(|e| panic!("{e:?}")).run,

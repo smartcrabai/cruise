@@ -17,6 +17,8 @@ mod session;
 mod spinner;
 mod step;
 #[cfg(test)]
+mod test_binary_support;
+#[cfg(test)]
 mod test_support;
 mod variable;
 mod workflow;

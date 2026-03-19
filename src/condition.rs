@@ -3,6 +3,10 @@ use crate::error::Result;
 use crate::variable::VariableStore;
 
 /// Returns true if the step should be skipped.
+///
+/// # Errors
+///
+/// Returns an error if the skip condition references an undefined variable.
 pub fn should_skip(skip: Option<&SkipCondition>, vars: &VariableStore) -> Result<bool> {
     match skip {
         None => Ok(false),

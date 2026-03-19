@@ -28,6 +28,11 @@ fn default_branch_name(session_id: &str, input: &str) -> String {
 ///
 /// If the worktree directory already exists (e.g. resuming a session),
 /// it is reused. `existing_branch` overrides the branch name when reusing.
+///
+/// # Errors
+///
+/// Returns an error if `base_dir` is not a git repository, the git worktree
+/// command fails, or file I/O fails while copying worktree includes.
 pub fn setup_session_worktree(
     base_dir: &Path,
     session_id: &str,
@@ -86,6 +91,13 @@ pub fn setup_session_worktree(
 }
 
 /// Remove the worktree and delete its branch.
+///
+/// # Errors
+///
+/// Returns an error only if the `git` process itself fails to spawn (e.g. git is not found).
+/// If the git command exits with a non-zero status (e.g. the worktree or branch no longer
+/// exists), the failure is logged as a warning and `Ok(())` is returned — cleanup is
+/// best-effort and partial failures do not propagate.
 pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
     let output = Command::new("git")
         .args(["worktree", "remove", "--force"])

@@ -13,7 +13,7 @@ use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
 /// Name of the variable that holds the plan file path.
-pub(crate) const PLAN_VAR: &str = "plan";
+pub const PLAN_VAR: &str = "plan";
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
@@ -23,31 +23,12 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
     eprintln!("{}", style(source.display_string()).dim());
 
-    // Resolve input: CLI arg, or read from stdin if piped.
     // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
     // or backward-compat path where cli.rs already consumed stdin and placed
     // the content in args.input).  This prevents inquire from attempting to
     // read interactive input from a non-TTY file descriptor.
     let noninteractive = !std::io::stdin().is_terminal();
-    let stdin_input = if args.input.is_none() && noninteractive {
-        use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin()
-            .read_to_string(&mut s)
-            .map_err(CruiseError::IoError)?;
-        Some(s)
-    } else {
-        None
-    };
-    let input = resolve_input(args.input, stdin_input, || {
-        if noninteractive {
-            return Err(CruiseError::Other(
-                "no input provided: stdin is not a terminal and no --input flag was given"
-                    .to_string(),
-            ));
-        }
-        prompt_for_plan_input()
-    })?;
+    let input = read_plan_input(args.input, noninteractive)?;
 
     if args.dry_run {
         eprintln!(
@@ -123,6 +104,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             args.rate_limit_retries,
             &env,
             Some(&on_retry),
+            None,
         )
         .await
     };
@@ -140,6 +122,29 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         noninteractive,
     )
     .await
+}
+
+/// Read task input from CLI arg, piped stdin, or interactive prompt.
+fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String> {
+    let stdin_input = if input.is_none() && noninteractive {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(CruiseError::IoError)?;
+        Some(s)
+    } else {
+        None
+    };
+    resolve_input(input, stdin_input, || {
+        if noninteractive {
+            return Err(CruiseError::Other(
+                "no input provided: stdin is not a terminal and no --input flag was given"
+                    .to_string(),
+            ));
+        }
+        prompt_for_plan_input()
+    })
 }
 
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
@@ -253,8 +258,30 @@ async fn run_approve_loop(
     }
 }
 
+/// Generate a plan for the given session (writes `plan.md`).
+///
+/// Used by the Tauri GUI backend to run the plan-generation step without
+/// the interactive approve loop.  The caller is responsible for creating
+/// the session and wiring up the `VariableStore` (including setting `plan`
+/// to the session's `plan_path`).
+#[expect(dead_code, reason = "Used by Tauri GUI backend")]
+pub async fn generate_plan(
+    config: &crate::config::WorkflowConfig,
+    vars: &mut crate::variable::VariableStore,
+    rate_limit_retries: usize,
+) -> crate::error::Result<()> {
+    run_plan_prompt(
+        config,
+        vars,
+        rate_limit_retries,
+        PLAN_PROMPT_TEMPLATE,
+        "[plan] creating plan...",
+    )
+    .await
+}
+
 /// Replan an existing session using the built-in fix-plan prompt.
-pub(crate) async fn replan_session(
+pub async fn replan_session(
     manager: &SessionManager,
     session: &SessionState,
     feedback: String,
@@ -318,7 +345,7 @@ async fn run_plan_prompt(
     let env = std::collections::HashMap::new();
     eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
     let compiled = crate::workflow::compile(config.clone())?;
-    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env).await?;
+    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env, None).await?;
     Ok(())
 }
 
@@ -474,12 +501,12 @@ mod tests {
 
     #[test]
     fn test_resolve_input_multiline_from_stdin_preserves_internal_newlines() {
-        // Given: 複数行を含む stdin 入力（pipe 等）
+        // Given: multi-line stdin input (piped, etc.)
         let stdin = "line1\nline2\nline3\n".to_string();
         let result = resolve_input(None, Some(stdin), || {
             panic!("interactive prompt should not run")
         });
-        // Then: 先頭・末尾の空白のみ trim され、内部改行は保持される
+        // Then: only leading/trailing whitespace is trimmed, internal newlines are preserved
         assert_eq!(
             result.unwrap_or_else(|e| panic!("{e:?}")),
             "line1\nline2\nline3"
@@ -488,12 +515,12 @@ mod tests {
 
     #[test]
     fn test_resolve_input_multiline_trims_only_leading_trailing_whitespace() {
-        // Given: 先頭と末尾に余分な空白を持つ複数行 stdin 入力
+        // Given: multi-line stdin input with extra whitespace at start and end
         let stdin = "  line1\nline2  \n".to_string();
         let result = resolve_input(None, Some(stdin), || {
             panic!("interactive prompt should not run")
         });
-        // Then: 先頭・末尾の空白のみ除去され、中間の改行は保持される
+        // Then: only leading/trailing whitespace is removed, internal newlines are preserved
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
     }
 }

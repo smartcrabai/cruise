@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_run_subcommand_all_flag() {
-        // Given: --all フラグのみ指定
+        // Given: only the --all flag is specified
         let cli = Cli::parse_from(["cruise", "run", "--all"]);
         // When/Then: all=true, session=None
         match cli.command {
@@ -226,9 +226,9 @@ mod tests {
 
     #[test]
     fn test_run_subcommand_all_flag_default_is_false() {
-        // Given: フラグなしで run サブコマンド
+        // Given: run subcommand with no flags
         let cli = Cli::parse_from(["cruise", "run"]);
-        // When/Then: all のデフォルトは false
+        // When/Then: all defaults to false
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert!(!args.all, "--all should default to false");
@@ -239,9 +239,9 @@ mod tests {
 
     #[test]
     fn test_run_subcommand_all_with_dry_run() {
-        // Given: --all --dry-run の組み合わせ
+        // Given: combination of --all and --dry-run
         let cli = Cli::parse_from(["cruise", "run", "--all", "--dry-run"]);
-        // When/Then: 両フラグが有効
+        // When/Then: both flags are active
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert!(args.all);

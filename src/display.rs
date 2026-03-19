@@ -62,6 +62,7 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
 }
 
 /// Truncate `s` to `max` characters (first line only), appending `…` if truncated.
+#[must_use]
 pub fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
     let first_line = s.lines().next().unwrap_or(s);
@@ -154,26 +155,26 @@ mod tests {
 
     #[test]
     fn test_truncate_short_string() {
-        // max より短い文字列はそのまま返る
+        // strings shorter than max are returned as-is
         assert_eq!(truncate("hello", 10), "hello");
     }
 
     #[test]
     fn test_truncate_exact_length() {
-        // ちょうど max の文字列はそのまま返る
+        // strings exactly at max are returned as-is
         assert_eq!(truncate("hello", 5), "hello");
     }
 
     #[test]
     fn test_truncate_long_string() {
-        // max を超えると末尾に `…` が付与される
+        // strings exceeding max get `…` appended at the end
         let result = truncate("hello world", 5);
         assert_eq!(result, "hello…");
     }
 
     #[test]
     fn test_truncate_multiline() {
-        // 複数行の場合は最初の行のみを使用
+        // only the first line is used for multiline input
         let result = truncate("first line\nsecond line", 20);
         assert_eq!(result, "first line");
     }
@@ -182,44 +183,44 @@ mod tests {
 
     #[test]
     fn test_truncate_short_single_line_returns_as_is() {
-        // Given: max より短い単一行
+        // Given: a single line shorter than max
         let result = truncate("hello", 80);
-        // Then: そのまま返る
+        // Then: returned as-is
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn test_truncate_long_single_line_appends_ellipsis() {
-        // Given: max を超える単一行
+        // Given: a single line exceeding max
         let result = truncate("abcde", 3);
-        // Then: 3 文字 + "…" で切り詰められる
+        // Then: truncated to 3 chars + "…"
         assert_eq!(result, "abc…");
     }
 
     #[test]
     fn test_truncate_multiline_returns_first_line_only() {
-        // Given: 複数行入力（セッション input が multiline になった場合を想定）
+        // Given: multiline input (e.g. when session input becomes multiline)
         let result = truncate("line1\nline2\nline3", 80);
-        // Then: 最初の行のみ返る
+        // Then: only the first line is returned
         assert_eq!(result, "line1");
     }
 
     #[test]
     fn test_truncate_multiline_long_first_line_truncated() {
-        // Given: 長い第 1 行 + 短い第 2 行
+        // Given: a long first line + a short second line
         let first = "a".repeat(100);
         let input = format!("{first}\nshort");
         let result = truncate(&input, 10);
-        // Then: 10 文字 + "…" で切り詰められ、"short" は含まれない
+        // Then: truncated to 10 chars + "…", "short" is not included
         assert_eq!(result, format!("{}…", "a".repeat(10)));
         assert!(!result.contains("short"));
     }
 
     #[test]
     fn test_truncate_trims_leading_trailing_whitespace() {
-        // Given: 先頭・末尾に空白のある入力
+        // Given: input with leading and trailing whitespace
         let result = truncate("  hello  ", 80);
-        // Then: trim された文字列が返る
+        // Then: the trimmed string is returned
         assert_eq!(result, "hello");
     }
 }

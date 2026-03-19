@@ -1,0 +1,28 @@
+{
+  "productName": "cruise",
+  "version": "0.1.0",
+  "identifier": "io.github.smartcrabai.cruise",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../ui run dev",
+    "beforeBuildCommand": "pnpm --dir ../ui run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Cruise",
+        "width": 1024,
+        "height": 768
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}
