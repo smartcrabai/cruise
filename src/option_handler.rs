@@ -11,6 +11,10 @@ pub trait OptionHandler: Send + Sync {
     /// Present `choices` to the user and return their selection.
     ///
     /// `plan` is optional context text shown before the selection menu (e.g. plan.md contents).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the user interaction fails or is cancelled.
     fn select_option(&self, choices: &[OptionChoice], plan: Option<&str>) -> Result<OptionResult>;
 }
 
@@ -54,7 +58,15 @@ pub struct FirstChoiceOptionHandler {
 }
 
 #[cfg(test)]
+impl Default for FirstChoiceOptionHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 impl FirstChoiceOptionHandler {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             call_count: std::sync::atomic::AtomicUsize::new(0),

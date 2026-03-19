@@ -14,10 +14,14 @@ pub struct CommandResult {
 
 /// Execute a list of shell commands sequentially.
 /// Stops immediately on the first failure and returns that result.
-pub async fn run_commands(
+///
+/// # Errors
+///
+/// Returns an error if a command fails to spawn or encounters a fatal I/O error.
+pub async fn run_commands<S: std::hash::BuildHasher>(
     cmds: &[String],
     max_retries: usize,
-    env: &HashMap<String, String>,
+    env: &HashMap<String, String, S>,
 ) -> Result<CommandResult> {
     let mut last_result = CommandResult {
         success: true,
@@ -35,10 +39,14 @@ pub async fn run_commands(
 }
 
 /// Execute a shell command with optional rate-limit retry.
-pub async fn run_command(
+///
+/// # Errors
+///
+/// Returns an error if the command fails to spawn or encounters a fatal I/O error.
+pub async fn run_command<S: std::hash::BuildHasher>(
     cmd: &str,
     max_retries: usize,
-    env: &HashMap<String, String>,
+    env: &HashMap<String, String, S>,
 ) -> Result<CommandResult> {
     let mut attempts = 0;
 
@@ -67,7 +75,10 @@ pub async fn run_command(
 }
 
 /// Run `sh -c cmd`, streaming stdout and capturing stderr.
-async fn execute_command(cmd: &str, env: &HashMap<String, String>) -> Result<CommandResult> {
+async fn execute_command<S: std::hash::BuildHasher>(
+    cmd: &str,
+    env: &HashMap<String, String, S>,
+) -> Result<CommandResult> {
     let output = Command::new("sh")
         .arg("-c")
         .arg(cmd)
@@ -90,6 +101,7 @@ async fn execute_command(cmd: &str, env: &HashMap<String, String>) -> Result<Com
 }
 
 /// Return true if `stderr` indicates a rate-limit error.
+#[must_use]
 pub fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("rate limit")
@@ -99,6 +111,7 @@ pub fn is_rate_limited(stderr: &str) -> bool {
 }
 
 /// Exponential backoff: 2s base, 60s cap.
+#[must_use]
 pub fn calculate_backoff(attempt: usize) -> Duration {
     let base_secs = 2u64;
     let max_secs = 60u64;

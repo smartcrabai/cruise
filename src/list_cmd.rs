@@ -202,7 +202,7 @@ fn format_session_date(id: &str) -> String {
     format!("{month}/{day} {hour}:{min}")
 }
 
-/// Running/Suspended 時は " [`step_name`]"、Completed+PR 時は " PR#N" を返す。
+/// Returns " \[`step_name`\]" for Running/Suspended, or " PR#N" for Completed with PR URL.
 fn format_suffix(s: &SessionState) -> String {
     match &s.phase {
         SessionPhase::Running | SessionPhase::Suspended => s
@@ -233,13 +233,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_planned_has_run_and_replan() {
-        // Given: Planned フェーズ
+        // Given: Planned phase
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Run" と "Replan" が含まれ、"Delete" と "Back" も含まれる
+        // Then: contains "Run" and "Replan"; also contains "Delete" and "Back"
         assert!(
             actions.contains(&"Run"),
             "Planned should have Run: {actions:?}"
@@ -260,13 +260,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_planned_has_no_resume() {
-        // Given: Planned フェーズ
+        // Given: Planned phase
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Resume" は含まれない（未着手なので Resume ではなく Run）
+        // Then: "Resume" is absent (Run is used for a fresh start, not Resume)
         assert!(
             !actions.contains(&"Resume"),
             "Planned should NOT have Resume: {actions:?}"
@@ -275,13 +275,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_running_has_resume_not_replan() {
-        // Given: Running フェーズ
+        // Given: Running phase
         let session = make_session("20260306143000", "task", SessionPhase::Running);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Resume" は含まれるが "Replan" は含まれない
+        // Then: "Resume" is present but "Replan" is absent
         assert!(
             actions.contains(&"Resume"),
             "Running should have Resume: {actions:?}"
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_session_actions_failed_has_run_not_replan() {
-        // Given: Failed フェーズ
+        // Given: Failed phase
         let session = make_session(
             "20260306143000",
             "task",
@@ -308,7 +308,7 @@ mod tests {
         // When
         let actions = session_actions(&session);
 
-        // Then: "Run" は含まれるが "Replan" は含まれない
+        // Then: "Run" is present but "Replan" is absent
         assert!(
             actions.contains(&"Run"),
             "Failed should have Run: {actions:?}"
@@ -321,13 +321,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_completed_has_no_run_no_replan_has_reset() {
-        // Given: Completed フェーズ、pr_url なし
+        // Given: Completed phase, no pr_url
         let session = make_session("20260306143000", "task", SessionPhase::Completed);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Run" も "Resume" も "Replan" も含まれないが "Reset to Planned" は含まれる
+        // Then: "Run", "Resume", and "Replan" are absent; "Reset to Planned" is present
         assert!(
             !actions.contains(&"Run"),
             "Completed should NOT have Run: {actions:?}"
@@ -356,13 +356,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_planned_run_before_replan() {
-        // Given: Planned フェーズ
+        // Given: Planned phase
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Run" は "Replan" より前に位置する（主要アクションが先頭）
+        // Then: "Run" appears before "Replan" (primary action first)
         let run_pos = actions
             .iter()
             .position(|&a| a == "Run")
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_session_actions_delete_and_back_always_at_end() {
-        // Given: すべてのフェーズで Delete と Back が末尾 2 つに並ぶ
+        // Given: Delete and Back are the last two entries across all phases
         let sessions = [
             make_session("20260306143000", "task", SessionPhase::AwaitingApproval),
             make_session("20260306143000", "task", SessionPhase::Planned),
@@ -398,7 +398,7 @@ mod tests {
             let actions = session_actions(session);
             let len = actions.len();
 
-            // Then: 末尾が Back、その前が Delete
+            // Then: Back is last, Delete is second-to-last
             assert!(
                 len >= 2,
                 "actions must have at least 2 items for {phase:?}: {actions:?}"
@@ -433,31 +433,31 @@ mod tests {
 
     #[test]
     fn test_format_session_date_standard_id_returns_mm_dd_hh_mm() {
-        // Given: 標準的な 14 桁のセッション ID
+        // Given: standard 14-digit session ID
         let id = "20260306143000";
 
         // When
         let result = format_session_date(id);
 
-        // Then: "MM/DD HH:MM" 形式に変換される
+        // Then: converted to "MM/DD HH:MM" format
         assert_eq!(result, "03/06 14:30");
     }
 
     #[test]
     fn test_format_session_date_twelve_digit_id_is_accepted() {
-        // Given: 12 桁（秒なし）の ID
+        // Given: 12-digit (no seconds) ID
         let id = "202603061430";
 
         // When
         let result = format_session_date(id);
 
-        // Then: "03/06 14:30" として変換される
+        // Then: converted to "03/06 14:30"
         assert_eq!(result, "03/06 14:30");
     }
 
     #[test]
     fn test_format_session_date_midnight() {
-        // Given: 00:00 のセッション
+        // Given: session at midnight (00:00)
         let id = "20260101000000";
 
         // When
@@ -473,69 +473,69 @@ mod tests {
 
     #[test]
     fn test_format_suffix_running_with_step_returns_step_bracket() {
-        // Given: Running フェーズ、current_step あり
+        // Given: Running phase, current_step present
         let mut s = make_session("20260306143000", "add feature", SessionPhase::Running);
         s.current_step = Some("implement".to_string());
 
         // When
         let result = format_suffix(&s);
 
-        // Then: "[implement]" 形式
+        // Then: "[implement]" format
         assert_eq!(result, " [implement]");
     }
 
     #[test]
     fn test_format_suffix_running_without_step_returns_empty() {
-        // Given: Running フェーズ、current_step なし
+        // Given: Running phase, no current_step
         let s = make_session("20260306143000", "add feature", SessionPhase::Running);
 
         // When
         let result = format_suffix(&s);
 
-        // Then: 空文字
+        // Then: empty string
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_format_suffix_completed_with_pr_url_returns_pr_number() {
-        // Given: Completed フェーズ、PR URL あり
+        // Given: Completed phase, PR URL present
         let mut s = make_session("20260306143000", "add feature", SessionPhase::Completed);
         s.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
 
         // When
         let result = format_suffix(&s);
 
-        // Then: "PR#42" 形式
+        // Then: "PR#42" format
         assert_eq!(result, " PR#42");
     }
 
     #[test]
     fn test_format_suffix_completed_without_pr_url_returns_empty() {
-        // Given: Completed フェーズ、PR URL なし
+        // Given: Completed phase, no PR URL
         let s = make_session("20260306143000", "add feature", SessionPhase::Completed);
 
         // When
         let result = format_suffix(&s);
 
-        // Then: 空文字
+        // Then: empty string
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_format_suffix_planned_returns_empty() {
-        // Given: Planned フェーズ
+        // Given: Planned phase
         let s = make_session("20260306143000", "add feature", SessionPhase::Planned);
 
         // When
         let result = format_suffix(&s);
 
-        // Then: 空文字
+        // Then: empty string
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_format_suffix_failed_returns_empty() {
-        // Given: Failed フェーズ
+        // Given: Failed phase
         let s = make_session(
             "20260306143000",
             "add feature",
@@ -545,22 +545,22 @@ mod tests {
         // When
         let result = format_suffix(&s);
 
-        // Then: 空文字
+        // Then: empty string
         assert_eq!(result, "");
     }
 
     // -----------------------------------------------------------------------
-    // format_session_label (新フォーマットへの期待値)
+    // format_session_label (expected values for new format)
     // -----------------------------------------------------------------------
 
-    /// ANSI エスケープを除去してラベル内容を検証するヘルパー。
+    /// Helper to strip ANSI escapes and verify label content.
     fn strip(s: &str) -> String {
         console::strip_ansi_codes(s).to_string()
     }
 
     #[test]
     fn test_format_session_label_planned_contains_icon_date_phase_input() {
-        // Given: Planned セッション
+        // Given: Planned session
         let s = make_session(
             "20260306143000",
             "add hello world feature",
@@ -570,7 +570,7 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: アイコン・日時・フェーズ・input を含む
+        // Then: contains icon, date, phase, and input
         assert!(label.contains('●'), "should contain ● icon: {label}");
         assert!(
             label.contains("03/06 14:30"),
@@ -585,14 +585,14 @@ mod tests {
 
     #[test]
     fn test_format_session_label_running_contains_running_icon_and_step() {
-        // Given: Running フェーズ、current_step あり
+        // Given: Running phase, current_step present
         let mut s = make_session("20260307150000", "implement auth", SessionPhase::Running);
         s.current_step = Some("test".to_string());
 
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: ▶ アイコンとステップ情報を含む
+        // Then: contains ▶ icon and step info
         assert!(label.contains('▶'), "should contain ▶ icon: {label}");
         assert!(label.contains("Running"), "should contain Running: {label}");
         assert!(label.contains("[test]"), "should contain step: {label}");
@@ -600,14 +600,14 @@ mod tests {
 
     #[test]
     fn test_format_session_label_completed_with_pr_contains_checkmark_and_pr() {
-        // Given: Completed フェーズ、PR URL あり
+        // Given: Completed phase, PR URL present
         let mut s = make_session("20260307090000", "refactor db", SessionPhase::Completed);
         s.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
 
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: ✓ アイコンと PR 番号を含む
+        // Then: contains ✓ icon and PR number
         assert!(label.contains('✓'), "should contain ✓ icon: {label}");
         assert!(
             label.contains("Completed"),
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn test_format_session_label_failed_contains_cross_icon() {
-        // Given: Failed フェーズ
+        // Given: Failed phase
         let s = make_session(
             "20260307103000",
             "fix login bug",
@@ -628,21 +628,21 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: ✗ アイコンを含む
+        // Then: contains ✗ icon
         assert!(label.contains('✗'), "should contain ✗ icon: {label}");
         assert!(label.contains("Failed"), "should contain Failed: {label}");
     }
 
     #[test]
     fn test_format_session_label_long_input_is_truncated() {
-        // Given: 非常に長い input
+        // Given: very long input
         let long_input = "a".repeat(200);
         let s = make_session("20260306143000", &long_input, SessionPhase::Planned);
 
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: 省略記号 "…" が含まれ、ラベル全体は 200 文字以下に収まる
+        // Then: contains ellipsis "…" and total label length is 200 chars or less
         assert!(
             label.contains('…'),
             "long input should be truncated: {label}"
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_session_actions_suspended_exact() {
-        // Given / When / Then: Suspended のアクションリストが期待どおり
+        // Given / When / Then: Suspended action list matches expectations
         assert_eq!(
             session_actions(&make_session("test", "test", SessionPhase::Suspended)),
             vec!["Resume", "Reset to Planned", "Delete", "Back"]
@@ -672,26 +672,26 @@ mod tests {
 
     #[test]
     fn test_format_suffix_suspended_with_step_returns_step_bracket() {
-        // Given: Suspended フェーズ、current_step あり
+        // Given: Suspended phase, current_step present
         let mut s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
         s.current_step = Some("implement".to_string());
 
         // When
         let result = format_suffix(&s);
 
-        // Then: "[implement]" 形式
+        // Then: "[implement]" format
         assert_eq!(result, " [implement]");
     }
 
     #[test]
     fn test_format_suffix_suspended_without_step_returns_empty() {
-        // Given: Suspended フェーズ、current_step なし
+        // Given: Suspended phase, no current_step
         let s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
 
         // When
         let result = format_suffix(&s);
 
-        // Then: 空文字
+        // Then: empty string
         assert_eq!(result, "");
     }
 
@@ -701,14 +701,14 @@ mod tests {
 
     #[test]
     fn test_format_session_label_suspended_contains_phase_and_step() {
-        // Given: Suspended フェーズ、current_step あり
+        // Given: Suspended phase, current_step present
         let mut s = make_session("20260310150000", "fix auth", SessionPhase::Suspended);
         s.current_step = Some("test".to_string());
 
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: "Suspended" フェーズ表示と中断したステップ名を含む
+        // Then: contains "Suspended" phase and the suspended step name
         assert!(
             label.contains("Suspended"),
             "should contain Suspended: {label}"
@@ -717,12 +717,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // session_actions — Delete/Back 末尾確認（Suspended を含む全フェーズ）
+    // session_actions — Delete/Back tail check (all phases including Suspended)
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_session_actions_delete_and_back_always_at_end_including_suspended() {
-        // Given: Suspended を含む全フェーズ
+        // Given: all phases including Suspended
         let phases = [
             SessionPhase::Planned,
             SessionPhase::Running,
@@ -736,7 +736,7 @@ mod tests {
             let actions = session_actions(&make_session("test", "test", phase.clone()));
             let len = actions.len();
 
-            // Then: 末尾が Back、その前が Delete
+            // Then: Back is last, Delete is second-to-last
             assert!(
                 len >= 2,
                 "actions must have at least 2 items for {phase:?}: {actions:?}"
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_session_actions_completed_has_reset_to_planned() {
-        // Given: Completed + pr_url なし
+        // Given: Completed + no pr_url
         let session = make_session("20260306143000", "task", SessionPhase::Completed);
         assert_eq!(
             session_actions(&session),
@@ -801,14 +801,14 @@ mod tests {
 
     #[test]
     fn test_session_actions_completed_with_pr_url_exact_order() {
-        // Given: Completed + pr_url あり
+        // Given: Completed + pr_url present
         let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
         session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
 
         // When
         let actions = session_actions(&session);
 
-        // Then: 順序は ["Open PR", "Reset to Planned", "Delete", "Back"]
+        // Then: order is ["Open PR", "Reset to Planned", "Delete", "Back"]
         assert_eq!(
             actions,
             vec!["Open PR", "Reset to Planned", "Delete", "Back"]
@@ -830,7 +830,7 @@ mod tests {
         fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
         let log_path = tmp.path().join("gh.log");
 
-        // fake gh: 引数をログに記録して exit 0
+        // fake gh: records args to log file then exits 0
         let script_path = bin_dir.join("gh");
         fs::write(
             &script_path,
@@ -846,14 +846,14 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
 
         let url = "https://github.com/owner/repo/pull/42";
         let result = open_pr_in_browser(url);
 
         assert!(result.is_ok(), "should succeed: {result:?}");
 
-        // ログを確認: "pr view <url> --web" が渡されていること
+        // Verify log: "pr view <url> --web" was passed
         let mut log_content = String::new();
         fs::File::open(&log_path)
             .unwrap_or_else(|e| panic!("{e:?}"))
@@ -883,7 +883,7 @@ mod tests {
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // fake gh: 常に exit 1
+        // fake gh: always exits 1
         let script_path = bin_dir.join("gh");
         fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
         let mut perms = fs::metadata(&script_path)
@@ -892,7 +892,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let _guard = crate::test_support::PathEnvGuard::prepend(&bin_dir);
+        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
 
         let result = open_pr_in_browser("https://github.com/owner/repo/pull/1");
 
@@ -900,18 +900,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AwaitingApproval フェーズのアクションとラベル
+    // AwaitingApproval phase — actions and labels
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_session_actions_awaiting_approval_has_approve() {
-        // Given: AwaitingApproval フェーズ
+        // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: "Approve" アクションを含む
+        // Then: contains "Approve" action
         assert!(
             actions.contains(&"Approve"),
             "AwaitingApproval should have Approve: {actions:?}"
@@ -920,13 +920,13 @@ mod tests {
 
     #[test]
     fn test_session_actions_awaiting_approval_has_no_run_no_resume() {
-        // Given: AwaitingApproval フェーズ
+        // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
         // When
         let actions = session_actions(&session);
 
-        // Then: 未承認のため "Run" も "Resume" も提供しない
+        // Then: neither "Run" nor "Resume" since it is not yet approved
         assert!(
             !actions.contains(&"Run"),
             "AwaitingApproval should NOT have Run: {actions:?}"
@@ -939,16 +939,16 @@ mod tests {
 
     #[test]
     fn test_session_actions_awaiting_approval_exact_order() {
-        // Given: AwaitingApproval フェーズ
+        // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
-        // When / Then: Approve → Delete → Back の順
+        // When / Then: order is Approve → Delete → Back
         assert_eq!(session_actions(&session), vec!["Approve", "Delete", "Back"]);
     }
 
     #[test]
     fn test_format_session_label_awaiting_approval_contains_phase_text() {
-        // Given: AwaitingApproval フェーズのセッション
+        // Given: AwaitingApproval phase session
         let s = make_session(
             "20260311100000",
             "pending task",
@@ -958,7 +958,7 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: "Awaiting Approval" テキストとアイコンを含む
+        // Then: contains "Awaiting Approval" text and icon
         assert!(
             label.contains("Awaiting Approval"),
             "label should contain 'Awaiting Approval': {label}"
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn test_format_session_label_awaiting_approval_not_planned_text() {
-        // Given: AwaitingApproval フェーズのセッション
+        // Given: AwaitingApproval phase session
         let s = make_session(
             "20260311100001",
             "some task",
@@ -982,7 +982,7 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: "Planned" テキストを含まない（フェーズの誤混同を防ぐ）
+        // Then: "Planned" text is absent (to avoid phase confusion)
         assert!(
             !label.contains("Planned"),
             "AwaitingApproval label should NOT contain 'Planned': {label}"
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_format_session_label_multiline_input_shows_first_line_only() {
-        // Given: session.input が複数行（Shift+Enter で改行を含む input）
+        // Given: session.input contains multiple lines (e.g. input with embedded newlines)
         let s = make_session(
             "20260306143000",
             "line1\nline2\nline3",
@@ -1003,7 +1003,7 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: ラベルには第 1 行だけ現れ、残りの行は含まれない
+        // Then: only the first line appears in the label; remaining lines are absent
         assert!(
             label.contains("line1"),
             "label must contain first line: {label}"
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_format_session_label_multiline_input_does_not_contain_newline_char() {
-        // Given: 複数行の input
+        // Given: multi-line input
         let s = make_session(
             "20260306143000",
             "implement feature\nwith extra detail",
@@ -1030,7 +1030,7 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: ラベル文字列に改行文字が含まれない（一覧 UI の 1 行として表示できる）
+        // Then: label contains no newline characters (displayable as a single list row)
         assert!(
             !label.contains('\n'),
             "label must not contain newline character: {label:?}"

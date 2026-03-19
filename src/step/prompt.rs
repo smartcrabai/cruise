@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::step::command::{calculate_backoff, is_rate_limited};
 
@@ -14,18 +15,23 @@ pub struct PromptResult {
 }
 
 /// Invoke the LLM command with optional rate-limit retry.
-pub async fn run_prompt(
+///
+/// # Errors
+///
+/// Returns an error if the LLM process fails to spawn or returns a fatal error.
+pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
     max_retries: usize,
-    env: &HashMap<String, String>,
-    on_retry: Option<&dyn Fn(&str)>,
+    env: &HashMap<String, String, S>,
+    on_retry: Option<&F>,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_prompt(command, model, prompt, env).await;
+        let result = execute_prompt(command, model, prompt, env, cancel_token).await;
 
         match result {
             Ok((output, stderr)) => return Ok(PromptResult { output, stderr }),
@@ -54,12 +60,21 @@ pub async fn run_prompt(
     }
 }
 
+/// Resolves when the token is cancelled, or waits forever if no token is provided.
+async fn maybe_cancelled(token: Option<&CancellationToken>) {
+    match token {
+        Some(t) => t.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-async fn execute_prompt(
+async fn execute_prompt<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
-    env: &HashMap<String, String>,
+    env: &HashMap<String, String, S>,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<(String, String)> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
@@ -93,16 +108,44 @@ async fn execute_prompt(
         drop(stdin);
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| CruiseError::CommandError(e.to_string()))?;
+    // Collect stdout/stderr concurrently with waiting to avoid pipe-buffer deadlocks.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut s) = stdout_pipe {
+            let _ = s.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut s) = stderr_pipe {
+            let _ = s.read_to_end(&mut buf).await;
+        }
+        buf
+    });
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let status = tokio::select! {
+        result = child.wait() => {
+            result.map_err(|e| CruiseError::CommandError(e.to_string()))?
+        }
+        () = maybe_cancelled(cancel_token) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(CruiseError::Interrupted);
+        }
+    };
 
-    if !output.status.success() {
+    let stdout_bytes = stdout_task.await.unwrap_or_default();
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+
+    if !status.success() {
         let error_msg = if stderr.is_empty() {
-            format!("command failed (exit code: {:?})", output.status.code())
+            format!("command failed (exit code: {:?})", status.code())
         } else {
             stderr
         };
@@ -114,7 +157,7 @@ async fn execute_prompt(
         return Err(CruiseError::CommandError(stderr));
     }
 
-    Ok((String::from_utf8_lossy(&output.stdout).to_string(), stderr))
+    Ok((String::from_utf8_lossy(&stdout_bytes).to_string(), stderr))
 }
 
 /// Build the full argument list for the LLM command (test helper).
@@ -153,15 +196,32 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
-        let result = run_prompt(&command, None, "test prompt", 0, &HashMap::new(), None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_prompt(
+            &command,
+            None,
+            "test prompt",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "test prompt");
     }
 
     #[tokio::test]
     async fn test_run_prompt_empty_command() {
-        let result = run_prompt(&[], None, "prompt", 0, &HashMap::new(), None).await;
+        let result = run_prompt(
+            &[],
+            None,
+            "prompt",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -172,9 +232,17 @@ mod tests {
         let command = vec!["cat".to_string()];
         let mut env = HashMap::new();
         env.insert("SOME_VAR".to_string(), "some_value".to_string());
-        let result = run_prompt(&command, None, "prompt text", 0, &env, None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_prompt(
+            &command,
+            None,
+            "prompt text",
+            0,
+            &env,
+            None::<&fn(&str)>,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output, "prompt text");
     }
 
@@ -189,6 +257,7 @@ mod tests {
             "hello model",
             0,
             &HashMap::new(),
+            None::<&fn(&str)>,
             None,
         )
         .await
@@ -206,9 +275,17 @@ mod tests {
             "echo out_text; echo err_text >&2".to_string(),
         ];
         // When: run_prompt is called with an empty prompt (stdin ignored by the script)
-        let result = run_prompt(&command, None, "", 0, &HashMap::new(), None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_prompt(
+            &command,
+            None,
+            "",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stdout is in output and stderr is captured in stderr field
         assert_eq!(result.output.trim(), "out_text");
         assert_eq!(result.stderr.trim(), "err_text");
@@ -220,9 +297,17 @@ mod tests {
         // Given: a command that writes only to stdout (cat echoes stdin)
         let command = vec!["cat".to_string()];
         // When: run_prompt is called
-        let result = run_prompt(&command, None, "only stdout", 0, &HashMap::new(), None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_prompt(
+            &command,
+            None,
+            "only stdout",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stderr field is empty, output contains stdin content
         assert_eq!(result.output, "only stdout");
         assert_eq!(result.stderr, "");

@@ -19,6 +19,7 @@ pub enum SessionPhase {
 }
 
 impl SessionPhase {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::AwaitingApproval => "Awaiting Approval",
@@ -31,6 +32,7 @@ impl SessionPhase {
     }
 
     /// Whether this phase allows (re-)execution.
+    #[must_use]
     pub fn is_runnable(&self) -> bool {
         matches!(
             self,
@@ -82,10 +84,16 @@ pub struct SessionState {
     /// Absolute path to the original config file (None for builtin or old sessions).
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// ISO 8601 last-updated time (auto-set on every save).
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    /// True when the session is waiting for user input (option step).
+    #[serde(default)]
+    pub awaiting_input: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SessionStateFingerprint([u8; 32]);
+pub struct SessionStateFingerprint([u8; 32]);
 
 impl SessionStateFingerprint {
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -94,7 +102,7 @@ impl SessionStateFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionFileContents {
+pub enum SessionFileContents {
     Missing,
     Parsed {
         state: Box<SessionState>,
@@ -107,7 +115,8 @@ pub(crate) enum SessionFileContents {
 }
 
 impl SessionFileContents {
-    pub(crate) fn fingerprint(&self) -> Option<SessionStateFingerprint> {
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<SessionStateFingerprint> {
         match self {
             Self::Missing => None,
             Self::Parsed { fingerprint, .. } | Self::Invalid { fingerprint, .. } => {
@@ -118,6 +127,7 @@ impl SessionFileContents {
 }
 
 impl SessionState {
+    #[must_use]
     pub fn new(id: String, base_dir: PathBuf, config_source: String, input: String) -> Self {
         Self {
             id,
@@ -134,15 +144,20 @@ impl SessionState {
             target_branch: None,
             pr_url: None,
             config_path: None,
+            updated_at: None,
+            awaiting_input: false,
         }
     }
 
     /// Absolute path to the plan file for this session.
+    #[must_use]
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
     }
 
     /// Approve the session, transitioning from `AwaitingApproval` to Planned.
+    ///
+    /// # Panics
     ///
     /// Panics if the session is not in `AwaitingApproval` phase.
     pub fn approve(&mut self) {
@@ -166,6 +181,7 @@ impl SessionState {
     }
 
     /// Returns a `WorktreeContext` if the session has a valid, existing worktree.
+    #[must_use]
     pub fn worktree_context(&self) -> Option<crate::worktree::WorktreeContext> {
         let path = self.worktree_path.as_ref()?;
         let branch = self.worktree_branch.as_ref()?;
@@ -186,26 +202,34 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[must_use]
     pub fn new(base: PathBuf) -> Self {
         Self { base }
     }
 
     /// Get the sessions directory.
+    #[must_use]
     pub fn sessions_dir(&self) -> PathBuf {
         self.base.join("sessions")
     }
 
     /// Get the worktrees directory.
+    #[must_use]
     pub fn worktrees_dir(&self) -> PathBuf {
         self.base.join("worktrees")
     }
 
     /// Generate a new unique session ID from current UTC time.
+    #[must_use]
     pub fn new_session_id() -> String {
         current_timestamp_id()
     }
 
     /// Create a new session directory and persist the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or the state cannot be written.
     pub fn create(&self, state: &SessionState) -> Result<()> {
         let session_dir = self.sessions_dir().join(&state.id);
         std::fs::create_dir_all(&session_dir)?;
@@ -214,14 +238,26 @@ impl SessionManager {
     }
 
     /// Load a session by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session file does not exist or cannot be parsed.
     pub fn load(&self, id: &str) -> Result<SessionState> {
         let (state, _) = self.load_with_fingerprint(id)?;
         Ok(state)
     }
 
     /// Persist a session state to disk.
+    ///
+    /// Automatically sets `updated_at` to the current UTC time before writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state cannot be serialized or written to disk.
     pub fn save(&self, state: &SessionState) -> Result<()> {
-        self.save_with_fingerprint(state)?;
+        let mut state = state.clone();
+        state.updated_at = Some(current_iso8601());
+        self.save_with_fingerprint(&state)?;
         Ok(())
     }
 
@@ -242,7 +278,12 @@ impl SessionManager {
         Ok((state, fingerprint))
     }
 
-    pub(crate) fn inspect_state_file(&self, id: &str) -> Result<SessionFileContents> {
+    /// Inspect the raw state file for a session without deserializing it fully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read.
+    pub fn inspect_state_file(&self, id: &str) -> Result<SessionFileContents> {
         let path = self.state_path(id);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -281,6 +322,10 @@ impl SessionManager {
     }
 
     /// List all sessions sorted by ID ascending (oldest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn list(&self) -> Result<Vec<SessionState>> {
         let sessions_dir = self.sessions_dir();
         if !sessions_dir.exists() {
@@ -303,6 +348,10 @@ impl SessionManager {
     }
 
     /// Return sessions in a runnable phase (pending execution).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn pending(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
@@ -312,6 +361,10 @@ impl SessionManager {
     }
 
     /// Return sessions in the Planned phase only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     #[cfg(test)]
     pub fn planned(&self) -> Result<Vec<SessionState>> {
         Ok(self
@@ -322,6 +375,10 @@ impl SessionManager {
     }
 
     /// Return sessions eligible for `run --all`: Planned or Suspended.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
     pub fn run_all_candidates(&self) -> Result<Vec<SessionState>> {
         Ok(self
             .list()?
@@ -331,6 +388,10 @@ impl SessionManager {
     }
 
     /// Load the workflow config for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be read or parsed.
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
         let config_path = state.config_path.clone().unwrap_or_else(|| {
             // Backward-compatible fallback: session-local copy
@@ -348,6 +409,10 @@ impl SessionManager {
     }
 
     /// Delete a session directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be removed.
     pub fn delete(&self, id: &str) -> Result<()> {
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
@@ -357,6 +422,10 @@ impl SessionManager {
     }
 
     /// Remove Completed sessions whose PR is closed or merged (checked via `gh`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session list cannot be read or a session cannot be deleted.
     pub fn cleanup_by_pr_status(&self) -> Result<CleanupReport> {
         let sessions = self.list()?;
         let mut report = CleanupReport::default();
@@ -426,6 +495,7 @@ pub struct CleanupReport {
 }
 
 /// Get the cruise home directory: `~/.cruise/`
+#[must_use]
 pub fn cruise_home() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
@@ -433,11 +503,16 @@ pub fn cruise_home() -> Option<PathBuf> {
 }
 
 /// Get the cruise home directory or return an error.
+///
+/// # Errors
+///
+/// Returns an error if the `HOME` environment variable is not set.
 pub fn get_cruise_home() -> crate::error::Result<PathBuf> {
     cruise_home().ok_or_else(|| crate::error::CruiseError::Other("HOME not set".to_string()))
 }
 
 /// Generate a session ID from current UTC time: `YYYYMMDDHHmmss`.
+#[must_use]
 pub fn current_timestamp_id() -> String {
     let secs = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,6 +523,7 @@ pub fn current_timestamp_id() -> String {
 }
 
 /// Format current UTC time as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+#[must_use]
 pub fn current_iso8601() -> String {
     let secs = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -646,11 +722,17 @@ mod tests {
             .inspect_state_file(&id)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: both APIs observe the same parsed state and fingerprint
-        assert_eq!(loaded, state);
+        // Then: both APIs observe the same parsed state and fingerprint.
+        // Note: save() auto-sets updated_at, so loaded.updated_at is Some(...).
+        assert_eq!(loaded.id, state.id);
+        assert_eq!(loaded.phase, state.phase);
+        assert!(loaded.updated_at.is_some());
         match inspected {
-            SessionFileContents::Parsed { state, fingerprint } => {
-                assert_eq!(*state, loaded);
+            SessionFileContents::Parsed {
+                state: inspected_state,
+                fingerprint,
+            } => {
+                assert_eq!(*inspected_state, loaded);
                 assert_eq!(fingerprint, load_fingerprint);
             }
             other => panic!("expected parsed contents, got {other:?}"),
@@ -916,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_session_planned_returns_only_planned() {
-        // Given: Planned / Completed / Failed / Running の各フェーズのセッションが存在する
+        // Given: sessions exist in each phase: Planned / Completed / Failed / Running
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -958,10 +1040,10 @@ mod tests {
         running.phase = SessionPhase::Running;
         manager.create(&running).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: planned() を呼ぶ
+        // When: calling planned()
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: Planned フェーズのセッションのみ返される
+        // Then: only sessions in the Planned phase are returned
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "20260308100000");
         assert!(matches!(result[0].phase, SessionPhase::Planned));
@@ -969,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_session_planned_empty_when_none_planned() {
-        // Given: Planned セッションが存在しない（Completed のみ）
+        // Given: no Planned sessions exist (only Completed)
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -984,16 +1066,16 @@ mod tests {
             .create(&completed)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: planned() を呼ぶ
+        // When: calling planned()
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: 空のリストが返される
+        // Then: an empty list is returned
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_session_planned_multiple_planned() {
-        // Given: 複数の Planned セッションが存在する
+        // Given: multiple Planned sessions exist
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -1012,10 +1094,10 @@ mod tests {
             manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
         }
 
-        // When: planned() を呼ぶ
+        // When: calling planned()
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: すべての Planned セッションが返される
+        // Then: all Planned sessions are returned
         assert_eq!(result.len(), 3);
         let ids: Vec<&str> = result.iter().map(|s| s.id.as_str()).collect();
         assert!(ids.contains(&"20260308300000"));
@@ -1096,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_reset_to_planned_from_completed() {
-        // Given: フル状態の Completed セッション
+        // Given: a fully populated Completed session
         let mut s = make_completed_session();
         let orig_id = s.id.clone();
         let orig_input = s.input.clone();
@@ -1107,7 +1189,7 @@ mod tests {
         // When
         s.reset_to_planned();
 
-        // Then: 実行状態フィールドがクリアされ、identity/worktree は保持
+        // Then: execution state fields are cleared, identity/worktree are preserved
         assert!(matches!(s.phase, SessionPhase::Planned));
         assert!(s.current_step.is_none());
         assert!(s.completed_at.is_none());
@@ -1126,7 +1208,7 @@ mod tests {
 
     #[test]
     fn test_reset_to_planned_from_running() {
-        // Given: Running 中のセッション
+        // Given: a session in the Running phase
         let mut s = SessionState::new(
             "20260309110000".to_string(),
             PathBuf::from("/repo"),
@@ -1141,7 +1223,7 @@ mod tests {
         // When
         s.reset_to_planned();
 
-        // Then: Planned に戻り、実行状態はクリア、worktree は保持
+        // Then: reverts to Planned, execution state is cleared, worktree is preserved
         assert!(matches!(s.phase, SessionPhase::Planned));
         assert!(s.current_step.is_none());
         assert!(s.completed_at.is_none());
@@ -1153,27 +1235,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SessionPhase::Suspended — 基本プロパティ
+    // SessionPhase::Suspended — basic properties
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_suspended_phase_label() {
-        // Given: Suspended フェーズ
+        // Given: Suspended phase
         let phase = SessionPhase::Suspended;
 
         // When
         let label = phase.label();
 
-        // Then: "Suspended" を返す
+        // Then: returns "Suspended"
         assert_eq!(label, "Suspended");
     }
 
     #[test]
     fn test_suspended_is_runnable() {
-        // Given: Suspended フェーズ
+        // Given: Suspended phase
         let phase = SessionPhase::Suspended;
 
-        // When / Then: resume 可能なので is_runnable() = true
+        // When / Then: is_runnable() = true because it can be resumed
         assert!(
             phase.is_runnable(),
             "Suspended should be runnable (resumable)"
@@ -1182,7 +1264,7 @@ mod tests {
 
     #[test]
     fn test_suspended_serialize_deserialize_roundtrip() {
-        // Given: Suspended フェーズと current_step を持つセッションを保存
+        // Given: save a session with Suspended phase and a current_step
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260310100000".to_string();
@@ -1196,10 +1278,10 @@ mod tests {
         state.current_step = Some("implement".to_string());
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: ディスクから再読み込み
+        // When: reloading from disk
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: フェーズと current_step が正しく復元される
+        // Then: the phase and current_step are correctly restored
         assert!(
             matches!(loaded.phase, SessionPhase::Suspended),
             "phase should be Suspended after roundtrip"
@@ -1209,7 +1291,7 @@ mod tests {
 
     #[test]
     fn test_pending_includes_suspended() {
-        // Given: Suspended / Completed の各フェーズのセッションが存在する
+        // Given: sessions exist in each phase: Suspended / Completed
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -1235,10 +1317,10 @@ mod tests {
             .create(&completed)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: pending() を呼ぶ
+        // When: calling pending()
         let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: Suspended は pending に含まれ、Completed は含まれない
+        // Then: Suspended is included in pending, Completed is not
         let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
         assert!(
             ids.contains(&"20260310110000"),
@@ -1256,7 +1338,7 @@ mod tests {
 
     #[test]
     fn test_run_all_candidates_returns_planned_and_suspended_only() {
-        // Given: 全フェーズのセッションが存在する
+        // Given: sessions exist in all phases
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -1277,12 +1359,12 @@ mod tests {
             manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
         }
 
-        // When: run_all_candidates() を呼ぶ
+        // When: calling run_all_candidates()
         let candidates = manager
             .run_all_candidates()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: Planned と Suspended のみ返される
+        // Then: only Planned and Suspended are returned
         assert_eq!(
             candidates.len(),
             2,
@@ -1313,7 +1395,7 @@ mod tests {
 
     #[test]
     fn test_run_all_candidates_empty_when_none_qualify() {
-        // Given: Completed セッションのみ存在する
+        // Given: only Completed sessions exist
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -1326,12 +1408,12 @@ mod tests {
         s.phase = SessionPhase::Completed;
         manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: run_all_candidates() を呼ぶ
+        // When: calling run_all_candidates()
         let candidates = manager
             .run_all_candidates()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: 空リストが返される
+        // Then: an empty list is returned
         assert!(
             candidates.is_empty(),
             "no candidates when only Completed exists"
@@ -1340,7 +1422,7 @@ mod tests {
 
     #[test]
     fn test_reset_to_planned_preserves_workspace_mode_and_target_branch() {
-        // Given: CurrentBranch モード + target_branch 設定済みの Running セッション
+        // Given: a Running session in CurrentBranch mode with target_branch set
         let mut s = SessionState::new(
             "20260310120000".to_string(),
             PathBuf::from("/repo"),
@@ -1355,7 +1437,7 @@ mod tests {
         // When
         s.reset_to_planned();
 
-        // Then: 実行状態はクリアされるが workspace_mode / target_branch は保持
+        // Then: execution state is cleared but workspace_mode / target_branch are preserved
         assert!(matches!(s.phase, SessionPhase::Planned));
         assert!(s.current_step.is_none());
         assert_eq!(s.workspace_mode, WorkspaceMode::CurrentBranch);
@@ -1368,7 +1450,7 @@ mod tests {
 
     #[test]
     fn test_session_new_starts_in_awaiting_approval() {
-        // Given / When: 新規セッションを作成する
+        // Given / When: creating a new session
         let s = SessionState::new(
             "20260311100000".to_string(),
             PathBuf::from("/repo"),
@@ -1376,7 +1458,7 @@ mod tests {
             "some task".to_string(),
         );
 
-        // Then: AwaitingApproval フェーズで開始する（Planned ではない）
+        // Then: starts in the AwaitingApproval phase (not Planned)
         assert!(
             matches!(s.phase, SessionPhase::AwaitingApproval),
             "new session should start in AwaitingApproval, got {:?}",
@@ -1386,10 +1468,10 @@ mod tests {
 
     #[test]
     fn test_awaiting_approval_is_not_runnable() {
-        // Given: AwaitingApproval フェーズ
+        // Given: AwaitingApproval phase
         let phase = SessionPhase::AwaitingApproval;
 
-        // When / Then: is_runnable() は false を返す
+        // When / Then: is_runnable() returns false
         assert!(
             !phase.is_runnable(),
             "AwaitingApproval should not be runnable"
@@ -1398,10 +1480,10 @@ mod tests {
 
     #[test]
     fn test_awaiting_approval_label_is_distinct() {
-        // Given: AwaitingApproval フェーズ
+        // Given: AwaitingApproval phase
         let phase = SessionPhase::AwaitingApproval;
 
-        // When / Then: 他のフェーズと重複しない明確なラベルを返す
+        // When / Then: returns a clear label that does not overlap with other phases
         let label = phase.label();
         assert_eq!(label, "Awaiting Approval");
         assert_ne!(label, SessionPhase::Planned.label());
@@ -1412,7 +1494,7 @@ mod tests {
 
     #[test]
     fn test_pending_excludes_awaiting_approval() {
-        // Given: AwaitingApproval / Planned / Running / Failed / Completed の各セッションが存在する
+        // Given: sessions exist in each phase: AwaitingApproval / Planned / Running / Failed / Completed
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
@@ -1422,7 +1504,7 @@ mod tests {
             "cruise.yaml".to_string(),
             "unapproved".to_string(),
         );
-        // SessionState::new は AwaitingApproval で作成される
+        // SessionState::new creates in AwaitingApproval phase
         manager
             .create(&awaiting)
             .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1445,10 +1527,10 @@ mod tests {
         running.phase = SessionPhase::Running;
         manager.create(&running).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: pending() を呼ぶ
+        // When: calling pending()
         let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: AwaitingApproval は含まれない。Planned・Running は含まれる
+        // Then: AwaitingApproval is not included; Planned and Running are included
         let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
         assert!(
             !ids.contains(&"20260311200000"),
@@ -1466,11 +1548,11 @@ mod tests {
 
     #[test]
     fn test_planned_excludes_awaiting_approval() {
-        // Given: AwaitingApproval と Planned の両セッションが存在する
+        // Given: both AwaitingApproval and Planned sessions exist
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
 
-        // AwaitingApproval セッション（SessionState::new のデフォルト）
+        // AwaitingApproval session (default of SessionState::new)
         let awaiting = SessionState::new(
             "20260311300000".to_string(),
             PathBuf::from("/repo"),
@@ -1492,10 +1574,10 @@ mod tests {
             .create(&approved)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: planned() を呼ぶ
+        // When: calling planned()
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: Planned のみ返され、AwaitingApproval は含まれない
+        // Then: only Planned is returned, AwaitingApproval is not included
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "20260311300001");
         assert!(
@@ -1506,7 +1588,7 @@ mod tests {
 
     #[test]
     fn test_awaiting_approval_session_roundtrip() {
-        // Given: AwaitingApproval フェーズのセッションを永続化する
+        // Given: persisting a session in the AwaitingApproval phase
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260311400000".to_string();
@@ -1518,10 +1600,10 @@ mod tests {
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: ロードする
+        // When: loading
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: AwaitingApproval フェーズが正しくデシリアライズされる
+        // Then: the AwaitingApproval phase is correctly deserialized
         assert!(
             matches!(loaded.phase, SessionPhase::AwaitingApproval),
             "loaded phase should be AwaitingApproval, got {:?}",
@@ -1531,7 +1613,7 @@ mod tests {
 
     #[test]
     fn test_approve_from_awaiting_approval() {
-        // Given: AwaitingApproval フェーズのセッション
+        // Given: a session in the AwaitingApproval phase
         let mut s = SessionState::new(
             "20260311500000".to_string(),
             PathBuf::from("/repo"),
@@ -1540,10 +1622,10 @@ mod tests {
         );
         assert!(matches!(s.phase, SessionPhase::AwaitingApproval));
 
-        // When: approve() を呼ぶ
+        // When: calling approve()
         s.approve();
 
-        // Then: Planned フェーズになる
+        // Then: the phase becomes Planned
         assert!(
             matches!(s.phase, SessionPhase::Planned),
             "approve should set phase to Planned, got {:?}",
@@ -1551,30 +1633,30 @@ mod tests {
         );
     }
 
-    // --- config_path フィールド & load_config 変更のテスト ---
+    // --- tests for the config_path field & load_config changes ---
 
     #[test]
     fn test_session_state_config_path_defaults_to_none_on_new() {
-        // Given/When: SessionState::new() を引数なしで作成
+        // Given/When: creating a SessionState::new() without arguments
         let state = SessionState::new(
             "20260314120000".to_string(),
             PathBuf::from("/repo"),
             "cruise.yaml".to_string(),
             "task".to_string(),
         );
-        // Then: config_path は None
+        // Then: config_path is None
         assert!(state.config_path.is_none());
     }
 
     #[test]
     fn test_session_state_backward_compat_config_path_none() {
-        // Given: config_path フィールドを含まない旧形式 JSON
+        // Given: legacy JSON format that does not contain the config_path field
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120002".to_string();
         let session_dir = manager.sessions_dir().join(&id);
         std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        // config_path フィールドなしの旧形式
+        // legacy format without config_path field
         let json = serde_json::json!({
             "id": id,
             "base_dir": "/repo",
@@ -1590,10 +1672,10 @@ mod tests {
         std::fs::write(session_dir.join("state.json"), json.to_string())
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: 旧形式の JSON を読み込む
+        // When: loading the legacy JSON format
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: config_path は None にデフォルト
+        // Then: config_path defaults to None
         assert!(
             loaded.config_path.is_none(),
             "config_path should default to None for old sessions"
@@ -1602,12 +1684,12 @@ mod tests {
 
     #[test]
     fn test_session_load_config_reads_from_config_path_when_set() {
-        // Given: 外部ファイルを指す config_path を持つセッション
+        // Given: a session with a config_path pointing to an external file
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120003".to_string();
 
-        // 外部 YAML ファイルを作成
+        // create an external YAML file
         let config_file = tmp.path().join("external_cruise.yaml");
         let yaml = "command:\n  - cat\nsteps:\n  check:\n    command: \"true\"\n";
         std::fs::write(&config_file, yaml).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1621,19 +1703,19 @@ mod tests {
         state.config_path = Some(config_file);
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: config_path からロード
+        // When: loading from config_path
         let config = manager
             .load_config(&state)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: 外部ファイルの内容が読み込まれる
+        // Then: the contents of the external file are loaded
         assert_eq!(config.command, vec!["cat".to_string()]);
         assert!(config.steps.contains_key("check"));
     }
 
     #[test]
     fn test_session_load_config_falls_back_to_session_dir_when_config_path_none() {
-        // Given: config_path が None のセッション（後方互換フォールバック）
+        // Given: a session with config_path as None (backward-compatible fallback)
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120004".to_string();
@@ -1643,28 +1725,28 @@ mod tests {
             "cruise.yaml".to_string(),
             "task".to_string(),
         );
-        // config_path は None のまま
+        // config_path remains None
         assert!(state.config_path.is_none());
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // セッションディレクトリの config.yaml にフォールバックとして書き込む
+        // write to config.yaml in the session directory as a fallback
         let yaml = "command:\n  - bash\nsteps:\n  fallback_step:\n    command: \"true\"\n";
         std::fs::write(manager.sessions_dir().join(&id).join("config.yaml"), yaml)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: load_config を呼ぶ
+        // When: calling load_config
         let config = manager
             .load_config(&state)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: フォールバックのセッションディレクトリ config.yaml が読まれる
+        // Then: the fallback session directory config.yaml is read
         assert_eq!(config.command, vec!["bash".to_string()]);
         assert!(config.steps.contains_key("fallback_step"));
     }
 
     #[test]
     fn test_session_load_config_config_path_not_found_returns_error() {
-        // Given: config_path が存在しないファイルを指しているセッション
+        // Given: a session whose config_path points to a non-existent file
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120005".to_string();
@@ -1677,10 +1759,10 @@ mod tests {
         state.config_path = Some(PathBuf::from("/nonexistent/cruise.yaml"));
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: 存在しないファイルを参照する load_config
+        // When: load_config referencing a non-existent file
         let result = manager.load_config(&state);
 
-        // Then: エラーが返る
+        // Then: an error is returned
         assert!(result.is_err());
     }
 }

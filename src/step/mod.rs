@@ -41,6 +41,7 @@ pub enum OptionChoice {
 }
 
 impl OptionChoice {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             OptionChoice::Selector { label, .. } | OptionChoice::TextInput { label, .. } => label,

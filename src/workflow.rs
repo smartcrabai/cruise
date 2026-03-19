@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
@@ -57,6 +55,7 @@ pub struct CompiledWorkflow {
 
 impl CompiledWorkflow {
     /// Create a new `CompiledWorkflow` that runs the `after_pr` phase as its main steps.
+    #[must_use]
     pub fn to_after_pr_compiled(&self) -> Self {
         Self {
             command: self.command.clone(),
@@ -79,6 +78,12 @@ impl CompiledWorkflow {
 /// Validates the config (undefined groups, migration errors, empty groups,
 /// nested calls, individual `if` in group steps) and expands all group call
 /// steps into their constituent sub-steps.
+///
+/// # Errors
+///
+/// Returns an error if the config references undefined groups, uses the old
+/// membership style, contains empty groups, nested group calls, or
+/// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     let (steps, invocations, step_to_invocation) = expand_steps(&config.steps, &config.groups)?;
     let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
