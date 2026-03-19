@@ -57,6 +57,9 @@ resolver = "2"
 allow-dirty = ["ci"]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
+# Build only the specific app being released, not the entire workspace.
+# Without this, --workspace pulls in cruise-gui's GTK3 deps on Linux.
+precise-builds = true
 # CI backends to support
 ci = "github"
 # Path that installers should place binaries in
