@@ -269,6 +269,28 @@ jobs:
         run: cargo tauri build --bundles ${{ matrix.bundles }}
         working-directory: src-tauri
 
+      # Ad-hoc sign the .app so macOS shows "unidentified developer" instead of "damaged"
+      # (xattr -cr /Applications/cruise.app is still needed after install)
+      #
+      # TODO: When Apple Developer Program membership is obtained, replace this with proper signing:
+      # env:
+      #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}           # base64-encoded .p12
+      #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }} # "Developer ID Application: ..."
+      #   APPLE_ID: ${{ secrets.APPLE_ID }}
+      #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}                  # app-specific password
+      #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Ad-hoc sign macOS app
+        if: matrix.platform == 'macos-aarch64'
+        run: |
+          APP=$(find target/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
+          if [ -z "$APP" ]; then
+            echo "Error: no .app bundle found in target/release/bundle/macos" >&2
+            exit 1
+          fi
+          codesign --force --deep --sign - "$APP"
+        working-directory: src-tauri
+
       - name: Collect artifacts (macOS)
         if: matrix.platform == 'macos-aarch64'
         shell: bash

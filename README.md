@@ -32,6 +32,16 @@ A desktop GUI is also available. Download the latest installer from [GitHub Rele
 | Linux (x86_64) | `.deb`, `.AppImage` |
 | Windows (x86_64) | `.msi`, `.exe` |
 
+#### macOS GUI Installation
+
+After downloading the DMG and copying `cruise.app` to `/Applications`, run the following in Terminal before the first launch:
+
+```sh
+xattr -cr /Applications/cruise.app
+```
+
+This removes the Gatekeeper quarantine attribute, allowing the app to launch.
+
 ## Usage
 
 ```sh
