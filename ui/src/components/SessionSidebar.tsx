@@ -5,6 +5,12 @@ import type { Session } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
 import { formatLocalTime } from "../lib/format";
 
+function Spinner({ color = "border-gray-400" }: { color?: string }) {
+  return (
+    <span className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${color}`} />
+  );
+}
+
 interface SessionSidebarProps {
   selectedId: string | null;
   onSelect: (session: Session) => void;
@@ -111,10 +117,17 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
             <button
               onClick={() => void handleClean()}
               disabled={cleaning}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50 flex items-center gap-1"
               title="Clean completed sessions"
             >
-              {cleaning ? "…" : "Clean"}
+              {cleaning ? (
+                <>
+                  <Spinner />
+                  Cleaning...
+                </>
+              ) : (
+                "Clean"
+              )}
             </button>
             <button
               onClick={onRunAll}
