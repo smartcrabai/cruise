@@ -112,6 +112,11 @@ export function discardSession(sessionId: string): Promise<void> {
   return invoke<void>("discard_session", { sessionId });
 }
 
+/** Delete a session and clean up its worktree. Cannot delete Running sessions. */
+export function deleteSession(sessionId: string): Promise<void> {
+  return invoke<void>("delete_session", { sessionId });
+}
+
 /**
  * Re-generate the plan for an existing session with the given feedback,
  * streaming PlanEvents via `channel`.

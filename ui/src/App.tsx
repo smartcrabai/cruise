@@ -9,6 +9,7 @@ import {
   cancelSession,
   cleanSessions,
   createSession,
+  deleteSession,
   discardSession,
   fixSession,
   getSessionLog,
@@ -267,11 +268,54 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
   );
 }
 
+// ─── ConfirmDialog ────────────────────────────────────────────────────────────
+
+interface ConfirmDialogProps {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  disabled?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCancel }: ConfirmDialogProps) {
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-sm w-full space-y-4"
+      >
+        <h2 className="text-lg font-semibold text-gray-100">{title}</h2>
+        <p className="text-sm text-gray-400">{message}</p>
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={onCancel}
+            disabled={disabled}
+            className="px-4 py-2 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={disabled}
+            className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── WorkflowRunner ───────────────────────────────────────────────────────────
 
 interface WorkflowRunnerProps {
   session: Session;
   onSessionUpdated: (session: Session) => void;
+  onSessionDeleted: () => void;
 }
 
 interface StepEntry {
@@ -289,7 +333,7 @@ interface PendingOption {
 type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
+function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: WorkflowRunnerProps) {
   const [status, setStatus] = useState<RunStatus>("idle");
   const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
@@ -301,6 +345,8 @@ function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
   const [replanFeedback, setReplanFeedback] = useState("");
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const _channelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
@@ -342,6 +388,8 @@ function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
     setLogLoading(false);
     setReplanFeedback("");
     setReplanPhase("idle");
+    setShowDeleteConfirm(false);
+    setDeleting(false);
     _channelRef.current = null;
   }, [session.id]);
 
@@ -421,6 +469,19 @@ function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
       setLiveLog([]);
     } catch (e) {
       setLiveLog((prev) => [...prev, `Reset error: ${e}`]);
+    }
+  }
+
+  async function handleDelete() {
+    setDeleting(true);
+    try {
+      await deleteSession(session.id);
+      onSessionDeleted();
+    } catch (e) {
+      setLiveLog((prev) => [...prev, `Delete error: ${e}`]);
+      setShowDeleteConfirm(false);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -544,6 +605,14 @@ function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
               className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
             >
               Replan
+            </button>
+          )}
+          {session.phase !== "Running" && status !== "running" && (
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-red-900/30"
+            >
+              Delete
             </button>
           )}
         </div>
@@ -707,6 +776,18 @@ function WorkflowRunner({ session, onSessionUpdated }: WorkflowRunnerProps) {
           choices={pendingOption.choices}
           plan={pendingOption.plan}
           onRespond={(result) => void handleOptionRespond(result)}
+        />
+      )}
+
+      {/* Delete confirmation dialog */}
+      {showDeleteConfirm && (
+        <ConfirmDialog
+          title="Delete Session"
+          message={`Delete session "${session.id}" and its worktree? This cannot be undone.`}
+          confirmLabel={deleting ? "Deleting…" : "Delete"}
+          disabled={deleting}
+          onConfirm={() => void handleDelete()}
+          onCancel={() => setShowDeleteConfirm(false)}
         />
       )}
     </div>
@@ -1130,6 +1211,10 @@ export default function App() {
             session={selectedSession}
             onSessionUpdated={(updated) => {
               setSelectedSession(updated);
+              sidebarRefreshRef.current?.();
+            }}
+            onSessionDeleted={() => {
+              setSelectedSession(null);
               sidebarRefreshRef.current?.();
             }}
           />
