@@ -150,7 +150,10 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRe
               <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
               <PhaseBadge phase={s.phase} />
             </div>
-            <p className="text-sm text-gray-300 truncate">{s.input}</p>
+            <p className="text-sm text-gray-300 truncate">{s.title || s.input}</p>
+            {s.title && (
+              <p className="text-xs text-gray-500 truncate">{s.input}</p>
+            )}
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="text-xs text-blue-400/70 font-mono truncate">
                 {s.baseDir.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? s.baseDir}

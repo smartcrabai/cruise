@@ -62,6 +62,9 @@ pub struct SessionState {
     pub config_source: String,
     /// User input that initiated the session.
     pub input: String,
+    /// Generated session title shown in session lists when available.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The step currently executing (set during run phase).
     pub current_step: Option<String>,
     /// ISO 8601 creation time.
@@ -135,6 +138,7 @@ impl SessionState {
             phase: SessionPhase::AwaitingApproval,
             config_source,
             input,
+            title: None,
             current_step: None,
             created_at: current_iso8601(),
             completed_at: None,
@@ -153,6 +157,15 @@ impl SessionState {
     #[must_use]
     pub fn plan_path(&self, sessions_dir: &Path) -> PathBuf {
         sessions_dir.join(&self.id).join("plan.md")
+    }
+
+    #[must_use]
+    pub fn title_or_input(&self) -> &str {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&self.input)
     }
 
     /// Approve the session, transitioning from `AwaitingApproval` to Planned.
@@ -672,6 +685,7 @@ mod tests {
         assert_eq!(loaded.input, "add hello world");
         assert!(matches!(loaded.phase, SessionPhase::AwaitingApproval));
         assert!(loaded.current_step.is_none());
+        assert_eq!(loaded.title, None);
         assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
         assert_eq!(loaded.target_branch, None);
         assert!(loaded.pr_url.is_none());
@@ -945,6 +959,24 @@ mod tests {
     }
 
     #[test]
+    fn test_session_state_title_roundtrip() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260306165000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.title = Some("Readable generated title".to_string());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(loaded.title.as_deref(), Some("Readable generated title"));
+    }
+
+    #[test]
     fn test_session_state_backward_compat() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
@@ -972,6 +1004,7 @@ mod tests {
         assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
         assert_eq!(loaded.target_branch, None);
         assert_eq!(loaded.pr_url, None);
+        assert_eq!(loaded.title, None);
         assert_eq!(loaded.input, "old task");
     }
 

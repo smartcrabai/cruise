@@ -26,6 +26,7 @@ pub struct SessionDto {
     pub config_source: String,
     pub base_dir: String,
     pub input: String,
+    pub title: Option<String>,
     pub current_step: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
@@ -48,6 +49,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             config_source: s.config_source,
             base_dir: s.base_dir.to_string_lossy().into_owned(),
             input: s.input,
+            title: s.title,
             current_step: s.current_step,
             created_at: s.created_at,
             completed_at: s.completed_at,
@@ -389,8 +391,10 @@ pub async fn create_session(
     manager.create(&session).map_err(|e| e.to_string())?;
 
     let session_dir = manager.sessions_dir().join(&session_id);
-    std::fs::write(session_dir.join("config.yaml"), &yaml)
-        .map_err(|e| format!("failed to write session config: {e}"))?;
+    if session.config_path.is_none() {
+        std::fs::write(session_dir.join("config.yaml"), &yaml)
+            .map_err(|e| format!("failed to write session config: {e}"))?;
+    }
 
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
@@ -426,6 +430,9 @@ pub async fn create_session(
 pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    if let Err(err) = cruise::metadata::refresh_session_title_from_session(&manager, &mut session) {
+        eprintln!("warning: failed to refresh session title: {err}");
+    }
     session.approve();
     manager.save(&session).map_err(|e| e.to_string())?;
     Ok(())
@@ -484,7 +491,7 @@ pub async fn fix_session(
     channel: tauri::ipc::Channel<PlanEvent>,
 ) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
-    let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
 
     let _ = channel.send(PlanEvent::PlanGenerating);
 
@@ -496,11 +503,12 @@ pub async fn fix_session(
 
     match run_plan_prompt_template(&config, &mut vars, FIX_PLAN_PROMPT_TEMPLATE, 5).await {
         Ok(()) => {
+            let content = std::fs::read_to_string(&plan_path)
+                .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))?;
+            cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
             // Re-save to update updated_at timestamp
             manager.save(&session).map_err(|e| e.to_string())?;
 
-            let content = std::fs::read_to_string(&plan_path)
-                .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))?;
             let _ = channel.send(PlanEvent::PlanGenerated {
                 content: content.clone(),
             });
@@ -990,6 +998,43 @@ mod tests {
         );
         // Then: returns an error (no pending request remains)
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_session_dto_from_session_includes_title() {
+        // Given: a session with a generated title
+        let mut session = cruise::session::SessionState::new(
+            "20260321120000".to_string(),
+            std::path::PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "raw input".to_string(),
+        );
+        session.title = Some("Readable session title".to_string());
+
+        // When: converting to the IPC DTO
+        let dto = SessionDto::from(session);
+
+        // Then: title is preserved for the frontend
+        assert_eq!(dto.title.as_deref(), Some("Readable session title"));
+        assert_eq!(dto.input, "raw input");
+    }
+
+    #[test]
+    fn test_session_dto_from_session_title_is_none_when_not_yet_generated() {
+        // Given: a session without a generated title
+        let session = cruise::session::SessionState::new(
+            "20260321120001".to_string(),
+            std::path::PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "raw input".to_string(),
+        );
+
+        // When: converting to the IPC DTO
+        let dto = SessionDto::from(session);
+
+        // Then: title remains absent and the raw input is still available
+        assert_eq!(dto.title, None);
+        assert_eq!(dto.input, "raw input");
     }
 
     // ─── Integration: full option-selection round-trip ────────────────────────
