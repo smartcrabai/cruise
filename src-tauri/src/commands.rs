@@ -247,15 +247,19 @@ pub fn respond_to_option(
 
 /// Remove Completed sessions whose PR is closed or merged.
 #[tauri::command]
-pub fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
+pub async fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
     let manager = new_session_manager()?;
-    manager
-        .cleanup_by_pr_status()
-        .map(|r| CleanupResultDto {
-            deleted: r.deleted,
-            skipped: r.skipped,
-        })
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        manager
+            .cleanup_by_pr_status()
+            .map(|r| CleanupResultDto {
+                deleted: r.deleted,
+                skipped: r.skipped,
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("cleanup task panicked: {e}"))?
 }
 
 /// Return the run log for a session as a plain-text string.
