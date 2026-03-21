@@ -1,8 +1,9 @@
 use crate::error::Result;
+use unicode_width::UnicodeWidthChar;
 
 /// Result of a multiline input prompt.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InputResult {
+pub(crate) enum InputResult {
     /// User confirmed the input with Enter.
     Submitted(String),
     /// User cancelled with Escape or Ctrl+C.
@@ -18,12 +19,10 @@ impl InputResult {
     /// # Errors
     ///
     /// Returns an error if the user cancelled the input.
-    pub fn into_result(self) -> crate::error::Result<String> {
+    pub(crate) fn into_result(self) -> crate::error::Result<String> {
         match self {
             InputResult::Submitted(text) => Ok(text),
-            InputResult::Cancelled => Err(crate::error::CruiseError::Other(
-                "input cancelled".to_string(),
-            )),
+            InputResult::Cancelled => Err(crate::error::CruiseError::StepPaused),
         }
     }
 }
@@ -67,6 +66,8 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
 
     let mut buf = InputBuffer::new();
 
+    let mut term_width = terminal::size().map(|(w, _)| w).unwrap_or(80);
+
     let result = loop {
         // Redraw the entire buffer from the saved position.
         execute!(
@@ -81,16 +82,20 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
             write!(out, "{line}")?;
         }
 
-        // Reposition the terminal cursor at (cursor_row, cursor_col).
+        // Reposition the terminal cursor, accounting for line wrapping.
         execute!(out, cursor::RestorePosition)?;
-        if buf.cursor_row > 0 {
-            let rows = u16::try_from(buf.cursor_row).unwrap_or(u16::MAX);
-            execute!(out, cursor::MoveDown(rows))?;
+        let (phys_row, phys_col) = buf.wrapped_cursor_pos(term_width);
+        if phys_row > 0 {
+            execute!(out, cursor::MoveDown(phys_row))?;
         }
-        execute!(out, cursor::MoveToColumn(buf.display_col()))?;
+        execute!(out, cursor::MoveToColumn(phys_col))?;
         out.flush()?;
 
         let event = event::read()?;
+        if let Event::Resize(w, _) = event {
+            term_width = w;
+            continue;
+        }
         if let Event::Key(KeyEvent {
             code,
             modifiers,
@@ -275,18 +280,21 @@ impl InputBuffer {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    /// Return the display width of the first `char_limit` characters in line `row`.
+    fn display_width_up_to(&self, row: usize, char_limit: usize) -> usize {
+        self.lines[row]
+            .chars()
+            .take(char_limit)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    }
+
     /// Return the terminal display column for the current cursor position.
     ///
     /// This differs from `cursor_col` (a char index) for wide characters such
     /// as CJK ideographs that occupy two terminal columns each.
-    fn display_col(&self) -> u16 {
-        use unicode_width::UnicodeWidthChar;
-        let width: usize = self.lines[self.cursor_row]
-            .chars()
-            .take(self.cursor_col)
-            .map(|c| c.width().unwrap_or(0))
-            .sum();
-        u16::try_from(width).unwrap_or(u16::MAX)
+    fn display_col(&self) -> usize {
+        self.display_width_up_to(self.cursor_row, self.cursor_col)
     }
 
     /// Convert a char-index `col` within line `row` to a byte offset.
@@ -307,6 +315,40 @@ impl InputBuffer {
         } else {
             self.cursor_col.min(target_line_len)
         }
+    }
+
+    /// Return the terminal display width of line `row` (full line, not up to cursor).
+    fn line_display_width(&self, row: usize) -> usize {
+        self.display_width_up_to(row, usize::MAX)
+    }
+
+    /// Return the physical (row, col) offset from the saved cursor position,
+    /// accounting for terminal line wrapping.
+    ///
+    /// When `term_width` is zero, returns `(0, 0)`.
+    fn wrapped_cursor_pos(&self, term_width: u16) -> (u16, u16) {
+        if term_width == 0 {
+            return (0, 0);
+        }
+        let tw = usize::from(term_width);
+        let mut physical_row: usize = 0;
+
+        // Each logical line before the cursor contributes at least 1 row
+        // (the newline itself), plus extra rows from terminal wrap
+        // (using the delayed auto-wrap formula).
+        for i in 0..self.cursor_row {
+            let w = self.line_display_width(i);
+            physical_row += (if w > 0 { (w - 1) / tw } else { 0 }) + 1;
+        }
+
+        let display = self.display_col();
+        physical_row += display / tw;
+        let physical_col = display % tw;
+
+        (
+            u16::try_from(physical_row).unwrap_or(u16::MAX),
+            u16::try_from(physical_col).unwrap_or(u16::MAX),
+        )
     }
 }
 
@@ -355,33 +397,6 @@ mod tests {
         let result = InputResult::Cancelled.into_result();
         // Then: returns Err, allowing processing to stop before session creation
         assert!(result.is_err(), "Cancelled should produce Err, got Ok");
-    }
-
-    // ── InputResult ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_input_result_submitted_holds_text() {
-        // Given a submitted result with some text
-        let result = InputResult::Submitted("hello world".to_string());
-        // Then the text is preserved
-        assert_eq!(result, InputResult::Submitted("hello world".to_string()));
-    }
-
-    #[test]
-    fn test_input_result_cancelled_is_distinct() {
-        // Given a cancelled result
-        let result = InputResult::Cancelled;
-        // Then it is not equal to any submitted value
-        assert_ne!(result, InputResult::Submitted(String::new()));
-        assert_eq!(result, InputResult::Cancelled);
-    }
-
-    #[test]
-    fn test_input_result_submitted_empty_string() {
-        // Given a submitted result with an empty string
-        let result = InputResult::Submitted(String::new());
-        // Then it is distinct from Cancelled
-        assert_ne!(result, InputResult::Cancelled);
     }
 
     // ── InputBuffer – creation ─────────────────────────────────────────────────
@@ -750,5 +765,124 @@ mod tests {
         // Then: text preserved and cursor at char position 3 (not byte position)
         assert_eq!(buf.text(), "\u{3042}\u{3044}\u{3046}");
         assert_eq!(buf.cursor_col, 3);
+    }
+
+    // ── InputBuffer – line_display_width ──────────────────────────────────────
+
+    #[test]
+    fn test_line_display_width_empty_line_returns_zero() {
+        assert_eq!(InputBuffer::new().line_display_width(0), 0);
+    }
+
+    #[test]
+    fn test_line_display_width_ascii_line_equals_char_count() {
+        assert_eq!(buf_with("hello").line_display_width(0), 5);
+    }
+
+    #[test]
+    fn test_line_display_width_cjk_is_double_char_count() {
+        assert_eq!(
+            buf_with("\u{3042}\u{3044}\u{3046}").line_display_width(0),
+            6
+        );
+    }
+
+    #[test]
+    fn test_line_display_width_mixed_ascii_and_cjk() {
+        assert_eq!(buf_with("a\u{3042}").line_display_width(0), 3);
+    }
+
+    #[test]
+    fn test_line_display_width_selects_correct_row_in_multiline_buffer() {
+        let buf = buf_with("hi\nhello");
+        assert_eq!(buf.line_display_width(0), 2);
+        assert_eq!(buf.line_display_width(1), 5);
+    }
+
+    // ── InputBuffer – wrapped_cursor_pos ──────────────────────────────────────
+
+    #[test]
+    fn test_wrapped_cursor_pos_within_term_width() {
+        let buf = buf_with("hello");
+        assert_eq!(buf.wrapped_cursor_pos(10), (0, 5));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_exactly_at_term_width() {
+        let buf = buf_with("hellohello");
+        // 10 % 10 = 0, 10 / 10 = 1
+        assert_eq!(buf.wrapped_cursor_pos(10), (1, 0));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_past_term_width() {
+        let buf = buf_with("hellohelloabc");
+        // 13 / 10 = 1, 13 % 10 = 3
+        assert_eq!(buf.wrapped_cursor_pos(10), (1, 3));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_cjk_wraps() {
+        let buf = buf_with("\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}"); // display width 10
+        assert_eq!(buf.wrapped_cursor_pos(10), (1, 0));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_cursor_in_middle_of_long_line() {
+        let mut buf = buf_with("hellohelloabc");
+        for _ in 0..8 {
+            buf.move_left();
+        }
+        // display_col = 5, so (5/10, 5%10) = (0, 5)
+        assert_eq!(buf.wrapped_cursor_pos(10), (0, 5));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_term_width_zero_does_not_panic() {
+        assert_eq!(buf_with("hello").wrapped_cursor_pos(0), (0, 0));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_single_line_two_wraps() {
+        let buf = buf_with("hellohellohellohelloX"); // 21 chars
+        // 21 / 10 = 2, 21 % 10 = 1
+        assert_eq!(buf.wrapped_cursor_pos(10), (2, 1));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_two_lines_no_wrap() {
+        let buf = buf_with("hello\nworld");
+        // line 0 (w=5): (5-1)/80+1 = 1 row; cursor display 5: 5/80 = 0
+        assert_eq!(buf.wrapped_cursor_pos(80), (1, 5));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_previous_line_wraps_once() {
+        let buf = buf_with("hellohellox\nhi");
+        // line 0 (w=11): (11-1)/10+1 = 2 rows; cursor display 2: 2/10 = 0
+        assert_eq!(buf.wrapped_cursor_pos(10), (2, 2));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_previous_line_exactly_at_term_width() {
+        // Delayed auto-wrap: line exactly term_width wide doesn't add an extra row
+        let buf = buf_with("hellohello\nhi");
+        // line 0 (w=10): (10-1)/10+1 = 1 row; cursor display 2: 2/10 = 0
+        assert_eq!(buf.wrapped_cursor_pos(10), (1, 2));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_cursor_line_itself_wraps() {
+        let buf = buf_with("hi\nhellohelloabc");
+        // line 0 (w=2): 1 row; cursor display 13: row 13/10=1, col 13%10=3
+        assert_eq!(buf.wrapped_cursor_pos(10), (2, 3));
+    }
+
+    #[test]
+    fn test_wrapped_cursor_pos_three_lines_all_wrapping() {
+        let buf = buf_with("hellohellox\nhellohellox\nhellohellox");
+        // lines 0,1 (w=11 each): (11-1)/10+1 = 2 rows each = 4
+        // cursor display 11: row 11/10=1, col 11%10=1
+        assert_eq!(buf.wrapped_cursor_pos(10), (5, 1));
     }
 }

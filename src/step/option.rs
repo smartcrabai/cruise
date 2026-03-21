@@ -57,12 +57,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
             text_input: None,
         }),
         OptionChoice::TextInput { label, next } => {
-            let text = match crate::multiline_input::prompt_multiline(label)? {
-                crate::multiline_input::InputResult::Submitted(t) => t,
-                crate::multiline_input::InputResult::Cancelled => {
-                    return Err(CruiseError::StepPaused);
-                }
-            };
+            let text = crate::multiline_input::prompt_multiline(label)?.into_result()?;
 
             Ok(OptionResult {
                 next_step: next.clone(),

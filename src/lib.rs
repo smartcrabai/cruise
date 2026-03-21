@@ -13,9 +13,9 @@ pub mod variable;
 pub mod workflow;
 pub mod worktree;
 
-// Display utilities and input handling, available to library consumers.
+// Display utilities (available to library consumers) and CLI input handling (crate-internal only).
 pub mod display;
-pub mod multiline_input;
+pub(crate) mod multiline_input;
 pub(crate) mod platform;
 mod spinner;
 
