@@ -147,6 +147,16 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
     })
 }
 
+fn approve_with_title(
+    session: &mut SessionState,
+    manager: &SessionManager,
+    plan_content: &str,
+) -> Result<()> {
+    crate::metadata::refresh_session_title_from_plan(session, plan_content);
+    session.approve();
+    manager.save(session)
+}
+
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
 /// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
 /// without prompting so that inquire never tries to read from a non-TTY stdin.
@@ -160,7 +170,7 @@ async fn run_approve_loop(
     noninteractive: bool,
 ) -> Result<()> {
     // Read the plan once up front; re-read only after Fix modifies it.
-    let mut plan_content = match read_plan_non_empty(plan_path) {
+    let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
         Ok(content) => content,
         Err(err) => {
             eprintln!(
@@ -179,8 +189,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            session.approve();
-            manager.save(session)?;
+            approve_with_title(session, manager, &plan_content)?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("✓").green().bold(),
@@ -206,8 +215,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                session.approve();
-                manager.save(session)?;
+                approve_with_title(session, manager, &plan_content)?;
                 eprintln!(
                     "\n{} Session {} created.",
                     style("✓").green().bold(),
@@ -226,7 +234,7 @@ async fn run_approve_loop(
                 };
                 vars.set_prev_input(Some(text));
                 run_fix_plan(config, vars, rate_limit_retries).await?;
-                plan_content = read_plan_non_empty(plan_path)?;
+                plan_content = crate::metadata::read_plan_markdown(plan_path)?;
             }
             "Ask" => {
                 let text = match prompt_multiline("Your question:")? {
@@ -237,8 +245,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                session.approve();
-                manager.save(session)?;
+                approve_with_title(session, manager, &plan_content)?;
                 eprintln!(
                     "\n{} Executing session {}...",
                     style("→").cyan(),
@@ -283,16 +290,21 @@ pub async fn generate_plan(
 /// Replan an existing session using the built-in fix-plan prompt.
 pub async fn replan_session(
     manager: &SessionManager,
-    session: &SessionState,
+    session: &mut SessionState,
     feedback: String,
     rate_limit_retries: usize,
 ) -> Result<()> {
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
-    run_fix_plan(&config, &mut vars, rate_limit_retries).await
+    run_fix_plan(&config, &mut vars, rate_limit_retries).await?;
+
+    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+    manager.save(session)?;
+    Ok(())
 }
 
 /// Run the built-in fix-plan prompt.
@@ -349,28 +361,6 @@ async fn run_plan_prompt(
     Ok(())
 }
 
-/// Read `plan.md` and return its content, or error if the file is missing or
-/// contains only whitespace.  This is the canonical validation point that
-/// prevents empty plans from reaching the approve menu.
-fn read_plan_non_empty(plan_path: &std::path::Path) -> Result<String> {
-    let content = std::fs::read_to_string(plan_path).map_err(|e| {
-        CruiseError::Other(format!(
-            "failed to read generated plan {}: {}",
-            plan_path.display(),
-            e
-        ))
-    })?;
-
-    if content.trim().is_empty() {
-        return Err(CruiseError::Other(format!(
-            "generated plan {} is empty",
-            plan_path.display()
-        )));
-    }
-
-    Ok(content)
-}
-
 fn resolve_input<F>(
     arg: Option<String>,
     stdin_input: Option<String>,
@@ -401,7 +391,6 @@ fn prompt_for_plan_input() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_resolve_input_from_arg() {
@@ -432,69 +421,6 @@ mod tests {
             result.unwrap_or_else(|e| panic!("{e:?}")),
             "resume in place"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // read_plan_non_empty() unit tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_read_plan_non_empty_returns_err_when_file_missing() {
-        // Given: a path that does not exist
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let plan_path = tmp.path().join("plan.md");
-
-        // When
-        let result = read_plan_non_empty(&plan_path);
-
-        // Then: Err is returned
-        assert!(result.is_err(), "expected Err for missing file, got Ok");
-    }
-
-    #[test]
-    fn test_read_plan_non_empty_returns_err_when_file_is_empty() {
-        // Given: plan file exists but is completely empty
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = read_plan_non_empty(&plan_path);
-
-        // Then: Err is returned
-        assert!(result.is_err(), "expected Err for empty file, got Ok");
-    }
-
-    #[test]
-    fn test_read_plan_non_empty_returns_err_when_file_is_whitespace_only() {
-        // Given: plan file contains only whitespace characters
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "   \n\t\n  ").unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = read_plan_non_empty(&plan_path);
-
-        // Then: Err is returned (whitespace-only is treated as empty)
-        assert!(
-            result.is_err(),
-            "expected Err for whitespace-only file, got Ok"
-        );
-    }
-
-    #[test]
-    fn test_read_plan_non_empty_returns_content_when_file_has_real_content() {
-        // Given: plan file has meaningful content
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let plan_path = tmp.path().join("plan.md");
-        let content = "# Implementation Plan\n\nStep 1: do something\n";
-        std::fs::write(&plan_path, content).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = read_plan_non_empty(&plan_path);
-
-        // Then: Ok with the original content is returned
-        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), content);
     }
 
     // ── resolve_input with multiline stdin ───────────────────────────────────

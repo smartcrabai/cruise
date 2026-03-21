@@ -7,200 +7,25 @@ import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, Workflow
 import {
   approveSession,
   cancelSession,
-  cleanSessions,
   createSession,
   deleteSession,
   discardSession,
   fixSession,
+  getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
   listSessions,
   resetSession,
   respondToOption,
+  runAllSessions,
   runSession,
 } from "./lib/commands";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatLocalTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function Spinner({ color = "border-gray-400" }: { color?: string }) {
-  return (
-    <span className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${color}`} />
-  );
-}
-
-// ─── Phase badge ──────────────────────────────────────────────────────────────
-
-const PHASE_COLORS: Partial<Record<SessionPhase, string>> = {
-  "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
-  Planned: "bg-blue-900/50 text-blue-300",
-  Running: "bg-green-900/50 text-green-300",
-  Completed: "bg-gray-700/50 text-gray-300",
-  Failed: "bg-red-900/50 text-red-300",
-  Suspended: "bg-orange-900/50 text-orange-300",
-};
-
-function PhaseBadge({ phase }: { phase: SessionPhase }) {
-  const cls = PHASE_COLORS[phase] ?? "bg-gray-700/50 text-gray-300";
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
-      {phase}
-    </span>
-  );
-}
-
-// ─── SessionSidebar ───────────────────────────────────────────────────────────
-
-interface SessionSidebarProps {
-  selectedId: string | null;
-  onSelect: (session: Session) => void;
-  onNewSession: () => void;
-  onRefreshRef?: React.MutableRefObject<(() => void) | null>;
-}
-
-function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: SessionSidebarProps) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanMessage, setCleanMessage] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const sessions = await listSessions();
-      const sorted = [...sessions].sort((a, b) => {
-        const aInput = a.awaitingInput || a.phase === "Awaiting Approval";
-        const bInput = b.awaitingInput || b.phase === "Awaiting Approval";
-        if (aInput !== bInput) return aInput ? -1 : 1;
-        const aTime = a.updatedAt ?? a.createdAt;
-        const bTime = b.updatedAt ?? b.createdAt;
-        return bTime.localeCompare(aTime);
-      });
-      setSessions(sorted);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    if (onRefreshRef) {
-      onRefreshRef.current = load;
-    }
-  }, [load, onRefreshRef]);
-
-  async function handleClean() {
-    setCleaning(true);
-    setCleanMessage(null);
-    try {
-      const result = await cleanSessions();
-      setCleanMessage(`${result.deleted} deleted (skipped: ${result.skipped})`);
-      void load();
-    } catch (e) {
-      setCleanMessage(`Error: ${e}`);
-    } finally {
-      setCleaning(false);
-    }
-  }
-
-  return (
-    <div className="h-full flex flex-col">
-      {/* Sidebar header */}
-      <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => void load()}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
-              title="Refresh"
-            >
-              ↻
-            </button>
-            <button
-              onClick={() => void handleClean()}
-              disabled={cleaning}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50 flex items-center gap-1"
-              title="Clean completed sessions"
-            >
-              {cleaning ? (
-                <>
-                  <Spinner />
-                  Cleaning...
-                </>
-              ) : (
-                "Clean"
-              )}
-            </button>
-            <button
-              onClick={onNewSession}
-              className="px-2 py-1 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded"
-            >
-              + New
-            </button>
-          </div>
-        </div>
-        {cleanMessage && (
-          <p className="text-xs text-gray-400">{cleanMessage}</p>
-        )}
-      </div>
-
-      {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && (
-          <p className="p-3 text-xs text-gray-500">Loading…</p>
-        )}
-        {error && (
-          <p className="p-3 text-xs text-red-400">Error: {error}</p>
-        )}
-        {!loading && !error && sessions.length === 0 && (
-          <p className="p-3 text-xs text-gray-500">No sessions found.</p>
-        )}
-        {sessions.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onSelect(s)}
-            className={`w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800 transition-colors ${
-              selectedId === s.id ? "bg-gray-800" : ""
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2 mb-0.5">
-              <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} />
-            </div>
-            <p className="text-sm text-gray-300 truncate">{s.input}</p>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-xs text-blue-400/70 font-mono truncate">
-                {s.baseDir.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? s.baseDir}
-              </span>
-              <span className="text-xs text-gray-600">{formatLocalTime(s.updatedAt ?? s.createdAt)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
+import { PhaseBadge } from "./components/PhaseBadge";
+import { SessionSidebar } from "./components/SessionSidebar";
+import { formatLocalTime } from "./lib/format";
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
 
@@ -360,7 +185,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const _channelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
   // Load saved log from file when tab is opened or after run finishes
@@ -403,7 +227,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setReplanPhase("idle");
     setShowDeleteConfirm(false);
     setDeleting(false);
-    _channelRef.current = null;
   }, [session.id]);
 
   // Scroll live log to bottom when new entries arrive
@@ -420,7 +243,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setActiveTab("log");
 
     const channel = new Channel<WorkflowEvent>();
-    _channelRef.current = channel;
 
     channel.onmessage = (event) => {
       if (event.event === "stepStarted") {
@@ -663,7 +485,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
         )}
         {replanPhase === "generating" && (
           <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Spinner />
+            <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
             Regenerating plan…
           </div>
         )}
@@ -1002,7 +824,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
             >
               {planPhase === "generating" ? (
                 <>
-                  <Spinner color="border-white" />
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
                   Generating plan…
                 </>
               ) : (
@@ -1081,6 +903,199 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── RunAllView ───────────────────────────────────────────────────────────────
+
+type RunAllStatus = "running" | "completed" | "cancelled" | "error";
+
+interface RunAllSessionResult {
+  sessionId: string;
+  input: string;
+  phase: SessionPhase;
+  error?: string;
+}
+
+interface RunAllViewProps {
+  onCompleted: () => void;
+}
+
+function RunAllView({ onCompleted }: RunAllViewProps) {
+  const [status, setStatus] = useState<RunAllStatus>("running");
+  const [total, setTotal] = useState(0);
+  const [currentSession, setCurrentSession] = useState<{ id: string; input: string } | null>(null);
+  const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
+  const [results, setResults] = useState<RunAllSessionResult[]>([]);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
+  const startedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void startRunAll();
+    return () => {
+      mountedRef.current = false;
+      if (channelRef.current) {
+        channelRef.current.onmessage = () => {};
+        channelRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startRunAll() {
+    const channel = new Channel<WorkflowEvent>();
+    channelRef.current = channel;
+
+    channel.onmessage = (event) => {
+      if (!mountedRef.current) return;
+      if (event.event === "runAllStarted") {
+        setTotal(event.data.total);
+      } else if (event.event === "runAllSessionStarted") {
+        setCurrentSession({ id: event.data.sessionId, input: event.data.input });
+        setCurrentStep(null);
+      } else if (event.event === "runAllSessionFinished") {
+        const { sessionId, input, phase, error } = event.data;
+        setResults((prev) => [...prev, { sessionId, input, phase, error }]);
+        setCurrentSession(null);
+        setCurrentStep(null);
+        setPendingOption(null);
+      } else if (event.event === "runAllCompleted") {
+        setStatus(event.data.cancelled > 0 ? "cancelled" : "completed");
+      } else if (event.event === "stepStarted") {
+        setCurrentStep({ name: event.data.step, index: event.data.index, total: event.data.total });
+      } else if (event.event === "optionRequired") {
+        setPendingOption({ requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan });
+      }
+    };
+
+    try {
+      await runAllSessions(channel);
+    } catch (e) {
+      if (mountedRef.current) {
+        setStatus("error");
+        setRunError(String(e));
+      }
+    }
+  }
+
+  async function handleCancel() {
+    try {
+      await cancelSession();
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  async function handleOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    setPendingOption(null);
+    try {
+      await respondToOption(result);
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  return (
+    <div className="h-full flex flex-col p-6 max-w-2xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-semibold text-gray-100">Run All</h2>
+        {status === "running" ? (
+          <button
+            onClick={() => void handleCancel()}
+            className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onCompleted}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded"
+          >
+            Done
+          </button>
+        )}
+      </div>
+
+      {total > 0 && (
+        <div className="mb-4">
+          <div className="flex justify-between text-xs text-gray-400 mb-1">
+            <span>{results.length} / {total} sessions</span>
+            {status === "running" && currentSession && (
+              <span className="text-green-400 animate-pulse">Running…</span>
+            )}
+            {status === "completed" && <span className="text-green-400">Completed</span>}
+            {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
+            {status === "error" && <span className="text-red-400">Error</span>}
+          </div>
+          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              style={{ width: `${(results.length / total) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {status === "running" && currentSession && (
+        <div className="mb-4 p-3 bg-gray-900 border border-green-900/50 rounded">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-xs text-gray-400 font-mono">{currentSession.id}</span>
+          </div>
+          <p className="text-sm text-gray-200 truncate">{currentSession.input}</p>
+          {currentStep && (
+            <p className="text-xs text-gray-500 mt-1">
+              [{currentStep.index + 1}/{currentStep.total}] {currentStep.name}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto space-y-1">
+        {results.map((r) => (
+          <div
+            key={r.sessionId}
+            className="flex items-start gap-2 px-3 py-2 rounded bg-gray-900/50"
+          >
+            <span className="mt-0.5 text-sm">
+              {r.phase === "Completed" && "✓"}
+              {r.phase === "Failed" && "✗"}
+              {r.phase === "Suspended" && "⏸"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-gray-300 truncate">{r.input}</p>
+              {r.error && <p className="text-xs text-red-400 mt-0.5 truncate">{r.error}</p>}
+            </div>
+            <PhaseBadge phase={r.phase} />
+          </div>
+        ))}
+      </div>
+
+      {(status === "completed" || status === "cancelled" || status === "error") && (
+        <div className="mt-4 p-3 bg-gray-900 border border-gray-800 rounded text-sm text-gray-400 flex flex-col gap-1">
+          <div className="flex gap-4">
+            <span className="text-green-400">{results.filter((r) => r.phase === "Completed").length} completed</span>
+            {results.filter((r) => r.phase === "Failed").length > 0 && <span className="text-red-400">{results.filter((r) => r.phase === "Failed").length} failed</span>}
+            {results.filter((r) => r.phase === "Suspended").length > 0 && <span className="text-orange-400">{results.filter((r) => r.phase === "Suspended").length} cancelled</span>}
+          </div>
+          {runError && <p className="text-xs text-red-400">{runError}</p>}
+        </div>
+      )}
+
+      {pendingOption && (
+        <OptionDialog
+          choices={pendingOption.choices}
+          plan={pendingOption.plan}
+          onRespond={(result) => void handleOptionRespond(result)}
+        />
+      )}
     </div>
   );
 }
@@ -1185,7 +1200,7 @@ function UpdateNotification() {
 
 export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [view, setView] = useState<"session" | "new">("session");
+  const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
 
   return (
@@ -1197,25 +1212,33 @@ export default function App() {
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
+          onRunAll={() => { setSelectedSession(null); setView("runAll"); }}
           onRefreshRef={sidebarRefreshRef}
         />
       </aside>
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        {view === "new" ? (
+        {view === "runAll" ? (
+          <RunAllView
+            onCompleted={() => {
+              sidebarRefreshRef.current?.();
+              setView("session");
+            }}
+          />
+        ) : view === "new" ? (
           <NewSessionForm
             onCreated={(id) => {
               sidebarRefreshRef.current?.();
               // Navigate to the created session after a brief refresh
-              setTimeout(async () => {
-                try {
-                  const { getSession } = await import("./lib/commands");
-                  const session = await getSession(id);
-                  setSelectedSession(session);
-                  setView("session");
-                } catch {
-                  setView("session");
-                }
+              setTimeout(() => {
+                void getSession(id)
+                  .then((session) => {
+                    setSelectedSession(session);
+                    setView("session");
+                  })
+                  .catch(() => {
+                    setView("session");
+                  });
               }, 300);
             }}
           />
