@@ -32,6 +32,11 @@ pub async fn run() -> Result<()> {
 
             match action {
                 "Approve" => {
+                    if let Err(err) =
+                        crate::metadata::refresh_session_title_from_session(&manager, &mut session)
+                    {
+                        eprintln!("warning: failed to refresh session title: {err}");
+                    }
                     session.approve();
                     manager.save(&session)?;
                     eprintln!(
@@ -58,7 +63,7 @@ pub async fn run() -> Result<()> {
                     };
                     crate::plan_cmd::replan_session(
                         &manager,
-                        &session,
+                        &mut session,
                         text,
                         DEFAULT_RATE_LIMIT_RETRIES,
                     )
@@ -188,7 +193,7 @@ fn format_session_label(s: &SessionState) -> String {
     };
     let date = format_session_date(&s.id);
     let suffix = format_suffix(s);
-    let input_preview = crate::display::truncate(&s.input, 60);
+    let input_preview = crate::display::truncate(s.title_or_input(), 60);
     format!("{icon} {date} {phase_str} {input_preview}{suffix}")
 }
 
@@ -646,6 +651,49 @@ mod tests {
         assert!(
             label.contains('…'),
             "long input should be truncated: {label}"
+        );
+    }
+
+    #[test]
+    fn test_format_session_label_prefers_title_over_input() {
+        // Given: a session with both raw input and a generated title
+        let mut s = make_session(
+            "20260306143000",
+            "raw task input that should not be the primary label",
+            SessionPhase::Planned,
+        );
+        s.title = Some("Generated session title".to_string());
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: the generated title is shown instead of the raw input
+        assert!(
+            label.contains("Generated session title"),
+            "should contain generated title: {label}"
+        );
+        assert!(
+            !label.contains("raw task input that should not be the primary label"),
+            "should not contain raw input when title is present: {label}"
+        );
+    }
+
+    #[test]
+    fn test_format_session_label_falls_back_to_input_when_title_missing() {
+        // Given: a session without a generated title
+        let s = make_session(
+            "20260306143000",
+            "raw task input remains visible",
+            SessionPhase::Planned,
+        );
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: the raw input remains the visible fallback
+        assert!(
+            label.contains("raw task input remains visible"),
+            "should contain raw input fallback: {label}"
         );
     }
 

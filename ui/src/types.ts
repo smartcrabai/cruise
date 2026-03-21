@@ -16,6 +16,7 @@ export interface Session {
   configSource: string;
   baseDir: string;
   input: string;
+  title?: string;
   currentStep?: string;
   createdAt: string;
   completedAt?: string;
