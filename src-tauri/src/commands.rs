@@ -447,6 +447,31 @@ pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Delete a session and clean up its git worktree if one exists.
+///
+/// Running sessions cannot be deleted — cancel them first.
+#[tauri::command]
+pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
+    let manager = new_session_manager()?;
+    let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+
+    if matches!(session.phase, SessionPhase::Running) {
+        return Err("Cannot delete a running session. Cancel it first.".to_string());
+    }
+
+    if let Some(ctx) = session.worktree_context()
+        && let Err(e) = cruise::worktree::cleanup_worktree(&ctx)
+    {
+        eprintln!(
+            "warning: failed to remove worktree for {}: {}",
+            session_id, e
+        );
+    }
+
+    manager.delete(&session_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Re-generate the plan for an existing session, streaming [`PlanEvent`]s over `channel`.
 ///
 /// Returns the updated plan markdown on success.

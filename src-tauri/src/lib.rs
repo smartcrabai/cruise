@@ -29,6 +29,7 @@ pub fn run() {
             commands::create_session,
             commands::approve_session,
             commands::discard_session,
+            commands::delete_session,
             commands::reset_session,
             commands::fix_session,
             commands::list_directory,
