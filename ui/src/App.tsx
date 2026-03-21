@@ -18,6 +18,7 @@ import {
   listSessions,
   resetSession,
   respondToOption,
+  runAllSessions,
   runSession,
 } from "./lib/commands";
 import { DirectoryPicker } from "./components/DirectoryPicker";
@@ -62,10 +63,11 @@ interface SessionSidebarProps {
   selectedId: string | null;
   onSelect: (session: Session) => void;
   onNewSession: () => void;
+  onRunAll: () => void;
   onRefreshRef?: React.MutableRefObject<(() => void) | null>;
 }
 
-function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: SessionSidebarProps) {
+function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -138,6 +140,14 @@ function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: Se
               title="Clean completed sessions"
             >
               {cleaning ? "…" : "Clean"}
+            </button>
+            <button
+              onClick={onRunAll}
+              disabled={!sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
+              title="Run all pending sessions"
+            >
+              Run All
             </button>
             <button
               onClick={onNewSession}
@@ -347,7 +357,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const _channelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
   // Load saved log from file when tab is opened or after run finishes
@@ -390,7 +399,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setReplanPhase("idle");
     setShowDeleteConfirm(false);
     setDeleting(false);
-    _channelRef.current = null;
   }, [session.id]);
 
   // Scroll live log to bottom when new entries arrive
@@ -407,7 +415,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setActiveTab("log");
 
     const channel = new Channel<WorkflowEvent>();
-    _channelRef.current = channel;
 
     channel.onmessage = (event) => {
       if (event.event === "stepStarted") {
@@ -1072,6 +1079,199 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
   );
 }
 
+// ─── RunAllView ───────────────────────────────────────────────────────────────
+
+type RunAllStatus = "running" | "completed" | "cancelled" | "error";
+
+interface RunAllSessionResult {
+  sessionId: string;
+  input: string;
+  phase: SessionPhase;
+  error?: string;
+}
+
+interface RunAllViewProps {
+  onCompleted: () => void;
+}
+
+function RunAllView({ onCompleted }: RunAllViewProps) {
+  const [status, setStatus] = useState<RunAllStatus>("running");
+  const [total, setTotal] = useState(0);
+  const [currentSession, setCurrentSession] = useState<{ id: string; input: string } | null>(null);
+  const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
+  const [results, setResults] = useState<RunAllSessionResult[]>([]);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
+  const startedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void startRunAll();
+    return () => {
+      mountedRef.current = false;
+      if (channelRef.current) {
+        channelRef.current.onmessage = () => {};
+        channelRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startRunAll() {
+    const channel = new Channel<WorkflowEvent>();
+    channelRef.current = channel;
+
+    channel.onmessage = (event) => {
+      if (!mountedRef.current) return;
+      if (event.event === "runAllStarted") {
+        setTotal(event.data.total);
+      } else if (event.event === "runAllSessionStarted") {
+        setCurrentSession({ id: event.data.sessionId, input: event.data.input });
+        setCurrentStep(null);
+      } else if (event.event === "runAllSessionFinished") {
+        const { sessionId, input, phase, error } = event.data;
+        setResults((prev) => [...prev, { sessionId, input, phase, error }]);
+        setCurrentSession(null);
+        setCurrentStep(null);
+        setPendingOption(null);
+      } else if (event.event === "runAllCompleted") {
+        setStatus(event.data.cancelled > 0 ? "cancelled" : "completed");
+      } else if (event.event === "stepStarted") {
+        setCurrentStep({ name: event.data.step, index: event.data.index, total: event.data.total });
+      } else if (event.event === "optionRequired") {
+        setPendingOption({ requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan });
+      }
+    };
+
+    try {
+      await runAllSessions(channel);
+    } catch (e) {
+      if (mountedRef.current) {
+        setStatus("error");
+        setRunError(String(e));
+      }
+    }
+  }
+
+  async function handleCancel() {
+    try {
+      await cancelSession();
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  async function handleOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    setPendingOption(null);
+    try {
+      await respondToOption(result);
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  return (
+    <div className="h-full flex flex-col p-6 max-w-2xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-semibold text-gray-100">Run All</h2>
+        {status === "running" ? (
+          <button
+            onClick={() => void handleCancel()}
+            className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onCompleted}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded"
+          >
+            Done
+          </button>
+        )}
+      </div>
+
+      {total > 0 && (
+        <div className="mb-4">
+          <div className="flex justify-between text-xs text-gray-400 mb-1">
+            <span>{results.length} / {total} sessions</span>
+            {status === "running" && currentSession && (
+              <span className="text-green-400 animate-pulse">Running…</span>
+            )}
+            {status === "completed" && <span className="text-green-400">Completed</span>}
+            {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
+            {status === "error" && <span className="text-red-400">Error</span>}
+          </div>
+          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              style={{ width: `${(results.length / total) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {status === "running" && currentSession && (
+        <div className="mb-4 p-3 bg-gray-900 border border-green-900/50 rounded">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-xs text-gray-400 font-mono">{currentSession.id}</span>
+          </div>
+          <p className="text-sm text-gray-200 truncate">{currentSession.input}</p>
+          {currentStep && (
+            <p className="text-xs text-gray-500 mt-1">
+              [{currentStep.index + 1}/{currentStep.total}] {currentStep.name}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto space-y-1">
+        {results.map((r) => (
+          <div
+            key={r.sessionId}
+            className="flex items-start gap-2 px-3 py-2 rounded bg-gray-900/50"
+          >
+            <span className="mt-0.5 text-sm">
+              {r.phase === "Completed" && "✓"}
+              {r.phase === "Failed" && "✗"}
+              {r.phase === "Suspended" && "⏸"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-gray-300 truncate">{r.input}</p>
+              {r.error && <p className="text-xs text-red-400 mt-0.5 truncate">{r.error}</p>}
+            </div>
+            <PhaseBadge phase={r.phase} />
+          </div>
+        ))}
+      </div>
+
+      {(status === "completed" || status === "cancelled" || status === "error") && (
+        <div className="mt-4 p-3 bg-gray-900 border border-gray-800 rounded text-sm text-gray-400 flex flex-col gap-1">
+          <div className="flex gap-4">
+            <span className="text-green-400">{results.filter((r) => r.phase === "Completed").length} completed</span>
+            {results.filter((r) => r.phase === "Failed").length > 0 && <span className="text-red-400">{results.filter((r) => r.phase === "Failed").length} failed</span>}
+            {results.filter((r) => r.phase === "Suspended").length > 0 && <span className="text-orange-400">{results.filter((r) => r.phase === "Suspended").length} cancelled</span>}
+          </div>
+          {runError && <p className="text-xs text-red-400">{runError}</p>}
+        </div>
+      )}
+
+      {pendingOption && (
+        <OptionDialog
+          choices={pendingOption.choices}
+          plan={pendingOption.plan}
+          onRespond={(result) => void handleOptionRespond(result)}
+        />
+      )}
+    </div>
+  );
+}
+
 // ─── UpdateNotification ──────────────────────────────────────────────────────
 
 type UpdateState = "available" | "downloading" | "error";
@@ -1172,7 +1372,7 @@ function UpdateNotification() {
 
 export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [view, setView] = useState<"session" | "new">("session");
+  const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
 
   return (
@@ -1184,12 +1384,20 @@ export default function App() {
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
+          onRunAll={() => { setSelectedSession(null); setView("runAll"); }}
           onRefreshRef={sidebarRefreshRef}
         />
       </aside>
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        {view === "new" ? (
+        {view === "runAll" ? (
+          <RunAllView
+            onCompleted={() => {
+              sidebarRefreshRef.current?.();
+              setView("session");
+            }}
+          />
+        ) : view === "new" ? (
           <NewSessionForm
             onCreated={(id) => {
               sidebarRefreshRef.current?.();
