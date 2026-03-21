@@ -43,8 +43,6 @@ struct LoopCounters {
     run: usize,
     skipped: usize,
     failed: usize,
-    step_index: usize,
-    total_steps: usize,
 }
 
 /// Outcome of processing one step iteration.
@@ -82,7 +80,6 @@ fn check_group_retry_skip(
         max
     );
     let count = meta.step_count;
-    counters.step_index += count;
     counters.skipped += count;
     let next = get_next_step(&compiled.steps, &meta.last_step, None);
     Some(next.map_or(StepOutcome::Done, StepOutcome::Next))
@@ -203,8 +200,6 @@ pub async fn execute_steps(
             run: 0,
             skipped: 0,
             failed: 0,
-            step_index: 0,
-            total_steps: ctx.compiled.steps.len(),
         },
         edge_counts: HashMap::new(),
     };
@@ -215,7 +210,6 @@ pub async fn execute_steps(
             && let Some(new_compiled) = reloader()?
             && new_compiled.steps.contains_key(current_step.as_str())
         {
-            state.counters.total_steps = new_compiled.steps.len();
             state.group_retry_counts.clear();
             state.edge_counts.clear();
             reloaded = Some(new_compiled);
@@ -296,23 +290,16 @@ async fn step_loop_iteration(
     }
 
     if should_skip(step_config.skip.as_ref(), vars)? {
-        state.counters.step_index += 1;
         state.counters.skipped += 1;
         eprintln!("{} skipping: {}", style("→").yellow(), current_step);
         return Ok(get_next_step(&ctx.compiled.steps, current_step, None)
             .map_or(StepOutcome::Done, StepOutcome::Next));
     }
 
-    state.counters.step_index += 1;
-    state.counters.total_steps = state.counters.total_steps.max(state.counters.step_index);
     eprintln!(
         "\n{} {}",
         style("▶").cyan().bold(),
-        style(format!(
-            "[{}/{}] {}",
-            state.counters.step_index, state.counters.total_steps, current_step
-        ))
-        .bold()
+        style(current_step).bold()
     );
     (ctx.on_step_start)(current_step)?;
 
@@ -559,12 +546,7 @@ pub(crate) async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             let prompt_text = format!("  {}", &resolved);
-            let text = match crate::multiline_input::prompt_multiline(&prompt_text)? {
-                crate::multiline_input::InputResult::Submitted(t) => t,
-                crate::multiline_input::InputResult::Cancelled => {
-                    return Err(CruiseError::StepPaused);
-                }
-            };
+            let text = crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?;
             vars.set_input(text);
         } else {
             eprintln!("  {}", style(resolved).dim());
@@ -1039,7 +1021,9 @@ steps:
     command: "echo done"
 "#;
         let result = run_config(yaml, "", None).await;
-        assert!(result.is_ok());
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.skipped, 1, "one step should be counted as skipped");
+        assert_eq!(result.run, 1, "one step should be counted as run");
     }
 
     #[tokio::test]
@@ -1056,7 +1040,9 @@ steps:
     command: "echo done"
 "#;
         let result = run_config(yaml, "", None).await;
-        assert!(result.is_ok());
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.skipped, 1, "one step should be counted as skipped");
+        assert_eq!(result.run, 2, "two steps should be counted as run");
     }
 
     #[tokio::test]
@@ -2226,6 +2212,56 @@ steps:
         assert_eq!(
             result.run, 2,
             "choose (option) + final should run; middle should be skipped via next=final"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execution_result_run_counter_counts_all_executed_steps() {
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo a"
+  step2:
+    command: "echo b"
+  step3:
+    command: "echo c"
+"#;
+        let result = run_config(yaml, "", None).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 3, "all three steps should be counted as run");
+        assert_eq!(result.skipped, 0, "no steps should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_execution_result_skipped_counter_group_max_retries_zero() {
+        let yaml = r#"
+command: [echo]
+groups:
+  my_group:
+    max_retries: 0
+    steps:
+      substep1:
+        command: "exit 1"
+      substep2:
+        command: "exit 1"
+steps:
+  before:
+    command: "echo before"
+  group_call:
+    group: my_group
+  after:
+    command: "echo after"
+"#;
+        let result = run_config(yaml, "", None).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(
+            result.skipped, 2,
+            "both group steps should be counted as skipped"
+        );
+        assert_eq!(
+            result.run, 2,
+            "before and after steps should be counted as run"
         );
     }
 }

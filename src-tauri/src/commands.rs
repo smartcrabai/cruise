@@ -389,7 +389,8 @@ pub async fn create_session(
     manager.create(&session).map_err(|e| e.to_string())?;
 
     let session_dir = manager.sessions_dir().join(&session_id);
-    std::fs::write(session_dir.join("config.yaml"), &yaml).map_err(|e| e.to_string())?;
+    std::fs::write(session_dir.join("config.yaml"), &yaml)
+        .map_err(|e| format!("failed to write session config: {e}"))?;
 
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
@@ -399,7 +400,8 @@ pub async fn create_session(
 
     match run_plan_prompt_template(&config, &mut vars, PLAN_PROMPT_TEMPLATE, 5).await {
         Ok(()) => {
-            let content = std::fs::read_to_string(&plan_path).map_err(|e| e.to_string())?;
+            let content = std::fs::read_to_string(&plan_path)
+                .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))?;
             if content.trim().is_empty() {
                 let _ = manager.delete(&session_id);
                 let msg = "generated plan is empty".to_string();
@@ -497,7 +499,8 @@ pub async fn fix_session(
             // Re-save to update updated_at timestamp
             manager.save(&session).map_err(|e| e.to_string())?;
 
-            let content = std::fs::read_to_string(&plan_path).map_err(|e| e.to_string())?;
+            let content = std::fs::read_to_string(&plan_path)
+                .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))?;
             let _ = channel.send(PlanEvent::PlanGenerated {
                 content: content.clone(),
             });

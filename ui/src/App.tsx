@@ -7,11 +7,11 @@ import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, Workflow
 import {
   approveSession,
   cancelSession,
-  cleanSessions,
   createSession,
   deleteSession,
   discardSession,
   fixSession,
+  getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
@@ -23,181 +23,9 @@ import {
 } from "./lib/commands";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatLocalTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-// ─── Phase badge ──────────────────────────────────────────────────────────────
-
-const PHASE_COLORS: Partial<Record<SessionPhase, string>> = {
-  "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
-  Planned: "bg-blue-900/50 text-blue-300",
-  Running: "bg-green-900/50 text-green-300",
-  Completed: "bg-gray-700/50 text-gray-300",
-  Failed: "bg-red-900/50 text-red-300",
-  Suspended: "bg-orange-900/50 text-orange-300",
-};
-
-function PhaseBadge({ phase }: { phase: SessionPhase }) {
-  const cls = PHASE_COLORS[phase] ?? "bg-gray-700/50 text-gray-300";
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
-      {phase}
-    </span>
-  );
-}
-
-// ─── SessionSidebar ───────────────────────────────────────────────────────────
-
-interface SessionSidebarProps {
-  selectedId: string | null;
-  onSelect: (session: Session) => void;
-  onNewSession: () => void;
-  onRunAll: () => void;
-  onRefreshRef?: React.MutableRefObject<(() => void) | null>;
-}
-
-function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef }: SessionSidebarProps) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanMessage, setCleanMessage] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const sessions = await listSessions();
-      const sorted = [...sessions].sort((a, b) => {
-        const aInput = a.awaitingInput || a.phase === "Awaiting Approval";
-        const bInput = b.awaitingInput || b.phase === "Awaiting Approval";
-        if (aInput !== bInput) return aInput ? -1 : 1;
-        const aTime = a.updatedAt ?? a.createdAt;
-        const bTime = b.updatedAt ?? b.createdAt;
-        return bTime.localeCompare(aTime);
-      });
-      setSessions(sorted);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    if (onRefreshRef) {
-      onRefreshRef.current = load;
-    }
-  }, [load, onRefreshRef]);
-
-  async function handleClean() {
-    setCleaning(true);
-    setCleanMessage(null);
-    try {
-      const result = await cleanSessions();
-      setCleanMessage(`${result.deleted} deleted (skipped: ${result.skipped})`);
-      void load();
-    } catch (e) {
-      setCleanMessage(`Error: ${e}`);
-    } finally {
-      setCleaning(false);
-    }
-  }
-
-  return (
-    <div className="h-full flex flex-col">
-      {/* Sidebar header */}
-      <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => void load()}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
-              title="Refresh"
-            >
-              ↻
-            </button>
-            <button
-              onClick={() => void handleClean()}
-              disabled={cleaning}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-              title="Clean completed sessions"
-            >
-              {cleaning ? "…" : "Clean"}
-            </button>
-            <button
-              onClick={onRunAll}
-              disabled={!sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-              title="Run all pending sessions"
-            >
-              Run All
-            </button>
-            <button
-              onClick={onNewSession}
-              className="px-2 py-1 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded"
-            >
-              + New
-            </button>
-          </div>
-        </div>
-        {cleanMessage && (
-          <p className="text-xs text-gray-400">{cleanMessage}</p>
-        )}
-      </div>
-
-      {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && (
-          <p className="p-3 text-xs text-gray-500">Loading…</p>
-        )}
-        {error && (
-          <p className="p-3 text-xs text-red-400">Error: {error}</p>
-        )}
-        {!loading && !error && sessions.length === 0 && (
-          <p className="p-3 text-xs text-gray-500">No sessions found.</p>
-        )}
-        {sessions.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onSelect(s)}
-            className={`w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800 transition-colors ${
-              selectedId === s.id ? "bg-gray-800" : ""
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2 mb-0.5">
-              <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} />
-            </div>
-            <p className="text-sm text-gray-300 truncate">{s.input}</p>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-xs text-blue-400/70 font-mono truncate">
-                {s.baseDir.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? s.baseDir}
-              </span>
-              <span className="text-xs text-gray-600">{formatLocalTime(s.updatedAt ?? s.createdAt)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
+import { PhaseBadge } from "./components/PhaseBadge";
+import { SessionSidebar } from "./components/SessionSidebar";
+import { formatLocalTime } from "./lib/format";
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
 
@@ -1402,15 +1230,15 @@ export default function App() {
             onCreated={(id) => {
               sidebarRefreshRef.current?.();
               // Navigate to the created session after a brief refresh
-              setTimeout(async () => {
-                try {
-                  const { getSession } = await import("./lib/commands");
-                  const session = await getSession(id);
-                  setSelectedSession(session);
-                  setView("session");
-                } catch {
-                  setView("session");
-                }
+              setTimeout(() => {
+                void getSession(id)
+                  .then((session) => {
+                    setSelectedSession(session);
+                    setView("session");
+                  })
+                  .catch(() => {
+                    setView("session");
+                  });
               }, 300);
             }}
           />
