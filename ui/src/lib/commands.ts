@@ -5,6 +5,7 @@ import type {
   DirEntry,
   PlanEvent,
   Session,
+  WorkspaceMode,
   WorkflowEvent,
 } from "../types";
 
@@ -29,13 +30,14 @@ export function getSessionPlan(sessionId: string): Promise<string> {
  * @example
  * const channel = new Channel<WorkflowEvent>();
  * channel.onmessage = (event) => { ... };
- * await runSession(sessionId, channel);
+ * await runSession(sessionId, "Worktree", channel);
  */
 export function runSession(
   sessionId: string,
+  workspaceMode: WorkspaceMode,
   channel: Channel<WorkflowEvent>
 ): Promise<void> {
-  return invoke<void>("run_session", { sessionId, channel });
+  return invoke<void>("run_session", { sessionId, workspaceMode, channel });
 }
 
 /** Cancel the currently running workflow. */

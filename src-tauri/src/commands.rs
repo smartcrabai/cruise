@@ -1,11 +1,15 @@
 use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cruise::cancellation::CancellationToken;
-use cruise::session::{SessionManager, SessionPhase, current_iso8601, get_cruise_home};
+use cruise::session::{
+    SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
+};
 use cruise::step::option::OptionResult;
+use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -34,6 +38,7 @@ pub struct SessionDto {
     pub pr_url: Option<String>,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
+    pub workspace_mode: WorkspaceMode,
 }
 
 impl From<cruise::session::SessionState> for SessionDto {
@@ -57,6 +62,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             pr_url: s.pr_url,
             updated_at: s.updated_at,
             awaiting_input: s.awaiting_input,
+            workspace_mode: s.workspace_mode,
         }
     }
 }
@@ -121,6 +127,27 @@ impl crate::gui_option_handler::EventEmitter for StateSavingEmitter {
 fn new_session_manager() -> std::result::Result<SessionManager, String> {
     let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
     Ok(SessionManager::new(cruise_home))
+}
+
+fn prepare_run_session(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    requested_workspace_mode: WorkspaceMode,
+) -> cruise::error::Result<PathBuf> {
+    let effective_workspace_mode = if session.current_step.is_none() {
+        requested_workspace_mode
+    } else {
+        session.workspace_mode
+    };
+
+    session.workspace_mode = effective_workspace_mode;
+    let execution_workspace =
+        prepare_execution_workspace(manager, session, effective_workspace_mode)?;
+    update_session_workspace(session, &execution_workspace);
+    session.phase = SessionPhase::Running;
+    manager.save(session)?;
+
+    Ok(execution_workspace.path().to_path_buf())
 }
 
 // ─── Filesystem commands ───────────────────────────────────────────────────────
@@ -565,6 +592,7 @@ impl SessionLogger {
 #[expect(clippy::too_many_lines)]
 async fn execute_single_session(
     session_id: &str,
+    workspace_mode: WorkspaceMode,
     channel: &tauri::ipc::Channel<WorkflowEvent>,
     state: &AppState,
     manager: &SessionManager,
@@ -594,8 +622,8 @@ async fn execute_single_session(
         Ok,
     )?;
 
-    session.phase = SessionPhase::Running;
-    manager.save(&session).map_err(|e| e.to_string())?;
+    let exec_root =
+        prepare_run_session(&manager, &mut session, workspace_mode).map_err(|e| e.to_string())?;
 
     let cancel_token = CancellationToken::new();
     {
@@ -617,10 +645,6 @@ async fn execute_single_session(
     let sessions_dir = manager.sessions_dir();
     let plan_path = session.plan_path(&sessions_dir);
     let input = session.input.clone();
-    let exec_root = session
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| session.base_dir.clone());
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
@@ -759,11 +783,12 @@ async fn execute_single_session(
 #[tauri::command]
 pub async fn run_session(
     session_id: String,
+    workspace_mode: WorkspaceMode,
     channel: tauri::ipc::Channel<WorkflowEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
-    match execute_single_session(&session_id, &channel, &state, &manager).await? {
+    match execute_single_session(&session_id, workspace_mode, &channel, &state, &manager).await? {
         SessionPhase::Failed(msg) => Err(msg),
         _ => Ok(()),
     }
@@ -789,12 +814,13 @@ pub async fn run_all_sessions(
     for session in candidates {
         let session_id = session.id;
         let input = session.input;
+        let workspace_mode = session.workspace_mode;
         let _ = channel.send(WorkflowEvent::RunAllSessionStarted {
             session_id: session_id.clone(),
             input: input.clone(),
         });
 
-        let phase = execute_single_session(&session_id, &channel, &state, &manager)
+        let phase = execute_single_session(&session_id, workspace_mode, &channel, &state, &manager)
             .await
             .unwrap_or_else(SessionPhase::Failed);
 
@@ -881,6 +907,10 @@ pub fn do_respond_to_option(
 mod tests {
     use super::*;
     use cruise::cancellation::CancellationToken;
+    use cruise::test_support::{init_git_repo, make_session};
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
     fn wait_for_pending(pending: &Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>) {
@@ -1110,6 +1140,95 @@ mod tests {
         // Then: title remains absent and the raw input is still available
         assert_eq!(dto.title, None);
         assert_eq!(dto.input, "raw input");
+    }
+
+    #[test]
+    fn test_prepare_run_session_uses_requested_workspace_mode_for_fresh_runs() {
+        // Given: a fresh planned session and a current-branch run request from the GUI
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260321121000";
+        let session = make_session(session_id, &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the backend prepares the run before spawning execution
+        let exec_root = prepare_run_session(&manager, &mut loaded, WorkspaceMode::CurrentBranch)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the requested mode is persisted and the run targets the base repository
+        assert_eq!(exec_root, repo);
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved.phase, SessionPhase::Running);
+        assert_eq!(saved.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(saved.target_branch.as_deref(), Some("main"));
+        assert!(saved.worktree_path.is_none());
+        assert!(saved.worktree_branch.is_none());
+    }
+
+    #[test]
+    fn test_prepare_run_session_resumes_with_saved_workspace_mode() {
+        // Given: a resume/retry session already pinned to current-branch mode
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(repo.join("resume-dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260321121001";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Suspended;
+        session.current_step = Some("edit".to_string());
+        session.workspace_mode = WorkspaceMode::CurrentBranch;
+        session.target_branch = Some("main".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the GUI asks to rerun with a different mode
+        let exec_root = prepare_run_session(&manager, &mut loaded, WorkspaceMode::Worktree)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the saved workspace mode wins and no worktree is created mid-session
+        assert_eq!(exec_root, repo);
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved.phase, SessionPhase::Running);
+        assert_eq!(saved.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(saved.worktree_path.is_none());
+        assert!(saved.worktree_branch.is_none());
+        assert!(
+            !manager.worktrees_dir().join(session_id).exists(),
+            "resume should not switch to a newly created worktree"
+        );
+    }
+
+    #[test]
+    fn test_prepare_run_session_does_not_persist_running_phase_when_workspace_setup_fails() {
+        // Given: a fresh current-branch run request against a dirty repository
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(repo.join("dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260321121002";
+        let session = make_session(session_id, &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: workspace preparation fails before execution starts
+        let error = prepare_run_session(&manager, &mut loaded, WorkspaceMode::CurrentBranch)
+            .map_or_else(|e| e, |_| panic!("expected workspace preparation to fail"));
+
+        // Then: the session remains runnable instead of being left in Running phase
+        assert!(
+            error.to_string().contains("dirty"),
+            "unexpected error: {error}"
+        );
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved.phase, SessionPhase::Planned);
     }
 
     // ─── Integration: full option-selection round-trip ────────────────────────

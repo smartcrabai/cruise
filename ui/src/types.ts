@@ -8,6 +8,8 @@ export type SessionPhase =
   | "Failed"
   | "Suspended";
 
+export type WorkspaceMode = "Worktree" | "CurrentBranch";
+
 export interface Session {
   id: string;
   phase: SessionPhase;
@@ -21,6 +23,7 @@ export interface Session {
   createdAt: string;
   completedAt?: string;
   worktreeBranch?: string;
+  workspaceMode: WorkspaceMode;
   prUrl?: string;
   updatedAt?: string;
   awaitingInput?: boolean;

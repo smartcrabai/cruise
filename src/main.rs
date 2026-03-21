@@ -24,6 +24,7 @@ mod test_binary_support;
 mod test_support;
 mod variable;
 mod workflow;
+mod workspace;
 mod worktree;
 
 #[tokio::main(flavor = "current_thread")]

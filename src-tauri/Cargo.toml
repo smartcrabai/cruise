@@ -22,6 +22,10 @@ tokio = { version = "1", features = ["sync", "rt"] }
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+cruise = { path = "..", features = ["test-utils"] }
+tempfile = "=3.27.0"
+
 [lints.clippy]
 dbg_macro = "deny"
 expect_used = "deny"

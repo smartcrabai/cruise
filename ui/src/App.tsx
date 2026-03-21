@@ -3,7 +3,15 @@ import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Update } from "./lib/updater";
 import { checkForUpdate, downloadAndInstall } from "./lib/updater";
-import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, WorkflowEvent } from "./types";
+import type {
+  ChoiceDto,
+  ConfigEntry,
+  PlanEvent,
+  Session,
+  SessionPhase,
+  WorkflowEvent,
+  WorkspaceMode,
+} from "./types";
 import {
   approveSession,
   cancelSession,
@@ -27,6 +35,16 @@ import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { formatLocalTime } from "./lib/format";
+
+function runButtonLabel(phase: SessionPhase): string {
+  if (phase === "Suspended") {
+    return "Resume";
+  }
+  if (phase === "Failed") {
+    return "Retry";
+  }
+  return "Run";
+}
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
 
@@ -311,7 +329,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     onSessionUpdated(updated);
   }
 
-  async function startRun() {
+  async function startRun(workspaceMode: WorkspaceMode) {
     setStatus("running");
     setCurrentStep(null);
     setLiveLog([]);
@@ -355,7 +373,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     };
 
     try {
-      await runSession(session.id, channel);
+      await runSession(session.id, workspaceMode, channel);
     } catch (e) {
       setStatus("failed");
       setLiveLog((prev) => [...prev, `Error: ${e}`]);
@@ -365,6 +383,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     refreshSession().catch((e) => {
       setLiveLog((prev) => [...prev, `Session refresh error: ${e}`]);
     });
+
     void loadSavedLog();
   }
 
@@ -463,6 +482,8 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     session.phase === "Suspended" ||
     session.phase === "Failed" ||
     session.phase === "Completed";
+  const isFreshRun = session.currentStep == null;
+  const canRun = isRunnable && status !== "running";
 
   // Decide which log content to show
   const showLive = status === "running" || (status !== "idle" && liveLog.length > 0);
@@ -493,12 +514,28 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
 
         {/* Controls */}
         <div className="flex gap-2">
-          {isRunnable && status !== "running" && (
+          {canRun && isFreshRun && (
+            <>
+              <button
+                onClick={() => void startRun("Worktree")}
+                className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+              >
+                Create worktree (new branch)
+              </button>
+              <button
+                onClick={() => void startRun("CurrentBranch")}
+                className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
+              >
+                Use current branch
+              </button>
+            </>
+          )}
+          {canRun && !isFreshRun && (
             <button
-              onClick={() => void startRun()}
+              onClick={() => void startRun(session.workspaceMode)}
               className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
             >
-              {status === "idle" ? "Run" : "Re-run"}
+              {runButtonLabel(session.phase)}
             </button>
           )}
           {status === "running" && (

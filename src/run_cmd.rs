@@ -19,6 +19,7 @@ use crate::session::{
 };
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
+use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
 use crate::worktree;
 
 const PR_LANGUAGE_VAR: &str = "pr.language";
@@ -49,25 +50,6 @@ enum WorkspaceOverride {
 enum SessionStateConflictChoice {
     Abort,
     Overwrite,
-}
-
-enum ExecutionWorkspace {
-    Worktree {
-        ctx: worktree::WorktreeContext,
-        reused: bool,
-    },
-    CurrentBranch {
-        path: PathBuf,
-    },
-}
-
-impl ExecutionWorkspace {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Worktree { ctx, .. } => &ctx.path,
-            Self::CurrentBranch { path } => path,
-        }
-    }
 }
 
 /// Returns a safe fallback directory when `set_current_dir` fails.
@@ -350,6 +332,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     std::env::set_current_dir(session.base_dir.clone())?;
     let execution_workspace =
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
+    log_execution_workspace(&execution_workspace);
     update_session_workspace(&mut session, &execution_workspace);
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
@@ -496,8 +479,8 @@ fn log_resume_message(session: &SessionState) {
     }
 }
 
-/// Update session workspace fields from the chosen execution workspace.
-fn update_session_workspace(session: &mut SessionState, ws: &ExecutionWorkspace) {
+/// Log the chosen execution workspace for CLI users.
+fn log_execution_workspace(ws: &ExecutionWorkspace) {
     match ws {
         ExecutionWorkspace::Worktree { ctx, reused } => {
             let suffix = if *reused { " (reused)" } else { "" };
@@ -507,14 +490,9 @@ fn update_session_workspace(session: &mut SessionState, ws: &ExecutionWorkspace)
                 ctx.path.display(),
                 suffix
             );
-            session.worktree_path = Some(ctx.path.clone());
-            session.worktree_branch = Some(ctx.branch.clone());
         }
         ExecutionWorkspace::CurrentBranch { path } => {
             eprintln!("{} current branch: {}", style("→").cyan(), path.display());
-            session.worktree_path = None;
-            session.worktree_branch = None;
-            session.pr_url = None;
         }
     }
 }
@@ -684,94 +662,6 @@ async fn run_all(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn prepare_execution_workspace(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    workspace_mode: WorkspaceMode,
-) -> Result<ExecutionWorkspace> {
-    match workspace_mode {
-        WorkspaceMode::Worktree => {
-            let worktrees_dir = manager.worktrees_dir();
-            let (ctx, reused) = worktree::setup_session_worktree(
-                &session.base_dir,
-                &session.id,
-                &session.input,
-                &worktrees_dir,
-                session.worktree_branch.as_deref(),
-            )?;
-            Ok(ExecutionWorkspace::Worktree { ctx, reused })
-        }
-        WorkspaceMode::CurrentBranch => {
-            validate_current_branch_session(session)?;
-            Ok(ExecutionWorkspace::CurrentBranch {
-                path: session.base_dir.clone(),
-            })
-        }
-    }
-}
-
-fn validate_current_branch_session(session: &mut SessionState) -> Result<()> {
-    let current_branch = current_branch_name(&session.base_dir)?;
-
-    match session.target_branch.as_deref() {
-        Some(target_branch) if current_branch != target_branch => {
-            return Err(CruiseError::Other(format!(
-                "current-branch mode expected branch `{target_branch}`, but found `{current_branch}`"
-            )));
-        }
-        None => {
-            session.target_branch = Some(current_branch);
-        }
-        _ => {}
-    }
-
-    // Only enforce a clean working tree at the start of a fresh session; on
-    // resume (current_step.is_some()) the tree may already contain in-progress
-    // changes left by the previous run.
-    if session.current_step.is_none() && is_working_tree_dirty(&session.base_dir)? {
-        return Err(CruiseError::Other(
-            "current-branch mode requires a clean working tree, but the repository is dirty"
-                .to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn current_branch_name(repo_dir: &Path) -> Result<String> {
-    let branch = git_stdout(
-        repo_dir,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        "git rev-parse --abbrev-ref HEAD failed",
-    )?;
-
-    if branch == "HEAD" {
-        return Err(CruiseError::Other(
-            "current-branch mode requires an attached branch; HEAD is detached".to_string(),
-        ));
-    }
-
-    Ok(branch)
-}
-
-fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git status --porcelain: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!(
-            "git status --porcelain failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1316,20 +1206,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_binary_support::PathEnvGuard;
-
-    fn run_git_ok(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("git command failed to start: {e}"));
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    use crate::test_support::{init_git_repo, run_git_ok};
 
     fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1344,16 +1221,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn init_git_repo(dir: &Path) {
-        run_git_ok(dir, &["init"]);
-        run_git_ok(dir, &["config", "user.email", "test@example.com"]);
-        run_git_ok(dir, &["config", "user.name", "Test"]);
-        fs::write(dir.join("README.md"), "init").unwrap_or_else(|e| panic!("{e:?}"));
-        run_git_ok(dir, &["add", "."]);
-        run_git_ok(dir, &["commit", "-m", "init"]);
-        run_git_ok(dir, &["branch", "-M", "main"]);
     }
 
     fn create_worktree(tmp: &TempDir, session_id: &str) -> (PathBuf, worktree::WorktreeContext) {

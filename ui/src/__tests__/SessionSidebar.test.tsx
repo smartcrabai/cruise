@@ -19,6 +19,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     baseDir: "/home/user/project",
     input: "test task",
     createdAt: "2026-01-01T00:00:00Z",
+    workspaceMode: "Worktree",
     ...overrides,
   };
 }
