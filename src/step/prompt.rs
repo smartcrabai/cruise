@@ -96,7 +96,9 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
+        .map_err(|e| {
+            CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
+        })?;
 
     // Write the prompt via stdin to avoid ARG_MAX limits.
     if let Some(mut stdin) = child.stdin.take() {
