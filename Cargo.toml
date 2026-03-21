@@ -4,12 +4,15 @@ edition = "2024"
 license = "MIT"
 name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
-version = "0.1.20"
+version.workspace = true
 
 [workspace]
 default-members = ["."]
 members = [".", "src-tauri"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.20"
 
 # Config for 'dist'
 [workspace.metadata.dist]

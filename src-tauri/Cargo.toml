@@ -1,6 +1,6 @@
 [package]
 name = "cruise-gui"
-version = "0.1.16"
+version.workspace = true
 edition = "2024"
 publish = false
 

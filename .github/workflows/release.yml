@@ -223,7 +223,7 @@ jobs:
         include:
           - platform: macos-aarch64
             runner: macos-latest
-            bundles: dmg
+            bundles: app,dmg
           - platform: linux-x86_64
             runner: ubuntu-latest
             bundles: deb,appimage
@@ -289,7 +289,6 @@ jobs:
             exit 1
           fi
           codesign --force --deep --sign - "$APP"
-        working-directory: src-tauri
 
       - name: Collect artifacts (macOS)
         if: matrix.platform == 'macos-aarch64'
