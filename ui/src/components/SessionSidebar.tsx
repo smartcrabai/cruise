@@ -9,10 +9,11 @@ interface SessionSidebarProps {
   selectedId: string | null;
   onSelect: (session: Session) => void;
   onNewSession: () => void;
+  onRunAll: () => void;
   onRefreshRef?: MutableRefObject<(() => void) | null>;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +115,14 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRe
               title="Clean completed sessions"
             >
               {cleaning ? "…" : "Clean"}
+            </button>
+            <button
+              onClick={onRunAll}
+              disabled={!sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
+              title="Run all pending sessions"
+            >
+              Run All
             </button>
             <button
               onClick={onNewSession}

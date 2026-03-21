@@ -27,6 +27,7 @@ const defaultProps = {
   selectedId: null as string | null,
   onSelect: vi.fn(),
   onNewSession: vi.fn(),
+  onRunAll: vi.fn(),
 };
 
 // --- Tests ---

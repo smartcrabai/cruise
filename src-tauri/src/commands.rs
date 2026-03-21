@@ -545,29 +545,27 @@ impl SessionLogger {
     }
 }
 
-// ─── run_session ───────────────────────────────────────────────────────────────
+// ─── run_session / run_all_sessions ────────────────────────────────────────────
 
-/// Execute a session's workflow, streaming [`WorkflowEvent`]s over `channel`.
+/// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
 ///
-/// The engine runs on a dedicated blocking thread (`spawn_blocking`) so that
-/// [`GuiOptionHandler::select_option`]'s `blocking_recv()` does not starve the
-/// async runtime. `execute_steps` is driven via `Handle::current().block_on()`
-/// inside that thread.
+/// Loads the session, runs the workflow on a dedicated blocking thread, saves the
+/// final phase, and emits the terminal [`WorkflowEvent`].  Returns the final
+/// [`SessionPhase`] so callers can decide how to proceed (e.g. break a batch loop
+/// on `Suspended`).
 ///
-/// # Phase-2 simplifications
-/// - No worktree creation (uses `worktree_path` if already set, else `base_dir`)
-/// - No conflict resolution on session saves
-/// - No config hot-reloading
-/// - No automatic PR creation
-#[tauri::command]
+/// Infrastructure errors (mutex poisoned, session not found, …) are returned as
+/// `Err(String)`.  Workflow-level errors (step failure) are returned as
+/// `Ok(SessionPhase::Failed(msg))` so that `run_all_sessions` can log them and
+/// continue to the next session instead of aborting the batch.
 #[expect(clippy::too_many_lines)]
-pub async fn run_session(
-    session_id: String,
-    channel: tauri::ipc::Channel<WorkflowEvent>,
-    state: tauri::State<'_, AppState>,
-) -> std::result::Result<(), String> {
-    let manager = new_session_manager()?;
-    let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+async fn execute_single_session(
+    session_id: &str,
+    channel: &tauri::ipc::Channel<WorkflowEvent>,
+    state: &AppState,
+    manager: &SessionManager,
+) -> std::result::Result<SessionPhase, String> {
+    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
 
     if !session.phase.is_runnable() {
         return Err(format!(
@@ -608,7 +606,7 @@ pub async fn run_session(
             .active_session_id
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = Some(session_id.clone());
+        *guard = Some(session_id.to_string());
     }
 
     let option_responder = Arc::clone(&state.option_responder);
@@ -622,9 +620,9 @@ pub async fn run_session(
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
-    let sid_for_spawn = session_id.clone();
-    let sid_for_emitter = session_id.clone();
-    let log_path = manager.sessions_dir().join(&session_id).join("run.log");
+    let sid_for_spawn = session_id.to_string();
+    let sid_for_emitter = session_id.to_string();
+    let log_path = manager.sessions_dir().join(session_id).join("run.log");
 
     let exec_result = tokio::task::spawn_blocking(
         move || -> cruise::error::Result<cruise::engine::ExecutionResult> {
@@ -716,7 +714,7 @@ pub async fn run_session(
     }
 
     // Reload session to pick up any intermediate saves, then apply the final phase.
-    let mut final_session = manager.load(&session_id).unwrap_or(session);
+    let mut final_session = manager.load(session_id).unwrap_or(session);
     final_session.awaiting_input = false;
 
     match exec_result {
@@ -729,13 +727,13 @@ pub async fn run_session(
                 failed: exec.failed,
             });
             manager.save(&final_session).map_err(|e| e.to_string())?;
-            Ok(())
+            Ok(SessionPhase::Completed)
         }
         Err(cruise::error::CruiseError::Interrupted) => {
             final_session.phase = SessionPhase::Suspended;
             let _ = channel.send(WorkflowEvent::WorkflowCancelled);
             manager.save(&final_session).map_err(|e| e.to_string())?;
-            Ok(())
+            Ok(SessionPhase::Suspended)
         }
         Err(e) => {
             let msg = e.to_string();
@@ -744,9 +742,82 @@ pub async fn run_session(
             let _ = channel.send(WorkflowEvent::WorkflowFailed { error: msg.clone() });
             // Ignore save errors so the original workflow error is preserved.
             let _ = manager.save(&final_session);
-            Err(msg)
+            Ok(SessionPhase::Failed(msg))
         }
     }
+}
+
+/// Execute a session's workflow, streaming [`WorkflowEvent`]s over `channel`.
+///
+/// Delegates to [`execute_single_session`] and converts the terminal phase into
+/// the return value expected by the Tauri IPC layer (`Ok(())` for Completed /
+/// Suspended, `Err(msg)` for Failed).
+#[tauri::command]
+pub async fn run_session(
+    session_id: String,
+    channel: tauri::ipc::Channel<WorkflowEvent>,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let manager = new_session_manager()?;
+    match execute_single_session(&session_id, &channel, &state, &manager).await? {
+        SessionPhase::Failed(msg) => Err(msg),
+        _ => Ok(()),
+    }
+}
+
+/// Execute all Planned / Suspended sessions in series, streaming batch-level
+/// [`WorkflowEvent`]s (plus the per-session events from each run) over `channel`.
+///
+/// Individual session failures are logged and the batch continues.  Only a
+/// `Suspended` result (user cancelled) stops the loop early.
+#[tauri::command]
+pub async fn run_all_sessions(
+    channel: tauri::ipc::Channel<WorkflowEvent>,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let manager = new_session_manager()?;
+    let candidates = manager.run_all_candidates().map_err(|e| e.to_string())?;
+    let total = candidates.len();
+    let _ = channel.send(WorkflowEvent::RunAllStarted { total });
+
+    let mut cancelled = 0usize;
+
+    for session in candidates {
+        let session_id = session.id;
+        let input = session.input;
+        let _ = channel.send(WorkflowEvent::RunAllSessionStarted {
+            session_id: session_id.clone(),
+            input: input.clone(),
+        });
+
+        let phase = execute_single_session(&session_id, &channel, &state, &manager)
+            .await
+            .unwrap_or_else(SessionPhase::Failed);
+
+        let (error, should_break) = match &phase {
+            SessionPhase::Suspended => {
+                cancelled += 1;
+                (None, true)
+            }
+            SessionPhase::Failed(msg) => (Some(msg.clone()), false),
+            _ => (None, false),
+        };
+
+        let _ = channel.send(WorkflowEvent::RunAllSessionFinished {
+            session_id,
+            input,
+            phase: phase.label().to_string(),
+            error,
+        });
+
+        if should_break {
+            break;
+        }
+    }
+
+    let _ = channel.send(WorkflowEvent::RunAllCompleted { cancelled });
+
+    Ok(())
 }
 
 /// Inner logic for the `cancel_session` IPC command.

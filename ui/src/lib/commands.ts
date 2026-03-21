@@ -44,6 +44,15 @@ export function cancelSession(): Promise<void> {
 }
 
 /**
+ * Run all Planned / Suspended sessions in series, streaming events via `channel`.
+ */
+export function runAllSessions(
+  channel: Channel<WorkflowEvent>
+): Promise<void> {
+  return invoke<void>("run_all_sessions", { channel });
+}
+
+/**
  * Respond to a pending option-step request.
  *
  * @param result.nextStep  The next step to jump to (selector choice).

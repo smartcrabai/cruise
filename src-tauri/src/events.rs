@@ -68,6 +68,24 @@ pub enum WorkflowEvent {
         error: String,
     },
     WorkflowCancelled,
+    RunAllStarted {
+        total: usize,
+    },
+    RunAllSessionStarted {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        input: String,
+    },
+    RunAllSessionFinished {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        input: String,
+        phase: String,
+        error: Option<String>,
+    },
+    RunAllCompleted {
+        cancelled: usize,
+    },
 }
 
 #[cfg(test)]
@@ -221,6 +239,89 @@ mod tests {
     }
 
     // --- ChoiceKind ---
+
+    // --- RunAllStarted ---
+
+    #[test]
+    fn test_run_all_started_serializes_total() {
+        // Given: a RunAllStarted event with 3 candidate sessions
+        let event = WorkflowEvent::RunAllStarted { total: 3 };
+        // When: serialized to JSON
+        let json = to_json(&event);
+        // Then: event tag is camelCase and total is correct
+        assert_eq!(json["event"], "runAllStarted");
+        assert_eq!(json["data"]["total"], 3);
+    }
+
+    // --- RunAllSessionStarted ---
+
+    #[test]
+    fn test_run_all_session_started_serializes_all_fields_as_camel_case() {
+        // Given: a RunAllSessionStarted event
+        let event = WorkflowEvent::RunAllSessionStarted {
+            session_id: "sess-1".to_string(),
+            input: "do something".to_string(),
+        };
+        // When: serialized to JSON
+        let json = to_json(&event);
+        // Then: all fields are present with camelCase names
+        assert_eq!(json["event"], "runAllSessionStarted");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
+        assert_eq!(json["data"]["input"], "do something");
+    }
+
+    // --- RunAllSessionFinished ---
+
+    #[test]
+    fn test_run_all_session_finished_without_error_serializes_null_error() {
+        // Given: a RunAllSessionFinished event with no error (session completed)
+        let event = WorkflowEvent::RunAllSessionFinished {
+            session_id: "sess-1".to_string(),
+            input: "do something".to_string(),
+            phase: "Completed".to_string(),
+            error: None,
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: error field is null and phase/sessionId are present
+        assert_eq!(json["event"], "runAllSessionFinished");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
+        assert_eq!(json["data"]["input"], "do something");
+        assert_eq!(json["data"]["phase"], "Completed");
+        assert_eq!(json["data"]["error"], Value::Null);
+    }
+
+    #[test]
+    fn test_run_all_session_finished_with_error_includes_error_message() {
+        // Given: a RunAllSessionFinished event where the session failed
+        let event = WorkflowEvent::RunAllSessionFinished {
+            session_id: "sess-2".to_string(),
+            input: "build project".to_string(),
+            phase: "Failed".to_string(),
+            error: Some("step 'build' failed".to_string()),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: error message is present alongside the phase
+        assert_eq!(json["event"], "runAllSessionFinished");
+        assert_eq!(json["data"]["sessionId"], "sess-2");
+        assert_eq!(json["data"]["input"], "build project");
+        assert_eq!(json["data"]["phase"], "Failed");
+        assert_eq!(json["data"]["error"], "step 'build' failed");
+    }
+
+    // --- RunAllCompleted ---
+
+    #[test]
+    fn test_run_all_completed_serializes_cancelled_count() {
+        // Given: a RunAllCompleted event where one session was cancelled
+        let event = WorkflowEvent::RunAllCompleted { cancelled: 1 };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: cancelled count is present under the correct tag
+        assert_eq!(json["event"], "runAllCompleted");
+        assert_eq!(json["data"]["cancelled"], 1);
+    }
 
     #[test]
     fn test_choice_kind_text_input_serializes_as_camel_case() {
