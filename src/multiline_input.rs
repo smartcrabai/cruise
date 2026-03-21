@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn test_insert_unicode_char() {
         let mut buf = InputBuffer::new();
-        buf.insert_char('あ');
-        assert_eq!(buf.text(), "あ");
+        buf.insert_char('\u{3042}');
+        assert_eq!(buf.text(), "\u{3042}");
         assert_eq!(buf.cursor_col, 1);
     }
 
@@ -746,9 +746,9 @@ mod tests {
     #[test]
     fn test_from_text_unicode_initial_text() {
         // Given: initial text with CJK characters
-        let buf = InputBuffer::from_text("あいう");
+        let buf = InputBuffer::from_text("\u{3042}\u{3044}\u{3046}");
         // Then: text preserved and cursor at char position 3 (not byte position)
-        assert_eq!(buf.text(), "あいう");
+        assert_eq!(buf.text(), "\u{3042}\u{3044}\u{3046}");
         assert_eq!(buf.cursor_col, 3);
     }
 }

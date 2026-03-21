@@ -290,6 +290,30 @@ jobs:
           fi
           codesign --force --deep --sign - "$APP"
 
+          # Recreate DMG from the signed .app (old DMG contains unsigned .app)
+          DMG=$(find target/release/bundle/dmg -maxdepth 1 -name "*.dmg" | head -1)
+          if [ -z "$DMG" ]; then
+            echo "Error: no DMG found in target/release/bundle/dmg" >&2
+            exit 1
+          fi
+          hdiutil create -volname "Cruise" -srcfolder "$APP" -ov -format UDZO "$DMG"
+
+          # Recreate tar.gz from the signed .app (old tar.gz contains unsigned .app)
+          TAR_GZ=$(find target/release/bundle/macos -maxdepth 1 -name "*.app.tar.gz" -not -name "*.sig" | head -1)
+          if [ -z "$TAR_GZ" ]; then
+            echo "Error: no .app.tar.gz found in target/release/bundle/macos" >&2
+            exit 1
+          fi
+          APP_NAME=$(basename "$APP")
+          rm -f "$TAR_GZ"
+          tar czf "$TAR_GZ" -C "$(dirname "$APP")" "$APP_NAME"
+
+          # Re-sign tar.gz for Tauri updater if key is available
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            rm -f "${TAR_GZ}.sig"
+            cargo tauri signer sign "$TAR_GZ"
+          fi
+
       - name: Collect artifacts (macOS)
         if: matrix.platform == 'macos-aarch64'
         shell: bash
