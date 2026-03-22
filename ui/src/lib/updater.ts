@@ -13,16 +13,7 @@ export async function checkForUpdate(): Promise<Update | null> {
   }
 }
 
-export async function downloadAndInstall(
-  update: Update,
-  onProgress?: (chunkLength: number, contentLength: number | undefined) => void,
-): Promise<void> {
-  await update.downloadAndInstall((event) => {
-    if (event.event === "Started") {
-      onProgress?.(0, event.data.contentLength);
-    } else if (event.event === "Progress") {
-      onProgress?.(event.data.chunkLength, undefined);
-    }
-  });
+export async function downloadAndInstall(update: Update): Promise<void> {
+  await update.downloadAndInstall();
   await relaunch();
 }
