@@ -8,6 +8,7 @@ mod engine;
 mod error;
 mod file_tracker;
 mod list_cmd;
+mod metadata;
 mod multiline_input;
 mod option_handler;
 mod plan_cmd;
@@ -23,6 +24,7 @@ mod test_binary_support;
 mod test_support;
 mod variable;
 mod workflow;
+mod workspace;
 mod worktree;
 
 #[tokio::main(flavor = "current_thread")]

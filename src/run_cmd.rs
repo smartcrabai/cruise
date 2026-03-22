@@ -19,6 +19,7 @@ use crate::session::{
 };
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
+use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
 use crate::worktree;
 
 const PR_LANGUAGE_VAR: &str = "pr.language";
@@ -27,6 +28,8 @@ const PR_URL_VAR: &str = "pr.url";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 const SESSION_STATE_CONFLICT_ABORT_LABEL: &str = "Abort run";
 const SESSION_STATE_CONFLICT_OVERWRITE_LABEL: &str = "Overwrite external state";
+const WORKSPACE_WORKTREE_LABEL: &str = "Create worktree (new branch)";
+const WORKSPACE_CURRENT_BRANCH_LABEL: &str = "Use current branch";
 
 #[cfg(test)]
 const TEST_STATE_CONFLICT_ACTION_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_ACTION";
@@ -34,6 +37,8 @@ const TEST_STATE_CONFLICT_ACTION_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_ACTION"
 const TEST_STATE_CONFLICT_LOG_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_LOG";
 #[cfg(test)]
 const TEST_STDIN_IS_TERMINAL_ENV: &str = "CRUISE_TEST_STDIN_IS_TERMINAL";
+#[cfg(test)]
+const TEST_WORKSPACE_MODE_ENV: &str = "CRUISE_TEST_WORKSPACE_MODE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceOverride {
@@ -45,25 +50,6 @@ enum WorkspaceOverride {
 enum SessionStateConflictChoice {
     Abort,
     Overwrite,
-}
-
-enum ExecutionWorkspace {
-    Worktree {
-        ctx: worktree::WorktreeContext,
-        reused: bool,
-    },
-    CurrentBranch {
-        path: PathBuf,
-    },
-}
-
-impl ExecutionWorkspace {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Worktree { ctx, .. } => &ctx.path,
-            Self::CurrentBranch { path } => path,
-        }
-    }
 }
 
 /// Returns a safe fallback directory when `set_current_dir` fails.
@@ -197,6 +183,38 @@ fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
+fn prompt_workspace_mode() -> Result<WorkspaceMode> {
+    #[cfg(test)]
+    if let Some(mode) = test_workspace_mode_choice() {
+        return Ok(mode);
+    }
+
+    if !stdin_is_terminal() {
+        return Ok(WorkspaceMode::Worktree);
+    }
+
+    let options = vec![WORKSPACE_WORKTREE_LABEL, WORKSPACE_CURRENT_BRANCH_LABEL];
+    match inquire::Select::new("Where should cruise execute?", options).prompt() {
+        Ok(choice) if choice == WORKSPACE_CURRENT_BRANCH_LABEL => Ok(WorkspaceMode::CurrentBranch),
+        Ok(_) => Ok(WorkspaceMode::Worktree),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Err(
+            CruiseError::Other("workspace mode selection cancelled".to_string()),
+        ),
+        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+}
+
+#[cfg(test)]
+fn test_workspace_mode_choice() -> Option<WorkspaceMode> {
+    std::env::var(TEST_WORKSPACE_MODE_ENV)
+        .ok()
+        .and_then(|v| match v.as_str() {
+            "current_branch" => Some(WorkspaceMode::CurrentBranch),
+            "worktree" => Some(WorkspaceMode::Worktree),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 fn test_session_state_conflict_choice() -> Option<SessionStateConflictChoice> {
     std::env::var(TEST_STATE_CONFLICT_ACTION_ENV)
@@ -286,9 +304,16 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     let compiled = crate::workflow::compile(config)?;
     let effective_workspace_mode = match workspace_override {
-        WorkspaceOverride::RespectSession => session.workspace_mode,
         WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
+        WorkspaceOverride::RespectSession => {
+            if session.current_step.is_none() && session.workspace_mode == WorkspaceMode::Worktree {
+                prompt_workspace_mode()?
+            } else {
+                session.workspace_mode
+            }
+        }
     };
+    session.workspace_mode = effective_workspace_mode;
     if effective_workspace_mode == WorkspaceMode::Worktree {
         ensure_gh_available()?;
     }
@@ -306,7 +331,8 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     log_resume_message(&session);
     std::env::set_current_dir(session.base_dir.clone())?;
     let execution_workspace =
-        prepare_execution_workspace(&manager, &session, effective_workspace_mode)?;
+        prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
+    log_execution_workspace(&execution_workspace);
     update_session_workspace(&mut session, &execution_workspace);
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
@@ -453,8 +479,8 @@ fn log_resume_message(session: &SessionState) {
     }
 }
 
-/// Update session workspace fields from the chosen execution workspace.
-fn update_session_workspace(session: &mut SessionState, ws: &ExecutionWorkspace) {
+/// Log the chosen execution workspace for CLI users.
+fn log_execution_workspace(ws: &ExecutionWorkspace) {
     match ws {
         ExecutionWorkspace::Worktree { ctx, reused } => {
             let suffix = if *reused { " (reused)" } else { "" };
@@ -464,14 +490,9 @@ fn update_session_workspace(session: &mut SessionState, ws: &ExecutionWorkspace)
                 ctx.path.display(),
                 suffix
             );
-            session.worktree_path = Some(ctx.path.clone());
-            session.worktree_branch = Some(ctx.branch.clone());
         }
         ExecutionWorkspace::CurrentBranch { path } => {
             eprintln!("{} current branch: {}", style("→").cyan(), path.display());
-            session.worktree_path = None;
-            session.worktree_branch = None;
-            session.pr_url = None;
         }
     }
 }
@@ -641,90 +662,6 @@ async fn run_all(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn prepare_execution_workspace(
-    manager: &SessionManager,
-    session: &SessionState,
-    workspace_mode: WorkspaceMode,
-) -> Result<ExecutionWorkspace> {
-    match workspace_mode {
-        WorkspaceMode::Worktree => {
-            let worktrees_dir = manager.worktrees_dir();
-            let (ctx, reused) = worktree::setup_session_worktree(
-                &session.base_dir,
-                &session.id,
-                &session.input,
-                &worktrees_dir,
-                session.worktree_branch.as_deref(),
-            )?;
-            Ok(ExecutionWorkspace::Worktree { ctx, reused })
-        }
-        WorkspaceMode::CurrentBranch => {
-            validate_current_branch_session(session)?;
-            Ok(ExecutionWorkspace::CurrentBranch {
-                path: session.base_dir.clone(),
-            })
-        }
-    }
-}
-
-fn validate_current_branch_session(session: &SessionState) -> Result<()> {
-    let current_branch = current_branch_name(&session.base_dir)?;
-
-    if let Some(target_branch) = session.target_branch.as_deref()
-        && current_branch != target_branch
-    {
-        return Err(CruiseError::Other(format!(
-            "current-branch mode expected branch `{target_branch}`, but found `{current_branch}`"
-        )));
-    }
-
-    // Only enforce a clean working tree at the start of a fresh session; on
-    // resume (current_step.is_some()) the tree may already contain in-progress
-    // changes left by the previous run.
-    if session.current_step.is_none() && is_working_tree_dirty(&session.base_dir)? {
-        return Err(CruiseError::Other(
-            "current-branch mode requires a clean working tree, but the repository is dirty"
-                .to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn current_branch_name(repo_dir: &Path) -> Result<String> {
-    let branch = git_stdout(
-        repo_dir,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        "git rev-parse --abbrev-ref HEAD failed",
-    )?;
-
-    if branch == "HEAD" {
-        return Err(CruiseError::Other(
-            "current-branch mode requires an attached branch; HEAD is detached".to_string(),
-        ));
-    }
-
-    Ok(branch)
-}
-
-fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git status --porcelain: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!(
-            "git status --porcelain failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1269,20 +1206,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_binary_support::PathEnvGuard;
-
-    fn run_git_ok(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("git command failed to start: {e}"));
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    use crate::test_support::{init_git_repo, run_git_ok};
 
     fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1297,16 +1221,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn init_git_repo(dir: &Path) {
-        run_git_ok(dir, &["init"]);
-        run_git_ok(dir, &["config", "user.email", "test@example.com"]);
-        run_git_ok(dir, &["config", "user.name", "Test"]);
-        fs::write(dir.join("README.md"), "init").unwrap_or_else(|e| panic!("{e:?}"));
-        run_git_ok(dir, &["add", "."]);
-        run_git_ok(dir, &["commit", "-m", "init"]);
-        run_git_ok(dir, &["branch", "-M", "main"]);
     }
 
     fn create_worktree(tmp: &TempDir, session_id: &str) -> (PathBuf, worktree::WorktreeContext) {
@@ -3192,6 +3106,326 @@ steps:
         assert!(
             session.completed_at.is_some(),
             "completed_at should be set on failure"
+        );
+    }
+
+    // ── prompt_workspace_mode unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_prompt_workspace_mode_returns_worktree_when_noninteractive() {
+        // Given: stdin is not a terminal
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+        process.remove_env(TEST_WORKSPACE_MODE_ENV);
+
+        // When: prompt_workspace_mode is called in non-interactive environment
+        let result = prompt_workspace_mode();
+
+        // Then: returns Worktree without showing a prompt
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            WorkspaceMode::Worktree,
+            "non-interactive should default to Worktree"
+        );
+    }
+
+    #[test]
+    fn test_prompt_workspace_mode_returns_current_branch_via_test_env() {
+        // Given: test env var selects current_branch
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        process.set_env(TEST_WORKSPACE_MODE_ENV, "current_branch");
+
+        // When: prompt_workspace_mode is called
+        let result = prompt_workspace_mode();
+
+        // Then: returns CurrentBranch as the env var dictates
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            WorkspaceMode::CurrentBranch,
+            "env override should select CurrentBranch"
+        );
+    }
+
+    #[test]
+    fn test_prompt_workspace_mode_returns_worktree_via_test_env() {
+        // Given: test env var selects worktree
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        process.set_env(TEST_WORKSPACE_MODE_ENV, "worktree");
+
+        // When: prompt_workspace_mode is called
+        let result = prompt_workspace_mode();
+
+        // Then: returns Worktree as the env var dictates
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            WorkspaceMode::Worktree,
+            "env override should select Worktree"
+        );
+    }
+
+    // ── run_single workspace mode selection integration tests ─────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_prompts_on_fresh_default_session_and_selects_current_branch() {
+        // Given: a fresh session with default workspace_mode (Worktree) and no current_step
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        // prompt resolves to current_branch via test env
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+        process.set_env(TEST_WORKSPACE_MODE_ENV, "current_branch");
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260321091000";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "run in place".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf in-place > in-place.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/300");
+        process.prepend_path(&bin_dir);
+
+        // When: run is called on the fresh session
+        let result = run(run_args(session_id)).await;
+
+        // Then: run succeeds and changes land in the base repo (not a worktree)
+        assert!(
+            result.is_ok(),
+            "expected run to succeed when prompt selects current_branch: {result:?}"
+        );
+        assert!(
+            repo.join("in-place.txt").exists(),
+            "current_branch selection should write changes into the base repository"
+        );
+        assert!(
+            !manager.worktrees_dir().join(session_id).exists(),
+            "current_branch selection should not create a worktree directory"
+        );
+        assert!(
+            !gh_log.exists(),
+            "current_branch selection should not invoke gh"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_saves_workspace_mode_and_target_branch_after_prompt_selects_current_branch()
+     {
+        // Given: a fresh session with default workspace_mode (Worktree)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+        process.set_env(TEST_WORKSPACE_MODE_ENV, "current_branch");
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260321091001";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "save mode test".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf mode > mode.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/301");
+        process.prepend_path(&bin_dir);
+
+        // When: run completes
+        run(run_args(session_id))
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the persisted session state reflects the chosen mode and target branch
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            loaded.workspace_mode,
+            WorkspaceMode::CurrentBranch,
+            "workspace_mode should be persisted as CurrentBranch after prompt selection"
+        );
+        assert_eq!(
+            loaded.target_branch.as_deref(),
+            Some("main"),
+            "target_branch should be set to the current branch at run time"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_does_not_prompt_when_session_already_has_current_branch_mode() {
+        // Given: a session with workspace_mode=CurrentBranch already set (no current_step)
+        // TEST_WORKSPACE_MODE_ENV is intentionally absent — if prompt were called, it would hang
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+        process.remove_env(TEST_WORKSPACE_MODE_ENV);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260321091002";
+        let session =
+            make_current_branch_session(session_id, &repo, "already current branch", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf skip > skip-prompt.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/302");
+        process.prepend_path(&bin_dir);
+
+        // When: run is called
+        let result = run(run_args(session_id)).await;
+
+        // Then: run succeeds in the base repo without prompting
+        assert!(
+            result.is_ok(),
+            "expected run to succeed without prompting: {result:?}"
+        );
+        assert!(
+            repo.join("skip-prompt.txt").exists(),
+            "already-CurrentBranch session should write changes into the base repository"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_does_not_prompt_when_resuming_saved_current_branch_session() {
+        // Given: a session being resumed (current_step is Some) in CurrentBranch mode
+        // TEST_WORKSPACE_MODE_ENV is absent — if prompt were called, it would hang
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+        process.remove_env(TEST_WORKSPACE_MODE_ENV);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260321091003";
+        let mut session =
+            make_current_branch_session(session_id, &repo, "resume no prompt", "main");
+        session.phase = SessionPhase::Running;
+        session.current_step = Some("second".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            r"command:
+  - cat
+steps:
+  first:
+    command: |
+      printf first > first.txt
+  second:
+    command: |
+      printf second > second.txt
+",
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/303");
+        process.prepend_path(&bin_dir);
+
+        // When: run is called to resume from second step
+        let result = run(run_args(session_id)).await;
+
+        // Then: run continues from the saved step without prompting
+        assert!(
+            result.is_ok(),
+            "expected resume to succeed without prompting: {result:?}"
+        );
+        assert!(
+            !repo.join("first.txt").exists(),
+            "resume should skip already-executed earlier steps"
+        );
+        assert!(
+            repo.join("second.txt").exists(),
+            "resume should execute from the saved current step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_defaults_to_worktree_when_stdin_is_not_terminal() {
+        // Given: a fresh session with default workspace_mode (Worktree) and non-interactive stdin
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+        process.remove_env(TEST_WORKSPACE_MODE_ENV);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260321091004";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "default to worktree".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf wt > wt.txt"),
+        );
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/304");
+        process.prepend_path(&bin_dir);
+
+        // When: run is called in non-interactive mode
+        let result = run(run_args(session_id)).await;
+
+        // Then: run succeeds using worktree mode (non-interactive defaults to safe Worktree)
+        assert!(
+            result.is_ok(),
+            "expected run to succeed in worktree mode: {result:?}"
+        );
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            loaded.workspace_mode,
+            WorkspaceMode::Worktree,
+            "non-interactive stdin should default to Worktree mode"
+        );
+        assert!(
+            !repo.join("wt.txt").exists(),
+            "worktree mode should not write changes into the base repository"
+        );
+        assert!(
+            manager
+                .worktrees_dir()
+                .join(session_id)
+                .join("wt.txt")
+                .exists(),
+            "worktree mode should write changes into the session worktree"
         );
     }
 }

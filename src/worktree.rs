@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::error::{CruiseError, Result};
 
+#[derive(Debug, Clone)]
 pub struct WorktreeContext {
     pub path: PathBuf,
     pub branch: String,

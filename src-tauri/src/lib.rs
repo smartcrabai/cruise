@@ -33,6 +33,7 @@ pub fn run() {
             commands::reset_session,
             commands::fix_session,
             commands::list_directory,
+            commands::run_all_sessions,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

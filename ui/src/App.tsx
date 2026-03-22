@@ -1,259 +1,47 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Update } from "./lib/updater";
-import { checkForUpdate, downloadAndInstall } from "./lib/updater";
-import type { ChoiceDto, ConfigEntry, PlanEvent, Session, SessionPhase, WorkflowEvent } from "./types";
+import type {
+  ChoiceDto,
+  ConfigEntry,
+  PlanEvent,
+  Session,
+  SessionPhase,
+  WorkflowEvent,
+  WorkspaceMode,
+} from "./types";
 import {
   approveSession,
   cancelSession,
-  cleanSessions,
   createSession,
   deleteSession,
   discardSession,
   fixSession,
+  getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
   listSessions,
   resetSession,
   respondToOption,
+  runAllSessions,
   runSession,
 } from "./lib/commands";
+import { notifyDesktop } from "./lib/desktopNotifications";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
+import { PhaseBadge } from "./components/PhaseBadge";
+import { SessionSidebar } from "./components/SessionSidebar";
+import { formatLocalTime } from "./lib/format";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatLocalTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  } catch {
-    return iso;
+function runButtonLabel(phase: SessionPhase): string {
+  if (phase === "Suspended") {
+    return "Resume";
   }
-}
-
-// ─── Phase badge ──────────────────────────────────────────────────────────────
-
-const PHASE_COLORS: Partial<Record<SessionPhase, string>> = {
-  "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
-  Planned: "bg-blue-900/50 text-blue-300",
-  Running: "bg-green-900/50 text-green-300",
-  Completed: "bg-gray-700/50 text-gray-300",
-  Failed: "bg-red-900/50 text-red-300",
-  Suspended: "bg-orange-900/50 text-orange-300",
-};
-
-function PhaseBadge({ phase }: { phase: SessionPhase }) {
-  const cls = PHASE_COLORS[phase] ?? "bg-gray-700/50 text-gray-300";
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
-      {phase}
-    </span>
-  );
-}
-
-// ─── SessionSidebar ───────────────────────────────────────────────────────────
-
-type UpdateState = "available" | "downloading" | "error";
-
-interface SessionSidebarProps {
-  selectedId: string | null;
-  onSelect: (session: Session) => void;
-  onNewSession: () => void;
-  onRefreshRef?: React.MutableRefObject<(() => void) | null>;
-}
-
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRefreshRef }: SessionSidebarProps) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanMessage, setCleanMessage] = useState<string | null>(null);
-  const [version, setVersion] = useState<string | null>(null);
-  const [update, setUpdate] = useState<Update | null>(null);
-  const [updateState, setUpdateState] = useState<UpdateState>("available");
-  const [errorMsg, setErrorMsg] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const sessions = await listSessions();
-      const sorted = [...sessions].sort((a, b) => {
-        const aInput = a.awaitingInput || a.phase === "Awaiting Approval";
-        const bInput = b.awaitingInput || b.phase === "Awaiting Approval";
-        if (aInput !== bInput) return aInput ? -1 : 1;
-        const aTime = a.updatedAt ?? a.createdAt;
-        const bTime = b.updatedAt ?? b.createdAt;
-        return bTime.localeCompare(aTime);
-      });
-      setSessions(sorted);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    if (onRefreshRef) {
-      onRefreshRef.current = load;
-    }
-  }, [load, onRefreshRef]);
-
-  useEffect(() => {
-    let updateIntervalId: ReturnType<typeof setInterval>;
-
-    void getVersion().then(setVersion);
-
-    const doCheck = () => void checkForUpdate().then((u) => {
-      if (u) setUpdate(u);
-    });
-
-    const updateTimerId = setTimeout(() => {
-      doCheck();
-      updateIntervalId = setInterval(doCheck, 24 * 60 * 60 * 1000);
-    }, 2000);
-
-    return () => {
-      clearTimeout(updateTimerId);
-      clearInterval(updateIntervalId);
-    };
-  }, []);
-
-  async function handleInstall() {
-    setUpdateState("downloading");
-    try {
-      await downloadAndInstall(update!);
-    } catch (e) {
-      setUpdateState("error");
-      setErrorMsg(String(e));
-    }
+  if (phase === "Failed") {
+    return "Retry";
   }
-
-  async function handleClean() {
-    setCleaning(true);
-    setCleanMessage(null);
-    try {
-      const result = await cleanSessions();
-      setCleanMessage(`${result.deleted} deleted (skipped: ${result.skipped})`);
-      void load();
-    } catch (e) {
-      setCleanMessage(`Error: ${e}`);
-    } finally {
-      setCleaning(false);
-    }
-  }
-
-  return (
-    <div className="h-full flex flex-col">
-      {/* Sidebar header */}
-      <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => void load()}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
-              title="Refresh"
-            >
-              ↻
-            </button>
-            <button
-              onClick={() => void handleClean()}
-              disabled={cleaning}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-              title="Clean completed sessions"
-            >
-              {cleaning ? "…" : "Clean"}
-            </button>
-            <button
-              onClick={onNewSession}
-              className="px-2 py-1 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded"
-            >
-              + New
-            </button>
-          </div>
-        </div>
-        {cleanMessage && (
-          <p className="text-xs text-gray-400">{cleanMessage}</p>
-        )}
-      </div>
-
-      {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && (
-          <p className="p-3 text-xs text-gray-500">Loading…</p>
-        )}
-        {error && (
-          <p className="p-3 text-xs text-red-400">Error: {error}</p>
-        )}
-        {!loading && !error && sessions.length === 0 && (
-          <p className="p-3 text-xs text-gray-500">No sessions found.</p>
-        )}
-        {sessions.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onSelect(s)}
-            className={`w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800 transition-colors ${
-              selectedId === s.id ? "bg-gray-800" : ""
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2 mb-0.5">
-              <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} />
-            </div>
-            <p className="text-sm text-gray-300 truncate">{s.input}</p>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-xs text-blue-400/70 font-mono truncate">
-                {s.baseDir.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? s.baseDir}
-              </span>
-              <span className="text-xs text-gray-600">{formatLocalTime(s.updatedAt ?? s.createdAt)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Sidebar footer: version & update */}
-      <div className="flex-shrink-0 border-t border-gray-800 px-3 py-2">
-        <div className="text-xs text-gray-500">{version ? `v${version}` : "…"}</div>
-        {update && updateState === "available" && (
-          <div className="mt-1 space-y-1">
-            <div className="text-xs text-green-400">v{update.version} available</div>
-            <button
-              onClick={() => void handleInstall()}
-              className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
-            >
-              Update
-            </button>
-          </div>
-        )}
-        {updateState === "downloading" && (
-          <div className="mt-1 text-xs text-gray-400">Downloading…</div>
-        )}
-        {updateState === "error" && (
-          <div className="mt-1 space-y-1">
-            <div className="text-xs text-red-400">{errorMsg}</div>
-            <button
-              onClick={() => { setUpdate(null); setUpdateState("available"); }}
-              className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+  return "Run";
 }
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
@@ -335,6 +123,69 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
   );
 }
 
+// ─── WorkflowToastStack ───────────────────────────────────────────────────────
+
+type ToastKind = "input-required" | "completed" | "failed";
+
+export interface WorkflowToast {
+  id: number;
+  kind: ToastKind;
+  sessionInput: string;
+  detail?: string;
+}
+
+const TOAST_STYLE: Record<ToastKind, string> = {
+  "input-required": "border-amber-700 bg-amber-900/80 text-amber-100",
+  "completed": "border-green-700 bg-green-900/80 text-green-100",
+  "failed": "border-red-700 bg-red-900/80 text-red-100",
+};
+
+const TOAST_LABEL: Record<ToastKind, string> = {
+  "input-required": "Action required",
+  "completed": "Completed",
+  "failed": "Failed",
+};
+
+const TOAST_DURATION_MS: Record<ToastKind, number> = {
+  "input-required": 10_000,
+  "completed": 5_000,
+  "failed": 5_000,
+};
+
+export function WorkflowToastStack({
+  toasts,
+  onDismiss,
+}: {
+  toasts: WorkflowToast[];
+  onDismiss: (id: number) => void;
+}) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`flex items-start gap-3 px-4 py-3 rounded-lg border shadow-xl text-sm pointer-events-auto ${TOAST_STYLE[t.kind]}`}
+        >
+          <div className="flex-1 min-w-0">
+            <div className="font-medium">{TOAST_LABEL[t.kind]}</div>
+            <div className="text-xs opacity-75 truncate mt-0.5">{t.sessionInput}</div>
+            {t.detail !== undefined && (
+              <div data-testid="toast-detail" className="text-xs opacity-60 truncate mt-0.5">{t.detail}</div>
+            )}
+          </div>
+          <button
+            onClick={() => onDismiss(t.id)}
+            className="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5"
+          >
+            x
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── ConfirmDialog ────────────────────────────────────────────────────────────
 
 interface ConfirmDialogProps {
@@ -383,6 +234,7 @@ interface WorkflowRunnerProps {
   session: Session;
   onSessionUpdated: (session: Session) => void;
   onSessionDeleted: () => void;
+  onToast: (toast: Omit<WorkflowToast, "id">) => void;
 }
 
 interface StepEntry {
@@ -400,7 +252,7 @@ interface PendingOption {
 type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: WorkflowRunnerProps) {
+function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
   const [status, setStatus] = useState<RunStatus>("idle");
   const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
@@ -414,7 +266,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const _channelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
   // Load saved log from file when tab is opened or after run finishes
@@ -457,7 +308,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setReplanPhase("idle");
     setShowDeleteConfirm(false);
     setDeleting(false);
-    _channelRef.current = null;
   }, [session.id]);
 
   // Scroll live log to bottom when new entries arrive
@@ -467,14 +317,23 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     }
   }, [liveLog, status]);
 
-  async function startRun() {
+  function notifyEvent(kind: ToastKind, sessionInput: string, detail?: string) {
+    onToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
+    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} — ${(detail ?? sessionInput).slice(0, 60)}`);
+  }
+
+  async function refreshSession() {
+    const updated = await getSession(session.id);
+    onSessionUpdated(updated);
+  }
+
+  async function startRun(workspaceMode: WorkspaceMode) {
     setStatus("running");
     setCurrentStep(null);
     setLiveLog([]);
     setActiveTab("log");
 
     const channel = new Channel<WorkflowEvent>();
-    _channelRef.current = channel;
 
     channel.onmessage = (event) => {
       if (event.event === "stepStarted") {
@@ -493,15 +352,18 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
           choices: event.data.choices,
           plan: event.data.plan,
         });
+        notifyEvent("input-required", session.input);
       } else if (event.event === "workflowCompleted") {
         setStatus("completed");
         setLiveLog((prev) => [
           ...prev,
           `✓ Completed — run: ${event.data.run}, skipped: ${event.data.skipped}, failed: ${event.data.failed}`,
         ]);
+        notifyEvent("completed", session.input);
       } else if (event.event === "workflowFailed") {
         setStatus("failed");
         setLiveLog((prev) => [...prev, `✗ Failed: ${event.data.error}`]);
+        notifyEvent("failed", session.input, event.data.error);
       } else if (event.event === "workflowCancelled") {
         setStatus("cancelled");
         setLiveLog((prev) => [...prev, "⏸ Cancelled"]);
@@ -509,13 +371,17 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     };
 
     try {
-      await runSession(session.id, channel);
+      await runSession(session.id, workspaceMode, channel);
     } catch (e) {
       setStatus("failed");
       setLiveLog((prev) => [...prev, `Error: ${e}`]);
     }
 
-    // Reload saved log after run finishes
+    // Re-fetch session state and saved log in parallel after run resolves
+    refreshSession().catch((e) => {
+      setLiveLog((prev) => [...prev, `Session refresh error: ${e}`]);
+    });
+
     void loadSavedLog();
   }
 
@@ -559,6 +425,8 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     setPendingOption(null);
     try {
       await respondToOption(result);
+      // Re-sync after awaiting_input = false is saved
+      await refreshSession();
     } catch (e) {
       setLiveLog((prev) => [...prev, `Option response error: ${e}`]);
     }
@@ -612,6 +480,8 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
     session.phase === "Suspended" ||
     session.phase === "Failed" ||
     session.phase === "Completed";
+  const isFreshRun = session.currentStep == null;
+  const canRun = isRunnable && status !== "running";
 
   // Decide which log content to show
   const showLive = status === "running" || (status !== "idle" && liveLog.length > 0);
@@ -642,12 +512,28 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted }: Workflo
 
         {/* Controls */}
         <div className="flex gap-2">
-          {isRunnable && status !== "running" && (
+          {canRun && isFreshRun && (
+            <>
+              <button
+                onClick={() => void startRun("Worktree")}
+                className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+              >
+                Create worktree (new branch)
+              </button>
+              <button
+                onClick={() => void startRun("CurrentBranch")}
+                className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
+              >
+                Use current branch
+              </button>
+            </>
+          )}
+          {canRun && !isFreshRun && (
             <button
-              onClick={() => void startRun()}
+              onClick={() => void startRun(session.workspaceMode)}
               className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
             >
-              {status === "idle" ? "Run" : "Re-run"}
+              {runButtonLabel(session.phase)}
             </button>
           )}
           {status === "running" && (
@@ -1139,40 +1025,271 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
   );
 }
 
+// ─── RunAllView ───────────────────────────────────────────────────────────────
+
+type RunAllStatus = "running" | "completed" | "cancelled" | "error";
+
+interface RunAllSessionResult {
+  sessionId: string;
+  input: string;
+  phase: SessionPhase;
+  error?: string;
+}
+
+interface RunAllViewProps {
+  onCompleted: () => void;
+}
+
+function RunAllView({ onCompleted }: RunAllViewProps) {
+  const [status, setStatus] = useState<RunAllStatus>("running");
+  const [total, setTotal] = useState(0);
+  const [currentSession, setCurrentSession] = useState<{ id: string; input: string } | null>(null);
+  const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
+  const [results, setResults] = useState<RunAllSessionResult[]>([]);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
+  const startedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void startRunAll();
+    return () => {
+      mountedRef.current = false;
+      if (channelRef.current) {
+        channelRef.current.onmessage = () => {};
+        channelRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startRunAll() {
+    const channel = new Channel<WorkflowEvent>();
+    channelRef.current = channel;
+
+    channel.onmessage = (event) => {
+      if (!mountedRef.current) return;
+      if (event.event === "runAllStarted") {
+        setTotal(event.data.total);
+      } else if (event.event === "runAllSessionStarted") {
+        setCurrentSession({ id: event.data.sessionId, input: event.data.input });
+        setCurrentStep(null);
+      } else if (event.event === "runAllSessionFinished") {
+        const { sessionId, input, phase, error } = event.data;
+        setResults((prev) => [...prev, { sessionId, input, phase, error }]);
+        setCurrentSession(null);
+        setCurrentStep(null);
+        setPendingOption(null);
+      } else if (event.event === "runAllCompleted") {
+        setStatus(event.data.cancelled > 0 ? "cancelled" : "completed");
+      } else if (event.event === "stepStarted") {
+        setCurrentStep({ name: event.data.step, index: event.data.index, total: event.data.total });
+      } else if (event.event === "optionRequired") {
+        setPendingOption({ requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan });
+      }
+    };
+
+    try {
+      await runAllSessions(channel);
+    } catch (e) {
+      if (mountedRef.current) {
+        setStatus("error");
+        setRunError(String(e));
+      }
+    }
+  }
+
+  async function handleCancel() {
+    try {
+      await cancelSession();
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  async function handleOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    setPendingOption(null);
+    try {
+      await respondToOption(result);
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  return (
+    <div className="h-full flex flex-col p-6 max-w-2xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-semibold text-gray-100">Run All</h2>
+        {status === "running" ? (
+          <button
+            onClick={() => void handleCancel()}
+            className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onCompleted}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded"
+          >
+            Done
+          </button>
+        )}
+      </div>
+
+      {total > 0 && (
+        <div className="mb-4">
+          <div className="flex justify-between text-xs text-gray-400 mb-1">
+            <span>{results.length} / {total} sessions</span>
+            {status === "running" && currentSession && (
+              <span className="text-green-400 animate-pulse">Running…</span>
+            )}
+            {status === "completed" && <span className="text-green-400">Completed</span>}
+            {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
+            {status === "error" && <span className="text-red-400">Error</span>}
+          </div>
+          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              style={{ width: `${(results.length / total) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {status === "running" && currentSession && (
+        <div className="mb-4 p-3 bg-gray-900 border border-green-900/50 rounded">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-xs text-gray-400 font-mono">{currentSession.id}</span>
+          </div>
+          <p className="text-sm text-gray-200 truncate">{currentSession.input}</p>
+          {currentStep && (
+            <p className="text-xs text-gray-500 mt-1">
+              [{currentStep.index + 1}/{currentStep.total}] {currentStep.name}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto space-y-1">
+        {results.map((r) => (
+          <div
+            key={r.sessionId}
+            className="flex items-start gap-2 px-3 py-2 rounded bg-gray-900/50"
+          >
+            <span className="mt-0.5 text-sm">
+              {r.phase === "Completed" && "✓"}
+              {r.phase === "Failed" && "✗"}
+              {r.phase === "Suspended" && "⏸"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-gray-300 truncate">{r.input}</p>
+              {r.error && <p className="text-xs text-red-400 mt-0.5 truncate">{r.error}</p>}
+            </div>
+            <PhaseBadge phase={r.phase} />
+          </div>
+        ))}
+      </div>
+
+      {(status === "completed" || status === "cancelled" || status === "error") && (
+        <div className="mt-4 p-3 bg-gray-900 border border-gray-800 rounded text-sm text-gray-400 flex flex-col gap-1">
+          <div className="flex gap-4">
+            <span className="text-green-400">{results.filter((r) => r.phase === "Completed").length} completed</span>
+            {results.filter((r) => r.phase === "Failed").length > 0 && <span className="text-red-400">{results.filter((r) => r.phase === "Failed").length} failed</span>}
+            {results.filter((r) => r.phase === "Suspended").length > 0 && <span className="text-orange-400">{results.filter((r) => r.phase === "Suspended").length} cancelled</span>}
+          </div>
+          {runError && <p className="text-xs text-red-400">{runError}</p>}
+        </div>
+      )}
+
+      {pendingOption && (
+        <OptionDialog
+          choices={pendingOption.choices}
+          plan={pendingOption.plan}
+          onRespond={(result) => void handleOptionRespond(result)}
+        />
+      )}
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [view, setView] = useState<"session" | "new">("session");
+  const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
+  const [toasts, setToasts] = useState<WorkflowToast[]>([]);
+  const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
+  const addToast = useCallback((toast: Omit<WorkflowToast, "id">) => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { ...toast, id }]);
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(id);
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, TOAST_DURATION_MS[toast.kind]);
+    toastTimersRef.current.set(id, timer);
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    const timer = toastTimersRef.current.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  useEffect(() => {
+    const timers = toastTimersRef.current;
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer));
+    };
+  }, []);
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
+      <WorkflowToastStack toasts={toasts} onDismiss={dismissToast} />
       {/* Sidebar */}
       <aside className="w-72 flex-shrink-0 border-r border-gray-800 flex flex-col">
         <SessionSidebar
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
+          onRunAll={() => { setSelectedSession(null); setView("runAll"); }}
           onRefreshRef={sidebarRefreshRef}
         />
       </aside>
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        {view === "new" ? (
+        {view === "runAll" ? (
+          <RunAllView
+            onCompleted={() => {
+              sidebarRefreshRef.current?.();
+              setView("session");
+            }}
+          />
+        ) : view === "new" ? (
           <NewSessionForm
             onCreated={(id) => {
               sidebarRefreshRef.current?.();
               // Navigate to the created session after a brief refresh
-              setTimeout(async () => {
-                try {
-                  const { getSession } = await import("./lib/commands");
-                  const session = await getSession(id);
-                  setSelectedSession(session);
-                  setView("session");
-                } catch {
-                  setView("session");
-                }
+              setTimeout(() => {
+                void getSession(id)
+                  .then((session) => {
+                    setSelectedSession(session);
+                    setView("session");
+                  })
+                  .catch(() => {
+                    setView("session");
+                  });
               }, 300);
             }}
           />
@@ -1187,6 +1304,7 @@ export default function App() {
               setSelectedSession(null);
               sidebarRefreshRef.current?.();
             }}
+            onToast={addToast}
           />
         ) : (
           <EmptyState />

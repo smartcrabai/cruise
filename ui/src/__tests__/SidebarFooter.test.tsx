@@ -6,8 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 
 // ─── Module mocks (hoisted by Vitest) ─────────────────────────────────────────
 
@@ -57,7 +56,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, downloadAndInstall } from "../lib/updater";
 import type { Update } from "../lib/updater";
-import { SessionSidebar } from "../App";
+import { SessionSidebar } from "../components/SessionSidebar";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +68,7 @@ const defaultProps = {
   selectedId: null as string | null,
   onSelect: vi.fn(),
   onNewSession: vi.fn(),
+  onRunAll: vi.fn(),
 };
 
 // ─── Tests: Version display ───────────────────────────────────────────────────
@@ -115,7 +115,7 @@ describe("SessionSidebar footer - update check", () => {
     await act(() => vi.advanceTimersByTimeAsync(2000));
 
     // Then:  version is displayed but no Update button
-    await screen.findByText(/v0\.1\.21/);
+    expect(screen.getByText(/v0\.1\.21/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /update/i })).toBeNull();
   });
 
@@ -132,7 +132,7 @@ describe("SessionSidebar footer - update check", () => {
     await act(() => vi.advanceTimersByTimeAsync(2000));
 
     // Then:  new version info is displayed
-    await screen.findByText(/0\.1\.22/);
+    expect(screen.getByText(/0\.1\.22/)).toBeTruthy();
   });
 
   it("shows Update button when update is available", async () => {
@@ -143,7 +143,7 @@ describe("SessionSidebar footer - update check", () => {
     await act(() => vi.advanceTimersByTimeAsync(2000));
 
     // Then:  Update button is displayed
-    await screen.findByRole("button", { name: /update/i });
+    expect(screen.getByRole("button", { name: /update/i })).toBeTruthy();
   });
 
   it("re-runs checkForUpdate() 24 hours after the initial check", async () => {
@@ -175,15 +175,11 @@ describe("SessionSidebar footer - update flow", () => {
     vi.useRealTimers();
   });
 
-  /** Renders until the Update button is visible and returns userEvent */
+  /** Renders until the Update button is visible */
   async function renderWithUpdate() {
-    const user = userEvent.setup({
-      advanceTimers: vi.advanceTimersByTime.bind(vi),
-    });
     render(<SessionSidebar {...defaultProps} />);
     await act(() => vi.advanceTimersByTimeAsync(2000));
-    await screen.findByRole("button", { name: /update/i });
-    return user;
+    expect(screen.getByRole("button", { name: /update/i })).toBeTruthy();
   }
 
   it("enters downloading state when Update button is clicked", async () => {
@@ -191,41 +187,49 @@ describe("SessionSidebar footer - update flow", () => {
     vi.mocked(downloadAndInstall).mockImplementation(
       () => new Promise<void>(() => {}),
     );
-    const user = await renderWithUpdate();
+    await renderWithUpdate();
 
     // When:  Update button is clicked
-    await user.click(screen.getByRole("button", { name: /update/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /update/i }));
+    });
 
     // Then:  a display indicating downloading appears
-    await screen.findByText(/downloading/i);
+    expect(screen.getByText(/downloading/i)).toBeTruthy();
   });
 
   it("shows error message and Dismiss button on download error", async () => {
     // Given: downloadAndInstall() throws an error
     vi.mocked(downloadAndInstall).mockRejectedValue(new Error("Network error"));
-    const user = await renderWithUpdate();
+    await renderWithUpdate();
 
     // When:  Update button is clicked
-    await user.click(screen.getByRole("button", { name: /update/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /update/i }));
+      await Promise.resolve();
+    });
 
     // Then:  error message and Dismiss button are displayed
-    await screen.findByText(/network error/i);
-    await screen.findByRole("button", { name: /dismiss/i });
+    expect(screen.getByText(/network error/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
   });
 
   it("resets error state when Dismiss button is clicked", async () => {
     // Given: download failure -> error state
     vi.mocked(downloadAndInstall).mockRejectedValue(new Error("Network error"));
-    const user = await renderWithUpdate();
-    await user.click(screen.getByRole("button", { name: /update/i }));
-    await screen.findByRole("button", { name: /dismiss/i });
+    await renderWithUpdate();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /update/i }));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
 
     // When:  Dismiss is clicked
-    await user.click(screen.getByRole("button", { name: /dismiss/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+    });
 
     // Then:  error message disappears
-    await waitFor(() => {
-      expect(screen.queryByText(/network error/i)).toBeNull();
-    });
+    expect(screen.queryByText(/network error/i)).toBeNull();
   });
 });

@@ -8,6 +8,8 @@ export type SessionPhase =
   | "Failed"
   | "Suspended";
 
+export type WorkspaceMode = "Worktree" | "CurrentBranch";
+
 export interface Session {
   id: string;
   phase: SessionPhase;
@@ -16,10 +18,12 @@ export interface Session {
   configSource: string;
   baseDir: string;
   input: string;
+  title?: string;
   currentStep?: string;
   createdAt: string;
   completedAt?: string;
   worktreeBranch?: string;
+  workspaceMode: WorkspaceMode;
   prUrl?: string;
   updatedAt?: string;
   awaitingInput?: boolean;
@@ -62,13 +66,37 @@ export interface WorkflowCancelledEvent {
   event: "workflowCancelled";
 }
 
+export interface RunAllStartedEvent {
+  event: "runAllStarted";
+  data: { total: number };
+}
+
+export interface RunAllSessionStartedEvent {
+  event: "runAllSessionStarted";
+  data: { sessionId: string; input: string };
+}
+
+export interface RunAllSessionFinishedEvent {
+  event: "runAllSessionFinished";
+  data: { sessionId: string; input: string; phase: SessionPhase; error?: string };
+}
+
+export interface RunAllCompletedEvent {
+  event: "runAllCompleted";
+  data: { cancelled: number };
+}
+
 export type WorkflowEvent =
   | StepStartedEvent
   | StepCompletedEvent
   | OptionRequiredEvent
   | WorkflowCompletedEvent
   | WorkflowFailedEvent
-  | WorkflowCancelledEvent;
+  | WorkflowCancelledEvent
+  | RunAllStartedEvent
+  | RunAllSessionStartedEvent
+  | RunAllSessionFinishedEvent
+  | RunAllCompletedEvent;
 
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 
