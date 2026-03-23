@@ -70,20 +70,22 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
           </div>
         )}
         <div className="space-y-2">
-          {choices.map((choice, index) =>
+          {choices.map((choice) =>
             choice.kind === "selector" ? (
               <button
-                key={index}
+                key={choice.label}
+                type="button"
                 onClick={() => onRespond({ nextStep: choice.next ?? undefined })}
                 className="w-full text-left px-4 py-2 border border-gray-700 rounded hover:bg-gray-800 text-sm text-gray-200 transition-colors"
               >
                 {choice.label}
               </button>
             ) : (
-              <div key={index} className="space-y-1">
-                <label className="text-sm text-gray-400">{choice.label}</label>
+              <div key={choice.label} className="space-y-1">
+                <label htmlFor={`text-input-${choice.label}`} className="text-sm text-gray-400">{choice.label}</label>
                 <div className="flex gap-2">
                   <input
+                    id={`text-input-${choice.label}`}
                     type="text"
                     value={textValues[choice.label] ?? ""}
                     onChange={(e) =>
@@ -175,6 +177,7 @@ export function WorkflowToastStack({
             )}
           </div>
           <button
+            type="button"
             onClick={() => onDismiss(t.id)}
             className="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5"
           >
@@ -209,6 +212,7 @@ function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCa
         <p className="text-sm text-gray-400">{message}</p>
         <div className="flex gap-2 justify-end">
           <button
+            type="button"
             onClick={onCancel}
             disabled={disabled}
             className="px-4 py-2 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800 disabled:opacity-50"
@@ -216,6 +220,7 @@ function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCa
             Cancel
           </button>
           <button
+            type="button"
             onClick={onConfirm}
             disabled={disabled}
             className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50"
@@ -515,12 +520,14 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           {canRun && isFreshRun && (
             <>
               <button
+                type="button"
                 onClick={() => void startRun("Worktree")}
                 className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
               >
                 Create worktree (new branch)
               </button>
               <button
+                type="button"
                 onClick={() => void startRun("CurrentBranch")}
                 className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
               >
@@ -530,6 +537,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           )}
           {canRun && !isFreshRun && (
             <button
+              type="button"
               onClick={() => void startRun(session.workspaceMode)}
               className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
             >
@@ -538,6 +546,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           )}
           {status === "running" && (
             <button
+              type="button"
               onClick={() => void handleCancel()}
               className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700"
             >
@@ -546,6 +555,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           )}
           {isResettable && status !== "running" && (
             <button
+              type="button"
               onClick={() => void handleReset()}
               className="px-4 py-2 border border-gray-700 text-orange-400 rounded text-sm hover:bg-gray-800"
             >
@@ -554,6 +564,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           )}
           {session.phase === "Planned" && status !== "running" && replanPhase !== "generating" && (
             <button
+              type="button"
               onClick={() => setReplanPhase("editing")}
               className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
             >
@@ -562,6 +573,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           )}
           {session.phase !== "Running" && status !== "running" && (
             <button
+              type="button"
               onClick={() => setShowDeleteConfirm(true)}
               className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-red-900/30"
             >
@@ -586,6 +598,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
             />
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() => void handleReplan()}
                 disabled={!replanFeedback.trim()}
                 className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -593,6 +606,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
                 Apply
               </button>
               <button
+                type="button"
                 onClick={() => { setReplanPhase("idle"); setReplanFeedback(""); }}
                 className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
               >
@@ -620,6 +634,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       {/* Tabs */}
       <div className="flex border-b border-gray-800">
         <button
+          type="button"
           onClick={() => handleTabChange("info")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "info"
@@ -630,6 +645,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           Info
         </button>
         <button
+          type="button"
           onClick={() => handleTabChange("plan")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "plan"
@@ -640,6 +656,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           Plan
         </button>
         <button
+          type="button"
           onClick={() => handleTabChange("log")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "log"
@@ -892,8 +909,9 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
           <>
             {/* Config selector */}
             <div className="space-y-1.5">
-              <label className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
+              <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
               <select
+                id="config-select"
                 value={configPath}
                 onChange={(e) => setConfigPath(e.target.value)}
                 disabled={planPhase === "generating"}
@@ -910,8 +928,9 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
 
             {/* Base dir */}
             <div className="space-y-1.5">
-              <label className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
+              <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
               <DirectoryPicker
+                id="base-dir-input"
                 value={baseDir}
                 onChange={setBaseDir}
                 disabled={planPhase === "generating"}
@@ -921,8 +940,9 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
 
             {/* Task input */}
             <div className="space-y-1.5">
-              <label className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
+              <label htmlFor="task-input" className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
               <textarea
+                id="task-input"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 disabled={planPhase === "generating"}
@@ -936,6 +956,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
             </div>
 
             <button
+              type="button"
               onClick={() => void handleGenerate()}
               disabled={planPhase === "generating" || !input.trim()}
               className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
@@ -979,6 +1000,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
                 />
                 <div className="flex gap-2">
                   <button
+                    type="button"
                     onClick={() => void handleFix()}
                     disabled={!feedback.trim()}
                     className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -986,6 +1008,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
                     Apply Fix
                   </button>
                   <button
+                    type="button"
                     onClick={() => setPlanPhase("generated")}
                     className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
                   >
@@ -999,18 +1022,21 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
             {planPhase === "generated" && (
               <div className="flex gap-2">
                 <button
+                  type="button"
                   onClick={() => void handleApprove()}
                   className="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600"
                 >
                   Approve
                 </button>
                 <button
+                  type="button"
                   onClick={() => setPlanPhase("fixing")}
                   className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
                 >
                   Fix
                 </button>
                 <button
+                  type="button"
                   onClick={() => void handleDiscard()}
                   className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-gray-800"
                 >
@@ -1126,6 +1152,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         <h2 className="text-xl font-semibold text-gray-100">Run All</h2>
         {status === "running" ? (
           <button
+            type="button"
             onClick={() => void handleCancel()}
             className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
           >
@@ -1133,6 +1160,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
           </button>
         ) : (
           <button
+            type="button"
             onClick={onCompleted}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded"
           >

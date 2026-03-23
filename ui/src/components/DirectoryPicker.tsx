@@ -8,6 +8,7 @@ interface DirectoryPickerProps {
   onChange: (value: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  id?: string;
 }
 
 /** Split a typed path into the parent dir and the incomplete last segment.
@@ -39,6 +40,7 @@ export function DirectoryPicker({
   onChange,
   disabled = false,
   placeholder,
+  id,
 }: DirectoryPickerProps) {
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -161,6 +163,7 @@ export function DirectoryPicker({
       <div className="flex gap-2">
         <input
           ref={inputRef}
+          id={id}
           type="text"
           value={value}
           onChange={(e) => {
