@@ -75,11 +75,11 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
             cursor::RestorePosition,
             Clear(ClearType::FromCursorDown)
         )?;
-        for (i, line) in buf.lines.iter().enumerate() {
+        for (i, row) in buf.physical_rows(term_width).iter().enumerate() {
             if i > 0 {
                 write!(out, "\r\n")?;
             }
-            write!(out, "{line}")?;
+            write!(out, "{row}")?;
         }
 
         // Reposition the terminal cursor, accounting for line wrapping.
@@ -320,6 +320,37 @@ impl InputBuffer {
     /// Return the terminal display width of line `row` (full line, not up to cursor).
     fn line_display_width(&self, row: usize) -> usize {
         self.display_width_up_to(row, usize::MAX)
+    }
+
+    /// Split all logical lines into physical rows based on terminal width.
+    ///
+    /// Each logical line is wrapped at `term_width` display columns, producing
+    /// one or more physical rows.  An empty logical line contributes exactly one
+    /// empty physical row.  A line whose display width equals `term_width`
+    /// exactly also contributes exactly one row — consistent with the terminal's
+    /// delayed auto-wrap behaviour.
+    fn physical_rows(&self, term_width: u16) -> Vec<String> {
+        let tw = usize::from(term_width);
+        let mut result = Vec::with_capacity(self.lines.len());
+
+        for line in &self.lines {
+            let mut current_row = String::with_capacity(line.len());
+            let mut current_width: usize = 0;
+
+            for ch in line.chars() {
+                let ch_width = ch.width().unwrap_or(0);
+                if current_width > 0 && current_width + ch_width > tw {
+                    result.push(current_row);
+                    current_row = String::new();
+                    current_width = 0;
+                }
+                current_row.push(ch);
+                current_width += ch_width;
+            }
+            result.push(current_row);
+        }
+
+        result
     }
 
     /// Return the physical (row, col) offset from the saved cursor position,
@@ -884,5 +915,88 @@ mod tests {
         // lines 0,1 (w=11 each): (11-1)/10+1 = 2 rows each = 4
         // cursor display 11: row 11/10=1, col 11%10=1
         assert_eq!(buf.wrapped_cursor_pos(10), (5, 1));
+    }
+
+    // ── InputBuffer – physical_rows ────────────────────────────────────────────
+
+    #[test]
+    fn test_physical_rows_empty_buffer_single_empty_row() {
+        // one row so the cursor has somewhere to be
+        assert_eq!(InputBuffer::new().physical_rows(80), vec![String::new()]);
+    }
+
+    #[test]
+    fn test_physical_rows_single_short_line_no_wrap() {
+        assert_eq!(
+            buf_with("hello").physical_rows(10),
+            vec!["hello".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_physical_rows_single_line_exactly_at_term_width_no_extra_row() {
+        // delayed auto-wrap: filling the last column doesn't start a new row yet
+        assert_eq!(
+            buf_with("hellohello").physical_rows(10),
+            vec!["hellohello".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_physical_rows_single_line_one_char_past_term_width() {
+        assert_eq!(
+            buf_with("hellohelloX").physical_rows(10),
+            vec!["hellohello".to_string(), "X".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_physical_rows_cjk_exactly_at_term_width_no_extra_row() {
+        // 5 CJK chars = 10 display columns (each occupies 2 terminal columns)
+        // sakoku-ignore-next-line
+        let buf = buf_with("あああああ");
+        let rows = buf.physical_rows(10);
+        // sakoku-ignore-next-line
+        assert_eq!(rows, vec!["あああああ".to_string()]);
+    }
+
+    #[test]
+    fn test_physical_rows_cjk_one_past_term_width() {
+        // 5 CJK (10 cols) + "X" wraps to row 1
+        // sakoku-ignore-next-line
+        let buf = buf_with("あああああX");
+        let rows = buf.physical_rows(10);
+        // sakoku-ignore-next-line
+        assert_eq!(rows, vec!["あああああ".to_string(), "X".to_string()]);
+    }
+
+    #[test]
+    fn test_physical_rows_multiline_no_wrapping() {
+        assert_eq!(
+            buf_with("hello\nworld").physical_rows(80),
+            vec!["hello".to_string(), "world".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_physical_rows_first_line_exactly_at_term_width_second_line_below() {
+        // regression: line at exactly term_width must NOT emit a blank row
+        assert_eq!(
+            buf_with("hellohello\nhi").physical_rows(10),
+            vec!["hellohello".to_string(), "hi".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_physical_rows_long_line_wraps_twice() {
+        // 21 chars → 10 + 10 + 1
+        assert_eq!(
+            buf_with("hellohellohellohelloX").physical_rows(10),
+            vec![
+                "hellohello".to_string(),
+                "hellohello".to_string(),
+                "X".to_string(),
+            ]
+        );
     }
 }
