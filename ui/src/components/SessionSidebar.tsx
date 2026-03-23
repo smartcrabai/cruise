@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import type { Update } from "../lib/updater";
+import { checkForUpdate, downloadAndInstall } from "../lib/updater";
 import { listSessions, cleanSessions } from "../lib/commands";
 import type { Session } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
 import { formatLocalTime } from "../lib/format";
+
+type UpdateState = "available" | "downloading" | "error";
 
 function Spinner({ color = "border-gray-400" }: { color?: string }) {
   return (
@@ -25,6 +30,10 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
   const [error, setError] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
   const [cleanMessage, setCleanMessage] = useState<string | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>("available");
+  const [errorMsg, setErrorMsg] = useState("");
   const lastFingerprintRef = useRef("");
   const inflightRef = useRef(false);
 
@@ -86,6 +95,36 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
       return () => { onRefreshRef.current = null; };
     }
   }, [load, onRefreshRef]);
+
+  useEffect(() => {
+    let updateIntervalId: ReturnType<typeof setInterval>;
+
+    void getVersion().then(setVersion);
+
+    const doCheck = () => void checkForUpdate().then((u) => {
+      if (u) setUpdate(u);
+    });
+
+    const updateTimerId = setTimeout(() => {
+      doCheck();
+      updateIntervalId = setInterval(doCheck, 24 * 60 * 60 * 1000);
+    }, 2000);
+
+    return () => {
+      clearTimeout(updateTimerId);
+      clearInterval(updateIntervalId);
+    };
+  }, []);
+
+  async function handleInstall() {
+    setUpdateState("downloading");
+    try {
+      await downloadAndInstall(update!);
+    } catch (e) {
+      setUpdateState("error");
+      setErrorMsg(String(e));
+    }
+  }
 
   async function handleClean() {
     setCleaning(true);
@@ -184,6 +223,36 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
             </div>
           </button>
         ))}
+      </div>
+
+      {/* Sidebar footer: version & update */}
+      <div className="flex-shrink-0 border-t border-gray-800 px-3 py-2">
+        <div className="text-xs text-gray-500">{version ? `v${version}` : "…"}</div>
+        {update && updateState === "available" && (
+          <div className="mt-1 space-y-1">
+            <div className="text-xs text-green-400">v{update.version} available</div>
+            <button
+              onClick={() => void handleInstall()}
+              className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+            >
+              Update
+            </button>
+          </div>
+        )}
+        {updateState === "downloading" && (
+          <div className="mt-1 text-xs text-gray-400">Downloading…</div>
+        )}
+        {updateState === "error" && (
+          <div className="mt-1 space-y-1">
+            <div className="text-xs text-red-400">{errorMsg}</div>
+            <button
+              onClick={() => { setUpdate(null); setUpdateState("available"); }}
+              className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

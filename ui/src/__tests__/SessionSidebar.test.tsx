@@ -4,6 +4,15 @@ import { SessionSidebar } from "../components/SessionSidebar";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn().mockResolvedValue("0.0.0"),
+}));
+
+vi.mock("../lib/updater", () => ({
+  checkForUpdate: vi.fn().mockResolvedValue(null),
+  downloadAndInstall: vi.fn(),
+}));
+
 vi.mock("../lib/commands", () => ({
   listSessions: vi.fn(),
   cleanSessions: vi.fn(),
