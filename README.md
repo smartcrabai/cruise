@@ -8,7 +8,7 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 
 ## Prerequisites
 
-- [`gh` CLI](https://cli.github.com/) — required for PR creation and cleanup.
+- [`gh` CLI](https://cli.github.com/) — required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
 
 ## Installation
 
@@ -104,7 +104,7 @@ Options:
       --dry-run                    Print the workflow flow without executing it
 ```
 
-`--all` runs every Planned session in sequence. Each session gets its own worktree (even if the session was created in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
 
 #### `cruise clean`
 
@@ -468,11 +468,31 @@ steps:
 
 > **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
-## Worktree Isolation
+## Workspace Mode
 
-`cruise run` always executes the workflow inside an isolated git worktree at `~/.cruise/worktrees/<session-id>/`, keeping the main working tree clean.
+When `cruise run` starts a new session, it prompts you to choose a workspace mode:
 
-- A new branch `cruise/<session-id>-<sanitized-input>` is created and checked out in the worktree.
+```
+? Where should cruise execute?
+> Create worktree (new branch)
+  Use current branch
+```
+
+| Mode | Description |
+|------|-------------|
+| **Worktree** (default) | Creates an isolated git worktree at `~/.cruise/worktrees/<session-id>/`. A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation. |
+| **Current branch** | Executes directly in the current repository on the active branch. No worktree is created, and no PR is created automatically. |
+
+In non-interactive environments (piped stdin) and with `--all`, worktree mode is used automatically.
+
+### Current-branch mode constraints
+
+- Requires a clean working tree (no uncommitted changes) for a fresh run.
+- Requires an attached branch (not detached HEAD).
+- On resume, the active branch must match the branch recorded at the start of the session.
+
+### Worktree isolation
+
 - The worktree is retained until the PR is closed or merged; run `cruise clean` to delete it.
 
 ### Copying files into the worktree
@@ -605,6 +625,12 @@ steps:
   commit:
     command: git add -A && git commit -m "feat: {input}"
 ```
+
+## Config Hot-Reload
+
+During `cruise run`, the config file is checked for changes between each step. If the file has been modified (detected via mtime), the updated config is reloaded automatically — no restart required. This allows you to adjust prompts, add steps, or tweak settings while a session is running.
+
+> **Note:** Hot-reload only applies when the session was started from an external config file (not the built-in default). The current step must still exist in the new config for the reload to take effect.
 
 ## Rate Limit Retry
 
