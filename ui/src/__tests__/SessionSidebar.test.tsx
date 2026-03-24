@@ -16,6 +16,7 @@ vi.mock("../lib/updater", () => ({
 vi.mock("../lib/commands", () => ({
   listSessions: vi.fn(),
   cleanSessions: vi.fn(),
+  getUpdateReadiness: vi.fn().mockResolvedValue({ canAutoUpdate: true }),
 }));
 
 // --- Helpers ---

@@ -34,6 +34,7 @@ pub fn run() {
             commands::fix_session,
             commands::list_directory,
             commands::run_all_sessions,
+            commands::get_update_readiness,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

@@ -31,6 +31,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getUpdateReadiness: vi.fn().mockResolvedValue({ canAutoUpdate: true }),
   listConfigs: vi.fn().mockResolvedValue([]),
   listDirectory: vi.fn().mockResolvedValue([]),
   resetSession: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, downloadAndInstall } from "../lib/updater";
 import type { Update } from "../lib/updater";
+import { getUpdateReadiness } from "../lib/commands";
 import { SessionSidebar } from "../components/SessionSidebar";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -231,5 +233,117 @@ describe("SessionSidebar footer - update flow", () => {
 
     // Then:  error message disappears
     expect(screen.queryByText(/network error/i)).toBeNull();
+  });
+});
+
+// ─── Tests: Update readiness guard ───────────────────────────────────────────
+
+describe("SessionSidebar footer - update readiness guard", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(getVersion).mockResolvedValue("0.1.21");
+    // An update IS available so we can confirm the button is suppressed by readiness
+    vi.mocked(checkForUpdate).mockResolvedValue(makeUpdate("0.1.22"));
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("hides the Update button when the app is running from App Translocation", async () => {
+    // Given: app is running from App Translocation (macOS Gatekeeper sandbox)
+    vi.mocked(getUpdateReadiness).mockResolvedValue({
+      canAutoUpdate: false,
+      reason: "translocated",
+      bundlePath: "/private/var/folders/xx/AppTranslocation/GUID/d/cruise.app",
+      guidance: "Move cruise.app to /Applications, then run xattr -cr /Applications/cruise.app",
+    });
+
+    // When: component is mounted and 2 seconds elapse
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: Update button is not shown
+    expect(screen.queryByRole("button", { name: /update/i })).toBeNull();
+  });
+
+  it("shows a warning message when the app is running from App Translocation", async () => {
+    // Given: app is running from App Translocation
+    vi.mocked(getUpdateReadiness).mockResolvedValue({
+      canAutoUpdate: false,
+      reason: "translocated",
+      bundlePath: "/private/var/folders/xx/AppTranslocation/GUID/d/cruise.app",
+      guidance: "Move cruise.app to /Applications, then run xattr -cr /Applications/cruise.app",
+    });
+
+    // When: component is mounted
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: guidance mentioning /Applications is displayed
+    expect(screen.getByText(/\/Applications/)).toBeTruthy();
+  });
+
+  it("hides the Update button when the app is running from a mounted DMG volume", async () => {
+    // Given: app is running directly from a mounted DMG
+    vi.mocked(getUpdateReadiness).mockResolvedValue({
+      canAutoUpdate: false,
+      reason: "mountedVolume",
+      bundlePath: "/Volumes/cruise 0.1.21/cruise.app",
+      guidance: "Copy cruise.app to /Applications before using auto-update",
+    });
+
+    // When: component is mounted and 2 seconds elapse
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: Update button is not shown
+    expect(screen.queryByRole("button", { name: /update/i })).toBeNull();
+  });
+
+  it("shows a warning message when the app is running from a mounted DMG volume", async () => {
+    // Given: app is running from a mounted DMG
+    vi.mocked(getUpdateReadiness).mockResolvedValue({
+      canAutoUpdate: false,
+      reason: "mountedVolume",
+      bundlePath: "/Volumes/cruise 0.1.21/cruise.app",
+      guidance: "Copy cruise.app to /Applications before using auto-update",
+    });
+
+    // When: component is mounted
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: guidance mentioning /Applications is displayed
+    expect(screen.getByText(/\/Applications/)).toBeTruthy();
+  });
+
+  it("shows the Update button when readiness check returns canAutoUpdate true", async () => {
+    // Given: app is properly installed (readiness OK)
+    vi.mocked(getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+
+    // When: component is mounted and 2 seconds elapse
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: Update button IS shown (normal behavior)
+    expect(screen.getByRole("button", { name: /update/i })).toBeTruthy();
+  });
+
+  it("still displays the current version when readiness blocks auto-update", async () => {
+    // Given: app is running from App Translocation
+    vi.mocked(getUpdateReadiness).mockResolvedValue({
+      canAutoUpdate: false,
+      reason: "translocated",
+      guidance: "Move cruise.app to /Applications",
+    });
+
+    // When: component is mounted
+    render(<SessionSidebar {...defaultProps} />);
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+
+    // Then: version number is still visible even though update is blocked
+    expect(screen.getByText(/v0\.1\.21/)).toBeTruthy();
   });
 });

@@ -30,7 +30,7 @@ mod worktree;
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("Error: {e}");
+        eprintln!("Error: {}", e.detailed_message());
         std::process::exit(1);
     }
 }

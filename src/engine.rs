@@ -140,15 +140,19 @@ fn resolve_if_next(
     group_retry_counts: &mut HashMap<String, usize>,
 ) -> Result<Option<String>> {
     // Per-step file-changed check.
-    if let Some(target) = step_if_file_changed
-        && tracker.has_files_changed(current_step)?
-    {
+    if let Some(target) = step_if_file_changed {
+        if tracker.has_files_changed(current_step)? {
+            eprintln!(
+                "  {} files changed, jumping to: {}",
+                style("↻").cyan(),
+                target
+            );
+            return Ok(Some(target.to_string()));
+        }
         eprintln!(
-            "  {} files changed, jumping to: {}",
-            style("↻").cyan(),
-            target
+            "  {} no file changes (if.file-changed check)",
+            style("·").dim()
         );
-        return Ok(Some(target.to_string()));
     }
     // Group file-changed check.
     let Some(call_site) = step_call_site else {
@@ -176,6 +180,11 @@ fn resolve_if_next(
         );
         Ok(Some(target.clone()))
     } else {
+        eprintln!(
+            "  {} no file changes in group '{}'",
+            style("·").dim(),
+            call_site
+        );
         Ok(None)
     }
 }
@@ -352,6 +361,12 @@ async fn step_loop_iteration(
         if nfc.fail {
             return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
         }
+        if nfc.retry {
+            eprintln!(
+                "  {} no file changes, will retry (if.no-file-changes.retry)",
+                style("↻").cyan()
+            );
+        }
         nfc.retry
     } else {
         false
@@ -369,6 +384,17 @@ async fn step_loop_iteration(
         },
         &mut state.group_retry_counts,
     )?;
+    let transition_reason = if if_next.is_some() {
+        "if.file-changed"
+    } else if nfc_retry {
+        "if.no-file-changes.retry"
+    } else if option_next.is_some() {
+        "option"
+    } else if step_next.is_some() {
+        "next"
+    } else {
+        "sequential"
+    };
     let effective_next = if_next
         .or(nfc_retry.then(|| current_step.to_string()))
         .or(option_next)
@@ -379,12 +405,28 @@ async fn step_loop_iteration(
         let edge = (current_step.to_string(), next.clone());
         let count = state.edge_counts.entry(edge).or_insert(0);
         *count += 1;
+        eprintln!(
+            "  {} {} -> {} [{}] (edge {}/{})",
+            style("→").dim(),
+            current_step,
+            next,
+            transition_reason,
+            count,
+            ctx.max_retries
+        );
         if *count > ctx.max_retries {
-            return Err(CruiseError::LoopProtection(
-                current_step.to_string(),
-                next.clone(),
-                ctx.max_retries,
-            ));
+            let mut all_edges: Vec<(String, String, usize)> = state
+                .edge_counts
+                .iter()
+                .map(|((f, t), &c)| (f.clone(), t.clone(), c))
+                .collect();
+            all_edges.sort_by(|a, b| b.2.cmp(&a.2));
+            return Err(CruiseError::LoopProtection {
+                from: current_step.to_string(),
+                to: next.clone(),
+                max_retries: ctx.max_retries,
+                edge_counts: all_edges,
+            });
         }
     }
 
@@ -586,6 +628,12 @@ pub(crate) async fn run_prompt_step(
     };
     drop(spinner);
     let result = result?;
+
+    if !result.stderr.is_empty() {
+        for line in result.stderr.trim_end().lines() {
+            eprintln!("  {} {}", style("stderr:").dim(), line);
+        }
+    }
 
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));
@@ -1684,7 +1732,7 @@ steps:
         assert!(result.is_err(), "expected Err but got Ok");
         let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(
-            matches!(err, CruiseError::LoopProtection(_, _, _)),
+            matches!(err, CruiseError::LoopProtection { .. }),
             "expected LoopProtection, got: {err:?}"
         );
     }

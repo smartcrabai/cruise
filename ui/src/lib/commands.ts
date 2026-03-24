@@ -5,6 +5,7 @@ import type {
   DirEntry,
   PlanEvent,
   Session,
+  UpdateReadiness,
   WorkspaceMode,
   WorkflowEvent,
 } from "../types";
@@ -83,6 +84,11 @@ export function getSessionLog(sessionId: string): Promise<string> {
 }
 
 // ─── Filesystem ───────────────────────────────────────────────────────────────
+
+/** Return whether the current launch context supports automatic in-place update. */
+export function getUpdateReadiness(): Promise<UpdateReadiness> {
+  return invoke<UpdateReadiness>("get_update_readiness");
+}
 
 /** List subdirectories of `path`. `~` is expanded server-side. Returns up to 50 entries. */
 export function listDirectory(path: string): Promise<DirEntry[]> {

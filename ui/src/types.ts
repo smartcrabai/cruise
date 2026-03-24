@@ -123,3 +123,15 @@ export type PlanEvent =
   | { event: "planGenerating"; data: Record<string, never> }
   | { event: "planGenerated"; data: { content: string } }
   | { event: "planFailed"; data: { error: string } };
+
+// ─── Update readiness ─────────────────────────────────────────────────────────
+
+export interface UpdateReadiness {
+  canAutoUpdate: boolean;
+  /** Set when canAutoUpdate is false. */
+  reason?: "translocated" | "mountedVolume" | "unknownBundlePath";
+  /** Resolved .app bundle path, for display. */
+  bundlePath?: string;
+  /** Human-readable remediation guidance. */
+  guidance?: string;
+}

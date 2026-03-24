@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,8 +25,14 @@ pub enum CruiseError {
     #[error("process spawn error: {0}")]
     ProcessSpawnError(String),
 
-    #[error("loop protection: edge {0} -> {1} exceeded max retries {2}")]
-    LoopProtection(String, String, usize),
+    #[error("loop protection: edge {from} -> {to} exceeded max retries {max_retries}")]
+    LoopProtection {
+        from: String,
+        to: String,
+        max_retries: usize,
+        /// All edge traversal counts at the time of the error, sorted by count descending.
+        edge_counts: Vec<(String, String, usize)>,
+    },
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -58,3 +66,33 @@ pub enum CruiseError {
 }
 
 pub type Result<T> = std::result::Result<T, CruiseError>;
+
+impl CruiseError {
+    /// Returns a detailed error message with additional diagnostic context.
+    ///
+    /// For `LoopProtection`, includes the full edge traversal count table.
+    /// For all other variants, falls back to the standard `Display` output.
+    #[must_use]
+    pub fn detailed_message(&self) -> String {
+        match self {
+            CruiseError::LoopProtection {
+                from,
+                to,
+                max_retries,
+                edge_counts,
+            } => {
+                let mut msg = format!(
+                    "loop protection: edge {from} -> {to} exceeded max retries {max_retries}"
+                );
+                if !edge_counts.is_empty() {
+                    msg.push_str("\n  edge counts:");
+                    for (f, t, c) in edge_counts {
+                        let _ = write!(msg, "\n    {f} -> {t}: {c}");
+                    }
+                }
+                msg
+            }
+            other => other.to_string(),
+        }
+    }
+}

@@ -646,7 +646,11 @@ async fn run_all(args: RunArgs) -> Result<()> {
                 eprintln!("session {} paused by user", session.id);
             }
             Err(e) if !interrupted => {
-                eprintln!("warning: session {} encountered an error: {e}", session.id);
+                eprintln!(
+                    "warning: session {} encountered an error: {}",
+                    session.id,
+                    e.detailed_message()
+                );
             }
             Ok(()) | Err(_) => {}
         }
