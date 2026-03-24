@@ -356,6 +356,7 @@ async fn run_plan_prompt_template(
     vars: &mut cruise::variable::VariableStore,
     template: &str,
     rate_limit_retries: usize,
+    cwd: Option<&std::path::Path>,
 ) -> std::result::Result<cruise::step::prompt::PromptResult, String> {
     let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
     let prompt = vars
@@ -379,6 +380,7 @@ async fn run_plan_prompt_template(
         &std::collections::HashMap::new(),
         None::<&fn(&str)>,
         None,
+        cwd,
     )
     .await
     .map_err(|e| e.to_string())
@@ -471,7 +473,15 @@ pub async fn create_session(
 
     let _ = channel.send(PlanEvent::PlanGenerating);
 
-    match run_plan_prompt_template(&config, &mut vars, PLAN_PROMPT_TEMPLATE, 5).await {
+    match run_plan_prompt_template(
+        &config,
+        &mut vars,
+        PLAN_PROMPT_TEMPLATE,
+        5,
+        Some(std::path::Path::new(&base_dir)),
+    )
+    .await
+    {
         Ok(result) => {
             let content = match cruise::metadata::resolve_plan_content(
                 &plan_path,
@@ -575,7 +585,15 @@ pub async fn fix_session(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
-    match run_plan_prompt_template(&config, &mut vars, FIX_PLAN_PROMPT_TEMPLATE, 5).await {
+    match run_plan_prompt_template(
+        &config,
+        &mut vars,
+        FIX_PLAN_PROMPT_TEMPLATE,
+        5,
+        Some(&session.base_dir),
+    )
+    .await
+    {
         Ok(result) => {
             let content = match cruise::metadata::resolve_plan_content(
                 &plan_path,

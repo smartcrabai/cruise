@@ -623,6 +623,7 @@ pub(crate) async fn run_prompt_step(
             env,
             Some(&on_retry),
             cancel_token,
+            None,
         )
         .await
     };

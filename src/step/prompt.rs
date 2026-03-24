@@ -19,6 +19,7 @@ pub struct PromptResult {
 /// # Errors
 ///
 /// Returns an error if the LLM process fails to spawn or returns a fatal error.
+#[expect(clippy::too_many_arguments)]
 pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     command: &[String],
     model: Option<&str>,
@@ -27,11 +28,12 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     env: &HashMap<String, String, S>,
     on_retry: Option<&F>,
     cancel_token: Option<&CancellationToken>,
+    cwd: Option<&std::path::Path>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_prompt(command, model, prompt, env, cancel_token).await;
+        let result = execute_prompt(command, model, prompt, env, cancel_token, cwd).await;
 
         match result {
             Ok((output, stderr)) => return Ok(PromptResult { output, stderr }),
@@ -75,6 +77,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
     prompt: &str,
     env: &HashMap<String, String, S>,
     cancel_token: Option<&CancellationToken>,
+    cwd: Option<&std::path::Path>,
 ) -> Result<(String, String)> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
@@ -89,16 +92,18 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         cmd_args.push(m.to_string());
     }
 
-    let mut child = Command::new(&command[0])
-        .args(&cmd_args)
+    let mut cmd = Command::new(&command[0]);
+    cmd.args(&cmd_args)
         .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
-        })?;
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
+    })?;
 
     // Write the prompt via stdin to avoid ARG_MAX limits.
     if let Some(mut stdin) = child.stdin.take() {
@@ -207,6 +212,7 @@ mod tests {
             &HashMap::new(),
             None::<&fn(&str)>,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -222,6 +228,7 @@ mod tests {
             0,
             &HashMap::new(),
             None::<&fn(&str)>,
+            None,
             None,
         )
         .await;
@@ -244,6 +251,7 @@ mod tests {
             &env,
             None::<&fn(&str)>,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -263,6 +271,7 @@ mod tests {
             0,
             &HashMap::new(),
             None::<&fn(&str)>,
+            None,
             None,
         )
         .await
@@ -289,6 +298,7 @@ mod tests {
             &HashMap::new(),
             None::<&fn(&str)>,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -311,6 +321,7 @@ mod tests {
             0,
             &HashMap::new(),
             None::<&fn(&str)>,
+            None,
             None,
         )
         .await

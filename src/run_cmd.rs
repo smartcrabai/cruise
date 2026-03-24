@@ -573,6 +573,7 @@ async fn generate_pr_description(
             &env,
             Some(&on_retry),
             None,
+            None,
         )
         .await
         {
