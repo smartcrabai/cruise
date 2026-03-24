@@ -1102,6 +1102,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
     mountedRef.current = true;
     if (startedRef.current) return;
     startedRef.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void startRunAll();
     return () => {
       mountedRef.current = false;
@@ -1110,7 +1111,6 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         channelRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleCancel() {

@@ -428,6 +428,25 @@ describe("SessionSidebar", () => {
     expect(onSelectedSessionUpdated).not.toHaveBeenCalled();
   });
 
+  // ─── Header buttons ────────────────────────────────────────────────────────
+
+  it("renders Clean, Run All, and + New buttons but no Refresh button in the header", async () => {
+    // Given
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledTimes(1),
+    );
+
+    // Then
+    expect(screen.queryByTitle("Refresh")).toBeNull();
+    expect(screen.getByText("Clean")).toBeTruthy();
+    expect(screen.getByText("Run All")).toBeTruthy();
+    expect(screen.getByText("+ New")).toBeTruthy();
+  });
+
   it("calls listSessions immediately when visibilitychange makes document visible", async () => {
     // Given
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });

@@ -130,9 +130,9 @@ export type PlanEvent =
 
 export interface UpdateReadiness {
   canAutoUpdate: boolean;
-  /** Set when canAutoUpdate is false. */
-  reason?: "translocated" | "mountedVolume" | "unknownBundlePath";
-  /** Resolved .app bundle path, for display. */
+  /** `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` — set when `canAutoUpdate` is false. */
+  reason?: string;
+  /** The resolved `.app` bundle path, for display in the UI. */
   bundlePath?: string;
   /** Human-readable remediation guidance. */
   guidance?: string;

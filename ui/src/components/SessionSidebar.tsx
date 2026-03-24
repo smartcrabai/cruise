@@ -3,8 +3,8 @@ import type { MutableRefObject } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "../lib/updater";
 import { checkForUpdate, downloadAndInstall } from "../lib/updater";
-import { listSessions, cleanSessions } from "../lib/commands";
-import type { Session } from "../types";
+import { listSessions, cleanSessions, getUpdateReadiness } from "../lib/commands";
+import type { Session, UpdateReadiness } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
 import { formatLocalTime } from "../lib/format";
 
@@ -42,6 +42,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
   const [version, setVersion] = useState<string | null>(null);
   const [update, setUpdate] = useState<Update | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>("available");
+  const [updateReadiness, setUpdateReadiness] = useState<UpdateReadiness | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const lastFingerprintRef = useRef("");
   const inflightRef = useRef(false);
@@ -114,11 +115,13 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
   useEffect(() => {
     let updateIntervalId: ReturnType<typeof setInterval>;
 
-    void getVersion().then(setVersion);
+    void getVersion().then(setVersion).catch(() => {});
 
-    const doCheck = () => void checkForUpdate().then((u) => {
-      if (u) setUpdate(u);
-    });
+    void getUpdateReadiness().then(setUpdateReadiness).catch(() => {});
+
+    const doCheck = () => {
+      void checkForUpdate().then((u) => { if (u) setUpdate(u); });
+    };
 
     const updateTimerId = setTimeout(() => {
       doCheck();
@@ -155,20 +158,15 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
     }
   }
 
+  const showAutoUpdate = update && updateState === "available" && updateReadiness?.canAutoUpdate;
+  const updateGuidance = updateReadiness && !updateReadiness.canAutoUpdate ? updateReadiness.guidance : null;
+
   return (
     <div className="h-full flex flex-col">
       <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => void load()}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
-              title="Refresh"
-            >
-              ↻
-            </button>
             <button
               type="button"
               onClick={() => void handleClean()}
@@ -248,7 +246,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
       {/* Sidebar footer: version & update */}
       <div className="flex-shrink-0 border-t border-gray-800 px-3 py-2">
         <div className="text-xs text-gray-500">{version ? `v${version}` : "…"}</div>
-        {update && updateState === "available" && (
+        {showAutoUpdate && (
           <div className="mt-1 space-y-1">
             <div className="text-xs text-green-400">v{update.version} available</div>
             <button
@@ -259,6 +257,9 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
               Update
             </button>
           </div>
+        )}
+        {updateGuidance && (
+          <div className="mt-1 text-xs text-yellow-400">{updateGuidance}</div>
         )}
         {updateState === "downloading" && (
           <div className="mt-1 text-xs text-gray-400">Downloading…</div>

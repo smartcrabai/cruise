@@ -151,7 +151,7 @@ fn resolve_if_next(
         }
         eprintln!(
             "  {} no file changes (if.file-changed check)",
-            style("·").dim()
+            style(".").dim()
         );
     }
     // Group file-changed check.
@@ -182,7 +182,7 @@ fn resolve_if_next(
     } else {
         eprintln!(
             "  {} no file changes in group '{}'",
-            style("·").dim(),
+            style(".").dim(),
             call_site
         );
         Ok(None)
