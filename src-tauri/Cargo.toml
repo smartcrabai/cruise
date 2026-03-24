@@ -1,8 +1,8 @@
 [package]
-name = "cruise-gui"
-version.workspace = true
 edition = "2024"
+name = "cruise-gui"
 publish = false
+version.workspace = true
 
 [package.metadata.dist]
 dist = false

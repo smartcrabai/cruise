@@ -38,6 +38,27 @@ pub struct SessionDto {
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub workspace_mode: WorkspaceMode,
+    /// Whether a valid (non-empty) `plan.md` exists for this session.
+    pub plan_available: bool,
+}
+
+impl SessionDto {
+    /// Construct a [`SessionDto`] with filesystem-derived `plan_available` flag.
+    ///
+    /// Use this instead of `From<SessionState>` whenever you have access to a
+    /// [`SessionManager`] so that `plan_available` is correctly populated.
+    pub(crate) fn from_state(
+        session: cruise::session::SessionState,
+        manager: &SessionManager,
+    ) -> Self {
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let plan_available = std::fs::read_to_string(&plan_path)
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        let mut dto = Self::from(session);
+        dto.plan_available = plan_available;
+        dto
+    }
 }
 
 impl From<cruise::session::SessionState> for SessionDto {
@@ -62,6 +83,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             updated_at: s.updated_at,
             awaiting_input: s.awaiting_input,
             workspace_mode: s.workspace_mode,
+            plan_available: false,
         }
     }
 }
@@ -222,7 +244,12 @@ pub fn list_sessions() -> std::result::Result<Vec<SessionDto>, String> {
     let manager = new_session_manager()?;
     manager
         .list()
-        .map(|sessions| sessions.into_iter().map(SessionDto::from).collect())
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|s| SessionDto::from_state(s, &manager))
+                .collect()
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -232,7 +259,7 @@ pub fn get_session(session_id: String) -> std::result::Result<SessionDto, String
     let manager = new_session_manager()?;
     manager
         .load(&session_id)
-        .map(SessionDto::from)
+        .map(|s| SessionDto::from_state(s, &manager))
         .map_err(|e| e.to_string())
 }
 
@@ -492,7 +519,7 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
     session.reset_to_planned();
     manager.save(&session).map_err(|e| e.to_string())?;
-    Ok(SessionDto::from(session))
+    Ok(SessionDto::from_state(session, &manager))
 }
 
 /// Delete a session that is still in "Awaiting Approval" phase (discard).
@@ -1015,7 +1042,6 @@ mod tests {
     use cruise::cancellation::CancellationToken;
     use cruise::test_support::{init_git_repo, make_session};
     use std::fs;
-    use std::path::Path;
     use tempfile::TempDir;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
