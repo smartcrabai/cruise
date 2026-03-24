@@ -173,6 +173,7 @@ export function WorkflowToastStack({
             type="button"
             aria-label="Dismiss"
             onClick={() => onDismiss(t.id)}
+            aria-label="Dismiss"
             className="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5"
           >
             x
@@ -470,7 +471,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       <div className="px-6 pt-6 pb-4 border-b border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold font-mono text-gray-100">{session.id}</h2>
-          <PhaseBadge phase={session.phase} />
+          <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} />
         </div>
 
         {session.prUrl && (
@@ -857,6 +858,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
     setSessionId(null);
     setPlanContent("");
     setPlanPhase("input");
+    setFeedback("");
   }
 
   async function handleFix() {

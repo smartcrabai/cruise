@@ -124,6 +124,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
     };
 
     const updateTimerId = setTimeout(() => {
+      void getUpdateReadiness().then(setReadiness).catch(() => {});
       doCheck();
       updateIntervalId = setInterval(doCheck, 24 * 60 * 60 * 1000);
     }, 2000);
@@ -165,7 +166,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
     <div className="h-full flex flex-col">
       <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold text-gray-200">Sessions</h1>
+          <h2 className="text-sm font-semibold text-gray-200">Sessions</h2>
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -227,7 +228,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
               <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} />
+              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} />
             </div>
             <p className="text-sm text-gray-300 truncate">{s.title || s.input}</p>
             {s.title && (
@@ -269,7 +270,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
             <div className="text-xs text-red-400">{errorMsg}</div>
             <button
               type="button"
-              onClick={() => { setUpdate(null); setUpdateState("available"); }}
+              onClick={() => { setUpdate(null); setUpdateState("available"); setErrorMsg(""); }}
               className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
             >
               Dismiss
