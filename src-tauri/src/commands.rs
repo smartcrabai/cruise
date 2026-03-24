@@ -39,6 +39,27 @@ pub struct SessionDto {
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub workspace_mode: WorkspaceMode,
+    /// Whether a valid (non-empty) `plan.md` exists for this session.
+    pub plan_available: bool,
+}
+
+impl SessionDto {
+    /// Construct a [`SessionDto`] with filesystem-derived `plan_available` flag.
+    ///
+    /// Use this instead of `From<SessionState>` whenever you have access to a
+    /// [`SessionManager`] so that `plan_available` is correctly populated.
+    pub(crate) fn from_state(
+        session: cruise::session::SessionState,
+        manager: &SessionManager,
+    ) -> Self {
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let plan_available = std::fs::read_to_string(&plan_path)
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        let mut dto = Self::from(session);
+        dto.plan_available = plan_available;
+        dto
+    }
 }
 
 impl From<cruise::session::SessionState> for SessionDto {
@@ -63,6 +84,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             updated_at: s.updated_at,
             awaiting_input: s.awaiting_input,
             workspace_mode: s.workspace_mode,
+            plan_available: false,
         }
     }
 }
@@ -210,7 +232,12 @@ pub fn list_sessions() -> std::result::Result<Vec<SessionDto>, String> {
     let manager = new_session_manager()?;
     manager
         .list()
-        .map(|sessions| sessions.into_iter().map(SessionDto::from).collect())
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|s| SessionDto::from_state(s, &manager))
+                .collect()
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -220,7 +247,7 @@ pub fn get_session(session_id: String) -> std::result::Result<SessionDto, String
     let manager = new_session_manager()?;
     manager
         .load(&session_id)
-        .map(SessionDto::from)
+        .map(|s| SessionDto::from_state(s, &manager))
         .map_err(|e| e.to_string())
 }
 
@@ -480,7 +507,7 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
     session.reset_to_planned();
     manager.save(&session).map_err(|e| e.to_string())?;
-    Ok(SessionDto::from(session))
+    Ok(SessionDto::from_state(session, &manager))
 }
 
 /// Delete a session that is still in "Awaiting Approval" phase (discard).
@@ -923,7 +950,6 @@ mod tests {
     use cruise::cancellation::CancellationToken;
     use cruise::test_support::{init_git_repo, make_session};
     use std::fs;
-    use std::path::Path;
     use tempfile::TempDir;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
@@ -1335,5 +1361,98 @@ mod tests {
             }
             other => panic!("expected OptionRequired event, got: {other:?}"),
         }
+    }
+
+    // ─── SessionDto::from_state / plan_available ─────────────────────────────
+
+    #[test]
+    fn test_session_dto_plan_available_true_when_plan_has_content() {
+        // Given: an AwaitingApproval session with a non-empty plan.md
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = make_session("20260321130000", &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        fs::write(
+            &plan_path,
+            "# Implementation Plan\n\nStep 1: do the thing\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: constructing the DTO with filesystem access
+        let dto = SessionDto::from_state(session, &manager);
+
+        // Then: plan_available reflects that a valid plan file exists
+        assert!(
+            dto.plan_available,
+            "expected plan_available == true for non-empty plan.md"
+        );
+    }
+
+    #[test]
+    fn test_session_dto_plan_available_false_when_plan_is_missing() {
+        // Given: a session with no plan.md written yet
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = make_session("20260321130001", &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        // Note: no plan.md written
+
+        // When: constructing the DTO with filesystem access
+        let dto = SessionDto::from_state(session, &manager);
+
+        // Then: plan_available is false because no file exists
+        assert!(
+            !dto.plan_available,
+            "expected plan_available == false when plan.md is absent"
+        );
+    }
+
+    #[test]
+    fn test_session_dto_plan_available_false_when_plan_is_empty() {
+        // Given: a session with an empty plan.md
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = make_session("20260321130002", &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: constructing the DTO with filesystem access
+        let dto = SessionDto::from_state(session, &manager);
+
+        // Then: plan_available is false because the file has no real content
+        assert!(
+            !dto.plan_available,
+            "expected plan_available == false for empty plan.md"
+        );
+    }
+
+    #[test]
+    fn test_session_dto_plan_available_false_when_plan_is_whitespace_only() {
+        // Given: a session with a whitespace-only plan.md
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = make_session("20260321130003", &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        fs::write(&plan_path, "   \n\t\n  ").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: constructing the DTO with filesystem access
+        let dto = SessionDto::from_state(session, &manager);
+
+        // Then: plan_available is false because whitespace-only doesn't count as real content
+        assert!(
+            !dto.plan_available,
+            "expected plan_available == false for whitespace-only plan.md"
+        );
     }
 }

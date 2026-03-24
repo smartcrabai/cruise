@@ -316,6 +316,117 @@ describe("SessionSidebar", () => {
     );
   });
 
+  // ─── onSelectedSessionUpdated callback ─────────────────────────────────────
+
+  it("calls onSelectedSessionUpdated when load returns a session matching selectedId", async () => {
+    // Given: selectedId matches a session in the initial load result
+    const session = makeSession({ id: "session-1", phase: "Planned" });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+
+    const onSelectedSessionUpdated = vi.fn();
+
+    // When
+    render(
+      <SessionSidebar
+        {...defaultProps}
+        selectedId="session-1"
+        onSelectedSessionUpdated={onSelectedSessionUpdated}
+      />,
+    );
+
+    // Then: callback is called with the latest DTO for the selected session
+    await waitFor(() => {
+      expect(onSelectedSessionUpdated).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "session-1", phase: "Planned" }),
+      );
+    });
+  });
+
+  it("calls onSelectedSessionUpdated with updated session after a silent refresh", async () => {
+    // Given: initial load returns one state, then a refresh returns an updated state
+    const initial = makeSession({ id: "session-1", phase: "Planned" });
+    vi.mocked(commands.listSessions).mockResolvedValueOnce([initial]);
+    const updated = makeSession({ id: "session-1", phase: "Running" });
+    vi.mocked(commands.listSessions).mockResolvedValueOnce([updated]);
+
+    const onSelectedSessionUpdated = vi.fn();
+    const refreshRef = { current: null as (() => void) | null };
+
+    render(
+      <SessionSidebar
+        {...defaultProps}
+        selectedId="session-1"
+        onSelectedSessionUpdated={onSelectedSessionUpdated}
+        onRefreshRef={refreshRef}
+      />,
+    );
+
+    // Wait for the initial load to complete
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledTimes(1),
+    );
+
+    // When: silent refresh fires (polling or visibility change)
+    await act(async () => {
+      refreshRef.current?.();
+    });
+
+    // Then: parent receives the updated session
+    await waitFor(() => {
+      expect(onSelectedSessionUpdated).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "session-1", phase: "Running" }),
+      );
+    });
+  });
+
+  it("does not call onSelectedSessionUpdated when selectedId is null", async () => {
+    // Given: no session is selected
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1" }),
+    ]);
+    const onSelectedSessionUpdated = vi.fn();
+
+    // When
+    render(
+      <SessionSidebar
+        {...defaultProps}
+        selectedId={null}
+        onSelectedSessionUpdated={onSelectedSessionUpdated}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledTimes(1),
+    );
+
+    // Then: callback is never called (nothing is selected)
+    expect(onSelectedSessionUpdated).not.toHaveBeenCalled();
+  });
+
+  it("does not call onSelectedSessionUpdated when selectedId is not in the result", async () => {
+    // Given: the selected session is absent from the returned list
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "other-session" }),
+    ]);
+    const onSelectedSessionUpdated = vi.fn();
+
+    // When
+    render(
+      <SessionSidebar
+        {...defaultProps}
+        selectedId="session-1"
+        onSelectedSessionUpdated={onSelectedSessionUpdated}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledTimes(1),
+    );
+
+    // Then: callback is not called (session no longer exists in the list)
+    expect(onSelectedSessionUpdated).not.toHaveBeenCalled();
+  });
+
   it("calls listSessions immediately when visibilitychange makes document visible", async () => {
     // Given
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });

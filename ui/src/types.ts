@@ -27,6 +27,8 @@ export interface Session {
   prUrl?: string;
   updatedAt?: string;
   awaitingInput?: boolean;
+  /** Whether a valid (non-empty) plan.md exists for this session. */
+  planAvailable?: boolean;
 }
 
 // ─── IPC Events ───────────────────────────────────────────────────────────────

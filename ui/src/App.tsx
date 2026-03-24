@@ -32,17 +32,8 @@ import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionSidebar } from "./components/SessionSidebar";
+import { getSessionActions } from "./lib/sessionActions";
 import { formatLocalTime } from "./lib/format";
-
-function runButtonLabel(phase: SessionPhase): string {
-  if (phase === "Suspended") {
-    return "Resume";
-  }
-  if (phase === "Failed") {
-    return "Retry";
-  }
-  return "Run";
-}
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
 
@@ -254,11 +245,11 @@ interface PendingOption {
   plan?: string;
 }
 
-type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
+type ExecStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
 function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
-  const [status, setStatus] = useState<RunStatus>("idle");
+  const [status, setStatus] = useState<ExecStatus>("idle");
   const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
   const [savedLog, setSavedLog] = useState<string>("");
@@ -330,6 +321,15 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
   async function refreshSession() {
     const updated = await getSession(session.id);
     onSessionUpdated(updated);
+  }
+
+  async function handleApproveSession() {
+    try {
+      await approveSession(session.id);
+      await refreshSession();
+    } catch (e) {
+      notifyEvent("failed", session.input, `Approve error: ${e}`);
+    }
   }
 
   async function startRun(workspaceMode: WorkspaceMode) {
@@ -474,19 +474,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     }
   }
 
-  const isRunnable =
-    session.phase === "Planned" ||
-    session.phase === "Running" ||
-    session.phase === "Failed" ||
-    session.phase === "Suspended";
-
-  const isResettable =
-    session.phase === "Running" ||
-    session.phase === "Suspended" ||
-    session.phase === "Failed" ||
-    session.phase === "Completed";
-  const isFreshRun = session.currentStep == null;
-  const canRun = isRunnable && status !== "running";
+  const actions = getSessionActions(session, status === "running" ? "running" : "idle");
 
   // Decide which log content to show
   const showLive = status === "running" || (status !== "idle" && liveLog.length > 0);
@@ -517,7 +505,16 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
 
         {/* Controls */}
         <div className="flex gap-2">
-          {canRun && isFreshRun && (
+          {actions.showApprove && (
+            <button
+              type="button"
+              onClick={() => void handleApproveSession()}
+              className="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600"
+            >
+              Approve
+            </button>
+          )}
+          {actions.showCreateWorktree && (
             <>
               <button
                 type="button"
@@ -535,16 +532,16 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
               </button>
             </>
           )}
-          {canRun && !isFreshRun && (
+          {actions.showRun && (
             <button
               type="button"
               onClick={() => void startRun(session.workspaceMode)}
               className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
             >
-              {runButtonLabel(session.phase)}
+              {actions.runLabel}
             </button>
           )}
-          {status === "running" && (
+          {actions.showCancel && (
             <button
               type="button"
               onClick={() => void handleCancel()}
@@ -553,7 +550,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
               Cancel
             </button>
           )}
-          {isResettable && status !== "running" && (
+          {actions.showReset && (
             <button
               type="button"
               onClick={() => void handleReset()}
@@ -562,7 +559,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
               Reset to Planned
             </button>
           )}
-          {session.phase === "Planned" && status !== "running" && replanPhase !== "generating" && (
+          {actions.showReplan && replanPhase !== "generating" && (
             <button
               type="button"
               onClick={() => setReplanPhase("editing")}
@@ -571,7 +568,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
               Replan
             </button>
           )}
-          {session.phase !== "Running" && status !== "running" && (
+          {actions.showDelete && (
             <button
               type="button"
               onClick={() => setShowDeleteConfirm(true)}
@@ -1293,6 +1290,7 @@ export default function App() {
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
           onRunAll={() => { setSelectedSession(null); setView("runAll"); }}
           onRefreshRef={sidebarRefreshRef}
+          onSelectedSessionUpdated={(s) => setSelectedSession(s)}
         />
       </aside>
       {/* Main content */}

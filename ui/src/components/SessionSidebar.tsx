@@ -22,9 +22,18 @@ interface SessionSidebarProps {
   onNewSession: () => void;
   onRunAll: () => void;
   onRefreshRef?: MutableRefObject<(() => void) | null>;
+  /** Called after each load() when the currently selected session appears in
+   *  the result, passing the latest DTO so the parent can stay in sync without
+   *  triggering a view-change side effect (i.e. never call onSelect here). */
+  onSelectedSessionUpdated?: (session: Session) => void;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp }: SessionSidebarProps) {
+  // Stable refs so load() can access the latest props without re-creating itself
+  const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
+  onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,10 +62,16 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
         const bTime = b.updatedAt ?? b.createdAt;
         return bTime.localeCompare(aTime);
       });
-      const fingerprint = sorted.map(s => `${s.id}:${s.phase}:${s.updatedAt ?? s.createdAt}:${!!s.awaitingInput}`).join(",");
+      const fingerprint = sorted.map(s => `${s.id}:${s.phase}:${s.updatedAt ?? s.createdAt}:${!!s.awaitingInput}:${!!s.planAvailable}`).join(",");
       if (fingerprint !== lastFingerprintRef.current) {
         lastFingerprintRef.current = fingerprint;
         setSessions(sorted);
+        if (selectedIdRef.current !== null) {
+          const match = sorted.find((s) => s.id === selectedIdRef.current);
+          if (match) {
+            onSelectedSessionUpdatedRef.current?.(match);
+          }
+        }
       }
       setError(null);
     } catch (e) {
