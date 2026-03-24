@@ -317,7 +317,7 @@ async fn run_plan_prompt_template(
     vars: &mut cruise::variable::VariableStore,
     template: &str,
     rate_limit_retries: usize,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<cruise::step::prompt::PromptResult, String> {
     let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
     let prompt = vars
         .resolve(template)
@@ -342,29 +342,7 @@ async fn run_plan_prompt_template(
         None,
     )
     .await
-    .map(|r| r.output)
     .map_err(|e| e.to_string())
-}
-
-/// Read the plan from `plan_path`, falling back to writing `stdout` if the file is missing.
-///
-/// Returns an error if neither the file exists nor `stdout` has content.
-fn resolve_plan_content(
-    plan_path: &std::path::Path,
-    stdout: String,
-) -> std::result::Result<String, String> {
-    if plan_path.exists() {
-        std::fs::read_to_string(plan_path)
-            .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))
-    } else if !stdout.trim().is_empty() {
-        std::fs::write(plan_path, &stdout).map_err(|e| format!("failed to write plan: {e}"))?;
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "failed to read plan at {}: No such file or directory (os error 2)",
-            plan_path.display()
-        ))
-    }
 }
 
 // ─── Session creation commands ─────────────────────────────────────────────────
@@ -455,14 +433,20 @@ pub async fn create_session(
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     match run_plan_prompt_template(&config, &mut vars, PLAN_PROMPT_TEMPLATE, 5).await {
-        Ok(stdout) => {
-            let content = resolve_plan_content(&plan_path, stdout)?;
-            if content.trim().is_empty() {
-                let _ = manager.delete(&session_id);
-                let msg = "generated plan is empty".to_string();
-                let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
-                return Err(msg);
-            }
+        Ok(result) => {
+            let content = match cruise::metadata::resolve_plan_content(
+                &plan_path,
+                &result.output,
+                &result.stderr,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = manager.delete(&session_id);
+                    let msg = e.to_string();
+                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    return Err(msg);
+                }
+            };
             let _ = channel.send(PlanEvent::PlanGenerated {
                 content: content.clone(),
             });
@@ -553,8 +537,19 @@ pub async fn fix_session(
     vars.set_prev_input(Some(feedback));
 
     match run_plan_prompt_template(&config, &mut vars, FIX_PLAN_PROMPT_TEMPLATE, 5).await {
-        Ok(stdout) => {
-            let content = resolve_plan_content(&plan_path, stdout)?;
+        Ok(result) => {
+            let content = match cruise::metadata::resolve_plan_content(
+                &plan_path,
+                &result.output,
+                &result.stderr,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    return Err(msg);
+                }
+            };
             cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
             // Re-save to update updated_at timestamp
             manager.save(&session).map_err(|e| e.to_string())?;

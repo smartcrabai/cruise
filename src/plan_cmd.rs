@@ -109,7 +109,22 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         .await
     };
     drop(spinner);
-    let _output = result?.output;
+    let prompt_result = result?;
+    if let Err(e) = crate::metadata::resolve_plan_content(
+        &plan_path,
+        &prompt_result.output,
+        &prompt_result.stderr,
+    ) {
+        eprintln!(
+            "\n{} Plan generation failed. Session {} discarded.",
+            style("✗").red().bold(),
+            session_id
+        );
+        if let Err(del_err) = manager.delete(&session_id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+        return Err(e);
+    }
 
     // Approve-plan loop.
     run_approve_loop(
