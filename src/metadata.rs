@@ -32,6 +32,49 @@ pub(crate) fn derive_session_title(plan_markdown: &str) -> String {
     truncate_title(candidate, MAX_SESSION_TITLE_CHARS)
 }
 
+/// Resolve plan content from multiple sources with fallback.
+///
+/// Fallback order:
+/// 1. `plan_path` exists and is non-empty → return its content
+/// 2. `stdout` is non-empty → write to `plan_path`, return it
+/// 3. `stderr` is non-empty → write to `plan_path`, return it
+/// 4. All sources empty → return a descriptive error
+///
+/// # Errors
+///
+/// Returns an error if no source produced content, or if writing the fallback
+/// content to `plan_path` fails.
+pub fn resolve_plan_content(plan_path: &Path, stdout: &str, stderr: &str) -> Result<String> {
+    match std::fs::read_to_string(plan_path) {
+        Ok(content) if !content.trim().is_empty() => return Ok(content),
+        Ok(_) => {} // file exists but is empty — fall through to stdout/stderr
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // not yet written — fall through
+        Err(e) => {
+            return Err(crate::error::CruiseError::Other(format!(
+                "failed to read plan at {}: {e}",
+                plan_path.display()
+            )));
+        }
+    }
+
+    if !stdout.trim().is_empty() {
+        std::fs::write(plan_path, stdout)
+            .map_err(|e| crate::error::CruiseError::Other(format!("failed to write plan: {e}")))?;
+        return Ok(stdout.to_string());
+    }
+
+    if !stderr.trim().is_empty() {
+        std::fs::write(plan_path, stderr)
+            .map_err(|e| crate::error::CruiseError::Other(format!("failed to write plan: {e}")))?;
+        return Ok(stderr.to_string());
+    }
+
+    Err(crate::error::CruiseError::Other(format!(
+        "plan generation produced no output: {}, stdout, and stderr were all empty",
+        plan_path.display()
+    )))
+}
+
 pub(crate) fn read_plan_markdown(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::CruiseError::Other(format!(
@@ -99,6 +142,51 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    // ── resolve_plan_content ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_plan_content_prefers_file_over_stdout() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# File Plan").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = resolve_plan_content(&plan_path, "stdout plan", "stderr plan")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result, "# File Plan");
+    }
+
+    #[test]
+    fn test_resolve_plan_content_falls_back_to_stdout() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        let result = resolve_plan_content(&plan_path, "stdout plan", "stderr plan")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result, "stdout plan");
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).unwrap_or_else(|e| panic!("{e:?}")),
+            "stdout plan"
+        );
+    }
+
+    #[test]
+    fn test_resolve_plan_content_falls_back_to_stderr() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        let result =
+            resolve_plan_content(&plan_path, "", "stderr plan").unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result, "stderr plan");
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).unwrap_or_else(|e| panic!("{e:?}")),
+            "stderr plan"
+        );
+    }
+
+    #[test]
+    fn test_resolve_plan_content_all_empty_returns_err() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        assert!(resolve_plan_content(&plan_path, "", "").is_err());
+    }
 
     // ── read_plan_markdown ────────────────────────────────────────────────────
 
