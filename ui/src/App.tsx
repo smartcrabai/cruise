@@ -242,12 +242,6 @@ interface WorkflowRunnerProps {
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
 }
 
-interface StepEntry {
-  name: string;
-  index: number;
-  total: number;
-}
-
 interface PendingOption {
   requestId: string;
   choices: ChoiceDto[];
@@ -259,7 +253,7 @@ type ActiveTab = "info" | "plan" | "log";
 
 function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
   const [status, setStatus] = useState<RunStatus>("idle");
-  const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
+  const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
   const [savedLog, setSavedLog] = useState<string>("");
   const [logLoading, setLogLoading] = useState(false);
@@ -342,15 +336,8 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
 
     channel.onmessage = (event) => {
       if (event.event === "stepStarted") {
-        setCurrentStep({
-          name: event.data.step,
-          index: event.data.index,
-          total: event.data.total,
-        });
-        setLiveLog((prev) => [
-          ...prev,
-          `[${event.data.index + 1}/${event.data.total}] ${event.data.step}`,
-        ]);
+        setCurrentStep(event.data.step);
+        setLiveLog((prev) => [...prev, event.data.step]);
       } else if (event.event === "optionRequired") {
         setPendingOption({
           requestId: event.data.requestId,
@@ -625,8 +612,8 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         {/* Progress indicator */}
         {status === "running" && currentStep && (
           <div className="text-sm text-gray-400">
-            Step {currentStep.index + 1}/{currentStep.total}:{" "}
-            <span className="font-medium text-gray-200">{currentStep.name}</span>
+            Step:{" "}
+            <span className="font-medium text-gray-200">{currentStep}</span>
           </div>
         )}
       </div>
@@ -1070,28 +1057,13 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
   const [status, setStatus] = useState<RunAllStatus>("running");
   const [total, setTotal] = useState(0);
   const [currentSession, setCurrentSession] = useState<{ id: string; input: string } | null>(null);
-  const [currentStep, setCurrentStep] = useState<StepEntry | null>(null);
+  const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [results, setResults] = useState<RunAllSessionResult[]>([]);
   const [runError, setRunError] = useState<string | null>(null);
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
   const startedRef = useRef(false);
   const mountedRef = useRef(true);
   const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void startRunAll();
-    return () => {
-      mountedRef.current = false;
-      if (channelRef.current) {
-        channelRef.current.onmessage = () => {};
-        channelRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function startRunAll() {
     const channel = new Channel<WorkflowEvent>();
@@ -1113,7 +1085,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
       } else if (event.event === "runAllCompleted") {
         setStatus(event.data.cancelled > 0 ? "cancelled" : "completed");
       } else if (event.event === "stepStarted") {
-        setCurrentStep({ name: event.data.step, index: event.data.index, total: event.data.total });
+        setCurrentStep(event.data.step);
       } else if (event.event === "optionRequired") {
         setPendingOption({ requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan });
       }
@@ -1128,6 +1100,21 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
       }
     }
   }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void startRunAll();
+    return () => {
+      mountedRef.current = false;
+      if (channelRef.current) {
+        channelRef.current.onmessage = () => {};
+        channelRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleCancel() {
     try {
@@ -1198,7 +1185,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
           <p className="text-sm text-gray-200 truncate">{currentSession.input}</p>
           {currentStep && (
             <p className="text-xs text-gray-500 mt-1">
-              [{currentStep.index + 1}/{currentStep.total}] {currentStep.name}
+              {currentStep}
             </p>
           )}
         </div>
