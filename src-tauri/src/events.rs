@@ -43,8 +43,6 @@ pub enum ChoiceKind {
 pub enum WorkflowEvent {
     StepStarted {
         step: String,
-        index: usize,
-        total: usize,
     },
     StepCompleted {
         step: String,
@@ -100,20 +98,13 @@ mod tests {
     // --- StepStarted ---
 
     #[test]
-    fn test_step_started_serializes_with_event_tag_and_camel_case_fields() {
-        // Given: a StepStarted event
+    fn test_step_started_serializes_step_name_only() {
         let event = WorkflowEvent::StepStarted {
             step: "build".to_string(),
-            index: 0,
-            total: 5,
         };
-        // When: serialized to JSON
         let json = to_json(&event);
-        // Then: adjacently-tagged format with camelCase variant name
         assert_eq!(json["event"], "stepStarted");
         assert_eq!(json["data"]["step"], "build");
-        assert_eq!(json["data"]["index"], 0);
-        assert_eq!(json["data"]["total"], 5);
     }
 
     // --- StepCompleted ---

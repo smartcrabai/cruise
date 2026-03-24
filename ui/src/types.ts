@@ -33,7 +33,7 @@ export interface Session {
 
 export interface StepStartedEvent {
   event: "stepStarted";
-  data: { step: string; index: number; total: number };
+  data: { step: string };
 }
 
 export interface StepCompletedEvent {

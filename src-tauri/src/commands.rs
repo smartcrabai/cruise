@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -694,16 +693,10 @@ async fn execute_single_session(
                 cruise::error::CruiseError::Other(format!("failed to set working dir: {e}"))
             })?;
 
-            let total_steps = compiled.steps.len();
-            let step_counter = Cell::new(0usize);
             let on_step_start = |step: &str| -> cruise::error::Result<()> {
-                let index = step_counter.get();
-                step_counter.set(index + 1);
-                logger.write(&format!("[{}/{}] {}", index + 1, total_steps, step));
+                logger.write(step);
                 let _ = channel_for_step.send(WorkflowEvent::StepStarted {
                     step: step.to_string(),
-                    index,
-                    total: total_steps,
                 });
                 Ok(())
             };
