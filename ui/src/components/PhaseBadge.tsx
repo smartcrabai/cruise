@@ -9,10 +9,24 @@ const PHASE_COLORS: Record<SessionPhase, string> = {
   Suspended: "bg-orange-900/50 text-orange-300",
 };
 
-export function PhaseBadge({ phase }: { phase: SessionPhase }) {
+export function PhaseBadge({
+  phase,
+  planAvailable,
+}: {
+  phase: SessionPhase;
+  planAvailable?: boolean;
+}) {
   const cls = PHASE_COLORS[phase];
+  const showApproveReady = phase === "Awaiting Approval" && planAvailable === true;
   return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+      {showApproveReady && (
+        <span
+          role="img"
+          aria-label="plan ready for approval"
+          className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
+        />
+      )}
       {phase}
     </span>
   );

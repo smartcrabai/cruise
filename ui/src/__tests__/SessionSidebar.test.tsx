@@ -473,4 +473,22 @@ describe("SessionSidebar", () => {
       callsAfterMount,
     );
   });
+
+  // ─── PhaseBadge planAvailable indicator ────────────────────────────────────
+
+  it("shows blue dot indicator for 'Awaiting Approval' session when planAvailable is true", async () => {
+    // Given: a session that is awaiting approval with a plan already generated
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: the blue dot indicator is shown for that session
+    await waitFor(() => {
+      expect(screen.getByLabelText("plan ready for approval")).toBeTruthy();
+    });
+  });
+
 });

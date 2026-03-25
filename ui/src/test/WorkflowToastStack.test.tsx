@@ -130,7 +130,7 @@ describe("WorkflowToastStack", () => {
       render(<WorkflowToastStack toasts={[toast]} onDismiss={onDismiss} />);
 
       // When
-      const dismissBtn = screen.getByRole("button", { name: "x" });
+      const dismissBtn = screen.getByRole("button", { name: "Dismiss" });
       await userEvent.click(dismissBtn);
 
       // Then
@@ -148,7 +148,7 @@ describe("WorkflowToastStack", () => {
       render(<WorkflowToastStack toasts={toasts} onDismiss={onDismiss} />);
 
       // When: click x on the second toast
-      const dismissBtns = screen.getAllByRole("button", { name: "x" });
+      const dismissBtns = screen.getAllByRole("button", { name: "Dismiss" });
       await userEvent.click(dismissBtns[1]);
 
       // Then: called with id=20
