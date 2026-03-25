@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
@@ -45,16 +45,17 @@ interface OptionDialogProps {
 
 function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
   const [textValues, setTextValues] = useState<Record<string, string>>({});
+  const titleId = useId();
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="option-dialog-title"
+        aria-labelledby={titleId}
         className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-lg w-full space-y-4"
       >
-        <h2 id="option-dialog-title" className="text-lg font-semibold text-gray-100">Choose an option</h2>
+        <h2 id={titleId} className="text-lg font-semibold text-gray-100">Choose an option</h2>
         {plan && (
           <div className="bg-gray-800 border border-gray-700 rounded overflow-auto max-h-48">
             <MarkdownViewer content={plan} className="p-3" />
@@ -96,6 +97,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                     }}
                   />
                   <button
+                    type="button"
                     onClick={() =>
                       onRespond({
                         nextStep: choice.next ?? undefined,
@@ -169,6 +171,7 @@ export function WorkflowToastStack({
           </div>
           <button
             type="button"
+            aria-label="Dismiss"
             onClick={() => onDismiss(t.id)}
             className="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5"
           >
@@ -192,14 +195,16 @@ interface ConfirmDialogProps {
 }
 
 function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCancel }: ConfirmDialogProps) {
+  const titleId = useId();
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
         className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-sm w-full space-y-4"
       >
-        <h2 className="text-lg font-semibold text-gray-100">{title}</h2>
+        <h2 id={titleId} className="text-lg font-semibold text-gray-100">{title}</h2>
         <p className="text-sm text-gray-400">{message}</p>
         <div className="flex gap-2 justify-end">
           <button
@@ -243,6 +248,14 @@ type ExecStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
 function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
+  const uid = useId();
+  const tabInfoId = `${uid}-tab-info`;
+  const tabPlanId = `${uid}-tab-plan`;
+  const tabLogId = `${uid}-tab-log`;
+  const panelInfoId = `${uid}-panel-info`;
+  const panelPlanId = `${uid}-panel-plan`;
+  const panelLogId = `${uid}-panel-log`;
+
   const [status, setStatus] = useState<ExecStatus>("idle");
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
@@ -282,22 +295,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     } finally {
       setPlanLoading(false);
     }
-  }, [session.id]);
-
-  // Reset all state when the selected session changes
-  useEffect(() => {
-    setStatus("idle");
-    setCurrentStep(null);
-    setLiveLog([]);
-    setSavedLog("");
-    setPlanContent("");
-    setPendingOption(null);
-    setActiveTab("info");
-    setLogLoading(false);
-    setReplanFeedback("");
-    setReplanPhase("idle");
-    setShowDeleteConfirm(false);
-    setDeleting(false);
   }, [session.id]);
 
   // Scroll live log to bottom when new entries arrive
@@ -472,7 +469,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       {/* Header */}
       <div className="px-6 pt-6 pb-4 border-b border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold font-mono text-gray-100">{session.id}</h1>
+          <h2 className="text-lg font-semibold font-mono text-gray-100">{session.id}</h2>
           <PhaseBadge phase={session.phase} />
         </div>
 
@@ -570,6 +567,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         {replanPhase === "editing" && (
           <div className="space-y-2">
             <textarea
+              aria-label="Replan instructions"
               value={replanFeedback}
               onChange={(e) => setReplanFeedback(e.target.value)}
               rows={3}
@@ -616,9 +614,13 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-800">
+      <div role="tablist" className="flex border-b border-gray-800">
         <button
           type="button"
+          role="tab"
+          id={tabInfoId}
+          aria-selected={activeTab === "info"}
+          aria-controls={panelInfoId}
           onClick={() => handleTabChange("info")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "info"
@@ -630,6 +632,10 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         </button>
         <button
           type="button"
+          role="tab"
+          id={tabPlanId}
+          aria-selected={activeTab === "plan"}
+          aria-controls={panelPlanId}
           onClick={() => handleTabChange("plan")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "plan"
@@ -641,6 +647,10 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         </button>
         <button
           type="button"
+          role="tab"
+          id={tabLogId}
+          aria-selected={activeTab === "log"}
+          aria-controls={panelLogId}
           onClick={() => handleTabChange("log")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "log"
@@ -658,7 +668,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       {/* Tab content */}
       <div className="flex-1 overflow-auto">
         {activeTab === "info" && (
-          <div className="p-6 space-y-3 text-sm text-gray-400">
+          <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className="p-6 space-y-3 text-sm text-gray-400">
             <div>
               <span className="text-gray-600 text-xs uppercase tracking-wide">Config</span>
               <p className="font-mono text-gray-300 mt-0.5">{session.configSource}</p>
@@ -693,7 +703,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         )}
 
         {activeTab === "plan" && (
-          <div className="h-full overflow-auto">
+          <div id={panelPlanId} role="tabpanel" aria-labelledby={tabPlanId} className="h-full overflow-auto">
             {planLoading ? (
               <p className="p-4 text-xs text-gray-500">Loading plan…</p>
             ) : planContent ? (
@@ -705,7 +715,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         )}
 
         {activeTab === "log" && (
-          <div className="h-full flex flex-col">
+          <div id={panelLogId} role="tabpanel" aria-labelledby={tabLogId} className="h-full flex flex-col">
             {logLoading && status !== "running" ? (
               <p className="p-4 text-xs text-gray-500">Loading log…</p>
             ) : logContent ? (
@@ -877,7 +887,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 pt-6 pb-4 border-b border-gray-800">
-        <h1 className="text-lg font-semibold text-gray-100">New Session</h1>
+        <h2 className="text-lg font-semibold text-gray-100">New Session</h2>
       </div>
 
       <div className={`flex-1 overflow-hidden p-6 ${planPhase === "generated" || planPhase === "fixing" ? "flex flex-col gap-4" : "overflow-auto space-y-5"}`}>
@@ -970,8 +980,9 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
             {/* Fix feedback */}
             {planPhase === "fixing" && (
               <div className="space-y-1.5">
-                <label className="text-xs text-gray-500 uppercase tracking-wide">Fix Instructions</label>
+                <label htmlFor="fix-instructions-input" className="text-xs text-gray-500 uppercase tracking-wide">Fix Instructions</label>
                 <textarea
+                  id="fix-instructions-input"
                   value={feedback}
                   onChange={(e) => setFeedback(e.target.value)}
                   rows={3}
@@ -1308,6 +1319,7 @@ export default function App() {
           />
         ) : selectedSession ? (
           <WorkflowRunner
+            key={selectedSession.id}
             session={selectedSession}
             onSessionUpdated={(updated) => {
               setSelectedSession(updated);

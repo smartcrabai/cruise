@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listDirectory } from "../lib/commands";
 import type { DirEntry } from "../types";
@@ -45,8 +45,10 @@ export function DirectoryPicker({
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [highlighted, setHighlighted] = useState<number>(-1);
-  const [cachedDir, setCachedDir] = useState<string | null>(null);
-  const [cachedEntries, setCachedEntries] = useState<DirEntry[]>([]);
+  const cacheRef = useRef<{ dir: string | null; entries: DirEntry[] }>({ dir: null, entries: [] });
+
+  const uid = useId();
+  const listboxId = `${uid}-listbox`;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -57,8 +59,8 @@ export function DirectoryPicker({
       const { dir, prefix } = splitPath(inputValue);
       const queryPath = dir || inputValue;
 
-      if (queryPath === cachedDir) {
-        const filtered = filterByPrefix(cachedEntries, prefix);
+      if (queryPath === cacheRef.current.dir) {
+        const filtered = filterByPrefix(cacheRef.current.entries, prefix);
         setEntries(filtered);
         setIsOpen(filtered.length > 0);
         return;
@@ -66,8 +68,7 @@ export function DirectoryPicker({
 
       listDirectory(queryPath)
         .then((result) => {
-          setCachedDir(queryPath);
-          setCachedEntries(result);
+          cacheRef.current = { dir: queryPath, entries: result };
           const filtered = filterByPrefix(result, prefix);
           setEntries(filtered);
           setHighlighted(-1);
@@ -78,7 +79,7 @@ export function DirectoryPicker({
           setIsOpen(false);
         });
     },
-    [cachedDir, cachedEntries]
+    []
   );
 
   // Debounced fetch on value change
@@ -122,7 +123,7 @@ export function DirectoryPicker({
     onChange(newValue);
     setIsOpen(false);
     setHighlighted(-1);
-    setCachedDir(null);
+    cacheRef.current = { dir: null, entries: [] };
     inputRef.current?.focus();
   }
 
@@ -151,7 +152,7 @@ export function DirectoryPicker({
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected === "string") {
         onChange(selected.endsWith("/") ? selected : selected + "/");
-        setCachedDir(null);
+        cacheRef.current = { dir: null, entries: [] };
       }
     } catch {
       // user cancelled or dialog failed — ignore
@@ -165,10 +166,15 @@ export function DirectoryPicker({
           ref={inputRef}
           id={id}
           type="text"
+          role="combobox"
+          aria-expanded={isOpen}
+          aria-autocomplete="list"
+          aria-controls={listboxId}
+          aria-activedescendant={highlighted >= 0 ? `${listboxId}-opt-${highlighted}` : undefined}
           value={value}
           onChange={(e) => {
             onChange(e.target.value);
-            setCachedDir(null);
+            cacheRef.current = { dir: null, entries: [] };
           }}
           onFocus={() => {
             if (value.length > 0) fetchEntries(value);
@@ -189,10 +195,17 @@ export function DirectoryPicker({
       </div>
 
       {isOpen && entries.length > 0 && (
-        <ul className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-auto">
+        <ul
+          id={listboxId}
+          role="listbox"
+          className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-auto"
+        >
           {entries.map((entry, i) => (
             <li
               key={entry.path}
+              id={`${listboxId}-opt-${i}`}
+              role="option"
+              aria-selected={i === highlighted}
               onMouseDown={(e) => {
                 e.preventDefault();
                 selectEntry(entry);

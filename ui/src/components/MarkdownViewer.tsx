@@ -1,6 +1,8 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+const REMARK_PLUGINS = [remarkGfm];
+
 const BASE_CLASSES =
   "prose prose-invert prose-sm max-w-none " +
   "prose-headings:text-gray-100 prose-headings:font-semibold " +
@@ -23,7 +25,7 @@ interface MarkdownViewerProps {
 export function MarkdownViewer({ content, className }: MarkdownViewerProps) {
   return (
     <div className={className ? `${BASE_CLASSES} ${className}` : BASE_CLASSES}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{content}</ReactMarkdown>
     </div>
   );
 }

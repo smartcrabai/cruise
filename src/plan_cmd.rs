@@ -163,12 +163,24 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
     })
 }
 
-fn approve_with_title(
+async fn approve_with_title(
     session: &mut SessionState,
     manager: &SessionManager,
     plan_content: &str,
+    llm_api: Option<&crate::llm_api::LlmApiConfig>,
 ) -> Result<()> {
-    crate::metadata::refresh_session_title_from_plan(session, plan_content);
+    if let Some(api_config) = llm_api {
+        match crate::llm_api::generate_session_title(api_config, &session.input, plan_content).await
+        {
+            Ok(title) => session.title = Some(title),
+            Err(e) => {
+                eprintln!("warning: session title generation via API failed: {e}");
+                crate::metadata::refresh_session_title_from_plan(session, plan_content);
+            }
+        }
+    } else {
+        crate::metadata::refresh_session_title_from_plan(session, plan_content);
+    }
     session.approve();
     manager.save(session)
 }
@@ -185,6 +197,8 @@ async fn run_approve_loop(
     rate_limit_retries: usize,
     noninteractive: bool,
 ) -> Result<()> {
+    let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
+
     // Read the plan once up front; re-read only after Fix modifies it.
     let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
         Ok(content) => content,
@@ -205,7 +219,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            approve_with_title(session, manager, &plan_content)?;
+            approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("✓").green().bold(),
@@ -231,7 +245,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                approve_with_title(session, manager, &plan_content)?;
+                approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Session {} created.",
                     style("✓").green().bold(),
@@ -261,7 +275,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                approve_with_title(session, manager, &plan_content)?;
+                approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Executing session {}...",
                     style("→").cyan(),

@@ -35,6 +35,25 @@ pub struct WorkflowConfig {
     /// Steps to run after PR creation. Same format as `steps`.
     #[serde(default, rename = "after-pr")]
     pub after_pr: IndexMap<String, StepConfig>,
+
+    /// LLM API configuration for direct OpenAI-compatible API calls (optional).
+    #[serde(default)]
+    pub llm: Option<LlmApiConfigYaml>,
+}
+
+/// LLM API configuration loaded from the config file.
+///
+/// All fields are optional; missing values fall back to environment variables
+/// (`CRUISE_LLM_*`) or built-in defaults.  Prefer `CRUISE_LLM_API_KEY` over
+/// storing a key in the YAML file to avoid committing secrets.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct LlmApiConfigYaml {
+    /// API key for the OpenAI-compatible service.
+    pub api_key: Option<String>,
+    /// Base URL of the API endpoint. Default: `https://api.openai.com/v1`
+    pub endpoint: Option<String>,
+    /// Model name to use for generation. Default: `gpt-4o`
+    pub model: Option<String>,
 }
 
 /// A command value that can be either a single string or a list of strings.
@@ -202,6 +221,7 @@ impl WorkflowConfig {
             groups: HashMap::new(),
             steps,
             after_pr: IndexMap::new(),
+            llm: None,
         }
     }
 }
@@ -1671,5 +1691,99 @@ steps:
     fn test_schema_after_pr_is_object_with_step_config() {
         let schema = load_schema();
         assert_object_map_property(schema, "after-pr");
+    }
+
+    // ── LlmApiConfigYaml ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_llm_api_config_absent_when_no_llm_section() {
+        // Given: workflow YAML with no `llm:` section
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: llm field defaults to None
+        assert!(
+            config.llm.is_none(),
+            "expected config.llm to be None when llm: section is absent"
+        );
+    }
+
+    #[test]
+    fn test_llm_api_config_all_fields_deserialize() {
+        // Given: workflow YAML with all three llm fields set
+        let yaml = r#"
+command: [claude, -p]
+llm:
+  api_key: "sk-test"
+  endpoint: "https://my-api.com/v1"
+  model: "gpt-4o-mini"
+steps:
+  s1:
+    command: echo hi
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: all llm fields are present
+        let llm = config
+            .llm
+            .unwrap_or_else(|| panic!("expected Some llm config"));
+        assert_eq!(llm.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(llm.endpoint.as_deref(), Some("https://my-api.com/v1"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_llm_api_config_partial_fields_others_are_none() {
+        // Given: workflow YAML with only `model` in the llm section
+        let yaml = r"
+command: [claude, -p]
+llm:
+  model: custom-model
+steps:
+  s1:
+    command: echo hi
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: model is set; api_key and endpoint are None
+        let llm = config
+            .llm
+            .unwrap_or_else(|| panic!("expected Some llm config"));
+        assert!(llm.api_key.is_none(), "api_key should be None when not set");
+        assert!(
+            llm.endpoint.is_none(),
+            "endpoint should be None when not set"
+        );
+        assert_eq!(llm.model.as_deref(), Some("custom-model"));
+    }
+
+    #[test]
+    fn test_llm_api_config_empty_block_all_fields_none() {
+        // Given: workflow YAML with an empty `llm:` block
+        let yaml = r"
+command: [claude, -p]
+llm: {}
+steps:
+  s1:
+    command: echo hi
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: llm is Some but all inner fields are None
+        let llm = config
+            .llm
+            .unwrap_or_else(|| panic!("expected Some llm config"));
+        assert!(llm.api_key.is_none());
+        assert!(llm.endpoint.is_none());
+        assert!(llm.model.is_none());
     }
 }
