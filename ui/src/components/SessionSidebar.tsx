@@ -124,7 +124,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
     };
 
     const updateTimerId = setTimeout(() => {
-      void getUpdateReadiness().then(setReadiness).catch(() => {});
+      void getUpdateReadiness().then(setUpdateReadiness).catch(() => {});
       doCheck();
       updateIntervalId = setInterval(doCheck, 24 * 60 * 60 * 1000);
     }, 2000);
