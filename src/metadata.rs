@@ -132,6 +132,36 @@ fn strip_ordered_list_prefix(line: &str) -> Option<&str> {
     rest.strip_prefix(". ").map(str::trim)
 }
 
+/// Try to parse a frontmatter block from `content` that starts with `---`.
+///
+/// Returns `Some((title, body))` on success, `None` otherwise.
+pub(crate) fn try_parse_frontmatter(content: &str) -> Option<(String, String)> {
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_open = match content[3..].find('\n') {
+        Some(pos) => &content[3 + pos + 1..],
+        None => return None,
+    };
+    let close_pos = after_open.find("\n---")?;
+    let frontmatter = &after_open[..close_pos];
+    let after_close = &after_open[close_pos + "\n---".len()..];
+    let body = after_close.strip_prefix('\n').unwrap_or(after_close);
+
+    let title = frontmatter.lines().find_map(|line| {
+        line.strip_prefix("title:").map(|rest| {
+            let rest = rest.trim();
+            rest.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(rest)
+                .to_string()
+        })
+    })?;
+
+    Some((title, body.to_string()))
+}
+
 fn truncate_title(title: &str, max_chars: usize) -> String {
     let truncated: String = title.chars().take(max_chars).collect();
     truncated.trim().to_string()

@@ -5,6 +5,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod file_tracker;
+pub mod llm_api;
 pub mod metadata;
 pub mod option_handler;
 pub mod resolver;

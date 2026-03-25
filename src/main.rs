@@ -8,6 +8,7 @@ mod engine;
 mod error;
 mod file_tracker;
 mod list_cmd;
+mod llm_api;
 mod metadata;
 mod multiline_input;
 mod option_handler;
