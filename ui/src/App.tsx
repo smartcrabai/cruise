@@ -173,7 +173,6 @@ export function WorkflowToastStack({
             type="button"
             aria-label="Dismiss"
             onClick={() => onDismiss(t.id)}
-            aria-label="Dismiss"
             className="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5"
           >
             x
