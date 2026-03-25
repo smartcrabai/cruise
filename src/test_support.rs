@@ -5,6 +5,44 @@ use crate::session::{SessionPhase, SessionState};
 
 pub static GLOBAL_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// RAII guard that restores a single environment variable on drop.
+/// Caller must hold `GLOBAL_PROCESS_LOCK` to ensure no concurrent env access.
+pub struct EnvGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+impl EnvGuard {
+    #[must_use]
+    pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+    #[must_use]
+    pub fn remove(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: callers must hold GLOBAL_PROCESS_LOCK for the full lifetime of this guard.
+        // This is a trusted-caller contract, not a compile-time guarantee.
+        // By convention, declare the ProcessLock (from lock_process()) before EnvGuard in
+        // the same scope; Rust's reverse-drop order then ensures the lock outlives the guard.
+        unsafe {
+            if let Some(ref v) = self.prev {
+                std::env::set_var(self.key, v);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
 pub struct ProcessLock {
     _guard: std::sync::MutexGuard<'static, ()>,
 }

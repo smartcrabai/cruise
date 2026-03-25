@@ -507,7 +507,8 @@ async fn handle_worktree_pr(
     rate_limit_retries: usize,
     max_retries: usize,
 ) -> Result<()> {
-    let (pr_title, pr_body) = generate_pr_description(compiled, vars, rate_limit_retries).await;
+    let (pr_title, pr_body) =
+        generate_pr_description(compiled, vars, rate_limit_retries, &ctx.path).await;
 
     match attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body) {
         Ok(pr_attempt) => {
@@ -543,7 +544,28 @@ async fn generate_pr_description(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
+    working_dir: &Path,
 ) -> (String, String) {
+    // If LLM API is configured, try the API path first.
+    if let Some(ref api_config) = compiled.llm_api
+        && let Ok(plan_path_str) = vars.get_variable(PLAN_VAR)
+    {
+        let plan_path = PathBuf::from(&plan_path_str);
+        match crate::llm_api::generate_pr_metadata(
+            api_config,
+            &plan_path,
+            &compiled.pr_language,
+            working_dir,
+        )
+        .await
+        {
+            Ok((title, body)) => return (title, body),
+            Err(e) => {
+                eprintln!("warning: LLM API call failed, falling back to CLI: {e}");
+            }
+        }
+    }
+
     let pr_prompt = match build_pr_prompt(vars, compiled) {
         Err(e) => {
             eprintln!("warning: PR prompt resolution failed: {e}");
@@ -1036,43 +1058,6 @@ fn iter_line_offsets(s: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// Try to parse a frontmatter block from `content` that starts with `---`.
-///
-/// Returns `Some((title, body))` on success, `None` otherwise.
-fn try_parse_frontmatter(content: &str) -> Option<(String, String)> {
-    // Must start with ---
-    if !content.starts_with("---") {
-        return None;
-    }
-
-    // Skip the opening --- line
-    let after_open = match content[3..].find('\n') {
-        Some(pos) => &content[3 + pos + 1..],
-        None => return None,
-    };
-
-    // Find closing ---
-    let close_pos = after_open.find("\n---")?;
-
-    let frontmatter = &after_open[..close_pos];
-    let after_close = &after_open[close_pos + "\n---".len()..];
-    let body = after_close.strip_prefix('\n').unwrap_or(after_close);
-
-    // Find title in frontmatter
-    let title = frontmatter.lines().find_map(|line| {
-        line.strip_prefix("title:").map(|rest| {
-            let rest = rest.trim();
-            rest.strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                .unwrap_or(rest)
-                .to_string()
-        })
-    })?;
-
-    Some((title, body.to_string()))
-}
-
 /// Try to parse Markdown heading format from `content`:
 ///
 /// ```text
@@ -1120,13 +1105,13 @@ fn parse_pr_metadata(output: &str) -> (String, String) {
     let content = strip_code_block(output);
 
     // 1. Try parsing the whole content as frontmatter
-    if let Some(result) = try_parse_frontmatter(content) {
+    if let Some(result) = crate::metadata::try_parse_frontmatter(content) {
         return result;
     }
 
     // 2. Search for \n---\n in the text and try from that position
     if let Some(pos) = content.find("\n---\n")
-        && let Some(result) = try_parse_frontmatter(&content[pos + 1..])
+        && let Some(result) = crate::metadata::try_parse_frontmatter(&content[pos + 1..])
     {
         return result;
     }

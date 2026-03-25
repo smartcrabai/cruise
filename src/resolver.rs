@@ -214,37 +214,7 @@ mod tests {
         }
     }
 
-    /// RAII guard that restores a single environment variable on drop.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-        fn remove(key: &'static str) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
-            unsafe { std::env::remove_var(key) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: caller holds GLOBAL_PROCESS_LOCK, so no concurrent env access.
-            unsafe {
-                if let Some(ref v) = self.prev {
-                    std::env::set_var(self.key, v);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
+    use crate::test_support::EnvGuard;
 
     // ---- explicit path ----
 

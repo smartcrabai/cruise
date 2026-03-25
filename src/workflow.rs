@@ -51,6 +51,8 @@ pub struct CompiledWorkflow {
     pub step_to_invocation: HashMap<String, String>,
     /// Precomputed mapping from expanded step name → call-site name, for `after_pr`.
     pub after_pr_step_to_invocation: HashMap<String, String>,
+    /// Resolved LLM API configuration. `None` when no API key is available.
+    pub llm_api: Option<crate::llm_api::LlmApiConfig>,
 }
 
 impl CompiledWorkflow {
@@ -69,6 +71,7 @@ impl CompiledWorkflow {
             after_pr: IndexMap::new(),
             after_pr_invocations: HashMap::new(),
             after_pr_step_to_invocation: HashMap::new(),
+            llm_api: self.llm_api.clone(),
         }
     }
 }
@@ -89,6 +92,8 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
         expand_steps(&config.after_pr, &config.groups)?;
 
+    let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
+
     Ok(CompiledWorkflow {
         command: config.command,
         model: config.model,
@@ -101,6 +106,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         after_pr_invocations,
         step_to_invocation,
         after_pr_step_to_invocation,
+        llm_api,
     })
 }
 
@@ -575,6 +581,76 @@ steps:
             msg.contains("collides"),
             "expected 'collides' in error message, got: {msg}"
         );
+    }
+
+    // ── llm_api field ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_compile_llm_api_is_none_when_no_api_key_configured() {
+        // Given: workflow with no llm section and CRUISE_LLM_API_KEY not set
+        let _lock = crate::test_support::lock_process();
+        let _env = crate::test_support::EnvGuard::remove("CRUISE_LLM_API_KEY");
+        let yaml = r"
+command: [echo]
+steps:
+  s1:
+    command: echo hello
+";
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: llm_api is None (API mode disabled by default)
+        assert!(
+            c.llm_api.is_none(),
+            "llm_api should be None when no API key is configured"
+        );
+    }
+
+    #[test]
+    fn test_compile_llm_api_propagates_to_after_pr_compiled() {
+        // Given: compiled workflow with no llm config (llm_api = None)
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+after-pr:
+  notify:
+    command: echo done
+";
+        // When: compiled, then converted to after-pr compiled
+        let c = compiled(yaml);
+        let after_pr = c.to_after_pr_compiled();
+
+        // Then: llm_api is propagated (same value in both)
+        assert_eq!(
+            c.llm_api.is_none(),
+            after_pr.llm_api.is_none(),
+            "llm_api should propagate from compile to to_after_pr_compiled"
+        );
+    }
+
+    #[test]
+    fn test_compile_llm_api_is_some_when_api_key_env_var_set() {
+        // Given: CRUISE_LLM_API_KEY is set in the environment
+        let _lock = crate::test_support::lock_process();
+        let _env = crate::test_support::EnvGuard::remove("CRUISE_LLM_API_KEY");
+        let _key = crate::test_support::EnvGuard::set("CRUISE_LLM_API_KEY", "sk-integration-test");
+
+        let yaml = r"
+command: [echo]
+steps:
+  s1:
+    command: echo hello
+";
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: llm_api is Some with the env key
+        let api = c.llm_api.unwrap_or_else(|| {
+            panic!("expected llm_api to be Some when CRUISE_LLM_API_KEY is set")
+        });
+        assert_eq!(api.api_key, "sk-integration-test");
     }
 
     #[test]
