@@ -233,6 +233,8 @@ function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCa
 
 interface WorkflowRunnerProps {
   session: Session;
+  activeTab: ActiveTab;
+  onActiveTabChange: (tab: ActiveTab) => void;
   onSessionUpdated: (session: Session) => void;
   onSessionDeleted: () => void;
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
@@ -247,7 +249,7 @@ interface PendingOption {
 type ExecStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
+function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabPlanId = `${uid}-tab-plan`;
@@ -263,7 +265,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
   const [logLoading, setLogLoading] = useState(false);
   const [planContent, setPlanContent] = useState<string>("");
   const [planLoading, setPlanLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<ActiveTab>("info");
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
   const [replanFeedback, setReplanFeedback] = useState("");
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
@@ -297,6 +298,36 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     }
   }, [session.id]);
 
+  // Reset transient state when the selected session changes.
+  // activeTab is intentionally NOT reset here – it is owned by App and persists
+  // per session across navigation. Lazy-load is triggered by the effect below.
+  useEffect(() => {
+    setStatus("idle");
+    setCurrentStep(null);
+    setLiveLog([]);
+    setSavedLog("");
+    setPlanContent("");
+    setPendingOption(null);
+    setLogLoading(false);
+    setReplanFeedback("");
+    setReplanPhase("idle");
+    setShowDeleteConfirm(false);
+    setDeleting(false);
+  }, [session.id]);
+
+  useEffect(() => {
+    if (activeTab === "log" && status !== "running") {
+      void loadSavedLog();
+    }
+  }, [activeTab, loadSavedLog, status]);
+
+  useEffect(() => {
+    if (activeTab === "plan" && !planContent) {
+      void loadPlan();
+    }
+  }, [activeTab, loadPlan, planContent]);
+
+
   // Scroll live log to bottom when new entries arrive
   useEffect(() => {
     if (status === "running") {
@@ -327,7 +358,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     setStatus("running");
     setCurrentStep(null);
     setLiveLog([]);
-    setActiveTab("log");
+    onActiveTabChange("log");
 
     const channel = new Channel<WorkflowEvent>();
 
@@ -366,12 +397,11 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
       setLiveLog((prev) => [...prev, `Error: ${e}`]);
     }
 
-    // Re-fetch session state and saved log in parallel after run resolves
+    // Re-fetch session state after run resolves. The log tab effect reloads
+    // persisted log content once the run leaves the "running" state.
     refreshSession().catch((e) => {
       setLiveLog((prev) => [...prev, `Session refresh error: ${e}`]);
     });
-
-    void loadSavedLog();
   }
 
   async function handleCancel() {
@@ -432,7 +462,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
         setPlanContent(event.data.content);
         setReplanPhase("idle");
         setReplanFeedback("");
-        setActiveTab("plan");
+        onActiveTabChange("plan");
       } else if (event.event === "planFailed") {
         setLiveLog((prev) => [...prev, `Replan failed: ${event.data.error}`]);
         setReplanPhase("editing");
@@ -444,17 +474,6 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
     } catch (e) {
       setLiveLog((prev) => [...prev, `Replan error: ${e}`]);
       setReplanPhase("editing");
-    }
-  }
-
-  // Load saved log when switching to log tab (and not running)
-  function handleTabChange(tab: ActiveTab) {
-    setActiveTab(tab);
-    if (tab === "log" && status !== "running") {
-      void loadSavedLog();
-    }
-    if (tab === "plan" && !planContent) {
-      void loadPlan();
     }
   }
 
@@ -621,7 +640,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           id={tabInfoId}
           aria-selected={activeTab === "info"}
           aria-controls={panelInfoId}
-          onClick={() => handleTabChange("info")}
+          onClick={() => onActiveTabChange("info")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "info"
               ? "text-blue-400 border-b-2 border-blue-500"
@@ -636,7 +655,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           id={tabPlanId}
           aria-selected={activeTab === "plan"}
           aria-controls={panelPlanId}
-          onClick={() => handleTabChange("plan")}
+          onClick={() => onActiveTabChange("plan")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "plan"
               ? "text-blue-400 border-b-2 border-blue-500"
@@ -651,7 +670,7 @@ function WorkflowRunner({ session, onSessionUpdated, onSessionDeleted, onToast }
           id={tabLogId}
           aria-selected={activeTab === "log"}
           aria-controls={panelLogId}
-          onClick={() => handleTabChange("log")}
+          onClick={() => onActiveTabChange("log")}
           className={`px-4 py-2 text-xs font-medium transition-colors ${
             activeTab === "log"
               ? "text-blue-400 border-b-2 border-blue-500"
@@ -772,50 +791,76 @@ function EmptyState() {
 
 type PlanPhase = "input" | "generating" | "generated" | "fixing";
 
+interface NewSessionDraft {
+  input: string;
+  configPath: string;
+  baseDir: string;
+  planPhase: PlanPhase;
+  planContent: string;
+  sessionId: string | null;
+  error: string | null;
+  feedback: string;
+}
+
+function createInitialNewSessionDraft(): NewSessionDraft {
+  return {
+    input: "",
+    configPath: "",
+    baseDir: "",
+    planPhase: "input",
+    planContent: "",
+    sessionId: null,
+    error: null,
+    feedback: "",
+  };
+}
+
 interface NewSessionFormProps {
+  draft: NewSessionDraft;
+  onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
+  onReset: () => void;
   onCreated: (sessionId: string) => void;
 }
 
-function NewSessionForm({ onCreated }: NewSessionFormProps) {
+function NewSessionForm({ draft, onDraftChange, onReset, onCreated }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
-  const [configPath, setConfigPath] = useState<string>("");
-  const [baseDir, setBaseDir] = useState<string>("");
-  const [input, setInput] = useState<string>("");
-  const [planPhase, setPlanPhase] = useState<PlanPhase>("input");
-  const [planContent, setPlanContent] = useState<string>("");
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string>("");
+
+  const { input, configPath, baseDir, planPhase, planContent, sessionId, error, feedback } = draft;
+
+  function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
+    onDraftChange((prev) => ({ ...prev, [key]: value }));
+  }
 
   // Load configs and default base_dir on mount
   useEffect(() => {
     void listConfigs().then(setConfigs).catch(() => {});
-    // Use the most recently updated session's baseDir as default
+    // Use the most recently updated session's baseDir as default, but only when
+    // the draft baseDir is empty (don't overwrite a user-edited value).
     void listSessions()
       .then((sessions) => {
         if (sessions.length > 0) {
-          const latest = [...sessions].sort((a, b) =>
-            (b.updatedAt ?? b.createdAt).localeCompare(a.updatedAt ?? a.createdAt)
-          )[0];
-          setBaseDir(latest.baseDir);
+          const latest = sessions.reduce((max, s) =>
+            (s.updatedAt ?? s.createdAt) > (max.updatedAt ?? max.createdAt) ? s : max
+          );
+          onDraftChange((prev) => {
+            if (prev.baseDir !== "") return prev;
+            return { ...prev, baseDir: latest.baseDir };
+          });
         }
       })
       .catch(() => {});
-  }, []);
+  }, [onDraftChange]);
 
   async function handleGenerate() {
     if (!input.trim()) return;
-    setError(null);
-    setPlanPhase("generating");
+    onDraftChange((prev) => ({ ...prev, error: null, planPhase: "generating" }));
 
     const channel = new Channel<PlanEvent>();
     channel.onmessage = (event) => {
       if (event.event === "planGenerated") {
-        setPlanContent(event.data.content);
-        setPlanPhase("generated");
+        onDraftChange((prev) => ({ ...prev, planContent: event.data.content, planPhase: "generated" }));
       } else if (event.event === "planFailed") {
-        setError(event.data.error);
-        setPlanPhase("input");
+        onDraftChange((prev) => ({ ...prev, error: event.data.error, planPhase: "input" }));
       }
     };
 
@@ -828,60 +873,52 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
         },
         channel
       );
-      setSessionId(id);
+      set("sessionId", id);
     } catch (e) {
-      setError(String(e));
-      setPlanPhase("input");
+      onDraftChange((prev) => ({ ...prev, error: String(e), planPhase: "input" }));
     }
   }
 
   async function handleApprove() {
     if (!sessionId) return;
-    setError(null);
+    set("error", null);
     try {
       await approveSession(sessionId);
+      onReset();
       onCreated(sessionId);
     } catch (e) {
-      setError(String(e));
+      set("error", String(e));
     }
   }
 
   async function handleDiscard() {
     if (!sessionId) return;
-    setError(null);
+    set("error", null);
     try {
       await discardSession(sessionId);
-    } catch {
-      // ignore discard errors
+      onReset();
+    } catch (e) {
+      set("error", String(e));
     }
-    setSessionId(null);
-    setPlanContent("");
-    setPlanPhase("input");
-    setFeedback("");
   }
 
   async function handleFix() {
     if (!sessionId || !feedback.trim()) return;
-    setError(null);
-    setPlanPhase("generating");
+    onDraftChange((prev) => ({ ...prev, error: null, planPhase: "generating" }));
 
     const channel = new Channel<PlanEvent>();
     channel.onmessage = (event) => {
       if (event.event === "planGenerated") {
-        setPlanContent(event.data.content);
-        setPlanPhase("generated");
-        setFeedback("");
+        onDraftChange((prev) => ({ ...prev, planContent: event.data.content, planPhase: "generated", feedback: "" }));
       } else if (event.event === "planFailed") {
-        setError(event.data.error);
-        setPlanPhase("generated");
+        onDraftChange((prev) => ({ ...prev, error: event.data.error, planPhase: "generated" }));
       }
     };
 
     try {
       await fixSession({ sessionId, feedback: feedback.trim() }, channel);
     } catch (e) {
-      setError(String(e));
-      setPlanPhase("generated");
+      onDraftChange((prev) => ({ ...prev, error: String(e), planPhase: "generated" }));
     }
   }
 
@@ -908,7 +945,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
               <select
                 id="config-select"
                 value={configPath}
-                onChange={(e) => setConfigPath(e.target.value)}
+                onChange={(e) => set("configPath", e.target.value)}
                 disabled={planPhase === "generating"}
                 className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
               >
@@ -927,7 +964,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
               <DirectoryPicker
                 id="base-dir-input"
                 value={baseDir}
-                onChange={setBaseDir}
+                onChange={(v) => set("baseDir", v)}
                 disabled={planPhase === "generating"}
                 placeholder="e.g. /Users/you/projects/myapp"
               />
@@ -939,7 +976,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
               <textarea
                 id="task-input"
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => set("input", e.target.value)}
                 disabled={planPhase === "generating"}
                 rows={4}
                 placeholder="Describe what you want to implement…"
@@ -985,7 +1022,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
                 <textarea
                   id="fix-instructions-input"
                   value={feedback}
-                  onChange={(e) => setFeedback(e.target.value)}
+                  onChange={(e) => set("feedback", e.target.value)}
                   rows={3}
                   autoFocus
                   placeholder="Describe how to revise the plan…"
@@ -1005,7 +1042,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPlanPhase("generated")}
+                    onClick={() => set("planPhase", "generated")}
                     className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
                   >
                     Cancel
@@ -1026,7 +1063,7 @@ function NewSessionForm({ onCreated }: NewSessionFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPlanPhase("fixing")}
+                  onClick={() => set("planPhase", "fixing")}
                   className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
                 >
                   Fix
@@ -1074,7 +1111,12 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
   const mountedRef = useRef(true);
   const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
 
-  async function startRunAll() {
+  useEffect(() => {
+    mountedRef.current = true;
+    if (startedRef.current) return;
+    startedRef.current = true;
+
+
     const channel = new Channel<WorkflowEvent>();
     channelRef.current = channel;
 
@@ -1100,22 +1142,13 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
       }
     };
 
-    try {
-      await runAllSessions(channel);
-    } catch (e) {
+    void runAllSessions(channel).catch((e) => {
       if (mountedRef.current) {
         setStatus("error");
         setRunError(String(e));
       }
-    }
-  }
+    });
 
-  useEffect(() => {
-    mountedRef.current = true;
-    if (startedRef.current) return;
-    startedRef.current = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void startRunAll();
     return () => {
       mountedRef.current = false;
       if (channelRef.current) {
@@ -1249,6 +1282,8 @@ export default function App() {
   const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
   const [toasts, setToasts] = useState<WorkflowToast[]>([]);
+  const [newSessionDraft, setNewSessionDraft] = useState<NewSessionDraft>(createInitialNewSessionDraft);
+  const [sessionTabMap, setSessionTabMap] = useState<Record<string, ActiveTab>>({});
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -1303,30 +1338,39 @@ export default function App() {
           />
         ) : view === "new" ? (
           <NewSessionForm
+            draft={newSessionDraft}
+            onDraftChange={setNewSessionDraft}
+            onReset={() => setNewSessionDraft(createInitialNewSessionDraft())}
             onCreated={(id) => {
               sidebarRefreshRef.current?.();
-              // Navigate to the created session after a brief refresh
-              setTimeout(() => {
-                void getSession(id)
-                  .then((session) => {
-                    setSelectedSession(session);
-                    setView("session");
-                  })
-                  .catch(() => {
-                    setView("session");
-                  });
-              }, 300);
+              void getSession(id)
+                .then((session) => {
+                  setSelectedSession(session);
+                  setView("session");
+                })
+                .catch(() => {
+                  setView("session");
+                });
             }}
           />
         ) : selectedSession ? (
           <WorkflowRunner
             key={selectedSession.id}
             session={selectedSession}
+            activeTab={sessionTabMap[selectedSession.id] ?? "info"}
+            onActiveTabChange={(tab) =>
+              setSessionTabMap((prev) => ({ ...prev, [selectedSession.id]: tab }))
+            }
             onSessionUpdated={(updated) => {
               setSelectedSession(updated);
               sidebarRefreshRef.current?.();
             }}
             onSessionDeleted={() => {
+              setSessionTabMap((prev) => {
+                const next = { ...prev };
+                delete next[selectedSession.id];
+                return next;
+              });
               setSelectedSession(null);
               sidebarRefreshRef.current?.();
             }}
