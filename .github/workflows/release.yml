@@ -290,13 +290,18 @@ jobs:
           fi
           codesign --force --deep --sign - "$APP"
 
-          # Recreate DMG from the signed .app (old DMG contains unsigned .app)
+          # Recreate DMG from the signed .app; staging dir adds the /Applications symlink
+          # for the conventional drag-to-install window layout
           DMG=$(find target/release/bundle/dmg -maxdepth 1 -name "*.dmg" | head -1)
           if [ -z "$DMG" ]; then
             echo "Error: no DMG found in target/release/bundle/dmg" >&2
             exit 1
           fi
-          hdiutil create -volname "Cruise" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Cruise" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          rm -rf "$STAGE"
 
           # Recreate tar.gz from the signed .app (old tar.gz contains unsigned .app)
           TAR_GZ=$(find target/release/bundle/macos -maxdepth 1 -name "*.app.tar.gz" -not -name "*.sig" | head -1)

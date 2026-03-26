@@ -38,6 +38,14 @@ assert_signed() {
   if codesign -v "$path" 2>/dev/null; then pass "$label"; else fail "$label" "codesign -v failed for: $path"; fi
 }
 
+assert_symlink_target() {
+  local label="$1" path="$2" expected="$3"
+  if [[ ! -L "$path" ]]; then fail "$label" "not a symlink: $path"; return; fi
+  local target
+  target=$(readlink "$path")
+  if [[ "$target" == "$expected" ]]; then pass "$label"; else fail "$label" "expected '$expected', got: '$target'"; fi
+}
+
 # ---------------------------------------------------------------------------
 # Fixture: a minimal .app bundle (uses /bin/echo as the binary placeholder)
 # ---------------------------------------------------------------------------
@@ -116,27 +124,34 @@ test_adhoc_signing() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3: DMG recreation  (mirrors: release.yml:293-298)
+# Step 3: DMG recreation with Applications symlink  (mirrors: release.yml:293-302)
 # ---------------------------------------------------------------------------
-test_dmg_recreated() {
-  # Given: an old DMG exists (from Tauri's build, containing unsigned .app)
-  # When:  hdiutil create -ov is run with the signed .app at the same path
-  # Then:  a new DMG file exists at the same path (old one overwritten via -ov)
-  hdiutil create -volname "Cruise" -srcfolder "$APP" -ov -format UDZO "$DMG" \
+test_dmg_recreation() {
+  # Stages .app + /Applications symlink, creates DMG, cleans up, then verifies
+  # DMG contents — mirrors the full staging sequence in release.yml.
+  local stage
+  stage=$(mktemp -d)
+  cp -R "$APP" "$stage/"
+  ln -s /Applications "$stage/Applications"
+  assert_symlink_target \
+    "staging dir: Applications symlink target is /Applications (absolute)" \
+    "$stage/Applications" "/Applications"
+
+  hdiutil create -volname "Cruise" -srcfolder "$stage" -ov -format UDZO "$DMG" \
     > /dev/null 2>&1
   assert_file_exists "DMG recreation: new DMG created" "$DMG"
-}
 
-test_dmg_contains_signed_app() {
-  # Given: the new DMG was created from the signed .app
-  # When:  we mount the DMG and inspect the .app inside
-  # Then:  codesign -v succeeds for the embedded .app
+  rm -rf "$stage"
+
   local mount_point
   mount_point=$(mktemp -d)
   hdiutil attach -mountpoint "$mount_point" "$DMG" -quiet
   local inner_app
   inner_app=$(find "$mount_point" -name "*.app" -maxdepth 1 | head -1)
-  assert_signed "DMG recreation: embedded .app is signed" "$inner_app"
+  assert_signed "DMG contents: embedded .app is signed" "$inner_app"
+  assert_symlink_target \
+    "DMG contents: Applications symlink points to /Applications" \
+    "$mount_point/Applications" "/Applications"
   hdiutil detach "$mount_point" -quiet
   rm -rf "$mount_point"
 }
@@ -218,9 +233,8 @@ echo "--- Step 2: ad-hoc signing ---"
 test_adhoc_signing
 
 echo ""
-echo "--- Step 3: DMG recreation ---"
-test_dmg_recreated
-test_dmg_contains_signed_app
+echo "--- Step 3: DMG recreation with Applications symlink ---"
+test_dmg_recreation
 
 echo ""
 echo "--- Step 4: tar.gz recreation ---"
