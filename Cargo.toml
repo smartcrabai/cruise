@@ -12,7 +12,7 @@ members = [".", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.25"
+version = "0.1.26"
 
 # Config for 'dist'
 [workspace.metadata.dist]
