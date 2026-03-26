@@ -180,6 +180,11 @@ model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
 
+llm:                      # OpenAI-compatible API for session title generation (optional)
+  api_key: sk-...         # API key (or set CRUISE_LLM_API_KEY env var)
+  endpoint: https://api.openai.com/v1   # default endpoint
+  model: gpt-4o-mini      # model to use for title generation
+
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
   PROJECT: myproject
@@ -235,6 +240,29 @@ The `pr_language` field controls the language used for the auto-generated PR tit
 ```yaml
 pr_language: Japanese     # PR title/body will be generated in Japanese
 ```
+
+### Session Title Generation
+
+When an API key is configured, cruise calls an OpenAI-compatible API after plan approval to generate a concise session title (up to 80 characters). This title is shown in `cruise list` and the GUI sidebar instead of the raw task input.
+
+Configure via the `llm:` block in the config file, or with environment variables:
+
+| Setting | Config field | Environment variable | Default |
+|---------|-------------|----------------------|---------|
+| API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | *(required)* |
+| Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
+| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o-mini` |
+
+Environment variables take precedence over config file values.
+
+```yaml
+llm:
+  api_key: sk-...
+  endpoint: https://api.openai.com/v1
+  model: gpt-4o-mini
+```
+
+If no API key is configured, the title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 ### Environment Variables
 
