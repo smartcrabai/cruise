@@ -16,7 +16,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe("getSessionActions", () => {
-  // ─── Running phase ─────────────────────────────────────────────────────────
+  // --- Running phase ---------------------------------------------------------
 
   describe("Running phase", () => {
     it("shows Resume instead of workspace selection even when currentStep is null", () => {
@@ -66,7 +66,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Awaiting Approval phase ───────────────────────────────────────────────
+  // --- Awaiting Approval phase -----------------------------------------------
 
   describe("Awaiting Approval phase", () => {
     it("shows Approve when planAvailable is true", () => {
@@ -136,7 +136,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Planned phase ─────────────────────────────────────────────────────────
+  // --- Planned phase ---------------------------------------------------------
 
   describe("Planned phase", () => {
     it("shows workspace selection buttons for a fresh run", () => {
@@ -195,7 +195,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Suspended phase ───────────────────────────────────────────────────────
+  // --- Suspended phase -------------------------------------------------------
 
   describe("Suspended phase", () => {
     it("shows Resume with label 'Resume'", () => {
@@ -233,7 +233,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Failed phase ──────────────────────────────────────────────────────────
+  // --- Failed phase ----------------------------------------------------------
 
   describe("Failed phase", () => {
     it("shows Retry with label 'Retry'", () => {
@@ -271,7 +271,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Completed phase ───────────────────────────────────────────────────────
+  // --- Completed phase -------------------------------------------------------
 
   describe("Completed phase", () => {
     it("shows Reset to Planned", () => {
@@ -309,7 +309,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Delete button ─────────────────────────────────────────────────────────
+  // --- Delete button ---------------------------------------------------------
 
   describe("Delete button", () => {
     it("shows Delete for all non-Running phases", () => {
@@ -341,7 +341,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── status === "running" ───────────────────────────────────────────────────
+  // --- status === "running" ---------------------------------------------------
 
   describe("when status is 'running'", () => {
     it("hides all action buttons except Cancel", () => {
@@ -362,7 +362,7 @@ describe("getSessionActions", () => {
     });
   });
 
-  // ─── Cancel button ─────────────────────────────────────────────────────────
+  // --- Cancel button ---------------------------------------------------------
 
   describe("Cancel button", () => {
     it("shows Cancel only when status is 'running'", () => {

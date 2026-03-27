@@ -83,7 +83,7 @@ export function getSessionLog(sessionId: string): Promise<string> {
   return invoke<string>("get_session_log", { sessionId });
 }
 
-// ─── Filesystem ───────────────────────────────────────────────────────────────
+// --- Filesystem ---------------------------------------------------------------
 
 /** Return whether the current launch context supports automatic in-place update. */
 export function getUpdateReadiness(): Promise<UpdateReadiness> {
@@ -95,7 +95,7 @@ export function listDirectory(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_directory", { path });
 }
 
-// ─── Session creation ─────────────────────────────────────────────────────────
+// --- Session creation ---------------------------------------------------------
 
 /** List workflow config files in ~/.cruise/. */
 export function listConfigs(): Promise<ConfigEntry[]> {
@@ -119,14 +119,9 @@ export function createSession(
   });
 }
 
-/** Approve a session (Awaiting Approval → Planned). */
+/** Approve a session (Awaiting Approval -> Planned). */
 export function approveSession(sessionId: string): Promise<void> {
   return invoke<void>("approve_session", { sessionId });
-}
-
-/** Delete a session that is still awaiting approval. */
-export function discardSession(sessionId: string): Promise<void> {
-  return invoke<void>("discard_session", { sessionId });
 }
 
 /** Delete a session and clean up its worktree. Cannot delete Running sessions. */

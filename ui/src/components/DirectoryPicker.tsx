@@ -14,9 +14,9 @@ interface DirectoryPickerProps {
 /** Split a typed path into the parent dir and the incomplete last segment.
  *
  * Examples:
- *   "/Users/takumi/ap"  → { dir: "/Users/takumi/", prefix: "ap" }
- *   "/Users/takumi/"    → { dir: "/Users/takumi/", prefix: "" }
- *   "~/pr"              → { dir: "~/", prefix: "pr" }
+ *   "/Users/takumi/ap"  -> { dir: "/Users/takumi/", prefix: "ap" }
+ *   "/Users/takumi/"    -> { dir: "/Users/takumi/", prefix: "" }
+ *   "~/pr"              -> { dir: "~/", prefix: "pr" }
  */
 function splitPath(value: string): { dir: string; prefix: string } {
   const lastSlash = value.lastIndexOf("/");
@@ -155,7 +155,7 @@ export function DirectoryPicker({
         cacheRef.current = { dir: null, entries: [] };
       }
     } catch {
-      // user cancelled or dialog failed — ignore
+      // user cancelled or dialog failed - ignore
     }
   }
 

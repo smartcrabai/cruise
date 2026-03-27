@@ -16,7 +16,7 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
-// ─── DTOs ─────────────────────────────────────────────────────────────────────
+// --- DTOs ---------------------------------------------------------------------
 
 /// Serializable representation of a session, sent to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -109,7 +109,7 @@ pub struct CleanupResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateReadinessDto {
     pub can_auto_update: bool,
-    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` — set when `can_auto_update` is false.
+    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` - set when `can_auto_update` is false.
     pub reason: Option<String>,
     /// The resolved `.app` bundle path, for display in the UI.
     pub bundle_path: Option<String>,
@@ -127,7 +127,7 @@ pub struct OptionResultDto {
     pub text_input: Option<String>,
 }
 
-// ─── StateSavingEmitter ────────────────────────────────────────────────────────
+// --- StateSavingEmitter --------------------------------------------------------
 
 /// Wraps the Tauri IPC channel and intercepts `OptionRequired` events to update
 /// the session's `awaiting_input` field in `state.json`.
@@ -156,7 +156,7 @@ impl crate::gui_option_handler::EventEmitter for StateSavingEmitter {
     }
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+// --- Helpers -------------------------------------------------------------------
 
 fn new_session_manager() -> std::result::Result<SessionManager, String> {
     let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
@@ -184,7 +184,7 @@ fn prepare_run_session(
     Ok(execution_workspace.path().to_path_buf())
 }
 
-// ─── Filesystem commands ───────────────────────────────────────────────────────
+// --- Filesystem commands -------------------------------------------------------
 
 /// List subdirectories of `path`, returning up to 50 entries sorted alphabetically.
 ///
@@ -236,7 +236,7 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
     Ok(entries)
 }
 
-// ─── Read commands ─────────────────────────────────────────────────────────────
+// --- Read commands -------------------------------------------------------------
 
 /// List all sessions, sorted oldest-first.
 #[tauri::command]
@@ -273,7 +273,7 @@ pub fn get_session_plan(session_id: String) -> std::result::Result<String, Strin
         .map_err(|e| format!("failed to read plan {}: {}", plan_path.display(), e))
 }
 
-// ─── Write commands ────────────────────────────────────────────────────────────
+// --- Write commands ------------------------------------------------------------
 
 /// Cancel the currently running workflow session.
 #[tauri::command]
@@ -342,7 +342,7 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
     }
 }
 
-// ─── Plan generation helpers ───────────────────────────────────────────────────
+// --- Plan generation helpers ---------------------------------------------------
 
 /// Plan generation prompt templates, embedded at compile-time.
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
@@ -386,7 +386,7 @@ async fn run_plan_prompt_template(
     .map_err(|e| e.to_string())
 }
 
-// ─── Session creation commands ─────────────────────────────────────────────────
+// --- Session creation commands -------------------------------------------------
 
 /// A discovered workflow config file, returned to the frontend.
 #[derive(Debug, Serialize)]
@@ -471,6 +471,11 @@ pub async fn create_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
+    // Emit early so the frontend can release the New Session form immediately
+    let _ = channel.send(PlanEvent::SessionCreated {
+        session_id: session_id.clone(),
+    });
+
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     match run_plan_prompt_template(
@@ -492,18 +497,25 @@ pub async fn create_session(
                 Err(e) => {
                     let _ = manager.delete(&session_id);
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    let _ = channel.send(PlanEvent::PlanFailed {
+                        session_id,
+                        error: msg.clone(),
+                    });
                     return Err(msg);
                 }
             };
             let _ = channel.send(PlanEvent::PlanGenerated {
+                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(session_id)
         }
         Err(msg) => {
             let _ = manager.delete(&session_id);
-            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+            let _ = channel.send(PlanEvent::PlanFailed {
+                session_id,
+                error: msg.clone(),
+            });
             Err(msg)
         }
     }
@@ -532,17 +544,9 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     Ok(SessionDto::from_state(session, &manager))
 }
 
-/// Delete a session that is still in "Awaiting Approval" phase (discard).
-#[tauri::command]
-pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
-    let manager = new_session_manager()?;
-    manager.delete(&session_id).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Delete a session and clean up its git worktree if one exists.
 ///
-/// Running sessions cannot be deleted — cancel them first.
+/// Running sessions cannot be deleted - cancel them first.
 #[tauri::command]
 pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
@@ -603,7 +607,10 @@ pub async fn fix_session(
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    let _ = channel.send(PlanEvent::PlanFailed {
+                        session_id: session_id.clone(),
+                        error: msg.clone(),
+                    });
                     return Err(msg);
                 }
             };
@@ -612,18 +619,22 @@ pub async fn fix_session(
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
+                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(content)
         }
         Err(msg) => {
-            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+            let _ = channel.send(PlanEvent::PlanFailed {
+                session_id: session_id.clone(),
+                error: msg.clone(),
+            });
             Err(msg)
         }
     }
 }
 
-// ─── SessionLogger ─────────────────────────────────────────────────────────────
+// --- SessionLogger -------------------------------------------------------------
 
 /// Appends timestamped log lines to `<sessions_dir>/<session_id>/run.log`.
 struct SessionLogger {
@@ -647,7 +658,7 @@ impl SessionLogger {
     }
 }
 
-// ─── run_session / run_all_sessions ────────────────────────────────────────────
+// --- run_session / run_all_sessions --------------------------------------------
 
 /// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
 ///
@@ -656,7 +667,7 @@ impl SessionLogger {
 /// [`SessionPhase`] so callers can decide how to proceed (e.g. break a batch loop
 /// on `Suspended`).
 ///
-/// Infrastructure errors (mutex poisoned, session not found, …) are returned as
+/// Infrastructure errors (mutex poisoned, session not found, etc.) are returned as
 /// `Err(String)`.  Workflow-level errors (step failure) are returned as
 /// `Ok(SessionPhase::Failed(msg))` so that `run_all_sessions` can log them and
 /// continue to the next session instead of aborting the batch.
@@ -771,13 +782,13 @@ async fn execute_single_session(
 
             match &result {
                 Ok(exec) => logger.write(&format!(
-                    "✓ completed — run: {}, skipped: {}, failed: {}",
+                    "[OK] completed - run: {}, skipped: {}, failed: {}",
                     exec.run, exec.skipped, exec.failed
                 )),
                 Err(cruise::error::CruiseError::Interrupted) => {
-                    logger.write("⏸ cancelled");
+                    logger.write("cancelled");
                 }
-                Err(e) => logger.write(&format!("✗ failed: {}", e.detailed_message())),
+                Err(e) => logger.write(&format!("[FAIL] failed: {}", e.detailed_message())),
             }
 
             if let Some(dir) = original_dir {
@@ -1078,7 +1089,7 @@ mod tests {
         }
     }
 
-    // ─── cancel_session ──────────────────────────────────────────────────────
+    // --- cancel_session ------------------------------------------------------
 
     fn empty_option_responder() -> Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> {
         Arc::new(Mutex::new(None))
@@ -1140,7 +1151,7 @@ mod tests {
         );
     }
 
-    // ─── respond_to_option ───────────────────────────────────────────────────
+    // --- respond_to_option ---------------------------------------------------
 
     #[test]
     fn test_respond_to_option_with_no_pending_request_returns_error() {
@@ -1381,17 +1392,17 @@ mod tests {
         assert_eq!(saved.phase, SessionPhase::Planned);
     }
 
-    // ─── Integration: full option-selection round-trip ────────────────────────
+    // --- Integration: full option-selection round-trip ------------------------
     //
     // Data flow:
     //   GuiOptionHandler::select_option (engine thread)
-    //     → stores sender in shared pending_response slot
-    //     → emits WorkflowEvent::OptionRequired
+    //     -> stores sender in shared pending_response slot
+    //     -> emits WorkflowEvent::OptionRequired
     //   do_respond_to_option (IPC command handler / test thread)
-    //     → extracts sender from slot
-    //     → sends OptionResult
+    //     -> extracts sender from slot
+    //     -> sends OptionResult
     //   GuiOptionHandler::select_option (engine thread)
-    //     → blocking_recv returns OptionResult
+    //     -> blocking_recv returns OptionResult
     //
     // Modules covered: events, gui_option_handler, state, commands
     //
@@ -1473,7 +1484,7 @@ mod tests {
         }
     }
 
-    // ─── check_update_readiness_for_path ─────────────────────────────────────
+    // --- check_update_readiness_for_path -------------------------------------
 
     #[test]
     fn test_readiness_normal_applications_path_allows_update() {
