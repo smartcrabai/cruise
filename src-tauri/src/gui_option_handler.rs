@@ -87,7 +87,7 @@ impl<E: EventEmitter> OptionHandler for GuiOptionHandler<E> {
                 .map_err(|e| cruise::error::CruiseError::Other(format!("lock poisoned: {e}")))?;
             if guard.is_some() {
                 return Err(cruise::error::CruiseError::Other(
-                    "pending_response slot already occupied — previous request was not consumed"
+                    "pending_response slot already occupied - previous request was not consumed"
                         .to_string(),
                 ));
             }
