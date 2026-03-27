@@ -22,6 +22,7 @@ pub async fn run_commands<S: std::hash::BuildHasher>(
     cmds: &[String],
     max_retries: usize,
     env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
 ) -> Result<CommandResult> {
     let mut last_result = CommandResult {
         success: true,
@@ -29,7 +30,7 @@ pub async fn run_commands<S: std::hash::BuildHasher>(
     };
 
     for cmd in cmds {
-        last_result = run_command(cmd, max_retries, env).await?;
+        last_result = run_command(cmd, max_retries, env, cwd).await?;
         if !last_result.success {
             return Ok(last_result);
         }
@@ -47,11 +48,12 @@ pub async fn run_command<S: std::hash::BuildHasher>(
     cmd: &str,
     max_retries: usize,
     env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
 ) -> Result<CommandResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_command(cmd, env).await?;
+        let result = execute_command(cmd, env, cwd).await?;
 
         if result.success {
             return Ok(result);
@@ -78,14 +80,20 @@ pub async fn run_command<S: std::hash::BuildHasher>(
 async fn execute_command<S: std::hash::BuildHasher>(
     cmd: &str,
     env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
 ) -> Result<CommandResult> {
     let (shell, flag) = crate::platform::shell_command();
-    let output = Command::new(shell)
+    let mut cmd_builder = Command::new(shell);
+    cmd_builder
         .arg(flag)
         .arg(cmd)
         .envs(env)
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd_builder.current_dir(dir);
+    }
+    let output = cmd_builder
         .spawn()
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?
         .wait_with_output()
@@ -165,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_successful_command() {
-        let result = run_command("echo hello", 0, &HashMap::new())
+        let result = run_command("echo hello", 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -173,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_failing_command() {
-        let result = run_command("exit 1", 0, &HashMap::new())
+        let result = run_command("exit 1", 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -182,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_commands_sequential() {
         let cmds = vec!["echo a".to_string(), "echo b".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new())
+        let result = run_commands(&cmds, 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -192,7 +200,7 @@ mod tests {
     async fn test_run_commands_stops_on_failure() {
         // Second command would succeed but shouldn't run because first fails.
         let cmds = vec!["exit 1".to_string(), "echo ok".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new())
+        let result = run_commands(&cmds, 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -200,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_commands_empty() {
-        let result = run_commands(&[], 0, &HashMap::new())
+        let result = run_commands(&[], 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -209,7 +217,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_captures_stderr() {
-        let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new())
+        let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -222,7 +230,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("CRUISE_TEST_VAR".to_string(), "hello_env".to_string());
         // The command echoes the env var; success means env was passed correctly.
-        let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env)
+        let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -236,7 +244,7 @@ mod tests {
             "echo step1".to_string(),
             "echo 'err_msg' >&2; exit 1".to_string(),
         ];
-        let result = run_commands(&cmds, 0, &HashMap::new())
+        let result = run_commands(&cmds, 0, &HashMap::new(), None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -249,9 +257,14 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("VAR_A".to_string(), "alpha".to_string());
         env.insert("VAR_B".to_string(), "beta".to_string());
-        let result = run_command(r#"test "$VAR_A" = alpha && test "$VAR_B" = beta"#, 0, &env)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_command(
+            r#"test "$VAR_A" = alpha && test "$VAR_B" = beta"#,
+            0,
+            &env,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
     }
 
@@ -261,7 +274,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("GREETING".to_string(), "hello".to_string());
         // stdout is inherited (not captured), but success means the command ran.
-        let result = run_command("echo $GREETING", 0, &env)
+        let result = run_command("echo $GREETING", 0, &env, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);

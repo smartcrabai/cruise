@@ -381,6 +381,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         cancel_token: Some(&cancel_token),
         option_handler: &CliOptionHandler,
         config_reloader: config_reloader.as_deref(),
+        working_dir: Some(execution_workspace.path()),
     };
     let exec_result = tokio::select! {
         result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,
@@ -521,8 +522,15 @@ async fn handle_worktree_pr(
                     }
                     vars.set_named_value(PR_URL_VAR, url.clone());
                     session.pr_url = Some(url);
-                    run_after_pr_steps(compiled, vars, tracker, max_retries, rate_limit_retries)
-                        .await;
+                    run_after_pr_steps(
+                        compiled,
+                        vars,
+                        tracker,
+                        max_retries,
+                        rate_limit_retries,
+                        ctx.path.as_path(),
+                    )
+                    .await;
                     Ok(())
                 }
                 PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
@@ -626,6 +634,7 @@ async fn run_after_pr_steps(
     tracker: &mut FileTracker,
     max_retries: usize,
     rate_limit_retries: usize,
+    working_dir: &std::path::Path,
 ) {
     let Some(first_step) = compiled.after_pr.keys().next() else {
         return;
@@ -639,6 +648,7 @@ async fn run_after_pr_steps(
         cancel_token: None,
         option_handler: &CliOptionHandler,
         config_reloader: None,
+        working_dir: Some(working_dir),
     };
     match execute_steps(&ctx, vars, tracker, first_step).await {
         Ok(_) | Err(CruiseError::StepPaused) => {}

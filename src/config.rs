@@ -112,7 +112,7 @@ pub struct StepConfig {
     /// Group this step belongs to.
     pub group: Option<String>,
 
-    /// If true, the step fails immediately when no tracked file changes are detected.
+    /// If true, the step fails immediately when no workspace file changes are detected.
     #[serde(default, rename = "fail-if-no-file-changes")]
     pub fail_if_no_file_changes: bool,
 }
@@ -131,7 +131,7 @@ pub struct OptionItem {
     pub next: Option<String>,
 }
 
-/// Action to take when no tracked file changes are detected after a step.
+/// Action to take when no workspace file changes are detected after a step.
 ///
 /// Exactly one of `fail` or `retry` must be true.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -152,7 +152,7 @@ pub struct IfCondition {
     #[serde(rename = "file-changed")]
     pub file_changed: Option<String>,
 
-    /// Action to take when no tracked file changes are detected after this step.
+    /// Action to take when no workspace file changes are detected after this step.
     #[serde(rename = "no-file-changes")]
     pub no_file_changes: Option<NoFileChangesCondition>,
 }

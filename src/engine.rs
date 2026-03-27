@@ -36,6 +36,10 @@ pub struct ExecutionContext<'a> {
     pub cancel_token: Option<&'a CancellationToken>,
     pub option_handler: &'a dyn OptionHandler,
     pub config_reloader: Option<&'a dyn Fn() -> Result<Option<CompiledWorkflow>>>,
+    /// Working directory for child processes spawned by prompt and command steps.
+    /// When set, both the LLM subprocess and shell commands run with this as their `cwd`,
+    /// ensuring that relative-path file writes land inside the `FileTracker` root.
+    pub working_dir: Option<&'a std::path::Path>,
 }
 
 /// Mutable counters threaded through the execution loop.
@@ -232,6 +236,7 @@ pub async fn execute_steps(
             cancel_token: ctx.cancel_token,
             option_handler: ctx.option_handler,
             config_reloader: None,
+            working_dir: ctx.working_dir,
         };
         let outcome =
             step_loop_iteration(&active_ctx, vars, tracker, &current_step, &mut state).await?;
@@ -451,6 +456,7 @@ async fn execute_step_kind(
                 ctx.rate_limit_retries,
                 merged_env,
                 ctx.cancel_token,
+                ctx.working_dir,
             )
             .await?;
             let elapsed = step_start.elapsed();
@@ -461,7 +467,14 @@ async fn execute_step_kind(
             Ok(None)
         }
         StepKind::Command(step) => {
-            let success = run_command_step(vars, step, ctx.rate_limit_retries, merged_env).await?;
+            let success = run_command_step(
+                vars,
+                step,
+                ctx.rate_limit_retries,
+                merged_env,
+                ctx.working_dir,
+            )
+            .await?;
             let elapsed = step_start.elapsed();
             if !success {
                 *failed += 1;
@@ -583,6 +596,7 @@ pub(crate) async fn run_prompt_step(
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
     cancel_token: Option<&CancellationToken>,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<String> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -623,7 +637,7 @@ pub(crate) async fn run_prompt_step(
             env,
             Some(&on_retry),
             cancel_token,
-            None,
+            working_dir,
         )
         .await
     };
@@ -650,6 +664,7 @@ pub(crate) async fn run_command_step(
     step: &CommandStep,
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<bool> {
     let cmds: Vec<String> = step
         .command
@@ -661,7 +676,7 @@ pub(crate) async fn run_command_step(
         eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
     }
 
-    let result = run_commands(&cmds, rate_limit_retries, env).await?;
+    let result = run_commands(&cmds, rate_limit_retries, env, working_dir).await?;
 
     let success = result.success;
     vars.set_prev_success(Some(success));
@@ -858,7 +873,7 @@ mod tests {
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let mut vars = VariableStore::new(input.to_string());
-        let mut tracker = FileTracker::with_root(tracker_root);
+        let mut tracker = FileTracker::with_root(tracker_root.clone());
         let first_step = compiled
             .steps
             .keys()
@@ -874,6 +889,7 @@ mod tests {
             cancel_token,
             option_handler,
             config_reloader,
+            working_dir: Some(tracker_root.as_path()),
         };
         execute_steps(&ctx, &mut vars, &mut tracker, &step).await
     }
@@ -1464,6 +1480,7 @@ steps:
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
+            working_dir: None,
         };
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
 
@@ -1891,6 +1908,65 @@ steps:
         );
     }
 
+    // ── regression: prompt/command step relative-path and nfc ────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_if_no_file_changes_retry_not_triggered_for_prompt_step_relative_path() {
+        // Given: a prompt step whose LLM subprocess creates a file via a relative path.
+        // The subprocess must run with cwd = tracker_root so the file lands inside the
+        // tracked directory; without working_dir the file lands in the test-runner cwd
+        // and no-file-changes.retry fires.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // sh -c "touch output.txt && cat":
+        //   - creates output.txt in the subprocess cwd (= tracker_root after fix)
+        //   - echoes the prompt text via cat so run_prompt receives a non-empty output
+        let yaml = r#"
+command: [sh, -c, "touch output.txt && cat"]
+steps:
+  implement:
+    prompt: "work"
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        // When: executed with tracker_root = dir
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow completes without retry (file created in tracker_root → nfc does not fire)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let r = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(r.run, 2, "implement + done = 2 executions (no nfc retry)");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_if_no_file_changes_retry_not_triggered_for_command_step_relative_path() {
+        // Given: a command step that creates a file via a relative path.
+        // The subprocess must run with cwd = tracker_root so the file lands inside the
+        // tracked directory; without working_dir the file lands in the test-runner cwd
+        // and no-file-changes.retry fires.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  implement:
+    command: "touch output.txt"
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        // When: executed with tracker_root = dir
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: workflow completes without retry (file created in tracker_root → nfc does not fire)
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let r = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(r.run, 2, "implement + done = 2 executions (no nfc retry)");
+    }
+
     // ── format_duration ───────────────────────────────────────────────────────
 
     #[test]
@@ -2181,6 +2257,7 @@ steps:
             cancel_token: Some(&token),
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
+            working_dir: None,
         };
         // When: execute_steps runs; step2's on_step_start triggers cancellation
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
