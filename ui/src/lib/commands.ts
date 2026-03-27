@@ -124,6 +124,15 @@ export function approveSession(sessionId: string): Promise<void> {
   return invoke<void>("approve_session", { sessionId });
 }
 
+/**
+ * Ask a question about a session's plan without modifying it.
+ *
+ * @returns The LLM answer text (transient; not persisted to plan.md).
+ */
+export function askSession(sessionId: string, question: string): Promise<string> {
+  return invoke<string>("ask_session", { sessionId, question });
+}
+
 /** Delete a session that is still awaiting approval. */
 export function discardSession(sessionId: string): Promise<void> {
   return invoke<void>("discard_session", { sessionId });

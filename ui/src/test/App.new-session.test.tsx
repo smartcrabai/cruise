@@ -44,6 +44,7 @@ vi.mock("../lib/commands", () => ({
   respondToOption: vi.fn(),
   runAllSessions: vi.fn(),
   fixSession: vi.fn(),
+  askSession: vi.fn(),
 }));
 
 vi.mock("../lib/updater", () => ({
@@ -372,5 +373,187 @@ describe("App: WorkflowRunner tab selection persistence", () => {
     await waitFor(() => {
       expect(commands.getSessionPlan).toHaveBeenCalledWith("sess-a");
     });
+  });
+});
+
+// ─── NewSessionForm: Ask flow ──────────────────────────────────────────────────
+
+describe("App: NewSessionForm Ask flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  async function generatePlan(planContent = "# Plan content"): Promise<void> {
+    mockCreateSessionWithPlan(planContent);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement…"),
+      "my task"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    await waitFor(() => screen.getByRole("button", { name: "Approve" }));
+  }
+
+  it("shows Ask button in the generated-plan action row", async () => {
+    // Given: a plan has been generated
+    render(<App />);
+    await generatePlan();
+
+    // Then: Ask button is present alongside Approve, Fix, and Discard
+    expect(screen.getByRole("button", { name: "Ask" })).toBeInTheDocument();
+  });
+
+  it("shows question input when Ask is clicked", async () => {
+    // Given: plan generated and action row is visible
+    render(<App />);
+    await generatePlan();
+
+    // When: click Ask
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    // Then: question textarea appears
+    expect(
+      screen.getByPlaceholderText("Ask a question about the plan…")
+    ).toBeInTheDocument();
+  });
+
+  it("calls askSession with the session ID and question", async () => {
+    // Given: plan generated and askSession mock is ready
+    vi.mocked(commands.askSession).mockResolvedValue("Here is the answer.");
+    render(<App />);
+    await generatePlan();
+
+    // When: click Ask, type question, and submit
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Ask a question about the plan…"),
+      "What does step 2 do?"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    // Then: askSession is called with the correct session ID and question
+    await waitFor(() => {
+      expect(commands.askSession).toHaveBeenCalledWith(
+        "new-sess-id",
+        "What does step 2 do?"
+      );
+    });
+  });
+
+  it("shows the Ask answer and re-exposes the action row after submission", async () => {
+    // Given: askSession returns an answer
+    vi.mocked(commands.askSession).mockResolvedValue("Step 2 does X.");
+    render(<App />);
+    await generatePlan();
+
+    // When: ask and submit
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Ask a question about the plan…"),
+      "What does step 2 do?"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    // Then: the answer is displayed
+    await waitFor(() => {
+      expect(screen.getByText("Step 2 does X.")).toBeInTheDocument();
+    });
+
+    // And: the action row is still visible (user can approve, fix, ask again, or discard)
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("clears stale Ask answer when Fix succeeds", async () => {
+    // Given: plan generated, an Ask has been answered, and Fix is ready
+    vi.mocked(commands.askSession).mockResolvedValue("Old answer.");
+    vi.mocked(commands.fixSession).mockImplementationOnce(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async (_params: any, channel: any) => {
+        channel.onmessage?.({
+          event: "planGenerated",
+          data: { content: "# Revised plan" },
+        });
+        return "# Revised plan";
+      }
+    );
+    render(<App />);
+    await generatePlan();
+
+    // Get an Ask answer
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Ask a question about the plan…"),
+      "Question?"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => screen.getByText("Old answer."));
+
+    // When: Fix succeeds and updates the plan
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe how to revise the plan…"),
+      "Make it shorter"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Apply Fix" }));
+
+    // Then: the stale Ask answer is no longer visible
+    await waitFor(() => {
+      expect(screen.queryByText("Old answer.")).toBeNull();
+    });
+  });
+
+  it("shows error and keeps question editor open when Ask fails", async () => {
+    // Given: askSession rejects
+    vi.mocked(commands.askSession).mockRejectedValue(new Error("LLM unavailable"));
+    render(<App />);
+    await generatePlan();
+
+    // When: ask and submit
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Ask a question about the plan…"),
+      "A question"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    // Then: an error message is visible
+    await waitFor(() => {
+      expect(screen.getByText(/LLM unavailable/)).toBeInTheDocument();
+    });
+
+    // And: the question editor is still open (user can retry)
+    expect(
+      screen.getByPlaceholderText("Ask a question about the plan…")
+    ).toBeInTheDocument();
+  });
+
+  it("collapses the question editor when Cancel is clicked", async () => {
+    // Given: Ask editor is open
+    render(<App />);
+    await generatePlan();
+    await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(
+      screen.getByPlaceholderText("Ask a question about the plan…")
+    ).toBeInTheDocument();
+
+    // When: cancel
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // Then: question editor is gone and action row is restored
+    expect(
+      screen.queryByPlaceholderText("Ask a question about the plan…")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
   });
 });

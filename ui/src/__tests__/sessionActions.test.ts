@@ -102,6 +102,72 @@ describe("getSessionActions", () => {
       expect(actions.showApprove).toBe(false);
     });
 
+    it("shows Fix when planAvailable is true", () => {
+      // Given: session awaiting approval with a valid plan
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Fix button is visible (plan review loop allows fix)
+      expect(actions.showFix).toBe(true);
+    });
+
+    it("hides Fix when planAvailable is false", () => {
+      // Given: session awaiting approval but no plan yet
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: false });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: nothing to fix if there is no plan
+      expect(actions.showFix).toBe(false);
+    });
+
+    it("hides Fix when planAvailable is undefined (safe default)", () => {
+      // Given: session awaiting approval with no planAvailable field
+      const session = makeSession({ phase: "Awaiting Approval" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: treat undefined as false
+      expect(actions.showFix).toBe(false);
+    });
+
+    it("shows Ask when planAvailable is true", () => {
+      // Given: session awaiting approval with a valid plan
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Ask button is visible (user can ask about the plan before approving)
+      expect(actions.showAsk).toBe(true);
+    });
+
+    it("hides Ask when planAvailable is false", () => {
+      // Given: session awaiting approval but no plan yet
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: false });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: nothing to ask about if there is no plan
+      expect(actions.showAsk).toBe(false);
+    });
+
+    it("hides Ask when planAvailable is undefined (safe default)", () => {
+      // Given: session awaiting approval with no planAvailable field
+      const session = makeSession({ phase: "Awaiting Approval" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: treat undefined as false
+      expect(actions.showAsk).toBe(false);
+    });
+
     it("hides workspace selection buttons", () => {
       // Given: Awaiting Approval session
       const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
@@ -159,6 +225,28 @@ describe("getSessionActions", () => {
 
       // Then
       expect(actions.showReplan).toBe(true);
+    });
+
+    it("hides Fix button (Planned uses Replan instead of Fix)", () => {
+      // Given: Planned session
+      const session = makeSession({ phase: "Planned" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Fix is an Awaiting Approval action; Planned uses showReplan
+      expect(actions.showFix).toBe(false);
+    });
+
+    it("hides Ask button (Ask is only available during plan review)", () => {
+      // Given: Planned session
+      const session = makeSession({ phase: "Planned" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Ask is only for Awaiting Approval review, not Planned
+      expect(actions.showAsk).toBe(false);
     });
 
     it("hides Approve button (already approved)", () => {
@@ -354,11 +442,26 @@ describe("getSessionActions", () => {
       // Then: only Cancel is shown
       expect(actions.showCancel).toBe(true);
       expect(actions.showApprove).toBe(false);
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
       expect(actions.showCreateWorktree).toBe(false);
       expect(actions.showRun).toBe(false);
       expect(actions.showReset).toBe(false);
       expect(actions.showReplan).toBe(false);
       expect(actions.showDelete).toBe(false);
+    });
+
+    it("hides Fix and Ask even when Awaiting Approval session has planAvailable", () => {
+      // Given: an Awaiting Approval session with a plan, but execution is in progress
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "running");
+
+      // Then: Fix/Ask are suppressed while running (only Cancel is active)
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
+      expect(actions.showCancel).toBe(true);
     });
   });
 
