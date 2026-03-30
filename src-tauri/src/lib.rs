@@ -32,6 +32,7 @@ pub fn run() {
             commands::delete_session,
             commands::reset_session,
             commands::fix_session,
+            commands::ask_session,
             commands::list_directory,
             commands::run_all_sessions,
             commands::get_update_readiness,

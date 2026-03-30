@@ -6,6 +6,10 @@ export type RunStatus = "idle" | "running";
 export interface SessionActions {
   /** Show the Approve button (`phase === "Awaiting Approval" && planAvailable`). */
   showApprove: boolean;
+  /** Show the "Fix" button (`phase === "Awaiting Approval" && planAvailable`). */
+  showFix: boolean;
+  /** Show the "Ask" button (`phase === "Awaiting Approval" && planAvailable`). */
+  showAsk: boolean;
   /** Show the "Create worktree (new branch)" button (`phase === "Planned"` only). */
   showCreateWorktree: boolean;
   /** Show the Resume / Retry run button. */
@@ -25,7 +29,8 @@ export interface SessionActions {
 /**
  * Derive which action buttons to show in the session detail pane.
  *
- * Follows the same phase-action matrix as the CLI (`src/list_cmd.rs:135-167`).
+ * For Awaiting Approval sessions, follows the approve-plan review loop
+ * (`src/plan_cmd.rs:218-295`) rather than the CLI list phase-action matrix.
  *
  * @param session - The current session DTO (always reflects latest persisted state).
  * @param status  - Whether the local process is actively running this session.
@@ -36,8 +41,12 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
   const isRunning = status === "running";
   const showCancel = isRunning;
 
-  const showApprove =
+  const awaitingApprovalWithPlan =
     !isRunning && phase === "Awaiting Approval" && session.planAvailable === true;
+
+  const showApprove = awaitingApprovalWithPlan;
+  const showFix = awaitingApprovalWithPlan;
+  const showAsk = awaitingApprovalWithPlan;
 
   const showCreateWorktree = !isRunning && phase === "Planned";
 
@@ -63,6 +72,8 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
 
   return {
     showApprove,
+    showFix,
+    showAsk,
     showCreateWorktree,
     showRun,
     runLabel,

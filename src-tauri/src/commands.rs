@@ -347,6 +347,7 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 /// Plan generation prompt templates, embedded at compile-time.
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
+const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
 const PLAN_VAR: &str = "plan";
 
 /// Invoke the LLM to generate/fix a plan using `template`, writing output to the
@@ -621,6 +622,48 @@ pub async fn fix_session(
             Err(msg)
         }
     }
+}
+
+/// Ask a question about an existing session's plan without modifying it.
+///
+/// Extracted for unit-testability: callers can supply any `SessionManager`
+/// (including one backed by a `TempDir`) and any config with a short-circuit
+/// command (e.g. `["echo"]`) to exercise the logic without invoking the real LLM.
+pub(crate) async fn do_ask_session(
+    manager: &cruise::session::SessionManager,
+    session_id: &str,
+    question: String,
+) -> std::result::Result<String, String> {
+    let session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_prev_input(Some(question));
+
+    let result = run_plan_prompt_template(
+        &config,
+        &mut vars,
+        ASK_PLAN_PROMPT_TEMPLATE,
+        5,
+        Some(&session.base_dir),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Return raw output only — do NOT call resolve_plan_content(), which would
+    // overwrite plan.md with the answer and corrupt the saved plan.
+    Ok(result.output)
+}
+
+/// Tauri command wrapper around [`do_ask_session`].
+#[tauri::command]
+pub async fn ask_session(
+    session_id: String,
+    question: String,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+    do_ask_session(&manager, &session_id, question).await
 }
 
 // ─── SessionLogger ─────────────────────────────────────────────────────────────
@@ -1576,5 +1619,122 @@ mod tests {
         // Then: still blocked as mountedVolume
         assert!(!r.can_auto_update);
         assert_eq!(r.reason.as_deref(), Some("mountedVolume"));
+    }
+
+    // ─── do_ask_session ───────────────────────────────────────────────────────
+
+    /// Write a minimal `config.yaml` that uses the given shell command as the LLM.
+    ///
+    /// The command must read stdin (or ignore it) and write to stdout; it does
+    /// not need to be an actual language model.
+    fn write_test_config(session_dir: &std::path::Path, shell_command: &str) {
+        let yaml = format!("command:\n  - bash\n  - -c\n  - \"{shell_command}\"\nsteps: {{}}\n");
+        fs::write(session_dir.join("config.yaml"), yaml).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Create a temporary SessionManager with a session that has `plan.md` and `config.yaml`.
+    /// Returns `(TempDir, SessionManager)` — callers must keep `_tmp` alive for the test duration.
+    fn setup_ask_session(
+        session_id: &str,
+        plan_content: &str,
+        shell_command: &str,
+    ) -> (TempDir, SessionManager) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = cruise::session::SessionState::new(
+            session_id.to_string(),
+            repo,
+            "cruise.yaml".to_string(),
+            "test task".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let session_dir = manager.sessions_dir().join(session_id);
+        fs::write(session_dir.join("plan.md"), plan_content).unwrap_or_else(|e| panic!("{e}"));
+        write_test_config(&session_dir, shell_command);
+        (tmp, manager)
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_returns_llm_output() {
+        // Given: a session with a plan and a config that echoes a fixed answer
+        let (_tmp, manager) =
+            setup_ask_session("20260326130000", "# Original Plan", "echo ask-answer");
+
+        // Re-load so config_path is correct (config.yaml is in session dir)
+        let session = manager
+            .load("20260326130000")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: ask_session is called with a question
+        let result =
+            do_ask_session(&manager, "20260326130000", "What does this do?".to_string()).await;
+
+        // Then: returns Ok (the LLM command ran successfully)
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let answer = result.unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            answer.contains("ask-answer"),
+            "expected answer to contain 'ask-answer', got: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_does_not_modify_plan_md() {
+        // Given: a session with known plan.md content
+        let original_plan = "# Original Plan\nDo the thing.";
+        let (_tmp, manager) = setup_ask_session(
+            "20260326130001",
+            original_plan,
+            "echo ask-answer; cat > /dev/null",
+        );
+
+        // When: ask_session is called
+        let _ = do_ask_session(&manager, "20260326130001", "A question?".to_string()).await;
+
+        // Then: plan.md is unchanged
+        let session_dir = manager.sessions_dir().join("20260326130001");
+        let plan_after =
+            fs::read_to_string(session_dir.join("plan.md")).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            plan_after, original_plan,
+            "ask_session must not modify plan.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_does_not_change_session_phase() {
+        // Given: a session in AwaitingApproval phase (the default for SessionState::new)
+        let (_tmp, manager) = setup_ask_session("20260326130002", "# Plan", "echo answer");
+
+        // When: ask_session is called
+        let _ = do_ask_session(&manager, "20260326130002", "A question?".to_string()).await;
+
+        // Then: session phase is still AwaitingApproval
+        let saved = manager
+            .load("20260326130002")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(saved.phase, SessionPhase::AwaitingApproval),
+            "ask_session must not mutate session phase, got: {:?}",
+            saved.phase
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_returns_error_when_session_not_found() {
+        // Given: no session with the given ID exists
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        // sessions dir doesn't even exist — load will fail immediately
+
+        // When: ask_session is called with a nonexistent ID
+        let result =
+            do_ask_session(&manager, "nonexistent-session-id", "Question?".to_string()).await;
+
+        // Then: returns an error
+        assert!(result.is_err(), "expected Err for missing session, got Ok");
     }
 }
