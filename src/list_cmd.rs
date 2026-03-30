@@ -1,13 +1,93 @@
+use std::io::Write;
+
 use console::style;
 use inquire::InquireError;
+use serde::Serialize;
 
-use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
+use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState, get_cruise_home};
+use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode, get_cruise_home};
 
-pub async fn run() -> Result<()> {
+/// CLI-only DTO for JSON output. Stable machine-readable form of `SessionState`.
+/// `phase` is always a plain string; `phase_error` carries the failure message for Failed sessions.
+#[derive(Debug, Serialize)]
+struct ListSessionJson {
+    id: String,
+    base_dir: String,
+    phase: &'static str,
+    phase_error: Option<String>,
+    config_source: String,
+    input: String,
+    title: Option<String>,
+    current_step: Option<String>,
+    created_at: String,
+    completed_at: Option<String>,
+    worktree_path: Option<String>,
+    worktree_branch: Option<String>,
+    workspace_mode: WorkspaceMode,
+    target_branch: Option<String>,
+    pr_url: Option<String>,
+    config_path: Option<String>,
+    updated_at: Option<String>,
+    awaiting_input: bool,
+}
+
+/// `Failed(msg)` is normalized to `phase = "Failed"` + `phase_error = Some(msg)`.
+fn session_to_json(session: SessionState) -> ListSessionJson {
+    let (phase, phase_error): (&'static str, Option<String>) = match session.phase {
+        SessionPhase::AwaitingApproval => ("AwaitingApproval", None),
+        SessionPhase::Planned => ("Planned", None),
+        SessionPhase::Running => ("Running", None),
+        SessionPhase::Completed => ("Completed", None),
+        SessionPhase::Failed(msg) => ("Failed", Some(msg)),
+        SessionPhase::Suspended => ("Suspended", None),
+    };
+    ListSessionJson {
+        id: session.id,
+        base_dir: session.base_dir.to_string_lossy().into_owned(),
+        phase,
+        phase_error,
+        config_source: session.config_source,
+        input: session.input,
+        title: session.title,
+        current_step: session.current_step,
+        created_at: session.created_at,
+        completed_at: session.completed_at,
+        worktree_path: session
+            .worktree_path
+            .map(|p| p.to_string_lossy().into_owned()),
+        worktree_branch: session.worktree_branch,
+        workspace_mode: session.workspace_mode,
+        target_branch: session.target_branch,
+        pr_url: session.pr_url,
+        config_path: session
+            .config_path
+            .map(|p| p.to_string_lossy().into_owned()),
+        updated_at: session.updated_at,
+        awaiting_input: session.awaiting_input,
+    }
+}
+
+/// Serialize a list of sessions to a JSON array (pretty-printed) followed by a newline.
+fn write_sessions_json<W: Write>(mut writer: W, sessions: Vec<SessionState>) -> Result<()> {
+    let dtos: Vec<ListSessionJson> = sessions.into_iter().map(session_to_json).collect();
+    serde_json::to_writer_pretty(&mut writer, &dtos)
+        .map_err(|e| CruiseError::Other(format!("JSON serialization error: {e}")))?;
+    writer
+        .write_all(b"\n")
+        .map_err(|e| CruiseError::Other(format!("write error: {e}")))?;
+    Ok(())
+}
+
+pub async fn run(args: ListArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
+
+    if args.json {
+        let sessions = manager.list()?;
+        write_sessions_json(std::io::BufWriter::new(std::io::stdout()), sessions)?;
+        return Ok(());
+    }
 
     loop {
         let Some(mut session) = pick_session(&manager)? else {
@@ -1082,6 +1162,178 @@ mod tests {
         assert!(
             !label.contains('\n'),
             "label must not contain newline character: {label:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // session_to_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_to_json_failed_phase_has_phase_string_and_error() {
+        // Given: a session in Failed phase with an error message
+        let session = make_session(
+            "20260306143000",
+            "task",
+            SessionPhase::Failed("db error".to_string()),
+        );
+
+        // When
+        let dto = session_to_json(session);
+
+        // Then: phase is "Failed" and phase_error contains the message
+        assert_eq!(dto.phase, "Failed");
+        assert_eq!(dto.phase_error, Some("db error".to_string()));
+    }
+
+    #[test]
+    fn test_session_to_json_all_non_failed_phases_have_null_phase_error() {
+        // Given: all non-Failed phases
+        let cases = [
+            (SessionPhase::AwaitingApproval, "AwaitingApproval"),
+            (SessionPhase::Planned, "Planned"),
+            (SessionPhase::Running, "Running"),
+            (SessionPhase::Completed, "Completed"),
+            (SessionPhase::Suspended, "Suspended"),
+        ];
+
+        for (phase, expected_str) in cases {
+            // When
+            let session = make_session("20260306143000", "task", phase);
+            let dto = session_to_json(session);
+
+            // Then: phase string matches and phase_error is None
+            assert_eq!(
+                dto.phase, expected_str,
+                "phase string mismatch for {expected_str}"
+            );
+            assert_eq!(
+                dto.phase_error, None,
+                "phase_error should be None for {expected_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_session_to_json_path_fields_are_strings() {
+        // Given: session with base_dir and optional path fields set
+        let mut session = make_session("20260306143000", "task", SessionPhase::Planned);
+        session.worktree_path = Some(PathBuf::from("/tmp/worktree"));
+        session.config_path = Some(PathBuf::from("/home/user/config.yaml"));
+
+        // When
+        let dto = session_to_json(session);
+
+        // Then: path fields are serialized as strings
+        assert_eq!(dto.base_dir, "/tmp");
+        assert_eq!(dto.worktree_path, Some("/tmp/worktree".to_string()));
+        assert_eq!(dto.config_path, Some("/home/user/config.yaml".to_string()));
+    }
+
+    #[test]
+    fn test_session_to_json_null_optional_paths_are_none() {
+        let session = make_session("20260306143000", "task", SessionPhase::Planned);
+        let dto = session_to_json(session);
+        assert_eq!(dto.worktree_path, None);
+        assert_eq!(dto.config_path, None);
+    }
+
+    #[test]
+    fn test_session_to_json_id_and_input_are_preserved() {
+        let session = make_session(
+            "20260306143000",
+            "my task description",
+            SessionPhase::Planned,
+        );
+        let dto = session_to_json(session);
+        assert_eq!(dto.id, "20260306143000");
+        assert_eq!(dto.input, "my task description");
+    }
+
+    // -----------------------------------------------------------------------
+    // write_sessions_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_sessions_json_empty_list_produces_empty_json_array() {
+        // Given: an empty session list
+        let sessions: Vec<SessionState> = vec![];
+        let mut buf = Vec::new();
+
+        // When
+        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: output parses as a JSON array with 0 entries
+        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
+        let value: serde_json::Value =
+            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(value.is_array(), "output should be a JSON array");
+        assert_eq!(
+            value
+                .as_array()
+                .unwrap_or_else(|| panic!("expected JSON array"))
+                .len(),
+            0,
+            "empty input should produce an empty array"
+        );
+    }
+
+    #[test]
+    fn test_write_sessions_json_multiple_sessions_produces_array_with_correct_ids() {
+        // Given: two sessions with distinct IDs
+        let sessions = vec![
+            make_session("20260306143000", "task A", SessionPhase::Planned),
+            make_session("20260306144500", "task B", SessionPhase::Completed),
+        ];
+        let mut buf = Vec::new();
+
+        // When
+        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: JSON array contains 2 entries with the expected IDs
+        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
+        let value: serde_json::Value =
+            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
+        let arr = value
+            .as_array()
+            .unwrap_or_else(|| panic!("expected JSON array"));
+        assert_eq!(arr.len(), 2, "should have 2 sessions");
+        assert_eq!(arr[0]["id"], "20260306143000");
+        assert_eq!(arr[1]["id"], "20260306144500");
+    }
+
+    #[test]
+    fn test_write_sessions_json_failed_phase_is_normalized() {
+        // Given: a session in Failed phase
+        let sessions = vec![make_session(
+            "20260306143000",
+            "task",
+            SessionPhase::Failed("some error".to_string()),
+        )];
+        let mut buf = Vec::new();
+
+        // When
+        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: JSON entry has phase="Failed" and phase_error="some error"
+        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
+        let value: serde_json::Value =
+            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
+        let entry = &value
+            .as_array()
+            .unwrap_or_else(|| panic!("expected JSON array"))[0];
+        assert_eq!(entry["phase"], "Failed");
+        assert_eq!(entry["phase_error"], "some error");
+    }
+
+    #[test]
+    fn test_write_sessions_json_output_ends_with_newline() {
+        let sessions: Vec<SessionState> = vec![];
+        let mut buf = Vec::new();
+        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            buf.ends_with(b"\n"),
+            "JSON output should end with a newline"
         );
     }
 }

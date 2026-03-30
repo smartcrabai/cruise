@@ -41,7 +41,7 @@ async fn run() -> error::Result<()> {
     match cli.command {
         Some(cli::Commands::Plan(args)) => plan_cmd::run(args).await,
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
-        Some(cli::Commands::List) => list_cmd::run().await,
+        Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         None => {
             // Backward compat: no subcommand → treat as `plan`.
