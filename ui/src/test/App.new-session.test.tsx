@@ -5,7 +5,7 @@ import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
-// ─── Module mocks ──────────────────────────────────────────────────────────────
+// --- Module mocks --------------------------------------------------------------
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("0.0.0"),
@@ -30,7 +30,6 @@ vi.mock("../lib/commands", () => ({
   listConfigs: vi.fn(),
   createSession: vi.fn(),
   approveSession: vi.fn(),
-  discardSession: vi.fn(),
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
@@ -56,7 +55,7 @@ vi.mock("../lib/desktopNotifications", () => ({
   notifyDesktop: vi.fn(),
 }));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -71,28 +70,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
-/**
- * Set up the createSession mock to emit a planGenerated event via the channel
- * and return a session ID.
- *
- * channel.onmessage is already set by handleGenerate() before createSession is
- * called, so calling it synchronously here is safe and avoids macrotask-timer
- * issues in the jsdom test environment.
- */
-function mockCreateSessionWithPlan(planContent = "# Plan content"): void {
-  vi.mocked(commands.createSession).mockImplementationOnce(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async (_params: any, channel: any) => {
-      channel.onmessage?.({
-        event: "planGenerated",
-        data: { content: planContent },
-      });
-      return "new-sess-id";
-    }
-  );
-}
-
-// ─── New Session draft state persistence ─────────────────────────────────────
+// --- New Session draft state persistence -------------------------------------
 
 describe("App: New Session draft state persistence", () => {
   beforeEach(() => {
@@ -120,7 +98,7 @@ describe("App: New Session draft state persistence", () => {
 
     // Navigate to New Session and type a task
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-    const taskTextarea = screen.getByPlaceholderText("Describe what you want to implement…");
+    const taskTextarea = screen.getByPlaceholderText("Describe what you want to implement...");
     await userEvent.type(taskTextarea, "my draft task");
 
     // When: navigate to the existing session, then back to New Session
@@ -129,7 +107,7 @@ describe("App: New Session draft state persistence", () => {
 
     // Then: the typed task is preserved
     expect(
-      screen.getByPlaceholderText("Describe what you want to implement…")
+      screen.getByPlaceholderText("Describe what you want to implement...")
     ).toHaveValue("my draft task");
   });
 
@@ -182,88 +160,320 @@ describe("App: New Session draft state persistence", () => {
     ).toHaveValue("/my/typed/dir");
   });
 
-  it("clears all draft fields after Discard", async () => {
-    // Given: App shows New Session form and a plan is generated
-    mockCreateSessionWithPlan();
-    vi.mocked(commands.discardSession).mockResolvedValue(undefined);
+});
 
-    render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+// --- Non-blocking session creation -------------------------------------------
 
-    // Enter a task and generate a plan
-    await userEvent.type(
-      screen.getByPlaceholderText("Describe what you want to implement…"),
-      "task to be discarded"
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
-    await waitFor(() => screen.getByRole("button", { name: "Discard" }));
+/**
+ * Set up the createSession mock to support a two-phase emit model:
+ *  1. sessionCreated fires immediately after session is persisted - the frontend
+ *     should release the New Session form at this point.
+ *  2. planGenerated / planFailed fire later, after the form has already been reset.
+ *
+ * The mock captures the channel reference and returns control handles so tests
+ * can fire each event at an explicit moment.
+ */
+function setupTwoPhaseCreateSession(sessionId = "new-sess-id") {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let capturedChannel: { onmessage: ((event: any) => void) | null } | null = null;
+  let resolveCreate!: (id: string) => void;
 
-    // When: click Discard
-    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+  vi.mocked(commands.createSession).mockImplementationOnce(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_params: any, channel: any) => {
+      capturedChannel = channel;
+      return new Promise<string>((resolve) => {
+        resolveCreate = resolve;
+      });
+    }
+  );
 
-    // Then: the Task textarea is reset to empty
-    await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText("Describe what you want to implement…")
-      ).toHaveValue("");
-    });
-  });
+  return {
+    /** Emit sessionCreated - session has been persisted, plan not yet ready. */
+    emitSessionCreated(): void {
+      capturedChannel!.onmessage?.({ event: "sessionCreated", data: { sessionId } });
+    },
+    /** Emit planGenerated and resolve the pending createSession promise. */
+    emitPlanGenerated(content = "# Plan content"): void {
+      capturedChannel!.onmessage?.({ event: "planGenerated", data: { sessionId, content } });
+      resolveCreate(sessionId);
+    },
+    /** Emit planFailed and resolve the pending createSession promise. */
+    emitPlanFailed(error = "plan generation failed"): void {
+      capturedChannel!.onmessage?.({ event: "planFailed", data: { sessionId, error } });
+      resolveCreate(sessionId);
+    },
+  };
+}
 
-  it("keeps the generated plan visible when Discard fails", async () => {
-    mockCreateSessionWithPlan();
-    vi.mocked(commands.discardSession).mockRejectedValue(new Error("discard failed"));
-
-    render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-    await userEvent.type(
-      screen.getByPlaceholderText("Describe what you want to implement…"),
-      "task to keep"
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
-    await waitFor(() => screen.getByRole("button", { name: "Discard" }));
-
-    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-
-    expect(screen.getByText("Error: discard failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Discard" })).toBeInTheDocument();
-  });
-
-  it("clears draft after Approve succeeds so New Session starts fresh", async () => {
-    // Given: plan is generated
-    mockCreateSessionWithPlan();
-    vi.mocked(commands.approveSession).mockResolvedValue(undefined);
-    vi.mocked(commands.getSession).mockResolvedValue(
-      makeSession({ id: "new-sess-id", input: "task to approve" })
-    );
+describe("App: Non-blocking session creation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("resets task input after sessionCreated, before plan generation resolves", async () => {
+    // Given: createSession emits sessionCreated before planGenerated
+    const control = setupTwoPhaseCreateSession("sess-early");
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe what you want to implement…"),
-      "task to approve"
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "my task"
     );
     await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
-    await waitFor(() => screen.getByRole("button", { name: "Approve" }));
 
-    // When: approve the session
-    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("new-sess-id")).toBeInTheDocument();
+    // When: sessionCreated fires (session is persisted, plan not yet ready)
+    await act(async () => {
+      control.emitSessionCreated();
     });
 
-    // Then: returning to New Session shows a fresh draft
-    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    // Then: task input is cleared (form released before plan is ready)
     await waitFor(() => {
       expect(
-        screen.getByPlaceholderText("Describe what you want to implement…")
+        screen.getByPlaceholderText("Describe what you want to implement...")
       ).toHaveValue("");
+    });
+
+    // Cleanup: resolve the pending createSession so the test does not leak
+    await act(async () => {
+      control.emitPlanGenerated();
+    });
+  });
+
+  it("Generate plan button is re-enabled after sessionCreated and typing a new task", async () => {
+    // Given: createSession is pending after sessionCreated
+    const control = setupTwoPhaseCreateSession("sess-early");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "another task"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: sessionCreated fires and the form is released (input cleared)
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("");
+    });
+
+    // When: user types a new task
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "next task"
+    );
+
+    // Then: Generate plan button is enabled
+    expect(screen.getByRole("button", { name: "Generate plan" })).not.toBeDisabled();
+
+    // Cleanup
+    await act(async () => {
+      control.emitPlanGenerated();
+    });
+  });
+
+  it("preserves baseDir after sessionCreated clears task-scoped fields", async () => {
+    // Given: form has a custom Working Directory before generate is clicked
+    const control = setupTwoPhaseCreateSession("sess-early");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    await userEvent.clear(baseDirInput);
+    await userEvent.type(baseDirInput, "/my/repo/path");
+
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "first task"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: sessionCreated fires
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+
+    // Then: task input is cleared but baseDir is preserved for the next session
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("");
+    });
+    expect(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+    ).toHaveValue("/my/repo/path");
+
+    // Cleanup
+    await act(async () => {
+      control.emitPlanGenerated();
+    });
+  });
+
+  it("late planFailed does not restore old task input after form was released by sessionCreated", async () => {
+    // Given: sessionCreated has already reset the form
+    const control = setupTwoPhaseCreateSession("sess-fail");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "task that will fail"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+    // Verify form was released
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("");
+    });
+
+    // When: planFailed fires late (after form was already released)
+    await act(async () => {
+      control.emitPlanFailed("model error");
+    });
+
+    // Then: task input stays empty - old draft must not be restored
+    expect(
+      screen.getByPlaceholderText("Describe what you want to implement...")
+    ).toHaveValue("");
+    // And: still on the New Session form so the user can start a fresh session
+    expect(screen.getByRole("button", { name: "Generate plan" })).toBeInTheDocument();
+  });
+
+  it("late planFailed triggers sidebar refresh after form was released", async () => {
+    // Given: form is released by sessionCreated
+    const control = setupTwoPhaseCreateSession("sess-fail");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "task that will fail"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("");
+    });
+
+    const callsBeforePlanFailed = vi.mocked(commands.listSessions).mock.calls.length;
+
+    // When: planFailed fires late
+    await act(async () => {
+      control.emitPlanFailed("model error");
+    });
+
+    // Then: sidebar is refreshed so the backend-deleted failed session disappears promptly
+    await waitFor(() => {
+      expect(vi.mocked(commands.listSessions).mock.calls.length).toBeGreaterThan(
+        callsBeforePlanFailed
+      );
+    });
+  });
+
+  it("late planGenerated triggers sidebar refresh without mutating the form", async () => {
+    // Given: form is released by sessionCreated; plan arrives later
+    const control = setupTwoPhaseCreateSession("sess-async");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "async task"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // sessionCreated: form resets
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("");
+    });
+
+    const callsBeforePlanGenerated = vi.mocked(commands.listSessions).mock.calls.length;
+
+    // When: planGenerated fires late
+    await act(async () => {
+      control.emitPlanGenerated("# Plan content");
+    });
+
+    // Then: sidebar is refreshed so planAvailable becomes visible immediately
+    await waitFor(() => {
+      expect(vi.mocked(commands.listSessions).mock.calls.length).toBeGreaterThan(
+        callsBeforePlanGenerated
+      );
+    });
+
+    // And: form input remains clean (late event must not mutate the draft)
+    expect(
+      screen.getByPlaceholderText("Describe what you want to implement...")
+    ).toHaveValue("");
+  });
+
+  it("sidebar is refreshed immediately after sessionCreated without waiting for plan", async () => {
+    // Given
+    const control = setupTwoPhaseCreateSession("sess-refresh");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "refresh test task"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    const callsBeforeSessionCreated = vi.mocked(commands.listSessions).mock.calls.length;
+
+    // When: sessionCreated fires (plan not yet ready)
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+
+    // Then: sidebar refreshes immediately (explicit refresh, not relying on 3-second poll)
+    await waitFor(() => {
+      expect(vi.mocked(commands.listSessions).mock.calls.length).toBeGreaterThan(
+        callsBeforeSessionCreated
+      );
+    });
+
+    // Cleanup
+    await act(async () => {
+      control.emitPlanGenerated();
     });
   });
 });
 
-// ─── WorkflowRunner tab selection persistence ─────────────────────────────────
+// --- WorkflowRunner tab selection persistence ---------------------------------
 
 describe("App: WorkflowRunner tab selection persistence", () => {
   beforeEach(() => {
@@ -377,6 +587,28 @@ describe("App: WorkflowRunner tab selection persistence", () => {
 });
 
 // ─── NewSessionForm: Ask flow ──────────────────────────────────────────────────
+
+/**
+ * Set up createSession to immediately emit planGenerated and resolve,
+ * simulating the simple (non-two-phase) case where a plan is produced
+ * synchronously for tests that only need an AwaitingApproval state.
+ *
+ * channel.onmessage is already set by handleGenerate() before createSession is
+ * called, so calling it synchronously here is safe and avoids macrotask-timer
+ * issues in the jsdom test environment.
+ */
+function mockCreateSessionWithPlan(planContent = "# Plan content"): void {
+  vi.mocked(commands.createSession).mockImplementationOnce(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (_params: any, channel: any) => {
+      channel.onmessage?.({
+        event: "planGenerated",
+        data: { sessionId: "new-sess-id", content: planContent },
+      });
+      return "new-sess-id";
+    }
+  );
+}
 
 describe("App: NewSessionForm Ask flow", () => {
   beforeEach(() => {

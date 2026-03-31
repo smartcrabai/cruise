@@ -1,4 +1,4 @@
-// ─── Session ──────────────────────────────────────────────────────────────────
+// --- Session ------------------------------------------------------------------
 
 export type SessionPhase =
   | "Awaiting Approval"
@@ -31,7 +31,7 @@ export interface Session {
   planAvailable?: boolean;
 }
 
-// ─── IPC Events ───────────────────────────────────────────────────────────────
+// --- IPC Events ---------------------------------------------------------------
 
 export interface StepStartedEvent {
   event: "stepStarted";
@@ -100,21 +100,21 @@ export type WorkflowEvent =
   | RunAllSessionFinishedEvent
   | RunAllCompletedEvent;
 
-// ─── Cleanup ──────────────────────────────────────────────────────────────────
+// --- Cleanup ------------------------------------------------------------------
 
 export interface CleanupResult {
   deleted: number;
   skipped: number;
 }
 
-// ─── Directory listing ────────────────────────────────────────────────────────
+// --- Directory listing --------------------------------------------------------
 
 export interface DirEntry {
   name: string;
   path: string;
 }
 
-// ─── Session creation ─────────────────────────────────────────────────────────
+// --- Session creation ---------------------------------------------------------
 
 export interface ConfigEntry {
   path: string;
@@ -122,15 +122,16 @@ export interface ConfigEntry {
 }
 
 export type PlanEvent =
+  | { event: "sessionCreated"; data: { sessionId: string } }
   | { event: "planGenerating"; data: Record<string, never> }
-  | { event: "planGenerated"; data: { content: string } }
-  | { event: "planFailed"; data: { error: string } };
+  | { event: "planGenerated"; data: { sessionId: string; content: string } }
+  | { event: "planFailed"; data: { sessionId: string; error: string } };
 
-// ─── Update readiness ─────────────────────────────────────────────────────────
+// --- Update readiness ---------------------------------------------------------
 
 export interface UpdateReadiness {
   canAutoUpdate: boolean;
-  /** `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` — set when `canAutoUpdate` is false. */
+  /** `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` - set when `canAutoUpdate` is false. */
   reason?: string;
   /** The resolved `.app` bundle path, for display in the UI. */
   bundlePath?: string;

@@ -317,7 +317,7 @@ describe("SessionSidebar", () => {
     );
   });
 
-  // ─── onSelectedSessionUpdated callback ─────────────────────────────────────
+  // --- onSelectedSessionUpdated callback -------------------------------------
 
   it("calls onSelectedSessionUpdated when load returns a session matching selectedId", async () => {
     // Given: selectedId matches a session in the initial load result
@@ -428,7 +428,7 @@ describe("SessionSidebar", () => {
     expect(onSelectedSessionUpdated).not.toHaveBeenCalled();
   });
 
-  // ─── Header buttons ────────────────────────────────────────────────────────
+  // --- Header buttons --------------------------------------------------------
 
   it("renders Clean, Run All, and + New buttons but no Refresh button in the header", async () => {
     // Given
@@ -474,7 +474,7 @@ describe("SessionSidebar", () => {
     );
   });
 
-  // ─── PhaseBadge planAvailable indicator ────────────────────────────────────
+  // --- PhaseBadge planAvailable indicator ------------------------------------
 
   it("shows blue dot indicator for 'Awaiting Approval' session when planAvailable is true", async () => {
     // Given: a session that is awaiting approval with a plan already generated

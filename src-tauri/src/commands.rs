@@ -493,18 +493,25 @@ pub async fn create_session(
                 Err(e) => {
                     let _ = manager.delete(&session_id);
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    let _ = channel.send(PlanEvent::PlanFailed {
+                        session_id: session_id.clone(),
+                        error: msg.clone(),
+                    });
                     return Err(msg);
                 }
             };
             let _ = channel.send(PlanEvent::PlanGenerated {
+                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(session_id)
         }
         Err(msg) => {
             let _ = manager.delete(&session_id);
-            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+            let _ = channel.send(PlanEvent::PlanFailed {
+                session_id: session_id.clone(),
+                error: msg.clone(),
+            });
             Err(msg)
         }
     }
@@ -604,7 +611,10 @@ pub async fn fix_session(
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+                    let _ = channel.send(PlanEvent::PlanFailed {
+                        session_id: session_id.clone(),
+                        error: msg.clone(),
+                    });
                     return Err(msg);
                 }
             };
@@ -613,12 +623,16 @@ pub async fn fix_session(
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
+                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(content)
         }
         Err(msg) => {
-            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
+            let _ = channel.send(PlanEvent::PlanFailed {
+                session_id: session_id.clone(),
+                error: msg.clone(),
+            });
             Err(msg)
         }
     }
