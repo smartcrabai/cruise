@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "cruise"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "clap",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cruise-gui"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "cruise",
  "home",
