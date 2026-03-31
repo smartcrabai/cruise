@@ -24,7 +24,7 @@ pub enum Commands {
     /// Execute a planned session.
     Run(RunArgs),
     /// List and manage sessions interactively.
-    List,
+    List(ListArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
 }
@@ -72,6 +72,13 @@ pub struct RunArgs {
 
 #[derive(Parser, Debug)]
 pub struct CleanArgs {}
+
+#[derive(Parser, Debug)]
+pub struct ListArgs {
+    /// Output all sessions as a JSON array to stdout.
+    #[arg(long)]
+    pub json: bool,
+}
 
 pub fn parse_cli() -> Cli {
     let mut cli = Cli::parse();
@@ -186,7 +193,29 @@ mod tests {
     #[test]
     fn test_list_subcommand() {
         let cli = Cli::parse_from(["cruise", "list"]);
-        assert!(matches!(cli.command, Some(Commands::List)));
+        assert!(matches!(cli.command, Some(Commands::List(_))));
+    }
+
+    #[test]
+    fn test_list_subcommand_json_flag_defaults_to_false() {
+        let cli = Cli::parse_from(["cruise", "list"]);
+        match cli.command {
+            Some(Commands::List(args)) => {
+                assert!(!args.json, "--json should default to false");
+            }
+            _ => panic!("expected List subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_list_subcommand_json_flag_is_true_with_flag() {
+        let cli = Cli::parse_from(["cruise", "list", "--json"]);
+        match cli.command {
+            Some(Commands::List(args)) => {
+                assert!(args.json, "--json should be true");
+            }
+            _ => panic!("expected List subcommand"),
+        }
     }
 
     #[test]

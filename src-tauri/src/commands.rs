@@ -16,7 +16,7 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
-// --- DTOs ---------------------------------------------------------------------
+// ─── DTOs ─────────────────────────────────────────────────────────────────────
 
 /// Serializable representation of a session, sent to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -109,7 +109,7 @@ pub struct CleanupResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateReadinessDto {
     pub can_auto_update: bool,
-    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` - set when `can_auto_update` is false.
+    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` — set when `can_auto_update` is false.
     pub reason: Option<String>,
     /// The resolved `.app` bundle path, for display in the UI.
     pub bundle_path: Option<String>,
@@ -127,7 +127,7 @@ pub struct OptionResultDto {
     pub text_input: Option<String>,
 }
 
-// --- StateSavingEmitter --------------------------------------------------------
+// ─── StateSavingEmitter ────────────────────────────────────────────────────────
 
 /// Wraps the Tauri IPC channel and intercepts `OptionRequired` events to update
 /// the session's `awaiting_input` field in `state.json`.
@@ -156,7 +156,7 @@ impl crate::gui_option_handler::EventEmitter for StateSavingEmitter {
     }
 }
 
-// --- Helpers -------------------------------------------------------------------
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 
 fn new_session_manager() -> std::result::Result<SessionManager, String> {
     let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
@@ -184,7 +184,7 @@ fn prepare_run_session(
     Ok(execution_workspace.path().to_path_buf())
 }
 
-// --- Filesystem commands -------------------------------------------------------
+// ─── Filesystem commands ───────────────────────────────────────────────────────
 
 /// List subdirectories of `path`, returning up to 50 entries sorted alphabetically.
 ///
@@ -236,7 +236,7 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
     Ok(entries)
 }
 
-// --- Read commands -------------------------------------------------------------
+// ─── Read commands ─────────────────────────────────────────────────────────────
 
 /// List all sessions, sorted oldest-first.
 #[tauri::command]
@@ -273,7 +273,7 @@ pub fn get_session_plan(session_id: String) -> std::result::Result<String, Strin
         .map_err(|e| format!("failed to read plan {}: {}", plan_path.display(), e))
 }
 
-// --- Write commands ------------------------------------------------------------
+// ─── Write commands ────────────────────────────────────────────────────────────
 
 /// Cancel the currently running workflow session.
 #[tauri::command]
@@ -342,11 +342,12 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
     }
 }
 
-// --- Plan generation helpers ---------------------------------------------------
+// ─── Plan generation helpers ───────────────────────────────────────────────────
 
 /// Plan generation prompt templates, embedded at compile-time.
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
+const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
 const PLAN_VAR: &str = "plan";
 
 /// Invoke the LLM to generate/fix a plan using `template`, writing output to the
@@ -386,7 +387,7 @@ async fn run_plan_prompt_template(
     .map_err(|e| e.to_string())
 }
 
-// --- Session creation commands -------------------------------------------------
+// ─── Session creation commands ─────────────────────────────────────────────────
 
 /// A discovered workflow config file, returned to the frontend.
 #[derive(Debug, Serialize)]
@@ -471,11 +472,6 @@ pub async fn create_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
-    // Emit early so the frontend can release the New Session form immediately
-    let _ = channel.send(PlanEvent::SessionCreated {
-        session_id: session_id.clone(),
-    });
-
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     match run_plan_prompt_template(
@@ -497,25 +493,18 @@ pub async fn create_session(
                 Err(e) => {
                     let _ = manager.delete(&session_id);
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed {
-                        session_id,
-                        error: msg.clone(),
-                    });
+                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
                     return Err(msg);
                 }
             };
             let _ = channel.send(PlanEvent::PlanGenerated {
-                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(session_id)
         }
         Err(msg) => {
             let _ = manager.delete(&session_id);
-            let _ = channel.send(PlanEvent::PlanFailed {
-                session_id,
-                error: msg.clone(),
-            });
+            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
             Err(msg)
         }
     }
@@ -544,9 +533,17 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     Ok(SessionDto::from_state(session, &manager))
 }
 
+/// Delete a session that is still in "Awaiting Approval" phase (discard).
+#[tauri::command]
+pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
+    let manager = new_session_manager()?;
+    manager.delete(&session_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Delete a session and clean up its git worktree if one exists.
 ///
-/// Running sessions cannot be deleted - cancel them first.
+/// Running sessions cannot be deleted — cancel them first.
 #[tauri::command]
 pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
@@ -607,10 +604,7 @@ pub async fn fix_session(
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = channel.send(PlanEvent::PlanFailed {
-                        session_id: session_id.clone(),
-                        error: msg.clone(),
-                    });
+                    let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
                     return Err(msg);
                 }
             };
@@ -619,22 +613,60 @@ pub async fn fix_session(
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
-                session_id: session_id.clone(),
                 content: content.clone(),
             });
             Ok(content)
         }
         Err(msg) => {
-            let _ = channel.send(PlanEvent::PlanFailed {
-                session_id: session_id.clone(),
-                error: msg.clone(),
-            });
+            let _ = channel.send(PlanEvent::PlanFailed { error: msg.clone() });
             Err(msg)
         }
     }
 }
 
-// --- SessionLogger -------------------------------------------------------------
+/// Ask a question about an existing session's plan without modifying it.
+///
+/// Extracted for unit-testability: callers can supply any `SessionManager`
+/// (including one backed by a `TempDir`) and any config with a short-circuit
+/// command (e.g. `["echo"]`) to exercise the logic without invoking the real LLM.
+pub(crate) async fn do_ask_session(
+    manager: &cruise::session::SessionManager,
+    session_id: &str,
+    question: String,
+) -> std::result::Result<String, String> {
+    let session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_prev_input(Some(question));
+
+    let result = run_plan_prompt_template(
+        &config,
+        &mut vars,
+        ASK_PLAN_PROMPT_TEMPLATE,
+        5,
+        Some(&session.base_dir),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Return raw output only — do NOT call resolve_plan_content(), which would
+    // overwrite plan.md with the answer and corrupt the saved plan.
+    Ok(result.output)
+}
+
+/// Tauri command wrapper around [`do_ask_session`].
+#[tauri::command]
+pub async fn ask_session(
+    session_id: String,
+    question: String,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+    do_ask_session(&manager, &session_id, question).await
+}
+
+// ─── SessionLogger ─────────────────────────────────────────────────────────────
 
 /// Appends timestamped log lines to `<sessions_dir>/<session_id>/run.log`.
 struct SessionLogger {
@@ -658,7 +690,7 @@ impl SessionLogger {
     }
 }
 
-// --- run_session / run_all_sessions --------------------------------------------
+// ─── run_session / run_all_sessions ────────────────────────────────────────────
 
 /// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
 ///
@@ -667,7 +699,7 @@ impl SessionLogger {
 /// [`SessionPhase`] so callers can decide how to proceed (e.g. break a batch loop
 /// on `Suspended`).
 ///
-/// Infrastructure errors (mutex poisoned, session not found, etc.) are returned as
+/// Infrastructure errors (mutex poisoned, session not found, …) are returned as
 /// `Err(String)`.  Workflow-level errors (step failure) are returned as
 /// `Ok(SessionPhase::Failed(msg))` so that `run_all_sessions` can log them and
 /// continue to the next session instead of aborting the batch.
@@ -782,13 +814,13 @@ async fn execute_single_session(
 
             match &result {
                 Ok(exec) => logger.write(&format!(
-                    "[OK] completed - run: {}, skipped: {}, failed: {}",
+                    "✓ completed — run: {}, skipped: {}, failed: {}",
                     exec.run, exec.skipped, exec.failed
                 )),
                 Err(cruise::error::CruiseError::Interrupted) => {
-                    logger.write("cancelled");
+                    logger.write("⏸ cancelled");
                 }
-                Err(e) => logger.write(&format!("[FAIL] failed: {}", e.detailed_message())),
+                Err(e) => logger.write(&format!("✗ failed: {}", e.detailed_message())),
             }
 
             if let Some(dir) = original_dir {
@@ -1089,7 +1121,7 @@ mod tests {
         }
     }
 
-    // --- cancel_session ------------------------------------------------------
+    // ─── cancel_session ──────────────────────────────────────────────────────
 
     fn empty_option_responder() -> Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> {
         Arc::new(Mutex::new(None))
@@ -1151,7 +1183,7 @@ mod tests {
         );
     }
 
-    // --- respond_to_option ---------------------------------------------------
+    // ─── respond_to_option ───────────────────────────────────────────────────
 
     #[test]
     fn test_respond_to_option_with_no_pending_request_returns_error() {
@@ -1392,17 +1424,17 @@ mod tests {
         assert_eq!(saved.phase, SessionPhase::Planned);
     }
 
-    // --- Integration: full option-selection round-trip ------------------------
+    // ─── Integration: full option-selection round-trip ────────────────────────
     //
     // Data flow:
     //   GuiOptionHandler::select_option (engine thread)
-    //     -> stores sender in shared pending_response slot
-    //     -> emits WorkflowEvent::OptionRequired
+    //     → stores sender in shared pending_response slot
+    //     → emits WorkflowEvent::OptionRequired
     //   do_respond_to_option (IPC command handler / test thread)
-    //     -> extracts sender from slot
-    //     -> sends OptionResult
+    //     → extracts sender from slot
+    //     → sends OptionResult
     //   GuiOptionHandler::select_option (engine thread)
-    //     -> blocking_recv returns OptionResult
+    //     → blocking_recv returns OptionResult
     //
     // Modules covered: events, gui_option_handler, state, commands
     //
@@ -1484,7 +1516,7 @@ mod tests {
         }
     }
 
-    // --- check_update_readiness_for_path -------------------------------------
+    // ─── check_update_readiness_for_path ─────────────────────────────────────
 
     #[test]
     fn test_readiness_normal_applications_path_allows_update() {
@@ -1587,5 +1619,122 @@ mod tests {
         // Then: still blocked as mountedVolume
         assert!(!r.can_auto_update);
         assert_eq!(r.reason.as_deref(), Some("mountedVolume"));
+    }
+
+    // ─── do_ask_session ───────────────────────────────────────────────────────
+
+    /// Write a minimal `config.yaml` that uses the given shell command as the LLM.
+    ///
+    /// The command must read stdin (or ignore it) and write to stdout; it does
+    /// not need to be an actual language model.
+    fn write_test_config(session_dir: &std::path::Path, shell_command: &str) {
+        let yaml = format!("command:\n  - bash\n  - -c\n  - \"{shell_command}\"\nsteps: {{}}\n");
+        fs::write(session_dir.join("config.yaml"), yaml).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Create a temporary SessionManager with a session that has `plan.md` and `config.yaml`.
+    /// Returns `(TempDir, SessionManager)` — callers must keep `_tmp` alive for the test duration.
+    fn setup_ask_session(
+        session_id: &str,
+        plan_content: &str,
+        shell_command: &str,
+    ) -> (TempDir, SessionManager) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session = cruise::session::SessionState::new(
+            session_id.to_string(),
+            repo,
+            "cruise.yaml".to_string(),
+            "test task".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let session_dir = manager.sessions_dir().join(session_id);
+        fs::write(session_dir.join("plan.md"), plan_content).unwrap_or_else(|e| panic!("{e}"));
+        write_test_config(&session_dir, shell_command);
+        (tmp, manager)
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_returns_llm_output() {
+        // Given: a session with a plan and a config that echoes a fixed answer
+        let (_tmp, manager) =
+            setup_ask_session("20260326130000", "# Original Plan", "echo ask-answer");
+
+        // Re-load so config_path is correct (config.yaml is in session dir)
+        let session = manager
+            .load("20260326130000")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: ask_session is called with a question
+        let result =
+            do_ask_session(&manager, "20260326130000", "What does this do?".to_string()).await;
+
+        // Then: returns Ok (the LLM command ran successfully)
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let answer = result.unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            answer.contains("ask-answer"),
+            "expected answer to contain 'ask-answer', got: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_does_not_modify_plan_md() {
+        // Given: a session with known plan.md content
+        let original_plan = "# Original Plan\nDo the thing.";
+        let (_tmp, manager) = setup_ask_session(
+            "20260326130001",
+            original_plan,
+            "echo ask-answer; cat > /dev/null",
+        );
+
+        // When: ask_session is called
+        let _ = do_ask_session(&manager, "20260326130001", "A question?".to_string()).await;
+
+        // Then: plan.md is unchanged
+        let session_dir = manager.sessions_dir().join("20260326130001");
+        let plan_after =
+            fs::read_to_string(session_dir.join("plan.md")).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            plan_after, original_plan,
+            "ask_session must not modify plan.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_does_not_change_session_phase() {
+        // Given: a session in AwaitingApproval phase (the default for SessionState::new)
+        let (_tmp, manager) = setup_ask_session("20260326130002", "# Plan", "echo answer");
+
+        // When: ask_session is called
+        let _ = do_ask_session(&manager, "20260326130002", "A question?".to_string()).await;
+
+        // Then: session phase is still AwaitingApproval
+        let saved = manager
+            .load("20260326130002")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(saved.phase, SessionPhase::AwaitingApproval),
+            "ask_session must not mutate session phase, got: {:?}",
+            saved.phase
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_session_returns_error_when_session_not_found() {
+        // Given: no session with the given ID exists
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        // sessions dir doesn't even exist — load will fail immediately
+
+        // When: ask_session is called with a nonexistent ID
+        let result =
+            do_ask_session(&manager, "nonexistent-session-id", "Question?".to_string()).await;
+
+        // Then: returns an error
+        assert!(result.is_err(), "expected Err for missing session, got Ok");
     }
 }
