@@ -52,7 +52,7 @@ pub enum CruiseError {
     #[error("run aborted to preserve external session state: {0}")]
     SessionStateConflictAborted(String),
 
-    #[error("step '{0}' made no tracked file changes (fail-if-no-file-changes)")]
+    #[error("step '{0}' made no workspace file changes (fail-if-no-file-changes)")]
     StepMadeNoFileChanges(String),
 
     #[error("interrupted by user (Ctrl+C)")]

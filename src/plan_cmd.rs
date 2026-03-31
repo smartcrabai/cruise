@@ -387,7 +387,7 @@ async fn run_plan_prompt(
     let env = std::collections::HashMap::new();
     eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
     let compiled = crate::workflow::compile(config.clone())?;
-    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env, None).await?;
+    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env, None, None).await?;
     Ok(())
 }
 

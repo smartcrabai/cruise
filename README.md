@@ -406,7 +406,7 @@ steps:
 
 #### No file changes detection (`if.no-file-changes`)
 
-When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any tracked files, the configured action is taken. Two modes are available:
+When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
 
 - **`fail: true`** — Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
 - **`retry: true`** — Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
