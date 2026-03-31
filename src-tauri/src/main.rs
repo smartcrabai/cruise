@@ -10,22 +10,45 @@ fn main() {
 fn fix_path_for_gui() {
     use std::path::PathBuf;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    if let Ok(output) = std::process::Command::new(&shell)
-        .args(["-l", "-c", "echo $PATH"])
-        .output()
-    {
-        if let Ok(path) = String::from_utf8(output.stdout) {
-            let path = path.trim();
-            if !path.is_empty() {
-                // SAFETY: called at startup before Tauri spawns any threads.
-                unsafe { std::env::set_var("PATH", path) };
-                return;
-            }
+    const MISE_SHIMS: &str = ".local/share/mise/shims";
+
+    fn prepend_if_missing(paths: &mut Vec<PathBuf>, p: PathBuf) {
+        if !paths.contains(&p) {
+            paths.insert(0, p);
         }
     }
-    // Fallback: shell PATH resolution failed silently. Append common user-tool
-    // directories so binaries like `claude`, `seher`, etc. can be found.
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    // Try interactive login shell first to capture mise/nvm/etc. activated in .zshrc.
+    // Fall back to login-only shell if interactive fails (e.g. .zshrc has prompts).
+    let path_from_shell = [
+        &["-i", "-l", "-c", "echo $PATH"][..],
+        &["-l", "-c", "echo $PATH"][..],
+    ]
+    .iter()
+    .find_map(|args| {
+        std::process::Command::new(&shell)
+            .args(*args)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    if let Some(path) = path_from_shell {
+        // Always ensure mise shims are present so that tools managed by
+        // `mise activate` (non-shim mode) are still findable.
+        let mut paths: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        if let Some(home) = home::home_dir() {
+            prepend_if_missing(&mut paths, home.join(MISE_SHIMS));
+        }
+        if let Ok(joined) = std::env::join_paths(&paths) {
+            // SAFETY: called at startup before Tauri spawns any threads.
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+        return;
+    }
+    // Fallback: shell PATH resolution failed. Append common user-tool directories.
     let existing = std::env::var_os("PATH").unwrap_or_default();
     let mut paths: Vec<PathBuf> = std::env::split_paths(&existing).collect();
     for p in &["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
@@ -35,12 +58,9 @@ fn fix_path_for_gui() {
         }
     }
     if let Some(home) = home::home_dir() {
-        // Insert in reverse order so .cargo/bin ends up at index 0 (highest priority).
-        for suffix in &[".local/bin", ".cargo/bin"] {
-            let p = home.join(suffix);
-            if !paths.contains(&p) {
-                paths.insert(0, p);
-            }
+        // Insert in reverse order so MISE_SHIMS ends up at index 0 (highest priority).
+        for suffix in &[".local/bin", ".cargo/bin", MISE_SHIMS] {
+            prepend_if_missing(&mut paths, home.join(suffix));
         }
     }
     if let Ok(joined) = std::env::join_paths(&paths) {
