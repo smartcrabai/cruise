@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 
-// ─── Module mocks (hoisted by Vitest) ─────────────────────────────────────────
+// --- Module mocks (hoisted by Vitest) -----------------------------------------
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn(),
@@ -26,7 +26,6 @@ vi.mock("../lib/commands", () => ({
   cancelSession: vi.fn(),
   createSession: vi.fn(),
   deleteSession: vi.fn(),
-  discardSession: vi.fn(),
   fixSession: vi.fn(),
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
@@ -52,7 +51,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
-// ─── Imports after mocks ───────────────────────────────────────────────────────
+// --- Imports after mocks -------------------------------------------------------
 
 import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, downloadAndInstall } from "../lib/updater";
@@ -60,7 +59,7 @@ import type { Update } from "../lib/updater";
 import { getUpdateReadiness } from "../lib/commands";
 import { SessionSidebar } from "../components/SessionSidebar";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function makeUpdate(version: string): Update {
   return { version } as unknown as Update;
@@ -73,7 +72,7 @@ const defaultProps = {
   onRunAll: vi.fn(),
 };
 
-// ─── Tests: Version display ───────────────────────────────────────────────────
+// --- Tests: Version display ---------------------------------------------------
 
 describe("SessionSidebar footer - version display", () => {
   beforeEach(() => {
@@ -95,7 +94,7 @@ describe("SessionSidebar footer - version display", () => {
   });
 });
 
-// ─── Tests: Update check ──────────────────────────────────────────────────────
+// --- Tests: Update check ------------------------------------------------------
 
 describe("SessionSidebar footer - update check", () => {
   beforeEach(() => {
@@ -163,7 +162,7 @@ describe("SessionSidebar footer - update check", () => {
   });
 });
 
-// ─── Tests: Update flow ───────────────────────────────────────────────────────
+// --- Tests: Update flow -------------------------------------------------------
 
 describe("SessionSidebar footer - update flow", () => {
   beforeEach(() => {
@@ -236,7 +235,7 @@ describe("SessionSidebar footer - update flow", () => {
   });
 });
 
-// ─── Tests: Update readiness guard ───────────────────────────────────────────
+// --- Tests: Update readiness guard -------------------------------------------
 
 describe("SessionSidebar footer - update readiness guard", () => {
   beforeEach(() => {

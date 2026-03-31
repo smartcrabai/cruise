@@ -7,12 +7,28 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", content = "data", rename_all = "camelCase")]
 pub enum PlanEvent {
+    /// Session has been persisted to disk; emitted before plan generation begins so the
+    /// frontend can release the New Session form without waiting for the plan.
+    SessionCreated {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     /// Plan generation has started.
     PlanGenerating,
     /// Plan was generated successfully; `content` is the markdown text.
-    PlanGenerated { content: String },
+    /// `session_id` identifies which session this plan belongs to.
+    PlanGenerated {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        content: String,
+    },
     /// Plan generation failed; `error` contains the error message.
-    PlanFailed { error: String },
+    /// `session_id` identifies which session failed.
+    PlanFailed {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        error: String,
+    },
 }
 
 /// A single choice in an option step, serialized for IPC transport to the frontend.
@@ -91,8 +107,58 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn to_json(event: &WorkflowEvent) -> Value {
+    fn to_json<T: serde::Serialize>(event: &T) -> Value {
         serde_json::to_value(event).unwrap_or_else(|e| panic!("serialization failed: {e}"))
+    }
+
+    // --- PlanEvent ------------------------------------------------------------
+
+    #[test]
+    fn plan_event_session_created_serializes_session_id_as_camel_case() {
+        // Given: a SessionCreated event
+        let event = PlanEvent::SessionCreated {
+            session_id: "sess-42".to_string(),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: event tag is "sessionCreated" and data.sessionId is correct
+        assert_eq!(json["event"], "sessionCreated");
+        assert_eq!(json["data"]["sessionId"], "sess-42");
+    }
+
+    #[test]
+    fn plan_event_plan_generating_serializes_event_tag_only() {
+        // Given: a PlanGenerating event (no payload)
+        let event = PlanEvent::PlanGenerating;
+        // When: serialized
+        let json = to_json(&event);
+        // Then: event tag is present; adjacently-tagged unit variants omit data
+        assert_eq!(json["event"], "planGenerating");
+        assert!(json.get("data").is_none() || json["data"] == Value::Null);
+    }
+
+    #[test]
+    fn plan_event_plan_generated_serializes_all_fields() {
+        let event = PlanEvent::PlanGenerated {
+            session_id: "sess-1".to_string(),
+            content: "# Plan\n- step 1".to_string(),
+        };
+        let json = to_json(&event);
+        assert_eq!(json["event"], "planGenerated");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
+        assert_eq!(json["data"]["content"], "# Plan\n- step 1");
+    }
+
+    #[test]
+    fn plan_event_plan_failed_serializes_all_fields() {
+        let event = PlanEvent::PlanFailed {
+            session_id: "sess-2".to_string(),
+            error: "model error".to_string(),
+        };
+        let json = to_json(&event);
+        assert_eq!(json["event"], "planFailed");
+        assert_eq!(json["data"]["sessionId"], "sess-2");
+        assert_eq!(json["data"]["error"], "model error");
     }
 
     // --- StepStarted ---

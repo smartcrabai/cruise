@@ -1,4 +1,4 @@
-// Tauri GUI entry point — wired up in Phase 1 implementation.
+// Tauri GUI entry point - wired up in Phase 1 implementation.
 fn main() {
     fix_path_for_gui();
     cruise_gui::run();
