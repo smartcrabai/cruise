@@ -186,20 +186,26 @@ fn prepare_run_session(
 
 // ─── Filesystem commands ───────────────────────────────────────────────────────
 
+/// Expand a leading `~` to the home directory. Returns the path unchanged if it does
+/// not start with `~`.
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with('~') {
+        let home = home::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("{}{}", home, &path[1..])
+    } else {
+        path.to_string()
+    }
+}
+
 /// List subdirectories of `path`, returning up to 50 entries sorted alphabetically.
 ///
 /// `~` is expanded to `$HOME`. Hidden directories (`.`-prefixed) are excluded.
 /// Non-existent paths return an empty Vec rather than an error.
 #[tauri::command]
 pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, String> {
-    let expanded = if path.starts_with('~') {
-        let home = home::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        format!("{}{}", home, &path[1..])
-    } else {
-        path
-    };
+    let expanded = expand_tilde(&path);
 
     let dir = std::path::Path::new(&expanded);
     if !dir.exists() {
@@ -363,7 +369,7 @@ async fn run_plan_prompt_template(
     let prompt = vars
         .resolve(template)
         .map_err(|e: cruise::error::CruiseError| e.to_string())?;
-    let effective_model = plan_model.as_deref().or(config.model.as_deref());
+    let effective_model = plan_model.as_deref();
     let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
     let (resolved_command, model_arg) = if has_placeholder {
         (
@@ -441,21 +447,19 @@ pub async fn create_session(
     channel: tauri::ipc::Channel<PlanEvent>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
-    use cruise::resolver::resolve_config;
     use cruise::session::{SessionManager, SessionState};
     use cruise::variable::VariableStore;
 
-    let (yaml, source) = resolve_config(config_path.as_deref()).map_err(|e| e.to_string())?;
+    let (base, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
     let config =
         WorkflowConfig::from_yaml(&yaml).map_err(|e| format!("config parse error: {e}"))?;
     validate_config(&config).map_err(|e| e.to_string())?;
 
     let manager = new_session_manager()?;
     let session_id = SessionManager::new_session_id();
-    let base = std::path::PathBuf::from(&base_dir);
     let mut session = SessionState::new(
         session_id.clone(),
-        base,
+        base.clone(),
         source.display_string(),
         input.trim().to_string(),
     );
@@ -474,15 +478,7 @@ pub async fn create_session(
 
     let _ = channel.send(PlanEvent::PlanGenerating);
 
-    match run_plan_prompt_template(
-        &config,
-        &mut vars,
-        PLAN_PROMPT_TEMPLATE,
-        5,
-        Some(std::path::Path::new(&base_dir)),
-    )
-    .await
-    {
+    match run_plan_prompt_template(&config, &mut vars, PLAN_PROMPT_TEMPLATE, 5, Some(&base)).await {
         Ok(result) => {
             let content = match cruise::metadata::resolve_plan_content(
                 &plan_path,
@@ -1027,6 +1023,22 @@ pub fn do_respond_to_option(
     Ok(())
 }
 
+/// Normalize a raw GUI `base_dir` string (expand leading `~`) and resolve the
+/// workflow config relative to that directory.
+///
+/// Returns `(normalized_base_dir, yaml_content, config_source)`.
+pub(crate) fn resolve_gui_session_paths(
+    base_dir_raw: &str,
+    explicit_config: Option<&str>,
+) -> std::result::Result<(PathBuf, String, cruise::resolver::ConfigSource), String> {
+    let normalized = PathBuf::from(expand_tilde(base_dir_raw));
+
+    let (yaml, source) = cruise::resolver::resolve_config_in_dir(explicit_config, &normalized)
+        .map_err(|e| e.to_string())?;
+
+    Ok((normalized, yaml, source))
+}
+
 /// Determine whether the current launch context supports automatic in-place update.
 ///
 /// The Tauri updater on macOS replaces the `.app` bundle in-place using the path
@@ -1119,6 +1131,7 @@ mod tests {
     use cruise::cancellation::CancellationToken;
     use cruise::test_support::{init_git_repo, make_session};
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
@@ -1752,5 +1765,152 @@ mod tests {
 
         // Then: returns an error
         assert!(result.is_err(), "expected Err for missing session, got Ok");
+    }
+
+    // ─── resolve_gui_session_paths ───────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_gui_session_paths_local_config_beats_user_dir() {
+        // Given: base_dir contains cruise.yaml; ~/.cruise/default.yaml also exists
+        // (Regression: GUI used to resolve config from process cwd, picking user-dir default
+        //  instead of the repo-local file.)
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_home = fake_home.path().join(".cruise");
+        fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            cruise_home.join("default.yaml"),
+            "command: [userdir]\nsteps:\n  s:\n    command: userdir",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: GUI session paths are resolved for the repo base_dir
+        let (base, yaml, source) = resolve_gui_session_paths(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None")),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: the local config is selected (not the user-dir default)
+        assert!(
+            yaml.contains("local"),
+            "expected local config to be selected, got: {yaml}"
+        );
+        if let cruise::resolver::ConfigSource::Local(p) = &source {
+            assert_eq!(
+                p,
+                &repo_dir.path().join("cruise.yaml"),
+                "config_path must be <repo>/cruise.yaml"
+            );
+        } else {
+            panic!("expected ConfigSource::Local, got: {source:?}");
+        }
+        // And the returned base_dir matches the input
+        assert_eq!(base, repo_dir.path());
+    }
+
+    #[test]
+    fn test_resolve_gui_session_paths_expands_tilde_in_base_dir() {
+        // Given: base_dir starts with ~
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let target = fake_home.path().join("myrepo");
+        fs::create_dir_all(&target).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: base_dir with tilde is resolved
+        let (base, _yaml, _source) =
+            resolve_gui_session_paths("~/myrepo", None).unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: the returned base path is absolute (tilde expanded)
+        assert!(
+            base.is_absolute(),
+            "normalized base_dir must be absolute, got: {}",
+            base.display()
+        );
+        assert_eq!(base, target, "tilde must expand to home + suffix");
+    }
+
+    #[test]
+    fn test_resolve_gui_session_paths_explicit_config_wins_over_local() {
+        // Given: base_dir has cruise.yaml, and an explicit config path is also provided
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let explicit_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            explicit_file.path(),
+            "command: [explicit]\nsteps:\n  s:\n    command: explicit",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let explicit_path = explicit_file
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"))
+            .to_string();
+
+        let _lock = cruise::test_support::lock_process();
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: explicit config is specified
+        let (_, yaml, source) = resolve_gui_session_paths(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None")),
+            Some(&explicit_path),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: explicit config wins over local repo config
+        assert!(
+            yaml.contains("explicit"),
+            "expected explicit config, got: {yaml}"
+        );
+        assert!(
+            matches!(source, cruise::resolver::ConfigSource::Explicit(_)),
+            "expected ConfigSource::Explicit, got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_gui_session_paths_normalized_base_matches_absolute_input() {
+        // Given: base_dir is already an absolute path (no tilde)
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let raw = repo_dir
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"));
+
+        // When: resolved without tilde
+        let (base, _yaml, _source) =
+            resolve_gui_session_paths(raw, None).unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: the returned base_dir equals the input path exactly
+        assert_eq!(base, repo_dir.path());
     }
 }

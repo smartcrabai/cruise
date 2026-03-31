@@ -46,12 +46,35 @@ impl ConfigSource {
 /// 2. `CRUISE_CONFIG` env var — error if file does not exist.
 /// 3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`.
 /// 4. `~/.cruise/*.yaml` / `*.yml` — auto-select if exactly one, else prompt.
-/// 6. Built-in default.
+/// 5. Built-in default.
 ///
 /// # Errors
 ///
 /// Returns an error if an explicitly specified config file is not found or cannot be read.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| CruiseError::Other(format!("failed to get current directory: {e}")))?;
+    resolve_config_in_dir(explicit, &cwd)
+}
+
+/// Like [`resolve_config`] but uses `cwd` for local-file discovery instead of the
+/// process working directory.
+///
+/// This is safe to call from concurrent Tauri request handlers because it does not
+/// mutate `std::env::current_dir()`.  Resolution order is identical to [`resolve_config`]:
+/// 1. `explicit` — error if file does not exist.
+/// 2. `CRUISE_CONFIG` env var — error if file does not exist.
+/// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
+/// 4. `~/.cruise/*.yaml` / `*.yml`.
+/// 5. Built-in default.
+///
+/// # Errors
+///
+/// Returns an error if an explicitly specified config file is not found or cannot be read.
+pub fn resolve_config_in_dir(
+    explicit: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag).
     if let Some(path) = explicit {
         let buf = PathBuf::from(path);
@@ -78,22 +101,28 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
         return Ok((yaml, ConfigSource::EnvVar(to_absolute(buf))));
     }
 
-    // 3-4. Local config files: visible first, then hidden.
+    // 3. Local config files relative to `cwd` (not process cwd).
     for name in &["cruise.yaml", "cruise.yml", ".cruise.yaml", ".cruise.yml"] {
-        if let Some((yaml, path)) = try_read_local(name)? {
-            return Ok((yaml, ConfigSource::Local(path)));
+        let path = cwd.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(yaml) => return Ok((yaml, ConfigSource::Local(path))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(CruiseError::Other(format!(
+                    "failed to read '{}': {e}",
+                    path.display()
+                )));
+            }
         }
     }
 
-    // 5. ~/.cruise/*.yaml / *.yml
+    // 4. ~/.cruise/*.yaml / *.yml
     if let Some(home) = home::home_dir() {
         let cruise_dir = home.join(".cruise");
-        let files = collect_yaml_files(&cruise_dir);
+        let mut files = collect_yaml_files(&cruise_dir);
         if !files.is_empty() {
             let path = if files.len() == 1 {
-                let mut it = files.into_iter();
-                it.next()
-                    .ok_or_else(|| CruiseError::Other("unexpected empty file list".to_string()))?
+                files.remove(0)
             } else {
                 prompt_select_config(&files)?
             };
@@ -104,21 +133,10 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
         }
     }
 
-    // 6. Built-in default.
+    // 5. Built-in default.
     let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin())
         .map_err(|e| CruiseError::Other(format!("failed to serialize built-in config: {e}")))?;
     Ok((yaml, ConfigSource::Builtin))
-}
-
-/// Try to read a local file by name. Returns `Ok(None)` if not found, `Ok(Some(...))` on
-/// success, or `Err(...)` on other I/O errors.
-fn try_read_local(name: &str) -> Result<Option<(String, PathBuf)>> {
-    let path = PathBuf::from(name);
-    match std::fs::read_to_string(&path) {
-        Ok(yaml) => Ok(Some((yaml, to_absolute(path)))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(CruiseError::Other(format!("failed to read '{name}': {e}"))),
-    }
 }
 
 /// Convert a path to absolute by joining with the current working directory.
@@ -454,6 +472,207 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
         assert!(files.is_empty());
+    }
+
+    // ---- resolve_config_in_dir ----
+
+    #[test]
+    fn test_resolve_in_dir_local_config_beats_user_dir() {
+        // Given: a repo directory has cruise.yaml, and ~/.cruise/default.yaml also exists
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_home = fake_home.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_home.join("default.yaml"),
+            "command: [userdir]\nsteps:\n  s:\n    command: userdir",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved against the repo directory
+        let (yaml, source) =
+            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the repo-local config wins over the user-dir default
+        assert!(yaml.contains("local"), "expected local config, got: {yaml}");
+        assert!(
+            matches!(source, ConfigSource::Local(_)),
+            "expected Local, got: {source:?}"
+        );
+        if let ConfigSource::Local(p) = source {
+            assert_eq!(p, repo_dir.path().join("cruise.yaml"));
+        }
+    }
+
+    #[test]
+    fn test_resolve_in_dir_does_not_use_process_cwd() {
+        // Given: process cwd has cruise.yaml, but the given dir does not
+        let process_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            process_dir.path().join("cruise.yaml"),
+            "command: [process_cwd]\nsteps:\n  s:\n    command: process_cwd",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let other_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        std::env::set_current_dir(process_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved against a different directory (not the process cwd)
+        let (_yaml, source) =
+            resolve_config_in_dir(None, other_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the process cwd's cruise.yaml is NOT picked up; falls back to builtin
+        assert!(
+            matches!(source, ConfigSource::Builtin),
+            "expected Builtin (process cwd should be ignored), got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_dir_explicit_path_bypasses_dir() {
+        // Given: a repo dir with local cruise.yaml, and a separate explicit config file
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let explicit_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            explicit_file.path(),
+            "command: [explicit]\nsteps:\n  s:\n    command: explicit",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let explicit_path = explicit_file
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"))
+            .to_string();
+
+        let _dir_guard = DirGuard::new();
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: an explicit config path is provided alongside a repo dir
+        let (yaml, source) = resolve_config_in_dir(Some(&explicit_path), repo_dir.path())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the explicit config wins over local repo config
+        assert!(
+            yaml.contains("explicit"),
+            "expected explicit config, got: {yaml}"
+        );
+        assert!(
+            matches!(source, ConfigSource::Explicit(_)),
+            "expected Explicit, got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_dir_env_var_bypasses_dir() {
+        // Given: a repo dir with cruise.yaml, and CRUISE_CONFIG pointing elsewhere
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            env_file.path(),
+            "command: [envvar]\nsteps:\n  s:\n    command: envvar",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_path = env_file
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"));
+
+        let _dir_guard = DirGuard::new();
+        let _env_guard = EnvGuard::set("CRUISE_CONFIG", std::ffi::OsStr::new(env_path));
+
+        // When: resolved against the repo dir while CRUISE_CONFIG is set
+        let (yaml, source) =
+            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: CRUISE_CONFIG wins over local repo config
+        assert!(
+            yaml.contains("envvar"),
+            "expected envvar config, got: {yaml}"
+        );
+        assert!(
+            matches!(source, ConfigSource::EnvVar(_)),
+            "expected EnvVar, got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_dir_falls_back_to_user_dir() {
+        // Given: repo dir has no local config; home has exactly one ~/.cruise/*.yaml
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_home = fake_home.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_home.join("myconf.yaml"),
+            "command: [userdir]\nsteps:\n  s:\n    command: userdir",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        // `home` crate 0.5.x uses USERPROFILE on Windows, HOME on Unix.
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let _home_guard = EnvGuard::set(home_var, fake_home.path().as_os_str());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved against the empty repo dir
+        let (yaml, source) =
+            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: falls back to user-dir config, not builtin
+        assert!(
+            yaml.contains("userdir"),
+            "expected userdir config, got: {yaml}"
+        );
+        assert!(
+            matches!(source, ConfigSource::UserDir(_)),
+            "expected UserDir, got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_dir_falls_back_to_builtin() {
+        // Given: repo dir has no local config and home has no ~/.cruise files
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved with nothing available
+        let (_yaml, source) =
+            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: falls back to built-in default
+        assert!(
+            matches!(source, ConfigSource::Builtin),
+            "expected Builtin, got: {source:?}"
+        );
     }
 
     // ---- builtin roundtrip ----
