@@ -754,6 +754,7 @@ async fn execute_single_session(
 
             let mut vars = VariableStore::new(input);
             vars.set_named_file("plan", plan_path);
+            let exec_root_path = exec_root.clone();
             let mut tracker = FileTracker::with_root(exec_root);
 
             let ctx = ExecutionContext {
@@ -764,6 +765,7 @@ async fn execute_single_session(
                 cancel_token: Some(&token_for_task),
                 option_handler: &handler,
                 config_reloader: None,
+                working_dir: Some(&exec_root_path),
             };
 
             let handle = tokio::runtime::Handle::current();
