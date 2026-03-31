@@ -159,11 +159,6 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         return Err(CruiseError::CommandError(error_msg));
     }
 
-    // Also detect rate limits reported via stderr.
-    if is_rate_limited(&stderr) {
-        return Err(CruiseError::CommandError(stderr));
-    }
-
     Ok((String::from_utf8_lossy(&stdout_bytes).to_string(), stderr))
 }
 
