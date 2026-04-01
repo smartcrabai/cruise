@@ -74,8 +74,7 @@ impl Prompt for CruisePrompt {
 pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
     println!("{message}");
     let kb = build_keybindings();
-    let edit_mode = Box::new(Emacs::new(kb));
-    let mut editor = Reedline::create().with_edit_mode(edit_mode);
+    let mut editor = build_reedline(kb);
     let prompt = CruisePrompt;
 
     loop {
@@ -86,13 +85,27 @@ pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
     }
 }
 
+/// Create the [`Reedline`] editor used by [`prompt_multiline`].
+///
+/// Enables the kitty keyboard enhancement protocol so that terminals that
+/// support it (e.g. kitty, `WezTerm`, foot) can distinguish `Shift+Enter` from
+/// plain `Enter`.  On terminals without support the enhancement is silently
+/// ignored by reedline.
+fn build_reedline(kb: Keybindings) -> Reedline {
+    let edit_mode = Box::new(Emacs::new(kb));
+    Reedline::create()
+        .use_kitty_keyboard_enhancement(true)
+        .with_edit_mode(edit_mode)
+}
+
 /// Build the Cruise-specific keybindings on top of the default Emacs set.
 ///
 /// Changes from the Emacs defaults:
 /// - `Esc` is remapped from [`ReedlineEvent::Esc`] to [`ReedlineEvent::CtrlC`]
 ///   so that it cancels input consistently, matching Ctrl+C behaviour.
 /// - `Alt+Enter` and `Shift+Enter` already emit `InsertNewline` in the Emacs
-///   defaults and are left unchanged.
+///   defaults and are left unchanged.  For `Shift+Enter` to fire in practice
+///   the caller must enable kitty keyboard enhancement; see [`build_reedline`].
 fn build_keybindings() -> Keybindings {
     let mut kb = default_emacs_keybindings();
     kb.add_binding(KeyModifiers::NONE, KeyCode::Esc, ReedlineEvent::CtrlC);
