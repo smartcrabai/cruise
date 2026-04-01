@@ -464,6 +464,9 @@ pub async fn create_session(
     );
     session.config_path = source.path().cloned();
     manager.create(&session).map_err(|e| e.to_string())?;
+    let _ = channel.send(PlanEvent::SessionCreated {
+        session_id: session_id.clone(),
+    });
 
     let session_dir = manager.sessions_dir().join(&session_id);
     if session.config_path.is_none() {
