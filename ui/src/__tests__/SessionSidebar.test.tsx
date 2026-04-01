@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, waitFor, cleanup } from "@testing-library/react";
 import { SessionSidebar } from "../components/SessionSidebar";
+import { PLANNING_LABEL } from "../components/PhaseBadge";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
@@ -489,6 +490,24 @@ describe("SessionSidebar", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("plan ready for approval")).toBeTruthy();
     });
+  });
+
+  it("shows 'Planning' label for 'Awaiting Approval' session when planAvailable is false", async () => {
+    // Given: a session that is awaiting approval but plan is not yet generated
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: false }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: the label shows "Planning" instead of "Awaiting Approval"
+    await waitFor(() => {
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+    });
+
+    // And: no blue dot is shown
+    expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
   });
 
 });

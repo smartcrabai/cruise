@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
-import { PhaseBadge } from "../components/PhaseBadge";
+import { PhaseBadge, PLANNING_LABEL } from "../components/PhaseBadge";
 
 // aria-label used by the blue "approve ready" indicator inside PhaseBadge
 const PLAN_READY_LABEL = "plan ready for approval";
@@ -35,18 +35,28 @@ describe("PhaseBadge", () => {
       expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
     });
 
-    it("always renders the text 'Awaiting Approval' regardless of planAvailable", () => {
+    it("renders 'Awaiting Approval' text when planAvailable is true", () => {
       // Given / When
-      const { rerender } = render(
-        <PhaseBadge phase="Awaiting Approval" planAvailable={true} />,
-      );
-      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+      render(<PhaseBadge phase="Awaiting Approval" planAvailable={true} />);
 
-      rerender(<PhaseBadge phase="Awaiting Approval" planAvailable={false} />);
+      // Then
       expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+    });
 
-      rerender(<PhaseBadge phase="Awaiting Approval" />);
-      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+    it("renders 'Planning' text when planAvailable is false", () => {
+      // Given / When
+      render(<PhaseBadge phase="Awaiting Approval" planAvailable={false} />);
+
+      // Then
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+    });
+
+    it("renders 'Planning' text when planAvailable is undefined (safe default)", () => {
+      // Given / When
+      render(<PhaseBadge phase="Awaiting Approval" />);
+
+      // Then
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
     });
   });
 
