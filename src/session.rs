@@ -232,6 +232,12 @@ impl SessionManager {
         self.base.join("worktrees")
     }
 
+    /// Get the run log path for a session.
+    #[must_use]
+    pub fn run_log_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(session_id).join("run.log")
+    }
+
     /// Generate a new unique session ID from current UTC time.
     #[must_use]
     pub fn new_session_id() -> String {
@@ -543,6 +549,30 @@ pub fn current_iso8601() -> String {
         .as_secs();
     let (year, month, day, h, m, s) = seconds_to_datetime(secs);
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Appends timestamped log lines to `<sessions_dir>/<session_id>/run.log`.
+pub struct SessionLogger {
+    path: std::path::PathBuf,
+}
+
+impl SessionLogger {
+    #[must_use]
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn write(&self, line: &str) {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let ts = current_iso8601();
+            let _ = writeln!(file, "[{ts}] {line}");
+        }
+    }
 }
 
 /// Parse an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`) to Unix seconds.
@@ -1796,5 +1826,84 @@ mod tests {
 
         // Then: an error is returned
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_session_logger_creates_file_and_writes_line() {
+        // Given: a temp directory and a log path
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_path = tmp.path().join("run.log");
+        let logger = SessionLogger::new(log_path.clone());
+
+        // When: writing a log line
+        logger.write("test message");
+
+        // Then: the file exists and contains the message
+        let content = std::fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            content.contains("test message"),
+            "log should contain 'test message'"
+        );
+    }
+
+    #[test]
+    fn test_session_logger_line_format_has_timestamp_prefix() {
+        // Given: a log file path
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_path = tmp.path().join("run.log");
+        let logger = SessionLogger::new(log_path.clone());
+
+        // When: writing a log line
+        logger.write("hello");
+
+        // Then: the line is formatted as "[YYYY-MM-DDTHH:MM:SSZ] hello"
+        let content = std::fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let line = content
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("should have at least one line"));
+        assert!(line.starts_with('['), "line should start with '['");
+        assert!(line.contains("] hello"), "line should contain '] hello'");
+    }
+
+    #[test]
+    fn test_session_logger_appends_multiple_writes() {
+        // Given: a log file path
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_path = tmp.path().join("run.log");
+        let logger = SessionLogger::new(log_path.clone());
+
+        // When: writing three log lines
+        logger.write("line one");
+        logger.write("line two");
+        logger.write("line three");
+
+        // Then: the file contains all 3 lines in order
+        let content = std::fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3, "should have 3 lines");
+        assert!(
+            lines[0].contains("line one"),
+            "first line should contain 'line one'"
+        );
+        assert!(
+            lines[1].contains("line two"),
+            "second line should contain 'line two'"
+        );
+        assert!(
+            lines[2].contains("line three"),
+            "third line should contain 'line three'"
+        );
+    }
+
+    #[test]
+    fn test_session_logger_write_silently_ignores_nonexistent_directory() {
+        // Given: a path inside a non-existent directory
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_path = tmp.path().join("nonexistent_dir").join("run.log");
+        let logger = SessionLogger::new(log_path);
+
+        // When/Then: writing does not panic even if the parent directory doesn't exist
+        logger.write("this should not panic");
     }
 }

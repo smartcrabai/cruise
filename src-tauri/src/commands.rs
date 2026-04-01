@@ -1,11 +1,10 @@
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cruise::cancellation::CancellationToken;
 use cruise::session::{
-    SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601, get_cruise_home,
+    SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601,
+    get_cruise_home,
 };
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
@@ -340,7 +339,7 @@ pub async fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
 #[tauri::command]
 pub fn get_session_log(session_id: String) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
-    let log_path = manager.sessions_dir().join(&session_id).join("run.log");
+    let log_path = manager.run_log_path(&session_id);
     match std::fs::read_to_string(&log_path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -676,30 +675,6 @@ pub async fn ask_session(
     do_ask_session(&manager, &session_id, question).await
 }
 
-// ─── SessionLogger ─────────────────────────────────────────────────────────────
-
-/// Appends timestamped log lines to `<sessions_dir>/<session_id>/run.log`.
-struct SessionLogger {
-    path: std::path::PathBuf,
-}
-
-impl SessionLogger {
-    fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn write(&self, line: &str) {
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            let ts = current_iso8601();
-            let _ = writeln!(file, "[{ts}] {line}");
-        }
-    }
-}
-
 // ─── run_session / run_all_sessions ────────────────────────────────────────────
 
 /// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
@@ -774,7 +749,7 @@ async fn execute_single_session(
     let channel_for_emitter = channel.clone();
     let sid_for_spawn = session_id.to_string();
     let sid_for_emitter = session_id.to_string();
-    let log_path = manager.sessions_dir().join(session_id).join("run.log");
+    let log_path = manager.run_log_path(session_id);
 
     let exec_result = tokio::task::spawn_blocking(
         move || -> cruise::error::Result<cruise::engine::ExecutionResult> {
