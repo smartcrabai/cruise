@@ -16,7 +16,6 @@ import {
   cancelSession,
   createSession,
   deleteSession,
-  discardSession,
   fixSession,
   getSession,
   getSessionLog,
@@ -910,17 +909,12 @@ function EmptyState() {
 
 // ─── NewSessionForm ────────────────────────────────────────────────────────────
 
-type PlanPhase = "input" | "generating" | "generated" | "fixing";
-
 interface NewSessionDraft {
   input: string;
   configPath: string;
   baseDir: string;
-  planPhase: PlanPhase;
-  planContent: string;
-  sessionId: string | null;
+  isGenerating: boolean;
   error: string | null;
-  feedback: string;
 }
 
 function createInitialNewSessionDraft(): NewSessionDraft {
@@ -928,29 +922,21 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     input: "",
     configPath: "",
     baseDir: "",
-    planPhase: "input",
-    planContent: "",
-    sessionId: null,
+    isGenerating: false,
     error: null,
-    feedback: "",
   };
 }
 
 interface NewSessionFormProps {
   draft: NewSessionDraft;
   onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
-  onReset: () => void;
-  onCreated: (sessionId: string) => void;
+  onRefreshSidebar: () => void;
 }
 
-function NewSessionForm({ draft, onDraftChange, onReset, onCreated }: NewSessionFormProps) {
+function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
-  const [askPhase, setAskPhase] = useState<"idle" | "editing" | "submitting">("idle");
-  const [askQuestion, setAskQuestion] = useState("");
-  const [askResponse, setAskResponse] = useState("");
-  const [askError, setAskError] = useState("");
 
-  const { input, configPath, baseDir, planPhase, planContent, sessionId, error, feedback } = draft;
+  const { input, configPath, baseDir, isGenerating, error } = draft;
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
@@ -978,89 +964,33 @@ function NewSessionForm({ draft, onDraftChange, onReset, onCreated }: NewSession
 
   async function handleGenerate() {
     if (!input.trim()) return;
-    onDraftChange((prev) => ({ ...prev, error: null, planPhase: "generating" }));
+    onDraftChange((prev) => ({ ...prev, error: null, isGenerating: true }));
+    let formReleased = false;
 
     const channel = new Channel<PlanEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "planGenerated") {
-        onDraftChange((prev) => ({ ...prev, planContent: event.data.content, planPhase: "generated" }));
-      } else if (event.event === "planFailed") {
-        onDraftChange((prev) => ({ ...prev, error: event.data.error, planPhase: "input" }));
+      if (event.event === "sessionCreated") {
+        formReleased = true;
+        onDraftChange((prev) => ({
+          ...createInitialNewSessionDraft(),
+          baseDir: prev.baseDir,
+          configPath: prev.configPath,
+        }));
+        onRefreshSidebar();
+      } else if (event.event === "planGenerated" || event.event === "planFailed") {
+        onRefreshSidebar();
       }
     };
 
     try {
-      const id = await createSession(
-        {
-          input: input.trim(),
-          configPath: configPath || undefined,
-          baseDir: baseDir || ".",
-        },
-        channel
+      await createSession(
+        { input: input.trim(), configPath: configPath || undefined, baseDir: baseDir || "." },
+        channel,
       );
-      set("sessionId", id);
     } catch (e) {
-      onDraftChange((prev) => ({ ...prev, error: String(e), planPhase: "input" }));
-    }
-  }
-
-  async function handleApprove() {
-    if (!sessionId) return;
-    set("error", null);
-    try {
-      await approveSession(sessionId);
-      onReset();
-      onCreated(sessionId);
-    } catch (e) {
-      set("error", String(e));
-    }
-  }
-
-  async function handleDiscard() {
-    if (!sessionId) return;
-    set("error", null);
-    try {
-      await discardSession(sessionId);
-      onReset();
-    } catch (e) {
-      set("error", String(e));
-    }
-  }
-
-  async function handleFix() {
-    if (!sessionId || !feedback.trim()) return;
-    onDraftChange((prev) => ({ ...prev, error: null, planPhase: "generating" }));
-
-    const channel = new Channel<PlanEvent>();
-    channel.onmessage = (event) => {
-      if (event.event === "planGenerated") {
-        onDraftChange((prev) => ({ ...prev, planContent: event.data.content, planPhase: "generated", feedback: "" }));
-        setAskResponse("");
-      } else if (event.event === "planFailed") {
-        onDraftChange((prev) => ({ ...prev, error: event.data.error, planPhase: "generated" }));
+      if (!formReleased) {
+        onDraftChange((prev) => ({ ...prev, error: String(e), isGenerating: false }));
       }
-    };
-
-    try {
-      await fixSession({ sessionId, feedback: feedback.trim() }, channel);
-    } catch (e) {
-      onDraftChange((prev) => ({ ...prev, error: String(e), planPhase: "generated" }));
-    }
-  }
-
-  async function handleAsk() {
-    const trimmed = askQuestion.trim();
-    if (!sessionId || !trimmed) return;
-    setAskPhase("submitting");
-    setAskError("");
-
-    try {
-      const answer = await askSession(sessionId, trimmed);
-      setAskResponse(answer);
-      setAskPhase("idle");
-    } catch (e) {
-      setAskError(String(e));
-      setAskPhase("editing");
     }
   }
 
@@ -1070,7 +1000,7 @@ function NewSessionForm({ draft, onDraftChange, onReset, onCreated }: NewSession
         <h2 className="text-lg font-semibold text-gray-100">New Session</h2>
       </div>
 
-      <div className={`flex-1 overflow-hidden p-6 ${planPhase === "generated" || planPhase === "fixing" ? "flex flex-col gap-4" : "overflow-auto space-y-5"}`}>
+      <div className="flex-1 overflow-auto p-6 space-y-5">
         {/* Error banner */}
         {error && (
           <div className="bg-red-900/40 border border-red-700 rounded px-4 py-3 text-sm text-red-300">
@@ -1078,177 +1008,69 @@ function NewSessionForm({ draft, onDraftChange, onReset, onCreated }: NewSession
           </div>
         )}
 
-        {/* Input form */}
-        {(planPhase === "input" || planPhase === "generating") && (
-          <>
-            {/* Config selector */}
-            <div className="space-y-1.5">
-              <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
-              <select
-                id="config-select"
-                value={configPath}
-                onChange={(e) => set("configPath", e.target.value)}
-                disabled={planPhase === "generating"}
-                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
-              >
-                <option value="">Default (builtin)</option>
-                {configs.map((c) => (
-                  <option key={c.path} value={c.path}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+        {/* Config selector */}
+        <div className="space-y-1.5">
+          <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
+          <select
+            id="config-select"
+            value={configPath}
+            onChange={(e) => set("configPath", e.target.value)}
+            disabled={isGenerating}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+          >
+            <option value="">Default (builtin)</option>
+            {configs.map((c) => (
+              <option key={c.path} value={c.path}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
-            {/* Base dir */}
-            <div className="space-y-1.5">
-              <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
-              <DirectoryPicker
-                id="base-dir-input"
-                value={baseDir}
-                onChange={(v) => set("baseDir", v)}
-                disabled={planPhase === "generating"}
-                placeholder="e.g. /Users/you/projects/myapp"
-              />
-            </div>
+        {/* Base dir */}
+        <div className="space-y-1.5">
+          <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
+          <DirectoryPicker
+            id="base-dir-input"
+            value={baseDir}
+            onChange={(v) => set("baseDir", v)}
+            disabled={isGenerating}
+            placeholder="e.g. /Users/you/projects/myapp"
+          />
+        </div>
 
-            {/* Task input */}
-            <div className="space-y-1.5">
-              <label htmlFor="task-input" className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
-              <textarea
-                id="task-input"
-                value={input}
-                onChange={(e) => set("input", e.target.value)}
-                disabled={planPhase === "generating"}
-                rows={4}
-                placeholder="Describe what you want to implement…"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none disabled:opacity-50"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleGenerate();
-                }}
-              />
-            </div>
+        {/* Task input */}
+        <div className="space-y-1.5">
+          <label htmlFor="task-input" className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
+          <textarea
+            id="task-input"
+            value={input}
+            onChange={(e) => set("input", e.target.value)}
+            disabled={isGenerating}
+            rows={4}
+            placeholder="Describe what you want to implement..."
+            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none disabled:opacity-50"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleGenerate();
+            }}
+          />
+        </div>
 
-            <button
-              type="button"
-              onClick={() => void handleGenerate()}
-              disabled={planPhase === "generating" || !input.trim()}
-              className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {planPhase === "generating" ? (
-                <>
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                  Generating plan…
-                </>
-              ) : (
-                "Generate plan"
-              )}
-            </button>
-          </>
-        )}
-
-        {/* Plan review */}
-        {(planPhase === "generated" || planPhase === "fixing") && (
-          <>
-            {/* Ask answer (shown above plan when available) */}
-            {planPhase === "generated" && askResponse && (
-              <div className="border border-gray-700 rounded bg-gray-900/50 p-3">
-                <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Answer</div>
-                <MarkdownViewer content={askResponse} className="" />
-              </div>
-            )}
-
-            <div className="flex-1 flex flex-col min-h-0 gap-1.5">
-              <span className="text-xs text-gray-500 uppercase tracking-wide">Generated Plan</span>
-              <div className="flex-1 bg-gray-900 border border-gray-700 rounded overflow-auto min-h-0">
-                <MarkdownViewer content={planContent} className="p-4" />
-              </div>
-            </div>
-
-            {/* Ask editor */}
-            {planPhase === "generated" && askPhase !== "idle" && (
-              <AskEditor
-                question={askQuestion}
-                onQuestionChange={setAskQuestion}
-                phase={askPhase}
-                error={askError}
-                onSubmit={handleAsk}
-                onCancel={() => { setAskPhase("idle"); setAskQuestion(""); setAskError(""); }}
-                className="space-y-1.5"
-              />
-            )}
-
-            {/* Fix feedback */}
-            {planPhase === "fixing" && (
-              <div className="space-y-1.5">
-                <label htmlFor="fix-instructions-input" className="text-xs text-gray-500 uppercase tracking-wide">Fix Instructions</label>
-                <textarea
-                  id="fix-instructions-input"
-                  value={feedback}
-                  onChange={(e) => set("feedback", e.target.value)}
-                  rows={3}
-                  autoFocus
-                  placeholder="Describe how to revise the plan…"
-                  className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleFix();
-                  }}
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleFix()}
-                    disabled={!feedback.trim()}
-                    className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Apply Fix
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => set("planPhase", "generated")}
-                    className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Action buttons (hidden while ask editor is open) */}
-            {planPhase === "generated" && askPhase === "idle" && (
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleApprove()}
-                  className="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600"
-                >
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  onClick={() => set("planPhase", "fixing")}
-                  className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
-                >
-                  Fix
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAskPhase("editing")}
-                  className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
-                >
-                  Ask
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDiscard()}
-                  className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-gray-800"
-                >
-                  Discard
-                </button>
-              </div>
-            )}
-          </>
-        )}
+        <button
+          type="button"
+          onClick={() => void handleGenerate()}
+          disabled={isGenerating || !input.trim()}
+          className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {isGenerating ? (
+            <>
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+              Creating session…
+            </>
+          ) : (
+            "Generate plan"
+          )}
+        </button>
       </div>
     </div>
   );
@@ -1510,18 +1332,7 @@ export default function App() {
           <NewSessionForm
             draft={newSessionDraft}
             onDraftChange={setNewSessionDraft}
-            onReset={() => setNewSessionDraft(createInitialNewSessionDraft())}
-            onCreated={(id) => {
-              sidebarRefreshRef.current?.();
-              void getSession(id)
-                .then((session) => {
-                  setSelectedSession(session);
-                  setView("session");
-                })
-                .catch(() => {
-                  setView("session");
-                });
-            }}
+            onRefreshSidebar={() => sidebarRefreshRef.current?.()}
           />
         ) : selectedSession ? (
           <WorkflowRunner
