@@ -14,8 +14,8 @@ use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
 use crate::plan_cmd::PLAN_VAR;
 use crate::session::{
-    SessionFileContents, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
-    WorkspaceMode, current_iso8601, get_cruise_home,
+    SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
+    SessionStateFingerprint, WorkspaceMode, current_iso8601, get_cruise_home,
 };
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -362,9 +362,13 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                 Ok(Some(compiled))
             }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>
         });
+    let log_path = manager.run_log_path(&session_id);
+    let logger = SessionLogger::new(log_path);
+    logger.write("--- run started ---");
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let on_step_start = |step: &str| {
+        logger.write(step);
         let mut s = session_cell.borrow_mut();
         s.current_step = Some(step.to_string());
         let fingerprint =
@@ -394,6 +398,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     // Handle Ctrl+C: save as Suspended so the session can be resumed later.
     if matches!(exec_result, Err(CruiseError::Interrupted)) {
+        logger.write("⏸ cancelled");
         eprintln!(
             "\n{} Interrupted — session saved as Suspended.",
             style("⏸").yellow().bold()
@@ -405,7 +410,10 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     let overall_result = match exec_result {
         Ok(exec) => {
-            let _ = (exec.run, exec.skipped, exec.failed);
+            logger.write(&format!(
+                "✓ completed — run: {}, skipped: {}, failed: {}",
+                exec.run, exec.skipped, exec.failed
+            ));
             match &execution_workspace {
                 ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
                 ExecutionWorkspace::Worktree { ctx, .. } => {
@@ -422,7 +430,10 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                 }
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            logger.write(&format!("✗ failed: {}", e.detailed_message()));
+            Err(e)
+        }
     };
 
     if let Err(e) = &overall_result
