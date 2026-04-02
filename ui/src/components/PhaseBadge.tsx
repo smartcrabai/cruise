@@ -1,5 +1,8 @@
 import type { SessionPhase } from "../types";
 
+/** Display label shown when phase is "Awaiting Approval" but plan isn't ready yet. */
+export const PLANNING_LABEL = "Planning";
+
 const PHASE_COLORS: Record<SessionPhase, string> = {
   "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
   Planned: "bg-blue-900/50 text-blue-300",
@@ -17,7 +20,9 @@ export function PhaseBadge({
   planAvailable?: boolean;
 }) {
   const cls = PHASE_COLORS[phase];
-  const showApproveReady = phase === "Awaiting Approval" && planAvailable === true;
+  const isAwaiting = phase === "Awaiting Approval";
+  const showApproveReady = isAwaiting && planAvailable === true;
+  const displayLabel = isAwaiting && planAvailable !== true ? PLANNING_LABEL : phase;
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
       {showApproveReady && (
@@ -27,7 +32,7 @@ export function PhaseBadge({
           className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
         />
       )}
-      {phase}
+      {displayLabel}
     </span>
   );
 }
