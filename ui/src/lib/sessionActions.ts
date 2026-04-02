@@ -1,6 +1,6 @@
 import type { Session } from "../types";
 
-export type RunStatus = "idle" | "running";
+export type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 /** Which action buttons are visible in the session detail pane. */
 export interface SessionActions {
@@ -41,6 +41,10 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
   const isRunning = status === "running";
   const showCancel = isRunning;
 
+  // Local execution finished but refreshSession() hasn't updated session.phase yet.
+  const isAwaitingRefresh =
+    !isRunning && status !== "idle" && phase === "Running";
+
   const awaitingApprovalWithPlan =
     !isRunning && phase === "Awaiting Approval" && session.planAvailable === true;
 
@@ -52,6 +56,7 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
 
   const showRun =
     !isRunning &&
+    !isAwaitingRefresh &&
     (phase === "Running" ||
     phase === "Suspended" ||
     phase === "Failed");
@@ -61,6 +66,7 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
 
   const showReset =
     !isRunning &&
+    !isAwaitingRefresh &&
     (phase === "Running" ||
     phase === "Suspended" ||
     phase === "Failed" ||

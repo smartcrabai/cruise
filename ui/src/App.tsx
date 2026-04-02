@@ -32,7 +32,7 @@ import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionSidebar } from "./components/SessionSidebar";
-import { getSessionActions } from "./lib/sessionActions";
+import { getSessionActions, type RunStatus } from "./lib/sessionActions";
 import { formatLocalTime } from "./lib/format";
 
 // ─── OptionDialog ─────────────────────────────────────────────────────────────
@@ -296,7 +296,6 @@ interface PendingOption {
   plan?: string;
 }
 
-type ExecStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 type ActiveTab = "info" | "plan" | "log";
 
 function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
@@ -308,7 +307,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const panelPlanId = `${uid}-panel-plan`;
   const panelLogId = `${uid}-panel-log`;
 
-  const [status, setStatus] = useState<ExecStatus>("idle");
+  const [status, setStatus] = useState<RunStatus>("idle");
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
   const [savedLog, setSavedLog] = useState<string>("");
@@ -557,7 +556,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }
 
-  const actions = getSessionActions(session, status === "running" ? "running" : "idle");
+  const actions = getSessionActions(session, status);
   const canShowFix = actions.showFix && replanPhase === "idle" && askPhase === "idle";
 
   // Decide which log content to show
