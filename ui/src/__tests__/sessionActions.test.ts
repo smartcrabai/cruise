@@ -490,4 +490,71 @@ describe("getSessionActions", () => {
       expect(actions.showCancel).toBe(false);
     });
   });
+
+  // --- post-run transitioning states ----------------------------------------
+
+  describe("post-run transitioning states (status completed/failed/cancelled with stale Running phase)", () => {
+    it.each(["completed", "failed", "cancelled"] as const)(
+      "hides Resume and Reset when status is '%s' and phase is still 'Running'",
+      (terminalStatus) => {
+        const session = makeSession({ phase: "Running" });
+        const actions = getSessionActions(session, terminalStatus);
+
+        expect(actions.showRun).toBe(false);
+        expect(actions.showReset).toBe(false);
+      },
+    );
+
+    it("hides Cancel when status is 'completed'", () => {
+      const session = makeSession({ phase: "Running" });
+      const actions = getSessionActions(session, "completed");
+
+      expect(actions.showCancel).toBe(false);
+    });
+
+    it("hides Delete when phase is still 'Running' regardless of status", () => {
+      const session = makeSession({ phase: "Running" });
+      const actions = getSessionActions(session, "completed");
+
+      expect(actions.showDelete).toBe(false);
+    });
+  });
+
+  // --- post-run states after refresh (phase updated) ------------------------
+
+  describe("post-run states after phase refresh", () => {
+    it("shows Reset after refresh: status 'completed', phase 'Completed'", () => {
+      const session = makeSession({ phase: "Completed" });
+      const actions = getSessionActions(session, "completed");
+
+      expect(actions.showReset).toBe(true);
+    });
+
+    it("shows Retry after refresh: status 'failed', phase 'Failed'", () => {
+      const session = makeSession({ phase: "Failed" });
+      const actions = getSessionActions(session, "failed");
+
+      expect(actions.showRun).toBe(true);
+      expect(actions.runLabel).toBe("Retry");
+    });
+
+    it("shows Resume after refresh: status 'cancelled', phase 'Suspended'", () => {
+      const session = makeSession({ phase: "Suspended" });
+      const actions = getSessionActions(session, "cancelled");
+
+      expect(actions.showRun).toBe(true);
+      expect(actions.runLabel).toBe("Resume");
+    });
+
+    it.each([
+      ["completed", "Completed"],
+      ["failed", "Failed"],
+      ["cancelled", "Suspended"],
+    ] as const)("shows Delete after refresh: status '%s', phase '%s'", (terminalStatus, phase) => {
+      const session = makeSession({ phase });
+      const actions = getSessionActions(session, terminalStatus);
+
+      expect(actions.showDelete).toBe(true);
+    });
+  });
 });
