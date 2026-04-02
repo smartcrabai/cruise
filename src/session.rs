@@ -1897,6 +1897,30 @@ mod tests {
     }
 
     #[test]
+    fn test_state_json_round_trip_preserves_control_characters_in_input() {
+        let cases = &[
+            "first line\nsecond line\nthird line",
+            "line one\r\nline two\rline three",
+            "col1\tcol2\tcol3",
+            "line1\nline2\tindented\r\nwin-line",
+        ];
+        for &input in cases {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let manager = SessionManager::new(tmp.path().to_path_buf());
+            let id = "20260401120000".to_string();
+            let state = SessionState::new(
+                id.clone(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                input.to_string(),
+            );
+            manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+            let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(loaded.input, input, "input should round-trip: {input:?}");
+        }
+    }
+
+    #[test]
     fn test_session_logger_write_silently_ignores_nonexistent_directory() {
         // Given: a path inside a non-existent directory
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
