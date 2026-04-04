@@ -32,10 +32,11 @@ export interface SessionActions {
  * For Awaiting Approval sessions, follows the approve-plan review loop
  * (`src/plan_cmd.rs:218-295`) rather than the CLI list phase-action matrix.
  *
- * @param session - The current session DTO (always reflects latest persisted state).
- * @param status  - Whether the local process is actively running this session.
+ * @param session  - The current session DTO (always reflects latest persisted state).
+ * @param status   - Whether the local process is actively running this session.
+ * @param isFixing - When true, suppresses Approve/Fix/Ask while a plan fix is in progress.
  */
-export function getSessionActions(session: Session, status: RunStatus): SessionActions {
+export function getSessionActions(session: Session, status: RunStatus, isFixing?: boolean): SessionActions {
   const { phase } = session;
 
   const isRunning = status === "running";
@@ -46,7 +47,7 @@ export function getSessionActions(session: Session, status: RunStatus): SessionA
     !isRunning && status !== "idle" && phase === "Running";
 
   const awaitingApprovalWithPlan =
-    !isRunning && phase === "Awaiting Approval" && session.planAvailable === true;
+    !isRunning && !isFixing && phase === "Awaiting Approval" && session.planAvailable === true;
 
   const showApprove = awaitingApprovalWithPlan;
   const showFix = awaitingApprovalWithPlan;

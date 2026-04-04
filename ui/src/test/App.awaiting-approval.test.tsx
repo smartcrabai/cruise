@@ -285,6 +285,123 @@ describe("App: Awaiting Approval — Ask flow", () => {
   });
 });
 
+// ─── Awaiting Approval: Fixing display state ─────────────────────────────────
+
+describe("App: Awaiting Approval — Fixing display state", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("# The plan");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  async function selectAwaitingApprovalSession(): Promise<void> {
+    const session = makeSession({ planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+    render(<App />);
+    await waitFor(() => screen.getByText("pending task"));
+    await userEvent.click(screen.getByRole("button", { name: /pending task/ }));
+    await waitFor(() => screen.getByRole("button", { name: "Fix" }));
+  }
+
+  it("shows 'Fixing' badge while the fix request is in-flight", async () => {
+    // Given: fixSession never resolves during this test (simulates a long-running fix)
+    vi.mocked(commands.fixSession).mockImplementationOnce(
+      () => new Promise<string>(() => { /* never resolves */ })
+    );
+    await selectAwaitingApprovalSession();
+
+    // When: start the fix by clicking Fix → typing feedback → clicking Apply
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe the changes needed…"),
+      "Make it better"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    // Then: the detail header badge changes from "Awaiting Approval" to "Fixing"
+    // (the sidebar badge also shows "Fixing" because fixingSessionIds is propagated from App)
+    await waitFor(() => {
+      expect(screen.getAllByText("Fixing").length).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.queryByText("Awaiting Approval")).toBeNull();
+  });
+
+  it("hides Approve, Fix, and Ask buttons while the fix is in-flight", async () => {
+    // Given: fixSession never resolves (in-flight)
+    vi.mocked(commands.fixSession).mockImplementationOnce(
+      () => new Promise<string>(() => { /* never resolves */ })
+    );
+    await selectAwaitingApprovalSession();
+
+    // When: submit the fix
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe the changes needed…"),
+      "Make it better"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    // Then: all three review-action buttons are hidden while fixing is running
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    });
+    expect(screen.queryByRole("button", { name: "Fix" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
+  });
+
+  it("clears the Fixing badge after fix succeeds and restores normal Awaiting Approval state", async () => {
+    // Given: fixSession resolves successfully
+    vi.mocked(commands.fixSession).mockImplementationOnce(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async (_params: any, channel: any) => {
+        channel.onmessage?.({ event: "planGenerated", data: { content: "# Revised plan" } });
+        return "# Revised plan";
+      }
+    );
+    vi.mocked(commands.getSession).mockResolvedValue(makeSession({ planAvailable: true }));
+    await selectAwaitingApprovalSession();
+
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe the changes needed…"),
+      "Make it better"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    // Then: "Fixing" badge is removed after the plan is generated
+    await waitFor(() => {
+      expect(screen.queryByText("Fixing")).toBeNull();
+    });
+  });
+
+  it("clears the Fixing badge after fix fails and shows the error", async () => {
+    // Given: fixSession rejects with an error
+    vi.mocked(commands.fixSession).mockRejectedValue(new Error("Fix failed"));
+    await selectAwaitingApprovalSession();
+
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe the changes needed…"),
+      "Make it better"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    // Then: error is shown and the Fixing badge is cleared (back to normal state)
+    await waitFor(() => {
+      expect(screen.getByText(/Fix failed/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Fixing")).toBeNull();
+  });
+});
+
 // ─── Awaiting Approval: Fix flow ─────────────────────────────────────────────
 
 describe("App: Awaiting Approval — Fix flow", () => {
