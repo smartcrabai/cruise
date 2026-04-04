@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -903,19 +904,30 @@ pub async fn run_all_sessions(
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
-    let candidates = manager.run_all_candidates().map_err(|e| e.to_string())?;
-    let total = candidates.len();
-    let _ = channel.send(WorkflowEvent::RunAllStarted { total });
-
     let mut cancelled = 0usize;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut remaining = manager
+        .run_all_remaining(&seen)
+        .map_err(|e| e.to_string())?;
+    let _ = channel.send(WorkflowEvent::RunAllStarted {
+        total: remaining.len(),
+    });
 
-    for session in candidates {
+    loop {
+        let remaining_count = remaining.len();
+        let Some(session) = remaining.into_iter().next() else {
+            break;
+        };
+        seen.insert(session.id.clone());
+
         let session_id = session.id;
         let input = session.input;
         let workspace_mode = session.workspace_mode;
+        let total = seen.len() + remaining_count - 1;
         let _ = channel.send(WorkflowEvent::RunAllSessionStarted {
             session_id: session_id.clone(),
             input: input.clone(),
+            total,
         });
 
         let phase = execute_single_session(&session_id, workspace_mode, &channel, &state, &manager)
@@ -941,6 +953,9 @@ pub async fn run_all_sessions(
         if should_break {
             break;
         }
+        remaining = manager
+            .run_all_remaining(&seen)
+            .map_err(|e| e.to_string())?;
     }
 
     let _ = channel.send(WorkflowEvent::RunAllCompleted { cancelled });

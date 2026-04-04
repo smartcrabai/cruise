@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -671,11 +672,16 @@ async fn run_after_pr_steps(
 
 async fn run_all(args: RunArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
-    let candidates = manager.run_all_candidates()?;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut results: Vec<SessionState> = Vec::new();
 
-    let mut results: Vec<SessionState> = Vec::with_capacity(candidates.len());
+    loop {
+        let remaining = manager.run_all_remaining(&seen)?;
+        let Some(session) = remaining.into_iter().next() else {
+            break;
+        };
+        seen.insert(session.id.clone());
 
-    for session in candidates {
         let session_args = RunArgs {
             session: Some(session.id.clone()),
             all: false,
@@ -3437,6 +3443,104 @@ steps:
                 .join("wt.txt")
                 .exists(),
             "worktree mode should write changes into the session worktree"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_all_picks_up_session_added_while_first_session_is_running() {
+        // Given: one Planned session with a blocking first step (blocks until proceed.txt exists)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+
+        let session_id_1 = "20260403400000";
+        let session_id_2 = "20260403400001"; // added mid-run — newer ID
+
+        let mut session_1 = SessionState::new(
+            session_id_1.to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "first task".to_string(),
+        );
+        session_1.phase = SessionPhase::Planned;
+        manager
+            .create(&session_1)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id_1, &blocking_conflict_config());
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/owner/repo/pull/201");
+        process.prepend_path(&bin_dir);
+
+        // When: run --all starts. Concurrently, add session_2 once session_1 is blocking.
+        let run_fut = run(RunArgs {
+            session: None,
+            all: true,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            dry_run: false,
+        });
+
+        let add_and_unblock_fut = async {
+            // Wait for session_1 to reach its blocking "first" step
+            wait_for_session_step(&manager, session_id_1, "first").await;
+
+            // Add session_2 as a Planned session with a simple command
+            let mut session_2 = SessionState::new(
+                session_id_2.to_string(),
+                repo.clone(),
+                "cruise.yaml".to_string(),
+                "second task added mid-run".to_string(),
+            );
+            session_2.phase = SessionPhase::Planned;
+            manager
+                .create(&session_2)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            write_config(
+                &manager,
+                session_id_2,
+                &single_command_config("do", "printf done2 > session2-output.txt"),
+            );
+
+            // Unblock session_1 by writing proceed.txt in its worktree
+            let state_1 = manager
+                .load(session_id_1)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let worktree = state_1
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| panic!("session_1 should have worktree_path set when Running"));
+            fs::write(worktree.join("proceed.txt"), "go").unwrap_or_else(|e| panic!("{e:?}"));
+        };
+
+        let (result, ()) = tokio::join!(run_fut, add_and_unblock_fut);
+
+        // Then: run --all completes without error
+        assert!(
+            result.is_ok(),
+            "run --all should succeed even when a session is added mid-run: {result:?}"
+        );
+
+        // And: session_2 was also executed and completed
+        let state_2 = manager
+            .load(session_id_2)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(state_2.phase, SessionPhase::Completed),
+            "session_2 added mid-run should be Completed, got {:?}",
+            state_2.phase
+        );
+        assert!(
+            manager
+                .worktrees_dir()
+                .join(session_id_2)
+                .join("session2-output.txt")
+                .exists(),
+            "session_2 command should have written session2-output.txt in its worktree"
         );
     }
 }

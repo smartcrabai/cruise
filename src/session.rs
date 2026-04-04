@@ -406,6 +406,25 @@ impl SessionManager {
             .collect())
     }
 
+    /// Return `run --all` candidates not already in `seen`.
+    ///
+    /// Filters [`run_all_candidates`] to exclude IDs already processed in the
+    /// current batch, preserving the ID-ascending order from [`Self::list`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sessions directory cannot be read.
+    pub fn run_all_remaining(
+        &self,
+        seen: &std::collections::HashSet<String>,
+    ) -> Result<Vec<SessionState>> {
+        Ok(self
+            .run_all_candidates()?
+            .into_iter()
+            .filter(|s| !seen.contains(&s.id))
+            .collect())
+    }
+
     /// Load the workflow config for a session.
     ///
     /// # Errors
@@ -1480,6 +1499,180 @@ mod tests {
             candidates.is_empty(),
             "no candidates when only Completed exists"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionManager::run_all_remaining
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_run_all_remaining_returns_all_when_seen_is_empty() {
+        // Given: two Planned sessions and an empty seen set
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for id in ["20260403300000", "20260403300001"] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = SessionPhase::Planned;
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        let seen = std::collections::HashSet::new();
+
+        // When: calling run_all_remaining() with empty seen
+        let remaining = manager
+            .run_all_remaining(&seen)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: all candidates are returned
+        assert_eq!(
+            remaining.len(),
+            2,
+            "empty seen should return all candidates"
+        );
+    }
+
+    #[test]
+    fn test_run_all_remaining_excludes_seen_ids() {
+        // Given: three candidates (Planned/Suspended), one ID already in seen
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for (id, phase) in [
+            ("20260403310000", SessionPhase::Planned),
+            ("20260403310001", SessionPhase::Planned),
+            ("20260403310002", SessionPhase::Suspended),
+        ] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = phase;
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        let seen: std::collections::HashSet<String> = ["20260403310000".to_string()].into();
+
+        // When: calling run_all_remaining() with one ID in seen
+        let remaining = manager
+            .run_all_remaining(&seen)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only the two unseen candidates are returned
+        assert_eq!(remaining.len(), 2, "seen ID should be excluded");
+        let ids: Vec<&str> = remaining.iter().map(|s| s.id.as_str()).collect();
+        assert!(!ids.contains(&"20260403310000"), "seen ID must not appear");
+        assert!(
+            ids.contains(&"20260403310001"),
+            "unseen Planned must be included"
+        );
+        assert!(
+            ids.contains(&"20260403310002"),
+            "unseen Suspended must be included"
+        );
+    }
+
+    #[test]
+    fn test_run_all_remaining_returns_empty_when_all_seen() {
+        // Given: one Planned session that is already in seen
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut s = SessionState::new(
+            "20260403320000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        s.phase = SessionPhase::Planned;
+        manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let seen: std::collections::HashSet<String> = ["20260403320000".to_string()].into();
+
+        // When
+        let remaining = manager
+            .run_all_remaining(&seen)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: empty
+        assert!(
+            remaining.is_empty(),
+            "all candidates are seen, result should be empty"
+        );
+    }
+
+    #[test]
+    fn test_run_all_remaining_preserves_id_ascending_order() {
+        // Given: sessions inserted in reverse order
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for id in ["20260403330002", "20260403330000", "20260403330001"] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = SessionPhase::Planned;
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        let seen = std::collections::HashSet::new();
+
+        // When
+        let remaining = manager
+            .run_all_remaining(&seen)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: results are in ascending ID order
+        let ids: Vec<&str> = remaining.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["20260403330000", "20260403330001", "20260403330002"],
+            "run_all_remaining must preserve ascending ID order"
+        );
+    }
+
+    #[test]
+    fn test_run_all_remaining_ignores_non_candidate_phases() {
+        // Given: Running/Completed/Failed sessions plus one Planned not in seen
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for (id, phase) in [
+            ("20260403340000", SessionPhase::Running),
+            ("20260403340001", SessionPhase::Completed),
+            ("20260403340002", SessionPhase::Failed("err".to_string())),
+            ("20260403340003", SessionPhase::Planned),
+        ] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = phase;
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        let seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // When
+        let remaining = manager
+            .run_all_remaining(&seen)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only the Planned session is returned
+        assert_eq!(remaining.len(), 1, "only Planned/Suspended qualify");
+        assert_eq!(remaining[0].id, "20260403340003");
     }
 
     #[test]
