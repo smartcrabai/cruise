@@ -7,6 +7,7 @@ import { listSessions, cleanSessions, getUpdateReadiness } from "../lib/commands
 import type { Session, UpdateReadiness } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
 import { formatLocalTime } from "../lib/format";
+import { isApprovalReady } from "../lib/sessionActions";
 
 type UpdateState = "available" | "downloading" | "error";
 
@@ -21,6 +22,8 @@ interface SessionSidebarProps {
   onSelect: (session: Session) => void;
   onNewSession: () => void;
   onRunAll: () => void;
+  /** When true, Run All is actively executing — button is enabled regardless of pending sessions and shown in active state. */
+  runAllActive?: boolean;
   onRefreshRef?: MutableRefObject<(() => void) | null>;
   /** Called after each load() when the currently selected session appears in
    *  the result, passing the latest DTO so the parent can stay in sync without
@@ -28,12 +31,18 @@ interface SessionSidebarProps {
   onSelectedSessionUpdated?: (session: Session) => void;
   /** Session IDs that currently have a fix in progress; their rows show "Fixing" instead of "Awaiting Approval". */
   fixingSessionIds?: ReadonlySet<string>;
+  /** Called after each successful load() when the fingerprint changes.
+   *  App uses this to detect phase transitions (approval-ready, completed)
+   *  and fire notifications without depending on the 3-second idle poll. */
+  onSessionsChanged?: (sessions: Session[]) => void;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, fixingSessionIds }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
   onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
+  const onSessionsChangedRef = useRef(onSessionsChangedProp);
+  onSessionsChangedRef.current = onSessionsChangedProp;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -69,6 +78,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
       if (fingerprint !== lastFingerprintRef.current) {
         lastFingerprintRef.current = fingerprint;
         setSessions(sorted);
+        onSessionsChangedRef.current?.(sorted);
         if (selectedIdRef.current !== null) {
           const match = sorted.find((s) => s.id === selectedIdRef.current);
           if (match) {
@@ -189,9 +199,14 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
             <button
               type="button"
               onClick={onRunAll}
-              disabled={!sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-              title="Run all pending sessions"
+              disabled={!runAllActive && !sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s))}
+              className={`px-2 py-1 text-xs rounded ${
+                runAllActive
+                  ? "bg-blue-600 text-white hover:bg-blue-700"
+                  : "text-gray-400 hover:text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+              }`}
+              aria-label={runAllActive ? "View running sessions" : "Run all pending sessions"}
+              title={runAllActive ? "View running sessions" : "Run all pending sessions"}
             >
               Run All
             </button>

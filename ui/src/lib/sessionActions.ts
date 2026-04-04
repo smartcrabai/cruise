@@ -2,6 +2,11 @@ import type { Session } from "../types";
 
 export type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 
+/** True when the session is in "Awaiting Approval" phase with a plan ready for review. */
+export function isApprovalReady(session: Session): boolean {
+  return session.phase === "Awaiting Approval" && session.planAvailable === true;
+}
+
 /** Which action buttons are visible in the session detail pane. */
 export interface SessionActions {
   /** Show the Approve button (`phase === "Awaiting Approval" && planAvailable`). */
@@ -47,7 +52,7 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
     !isRunning && status !== "idle" && phase === "Running";
 
   const awaitingApprovalWithPlan =
-    !isRunning && !isFixing && phase === "Awaiting Approval" && session.planAvailable === true;
+    !isRunning && !isFixing && isApprovalReady(session);
 
   const showApprove = awaitingApprovalWithPlan;
   const showFix = awaitingApprovalWithPlan;

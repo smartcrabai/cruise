@@ -5,8 +5,7 @@ export type { Update };
 
 export async function checkForUpdate(): Promise<Update | null> {
   try {
-    const update = await check();
-    return update ?? null;
+    return await check();
   } catch (e) {
     console.error("Update check failed:", e);
     return null;
