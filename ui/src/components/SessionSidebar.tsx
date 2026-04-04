@@ -21,6 +21,8 @@ interface SessionSidebarProps {
   onSelect: (session: Session) => void;
   onNewSession: () => void;
   onRunAll: () => void;
+  /** When true, Run All is actively executing — button is enabled regardless of pending sessions and shown in active state. */
+  runAllActive?: boolean;
   onRefreshRef?: MutableRefObject<(() => void) | null>;
   /** Called after each load() when the currently selected session appears in
    *  the result, passing the latest DTO so the parent can stay in sync without
@@ -28,7 +30,7 @@ interface SessionSidebarProps {
   onSelectedSessionUpdated?: (session: Session) => void;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
   onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
@@ -187,9 +189,14 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, o
             <button
               type="button"
               onClick={onRunAll}
-              disabled={!sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50"
-              title="Run all pending sessions"
+              disabled={!runAllActive && !sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended")}
+              className={`px-2 py-1 text-xs rounded ${
+                runAllActive
+                  ? "bg-blue-600 text-white hover:bg-blue-700"
+                  : "text-gray-400 hover:text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+              }`}
+              aria-label={runAllActive ? "View running sessions" : "Run all pending sessions"}
+              title={runAllActive ? "View running sessions" : "Run all pending sessions"}
             >
               Run All
             </button>
