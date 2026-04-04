@@ -32,7 +32,7 @@ import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionSidebar } from "./components/SessionSidebar";
-import { getSessionActions, type RunStatus } from "./lib/sessionActions";
+import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
 import { formatLocalTime, workflowEventLogLine, PHASE_ICON } from "./lib/format";
 
 // --- OptionDialog ----------------------------------------------------------------
@@ -67,7 +67,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
               <button
                 key={choice.label}
                 type="button"
-                onClick={() => onRespond({ nextStep: choice.next ?? undefined })}
+                onClick={() => onRespond({ nextStep: choice.next })}
                 className="w-full text-left px-4 py-2 border border-gray-700 rounded hover:bg-gray-800 text-sm text-gray-200 transition-colors"
               >
                 {choice.label}
@@ -91,7 +91,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                     onKeyDown={(e) => {
                       if (e.key === "Enter")
                         onRespond({
-                          nextStep: choice.next ?? undefined,
+                          nextStep: choice.next,
                           textInput: textValues[choice.label] ?? "",
                         });
                     }}
@@ -100,7 +100,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                     type="button"
                     onClick={() =>
                       onRespond({
-                        nextStep: choice.next ?? undefined,
+                        nextStep: choice.next,
                         textInput: textValues[choice.label] ?? "",
                       })
                     }
@@ -120,7 +120,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
 
 // --- WorkflowToastStack ------------------------------------------------------------
 
-type ToastKind = "input-required" | "completed" | "failed";
+type ToastKind = "input-required" | "completed" | "failed" | "plan-ready";
 
 export interface WorkflowToast {
   id: number;
@@ -133,18 +133,21 @@ const TOAST_STYLE: Record<ToastKind, string> = {
   "input-required": "border-amber-700 bg-amber-900/80 text-amber-100",
   "completed": "border-green-700 bg-green-900/80 text-green-100",
   "failed": "border-red-700 bg-red-900/80 text-red-100",
+  "plan-ready": "border-blue-700 bg-blue-900/80 text-blue-100",
 };
 
 const TOAST_LABEL: Record<ToastKind, string> = {
   "input-required": "Action required",
   "completed": "Completed",
   "failed": "Failed",
+  "plan-ready": "Plan ready",
 };
 
 const TOAST_DURATION_MS: Record<ToastKind, number> = {
   "input-required": 10_000,
   "completed": 5_000,
   "failed": 5_000,
+  "plan-ready": 8_000,
 };
 
 export function WorkflowToastStack({
@@ -393,11 +396,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }, [liveLog, status]);
 
-  function notifyEvent(kind: ToastKind, sessionInput: string, detail?: string) {
-    onToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
-    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} -- ${(detail ?? sessionInput).slice(0, 60)}`);
-  }
-
   async function refreshSession() {
     const updated = await getSession(session.id);
     onSessionUpdated(updated);
@@ -408,7 +406,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       await approveSession(session.id);
       await refreshSession();
     } catch (e) {
-      notifyEvent("failed", session.input, `Approve error: ${e}`);
+      onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}`.slice(0, 80) });
     }
   }
 
@@ -430,15 +428,14 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
           choices: event.data.choices,
           plan: event.data.plan,
         });
-        notifyEvent("input-required", session.input);
+        onToast({ kind: "input-required", sessionInput: session.input });
       } else if (event.event === "workflowCompleted") {
         setStatus("completed");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-        notifyEvent("completed", session.input);
       } else if (event.event === "workflowFailed") {
         setStatus("failed");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-        notifyEvent("failed", session.input, event.data.error);
+        onToast({ kind: "failed", sessionInput: session.input, detail: event.data.error?.slice(0, 80) });
       } else if (event.event === "workflowCancelled") {
         setStatus("cancelled");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
@@ -1234,6 +1231,7 @@ export default function App() {
   const runAllChannelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  const sessionSnapshotRef = useRef<Map<string, Session> | null>(null);
 
   const addToast = useCallback((toast: Omit<WorkflowToast, "id">) => {
     const id = ++toastIdRef.current;
@@ -1253,6 +1251,31 @@ export default function App() {
     }
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  const emitNotification = useCallback((kind: ToastKind, sessionInput: string, detail?: string) => {
+    addToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
+    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} — ${(detail ?? sessionInput).slice(0, 60)}`);
+  }, [addToast]);
+
+  const handleSessionsChanged = useCallback((sessions: Session[]) => {
+    const newMap = new Map(sessions.map((s) => [s.id, s]));
+    const prevMap = sessionSnapshotRef.current;
+    sessionSnapshotRef.current = newMap;
+    if (prevMap === null) return; // first snapshot: suppress startup notifications
+    for (const session of newMap.values()) {
+      const prev = prevMap.get(session.id);
+      const approvalReady = isApprovalReady(session);
+      const wasApprovalReady = prev !== undefined && isApprovalReady(prev);
+      if (approvalReady && !wasApprovalReady) {
+        emitNotification("plan-ready", session.input);
+      }
+      const isCompleted = session.phase === "Completed";
+      const wasCompleted = prev !== undefined && prev.phase === "Completed";
+      if (isCompleted && !wasCompleted) {
+        emitNotification("completed", session.input);
+      }
+    }
+  }, [emitNotification]);
 
   useEffect(() => {
     const timers = toastTimersRef.current;
@@ -1298,6 +1321,7 @@ export default function App() {
           const { sessionId, input, phase, error } = event.data;
           return { ...prev, results: [...prev.results, { sessionId, input, phase, error }], currentSession: null, currentStep: null, pendingOption: null };
         });
+        sidebarRefreshRef.current?.();
       } else if (event.event === "runAllCompleted") {
         setRunAllState((prev) => prev ? { ...prev, status: event.data.cancelled > 0 ? "cancelled" : "completed", liveLog: [...prev.liveLog, `--- Run All finished (cancelled: ${event.data.cancelled}) ---`] } : prev);
       } else if (event.event === "stepStarted") {
@@ -1358,6 +1382,7 @@ export default function App() {
           runAllActive={!!runAllState}
           onRefreshRef={sidebarRefreshRef}
           onSelectedSessionUpdated={(s) => setSelectedSession(s)}
+          onSessionsChanged={handleSessionsChanged}
         />
       </aside>
       {/* Main content */}
@@ -1396,7 +1421,7 @@ export default function App() {
               setSelectedSession(null);
               sidebarRefreshRef.current?.();
             }}
-            onToast={addToast}
+            onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
           />
         ) : (
           <EmptyState />

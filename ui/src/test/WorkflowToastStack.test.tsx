@@ -122,6 +122,30 @@ describe("WorkflowToastStack", () => {
     });
   });
 
+  describe("kind: 'plan-ready' toast", () => {
+    it("displays 'Plan ready' label", () => {
+      // Given: an approval-ready notification toast
+      const toast = makeToast({ kind: "plan-ready", sessionInput: "pending-approval-task" });
+
+      // When
+      render(<WorkflowToastStack toasts={[toast]} onDismiss={vi.fn()} />);
+
+      // Then
+      expect(screen.getByText("Plan ready")).toBeInTheDocument();
+    });
+
+    it("displays sessionInput text", () => {
+      // Given
+      const toast = makeToast({ kind: "plan-ready", sessionInput: "pending-approval-task" });
+
+      // When
+      render(<WorkflowToastStack toasts={[toast]} onDismiss={vi.fn()} />);
+
+      // Then
+      expect(screen.getByText("pending-approval-task")).toBeInTheDocument();
+    });
+  });
+
   describe("dismiss button", () => {
     it("clicking the x button calls onDismiss with the toast id", async () => {
       // Given

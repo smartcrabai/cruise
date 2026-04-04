@@ -6,7 +6,7 @@ use crate::step::option::OptionResult;
 ///
 /// Implementations:
 /// - CLI: [`CliOptionHandler`] using `inquire` interactive prompts.
-/// - GUI: `GuiOptionHandler` (future) using Tauri events + `oneshot::channel`.
+/// - GUI: [`GuiOptionHandler`] using Tauri events + `oneshot::channel`.
 pub trait OptionHandler: Send + Sync {
     /// Present `choices` to the user and return their selection.
     ///
