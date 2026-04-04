@@ -29,13 +29,15 @@ interface SessionSidebarProps {
    *  the result, passing the latest DTO so the parent can stay in sync without
    *  triggering a view-change side effect (i.e. never call onSelect here). */
   onSelectedSessionUpdated?: (session: Session) => void;
+  /** Session IDs that currently have a fix in progress; their rows show "Fixing" instead of "Awaiting Approval". */
+  fixingSessionIds?: ReadonlySet<string>;
   /** Called after each successful load() when the fingerprint changes.
    *  App uses this to detect phase transitions (approval-ready, completed)
    *  and fire notifications without depending on the 3-second idle poll. */
   onSessionsChanged?: (sessions: Session[]) => void;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
   onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
@@ -243,7 +245,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
               <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} />
+              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id)} />
             </div>
             <p className="text-sm text-gray-300 truncate">{s.title || s.input}</p>
             {s.title && (

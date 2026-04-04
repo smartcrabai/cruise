@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, waitFor, cleanup } from "@testing-library/react";
 import { SessionSidebar } from "../components/SessionSidebar";
-import { PLANNING_LABEL } from "../components/PhaseBadge";
+import { PLANNING_LABEL, FIXING_LABEL } from "../components/PhaseBadge";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
@@ -508,6 +508,45 @@ describe("SessionSidebar", () => {
 
     // And: no blue dot is shown
     expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
+  });
+
+  // --- fixingSessionIds override --------------------------------------------
+
+  it("shows 'Fixing' label in the session row when a fix override is active for that session", async () => {
+    // Given: an Awaiting Approval session with a plan, and a fix is currently in progress
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+    const fixingSessionIds = new Set(["session-1"]);
+
+    // When: the sidebar receives the override set
+    render(<SessionSidebar {...defaultProps} fixingSessionIds={fixingSessionIds} />);
+
+    // Then: the row badge shows "Fixing" rather than "Awaiting Approval"
+    await waitFor(() => {
+      expect(screen.getByText(FIXING_LABEL)).toBeTruthy();
+    });
+
+    // And: the approval-ready blue dot is also suppressed
+    expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
+  });
+
+  it("does not show 'Fixing' for sessions not included in fixingSessionIds", async () => {
+    // Given: two sessions; only session-1 has a fix override
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true }),
+      makeSession({ id: "session-2", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+    const fixingSessionIds = new Set(["session-1"]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} fixingSessionIds={fixingSessionIds} />);
+
+    // Then: session-1 shows "Fixing" while session-2 shows normal "Awaiting Approval"
+    await waitFor(() => {
+      expect(screen.getByText(FIXING_LABEL)).toBeTruthy();
+      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+    });
   });
 
 });
