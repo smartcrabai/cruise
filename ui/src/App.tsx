@@ -1116,6 +1116,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
       if (event.event === "runAllStarted") {
         setTotal(event.data.total);
       } else if (event.event === "runAllSessionStarted") {
+        setTotal(event.data.total);
         setCurrentSession({ id: event.data.sessionId, input: event.data.input });
         setCurrentStep(null);
       } else if (event.event === "runAllSessionFinished") {
