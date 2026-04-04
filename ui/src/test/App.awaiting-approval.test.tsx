@@ -5,7 +5,7 @@ import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
-// ─── Module mocks ──────────────────────────────────────────────────────────────
+// --- Module mocks --------------------------------------------------------------
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("0.0.0"),
@@ -56,7 +56,7 @@ vi.mock("../lib/desktopNotifications", () => ({
   notifyDesktop: vi.fn(),
 }));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -72,9 +72,9 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
-// ─── Awaiting Approval: Fix and Ask button visibility ────────────────────────
+// --- Awaiting Approval: Fix and Ask button visibility ------------------------
 
-describe("App: Awaiting Approval — Fix and Ask button visibility", () => {
+describe("App: Awaiting Approval -- Fix and Ask button visibility", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
@@ -125,9 +125,9 @@ describe("App: Awaiting Approval — Fix and Ask button visibility", () => {
   });
 });
 
-// ─── Awaiting Approval: Ask flow ─────────────────────────────────────────────
+// --- Awaiting Approval: Ask flow ---------------------------------------------
 
-describe("App: Awaiting Approval — Ask flow", () => {
+describe("App: Awaiting Approval -- Ask flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
@@ -160,7 +160,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
 
     // Then: question textarea is visible
     expect(
-      screen.getByPlaceholderText("Ask a question about the plan…")
+      screen.getByPlaceholderText("Ask a question about the plan...")
     ).toBeInTheDocument();
   });
 
@@ -172,7 +172,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
     // When: ask, type question, and submit
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Ask a question about the plan…"),
+      screen.getByPlaceholderText("Ask a question about the plan..."),
       "Why approach X?"
     );
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
@@ -197,7 +197,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Ask a question about the plan…"),
+      screen.getByPlaceholderText("Ask a question about the plan..."),
       "Question?"
     );
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
@@ -229,7 +229,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
     await waitFor(() => screen.getByRole("button", { name: "Ask" }));
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Ask a question about the plan…"),
+      screen.getByPlaceholderText("Ask a question about the plan..."),
       "Question?"
     );
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
@@ -250,7 +250,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Ask a question about the plan…"),
+      screen.getByPlaceholderText("Ask a question about the plan..."),
       "A question"
     );
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
@@ -262,7 +262,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
 
     // And: the question editor remains open so the user can retry
     expect(
-      screen.getByPlaceholderText("Ask a question about the plan…")
+      screen.getByPlaceholderText("Ask a question about the plan...")
     ).toBeInTheDocument();
   });
 
@@ -271,7 +271,7 @@ describe("App: Awaiting Approval — Ask flow", () => {
     await selectAwaitingApprovalSession();
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(
-      screen.getByPlaceholderText("Ask a question about the plan…")
+      screen.getByPlaceholderText("Ask a question about the plan...")
     ).toBeInTheDocument();
 
     // When: cancel
@@ -279,15 +279,15 @@ describe("App: Awaiting Approval — Ask flow", () => {
 
     // Then: editor is hidden and primary actions are visible again
     expect(
-      screen.queryByPlaceholderText("Ask a question about the plan…")
+      screen.queryByPlaceholderText("Ask a question about the plan...")
     ).toBeNull();
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
   });
 });
 
-// ─── Awaiting Approval: Fix flow ─────────────────────────────────────────────
+// --- Awaiting Approval: Fix flow ---------------------------------------------
 
-describe("App: Awaiting Approval — Fix flow", () => {
+describe("App: Awaiting Approval -- Fix flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
@@ -320,7 +320,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
 
     // Then: fix feedback editor is visible
     expect(
-      screen.getByPlaceholderText("Describe the changes needed…")
+      screen.getByPlaceholderText("Describe the changes needed...")
     ).toBeInTheDocument();
   });
 
@@ -344,7 +344,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
     // When: click Fix, type feedback, apply
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Remove step 3"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -385,7 +385,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
     // Get an Ask answer
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Ask a question about the plan…"),
+      screen.getByPlaceholderText("Ask a question about the plan..."),
       "Question?"
     );
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
@@ -394,7 +394,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
     // When: Fix succeeds
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Revise"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -412,7 +412,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Do something"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -424,7 +424,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
 
     // And: the fix editor remains open so the user can retry
     expect(
-      screen.getByPlaceholderText("Describe the changes needed…")
+      screen.getByPlaceholderText("Describe the changes needed...")
     ).toBeInTheDocument();
   });
 
@@ -447,7 +447,7 @@ describe("App: Awaiting Approval — Fix flow", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Revise"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
