@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
+import * as desktopNotifications from "../lib/desktopNotifications";
 
 // --- Module mocks --------------------------------------------------------------
 
@@ -586,3 +587,103 @@ describe("App: WorkflowRunner tab selection persistence", () => {
   });
 });
 
+// --- Approval-ready notification transitions ----------------------------------
+
+describe("App: Approval-ready notification transitions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("emits plan-ready toast when session transitions to approval-ready after planGenerated", async () => {
+    // Given: no sessions in initial sidebar, then plan becomes available
+    const control = setupTwoPhaseCreateSession("sess-plan-ready");
+
+    render(<App />);
+    await waitFor(() => screen.getByRole("button", { name: "+ New" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "needs approval",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // sessionCreated: session appears in sidebar but plan not yet ready (Planning in UI)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-plan-ready", phase: "Awaiting Approval", planAvailable: false }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Describe what you want to implement...")).toHaveValue("");
+    });
+
+    // When: planGenerated fires → session becomes approval-ready (planAvailable: true)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-plan-ready", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+    await act(async () => { control.emitPlanGenerated(); });
+
+    // Then: plan-ready toast appears (transition detected by snapshot detector)
+    await waitFor(() => expect(screen.getByText("Plan ready")).toBeInTheDocument());
+  });
+
+  it("does not emit plan-ready notification at sessionCreated when plan is not yet available", async () => {
+    // Given: session becomes visible after sessionCreated but is still in Planning state
+    const control = setupTwoPhaseCreateSession("sess-planning");
+
+    render(<App />);
+    await waitFor(() => screen.getByRole("button", { name: "+ New" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "planning task",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: sessionCreated fires → session has planAvailable: false (Planning in UI)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-planning", phase: "Awaiting Approval", planAvailable: false }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Describe what you want to implement...")).toHaveValue("");
+    });
+
+    // Then: no plan-ready toast (session not approval-ready yet)
+    expect(screen.queryByText("Plan ready")).not.toBeInTheDocument();
+
+    // Cleanup: resolve pending createSession
+    await act(async () => { control.emitPlanFailed(); });
+  });
+
+  it("does not emit plan-ready notification for sessions already approval-ready on app startup", async () => {
+    // Given: app starts with a pre-existing approval-ready session
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "existing-approved", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+
+    render(<App />);
+    // Wait for initial load to complete (session should appear in sidebar)
+    await waitFor(() => screen.getByText("test task"));
+    await act(async () => { await new Promise<void>((r) => setTimeout(r, 20)); });
+
+    // Then: no plan-ready toast (startup suppression: first snapshot is never notified)
+    expect(screen.queryByText("Plan ready")).not.toBeInTheDocument();
+    expect(vi.mocked(desktopNotifications.notifyDesktop)).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("Plan ready"),
+    );
+  });
+});
