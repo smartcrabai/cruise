@@ -1082,104 +1082,37 @@ interface RunAllSessionResult {
   error?: string;
 }
 
-interface RunAllViewProps {
-  onCompleted: () => void;
+interface RunAllUiState {
+  status: RunAllStatus;
+  total: number;
+  currentSession: { id: string; input: string } | null;
+  currentStep: string | null;
+  results: RunAllSessionResult[];
+  runError: string | null;
+  pendingOption: PendingOption | null;
+  liveLog: string[];
 }
 
-function RunAllView({ onCompleted }: RunAllViewProps) {
-  const [status, setStatus] = useState<RunAllStatus>("running");
-  const [total, setTotal] = useState(0);
-  const [currentSession, setCurrentSession] = useState<{ id: string; input: string } | null>(null);
-  const [currentStep, setCurrentStep] = useState<string | null>(null);
-  const [results, setResults] = useState<RunAllSessionResult[]>([]);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
-  const [liveLog, setLiveLog] = useState<string[]>([]);
-  const startedRef = useRef(false);
-  const mountedRef = useRef(true);
-  const channelRef = useRef<Channel<WorkflowEvent> | null>(null);
+interface RunAllViewProps {
+  state: RunAllUiState;
+  onCancel: () => void;
+  onOptionRespond: (result: { nextStep?: string; textInput?: string }) => void;
+  onDone: () => void;
+}
+
+function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProps) {
+  const { status, total, currentSession, currentStep, results, runError, pendingOption, liveLog } = state;
+  const progressCount = results.length + (currentSession ? 1 : 0);
+  const completedCount = results.filter((r) => r.phase === "Completed").length;
+  const failedCount = results.filter((r) => r.phase === "Failed").length;
+  const suspendedCount = results.filter((r) => r.phase === "Suspended").length;
   const logEndRef = useRef<HTMLSpanElement | null>(null);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    if (startedRef.current) return;
-    startedRef.current = true;
-
-
-    const channel = new Channel<WorkflowEvent>();
-    channelRef.current = channel;
-
-    channel.onmessage = (event) => {
-      if (!mountedRef.current) return;
-      if (event.event === "runAllStarted") {
-        setTotal(event.data.total);
-        setLiveLog((prev) => [...prev, `--- Run All started (${event.data.total} sessions) ---`]);
-      } else if (event.event === "runAllSessionStarted") {
-        setTotal(event.data.total);
-        setCurrentSession({ id: event.data.sessionId, input: event.data.input });
-        setCurrentStep(null);
-        setLiveLog((prev) => [...prev, `--- Session: ${event.data.input} (${event.data.sessionId}) ---`]);
-      } else if (event.event === "runAllSessionFinished") {
-        const { sessionId, input, phase, error } = event.data;
-        setResults((prev) => [...prev, { sessionId, input, phase, error }]);
-        setCurrentSession(null);
-        setCurrentStep(null);
-        setPendingOption(null);
-      } else if (event.event === "runAllCompleted") {
-        setStatus(event.data.cancelled > 0 ? "cancelled" : "completed");
-        setLiveLog((prev) => [...prev, `--- Run All finished (cancelled: ${event.data.cancelled}) ---`]);
-      } else if (event.event === "stepStarted") {
-        setCurrentStep(event.data.step);
-        setLiveLog((prev) => [...prev, event.data.step]);
-      } else if (event.event === "optionRequired") {
-        setPendingOption({ requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan });
-      } else if (
-        event.event === "workflowCompleted" ||
-        event.event === "workflowFailed" ||
-        event.event === "workflowCancelled"
-      ) {
-        setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-      }
-    };
-
-    void runAllSessions(channel).catch((e) => {
-      if (mountedRef.current) {
-        setStatus("error");
-        setRunError(String(e));
-      }
-    });
-
-    return () => {
-      mountedRef.current = false;
-      if (channelRef.current) {
-        channelRef.current.onmessage = () => {};
-        channelRef.current = null;
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (status === "running") {
       logEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [liveLog, status]);
-
-  async function handleCancel() {
-    try {
-      await cancelSession();
-    } catch (e) {
-      setRunError(String(e));
-    }
-  }
-
-  async function handleOptionRespond(result: { nextStep?: string; textInput?: string }) {
-    setPendingOption(null);
-    try {
-      await respondToOption(result);
-    } catch (e) {
-      setRunError(String(e));
-    }
-  }
 
   return (
     <div className="h-full flex flex-col p-6 max-w-2xl mx-auto">
@@ -1188,7 +1121,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         {status === "running" ? (
           <button
             type="button"
-            onClick={() => void handleCancel()}
+            onClick={onCancel}
             className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
           >
             Cancel
@@ -1196,7 +1129,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         ) : (
           <button
             type="button"
-            onClick={onCompleted}
+            onClick={onDone}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded"
           >
             Done
@@ -1204,10 +1137,10 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         )}
       </div>
 
-      {total > 0 && (
+      {(total > 0 || status === "error") && (
         <div className="mb-4">
           <div className="flex justify-between text-xs text-gray-400 mb-1">
-            <span>{results.length} / {total} sessions</span>
+            {total > 0 && <span>{progressCount} / {total} sessions</span>}
             {status === "running" && currentSession && (
               <span className="text-green-400 animate-pulse">Running...</span>
             )}
@@ -1215,12 +1148,14 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
             {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
             {status === "error" && <span className="text-red-400">Error</span>}
           </div>
-          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-600 rounded-full transition-all duration-300"
-              style={{ width: `${(results.length / total) * 100}%` }}
-            />
-          </div>
+          {total > 0 && (
+            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-600 rounded-full transition-all duration-300"
+                style={{ width: `${(progressCount / total) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -1267,9 +1202,9 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
       {(status === "completed" || status === "cancelled" || status === "error") && (
         <div className="mt-4 p-3 bg-gray-900 border border-gray-800 rounded text-sm text-gray-400 flex flex-col gap-1">
           <div className="flex gap-4">
-            <span className="text-green-400">{results.filter((r) => r.phase === "Completed").length} completed</span>
-            {results.filter((r) => r.phase === "Failed").length > 0 && <span className="text-red-400">{results.filter((r) => r.phase === "Failed").length} failed</span>}
-            {results.filter((r) => r.phase === "Suspended").length > 0 && <span className="text-orange-400">{results.filter((r) => r.phase === "Suspended").length} cancelled</span>}
+            <span className="text-green-400">{completedCount} completed</span>
+            {failedCount > 0 && <span className="text-red-400">{failedCount} failed</span>}
+            {suspendedCount > 0 && <span className="text-orange-400">{suspendedCount} cancelled</span>}
           </div>
           {runError && <p className="text-xs text-red-400">{runError}</p>}
         </div>
@@ -1279,7 +1214,7 @@ function RunAllView({ onCompleted }: RunAllViewProps) {
         <OptionDialog
           choices={pendingOption.choices}
           plan={pendingOption.plan}
-          onRespond={(result) => void handleOptionRespond(result)}
+          onRespond={onOptionRespond}
         />
       )}
     </div>
@@ -1295,6 +1230,8 @@ export default function App() {
   const [toasts, setToasts] = useState<WorkflowToast[]>([]);
   const [newSessionDraft, setNewSessionDraft] = useState<NewSessionDraft>(createInitialNewSessionDraft);
   const [sessionTabMap, setSessionTabMap] = useState<Record<string, ActiveTab>>({});
+  const [runAllState, setRunAllState] = useState<RunAllUiState | null>(null);
+  const runAllChannelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -1321,8 +1258,92 @@ export default function App() {
     const timers = toastTimersRef.current;
     return () => {
       timers.forEach((timer) => clearTimeout(timer));
+      if (runAllChannelRef.current) {
+        runAllChannelRef.current.onmessage = () => {};
+        runAllChannelRef.current = null;
+      }
     };
   }, []);
+
+  function patchRunAll(updates: Partial<RunAllUiState>) {
+    setRunAllState((prev) => prev ? { ...prev, ...updates } : prev);
+  }
+
+  function handleRunAll() {
+    setSelectedSession(null);
+    setView("runAll");
+    if (runAllState) return;
+
+    const channel = new Channel<WorkflowEvent>();
+    runAllChannelRef.current = channel;
+    setRunAllState({
+      status: "running",
+      total: 0,
+      currentSession: null,
+      currentStep: null,
+      results: [],
+      runError: null,
+      pendingOption: null,
+      liveLog: [],
+    });
+
+    channel.onmessage = (event) => {
+      if (event.event === "runAllStarted") {
+        setRunAllState((prev) => prev ? { ...prev, total: event.data.total, liveLog: [...prev.liveLog, `--- Run All started (${event.data.total} sessions) ---`] } : prev);
+      } else if (event.event === "runAllSessionStarted") {
+        setRunAllState((prev) => prev ? { ...prev, total: event.data.total, currentSession: { id: event.data.sessionId, input: event.data.input }, currentStep: null, liveLog: [...prev.liveLog, `--- Session: ${event.data.input} (${event.data.sessionId}) ---`] } : prev);
+      } else if (event.event === "runAllSessionFinished") {
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          const { sessionId, input, phase, error } = event.data;
+          return { ...prev, results: [...prev.results, { sessionId, input, phase, error }], currentSession: null, currentStep: null, pendingOption: null };
+        });
+      } else if (event.event === "runAllCompleted") {
+        setRunAllState((prev) => prev ? { ...prev, status: event.data.cancelled > 0 ? "cancelled" : "completed", liveLog: [...prev.liveLog, `--- Run All finished (cancelled: ${event.data.cancelled}) ---`] } : prev);
+      } else if (event.event === "stepStarted") {
+        setRunAllState((prev) => prev ? { ...prev, currentStep: event.data.step, liveLog: [...prev.liveLog, event.data.step] } : prev);
+      } else if (event.event === "optionRequired") {
+        patchRunAll({ pendingOption: { requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan } });
+      } else if (
+        event.event === "workflowCompleted" ||
+        event.event === "workflowFailed" ||
+        event.event === "workflowCancelled"
+      ) {
+        setRunAllState((prev) => prev ? { ...prev, liveLog: [...prev.liveLog, workflowEventLogLine(event)] } : prev);
+      }
+    };
+
+    void runAllSessions(channel).catch((e) => {
+      patchRunAll({ status: "error", runError: String(e) });
+    });
+  }
+
+  async function handleRunAllCancel() {
+    try {
+      await cancelSession();
+    } catch (e) {
+      patchRunAll({ runError: String(e) });
+    }
+  }
+
+  async function handleRunAllOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    patchRunAll({ pendingOption: null });
+    try {
+      await respondToOption(result);
+    } catch (e) {
+      patchRunAll({ runError: String(e) });
+    }
+  }
+
+  function handleRunAllDone() {
+    if (runAllChannelRef.current) {
+      runAllChannelRef.current.onmessage = () => {};
+      runAllChannelRef.current = null;
+    }
+    setRunAllState(null);
+    sidebarRefreshRef.current?.();
+    setView("session");
+  }
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
@@ -1333,19 +1354,20 @@ export default function App() {
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
           onNewSession={() => { setSelectedSession(null); setView("new"); }}
-          onRunAll={() => { setSelectedSession(null); setView("runAll"); }}
+          onRunAll={handleRunAll}
+          runAllActive={!!runAllState}
           onRefreshRef={sidebarRefreshRef}
           onSelectedSessionUpdated={(s) => setSelectedSession(s)}
         />
       </aside>
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        {view === "runAll" ? (
+        {view === "runAll" && runAllState ? (
           <RunAllView
-            onCompleted={() => {
-              sidebarRefreshRef.current?.();
-              setView("session");
-            }}
+            state={runAllState}
+            onCancel={handleRunAllCancel}
+            onOptionRespond={handleRunAllOptionRespond}
+            onDone={handleRunAllDone}
           />
         ) : view === "new" ? (
           <NewSessionForm
