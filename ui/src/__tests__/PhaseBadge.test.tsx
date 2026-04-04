@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
-import { PhaseBadge, PLANNING_LABEL } from "../components/PhaseBadge";
+import { PhaseBadge, PLANNING_LABEL, FIXING_LABEL } from "../components/PhaseBadge";
 
 // aria-label used by the blue "approve ready" indicator inside PhaseBadge
 const PLAN_READY_LABEL = "plan ready for approval";
@@ -117,6 +117,37 @@ describe("PhaseBadge", () => {
 
       rerender(<PhaseBadge phase="Suspended" />);
       expect(screen.getByText("Suspended")).toBeTruthy();
+    });
+  });
+
+  describe("fixing override", () => {
+    it("renders 'Fixing' text when fixing is true, overriding the Awaiting Approval label", () => {
+      // Given: an Awaiting Approval session with a plan, but fix is currently in progress
+      // When
+      render(<PhaseBadge phase="Awaiting Approval" planAvailable={true} fixing={true} />);
+
+      // Then: "Fixing" is displayed instead of "Awaiting Approval"
+      expect(screen.getByText(FIXING_LABEL)).toBeTruthy();
+      expect(screen.queryByText("Awaiting Approval")).toBeNull();
+    });
+
+    it("suppresses the blue dot when fixing is true even though planAvailable is true", () => {
+      // Given: plan is available, but a fix is currently running
+      // When
+      render(<PhaseBadge phase="Awaiting Approval" planAvailable={true} fixing={true} />);
+
+      // Then: the approval-ready indicator is hidden (fix is not yet ready for approval)
+      expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
+    });
+
+    it("fixing=false produces the same output as omitting the prop (no-op)", () => {
+      // Given: plan is available, fixing is explicitly false
+      // When
+      render(<PhaseBadge phase="Awaiting Approval" planAvailable={true} fixing={false} />);
+
+      // Then: normal Awaiting Approval behavior — label and blue dot are both shown
+      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+      expect(screen.getByLabelText(PLAN_READY_LABEL)).toBeTruthy();
     });
   });
 });

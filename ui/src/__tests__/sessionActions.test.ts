@@ -520,6 +520,48 @@ describe("getSessionActions", () => {
     });
   });
 
+  // --- isFixing flag ---------------------------------------------------------
+
+  describe("when isFixing is true", () => {
+    it("hides Approve, Fix, and Ask during an active plan fix", () => {
+      // Given: an Awaiting Approval session with a plan, and a fix is currently running
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle", true);
+
+      // Then: all review-stage actions are suppressed while fixing is in progress
+      expect(actions.showApprove).toBe(false);
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
+    });
+
+    it("keeps Delete visible during an active plan fix", () => {
+      // Given: an Awaiting Approval session with a plan, and a fix is currently running
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle", true);
+
+      // Then: delete is unaffected by the fixing state
+      expect(actions.showDelete).toBe(true);
+    });
+
+    it("isFixing=false produces the same result as omitting the argument", () => {
+      // Given: an Awaiting Approval session with a plan
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const withFalse = getSessionActions(session, "idle", false);
+      const withDefault = getSessionActions(session, "idle");
+
+      // Then: explicitly passing false is the same as the default (not fixing)
+      expect(withFalse.showApprove).toBe(withDefault.showApprove);
+      expect(withFalse.showFix).toBe(withDefault.showFix);
+      expect(withFalse.showAsk).toBe(withDefault.showAsk);
+    });
+  });
+
   // --- post-run states after refresh (phase updated) ------------------------
 
   describe("post-run states after phase refresh", () => {

@@ -291,6 +291,7 @@ interface WorkflowRunnerProps {
   onSessionUpdated: (session: Session) => void;
   onSessionDeleted: () => void;
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
+  onFixingChange: (sessionId: string, fixing: boolean) => void;
 }
 
 interface PendingOption {
@@ -301,7 +302,7 @@ interface PendingOption {
 
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onSessionDeleted, onToast }: WorkflowRunnerProps) {
+function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onSessionDeleted, onToast, onFixingChange }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabPlanId = `${uid}-tab-plan`;
@@ -376,6 +377,15 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setShowDeleteConfirm(false);
     setDeleting(false);
   }, [session.id]);
+
+  // Clear the parent's fixing state when this runner unmounts (e.g. user navigates
+  // to another session while a fix is in-flight). Without this, fixingSessionIds in
+  // App retains a stale entry and the sidebar keeps showing "Fixing" indefinitely.
+  useEffect(() => {
+    return () => {
+      onFixingChange(session.id, false);
+    };
+  }, [session.id, onFixingChange]);
 
   useEffect(() => {
     if (activeTab === "log" && status !== "running") {
@@ -507,6 +517,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     const trimmed = replanFeedback.trim();
     if (!trimmed) return;
     setReplanPhase("generating");
+    onFixingChange(session.id, true);
     setReplanError("");
 
     const channel = new Channel<PlanEvent>();
@@ -514,6 +525,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
+        onFixingChange(session.id, false);
         setReplanFeedback("");
         setAskResponse("");
         onActiveTabChange("plan");
@@ -521,6 +533,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       } else if (event.event === "planFailed") {
         setReplanError(event.data.error);
         setReplanPhase("editing");
+        onFixingChange(session.id, false);
       }
     };
 
@@ -529,6 +542,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     } catch (e) {
       setReplanError(String(e));
       setReplanPhase("editing");
+      onFixingChange(session.id, false);
     }
   }
 
@@ -549,8 +563,11 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }
 
-  const actions = getSessionActions(session, status);
-  const canShowFix = actions.showFix && replanPhase === "idle" && askPhase === "idle";
+  const isFixing = replanPhase === "generating";
+  const actions = getSessionActions(session, status, isFixing);
+  const notBusy = replanPhase === "idle" && askPhase === "idle";
+  const canShowFix = actions.showFix && notBusy;
+  const canShowAsk = actions.showAsk && notBusy;
 
   // Decide which log content to show
   const showLive = status === "running" || (status !== "idle" && liveLog.length > 0);
@@ -562,7 +579,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       <div className="px-6 pt-6 pb-4 border-b border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold font-mono text-gray-100">{session.id}</h2>
-          <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} />
+          <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} fixing={isFixing} />
         </div>
 
         {session.prUrl && (
@@ -599,7 +616,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
               Fix
             </button>
           )}
-          {canShowFix && (
+          {canShowAsk && (
             <button
               type="button"
               onClick={() => setAskPhase("editing")}
@@ -1231,6 +1248,21 @@ export default function App() {
   const runAllChannelRef = useRef<Channel<WorkflowEvent> | null>(null);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  const [fixingSessionIds, setFixingSessionIds] = useState<ReadonlySet<string>>(new Set());
+
+  const handleFixingChange = useCallback((sessionId: string, fixing: boolean) => {
+    setFixingSessionIds((prev) => {
+      if (prev.has(sessionId) === fixing) return prev;
+      const next = new Set(prev);
+      if (fixing) {
+        next.add(sessionId);
+      } else {
+        next.delete(sessionId);
+      }
+      return next;
+    });
+  }, []);
+
   const sessionSnapshotRef = useRef<Map<string, Session> | null>(null);
 
   const addToast = useCallback((toast: Omit<WorkflowToast, "id">) => {
@@ -1382,6 +1414,7 @@ export default function App() {
           runAllActive={!!runAllState}
           onRefreshRef={sidebarRefreshRef}
           onSelectedSessionUpdated={(s) => setSelectedSession(s)}
+          fixingSessionIds={fixingSessionIds}
           onSessionsChanged={handleSessionsChanged}
         />
       </aside>
@@ -1422,6 +1455,7 @@ export default function App() {
               sidebarRefreshRef.current?.();
             }}
             onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
+            onFixingChange={handleFixingChange}
           />
         ) : (
           <EmptyState />
