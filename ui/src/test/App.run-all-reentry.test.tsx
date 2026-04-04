@@ -78,6 +78,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 function setupRunAllMock() {
   let capturedChannel: { onmessage: ((event: unknown) => void) | null } | null = null;
   let resolveRunAll!: () => void;
+  let capturedTotal = 0;
 
   vi.mocked(commands.runAllSessions).mockImplementationOnce(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -92,16 +93,17 @@ function setupRunAllMock() {
   return {
     /** Emit runAllStarted event. */
     emitStarted(total: number): void {
+      capturedTotal = total;
       capturedChannel!.onmessage?.({
         event: "runAllStarted",
         data: { total },
       });
     },
     /** Emit runAllSessionStarted event. */
-    emitSessionStarted(sessionId: string, input: string): void {
+    emitSessionStarted(sessionId: string, input: string, total?: number): void {
       capturedChannel!.onmessage?.({
         event: "runAllSessionStarted",
-        data: { sessionId, input },
+        data: { sessionId, input, total: total ?? capturedTotal },
       });
     },
     /** Emit runAllSessionFinished event. */

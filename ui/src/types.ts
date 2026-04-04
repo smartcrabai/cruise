@@ -75,7 +75,7 @@ export interface RunAllStartedEvent {
 
 export interface RunAllSessionStartedEvent {
   event: "runAllSessionStarted";
-  data: { sessionId: string; input: string };
+  data: { sessionId: string; input: string; total: number };
 }
 
 export interface RunAllSessionFinishedEvent {
