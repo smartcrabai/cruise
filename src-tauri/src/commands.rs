@@ -445,6 +445,7 @@ pub async fn create_session(
     input: String,
     config_path: Option<String>,
     base_dir: String,
+    skipped_steps: Vec<String>,
     channel: tauri::ipc::Channel<PlanEvent>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
@@ -465,6 +466,7 @@ pub async fn create_session(
         input.trim().to_string(),
     );
     session.config_path = source.path().cloned();
+    session.skipped_steps = skipped_steps;
     manager.create(&session).map_err(|e| e.to_string())?;
     let _ = channel.send(PlanEvent::SessionCreated {
         session_id: session_id.clone(),
@@ -515,6 +517,24 @@ pub async fn create_session(
             Err(msg)
         }
     }
+}
+
+/// Return the ordered list of step names defined in a workflow config file.
+///
+/// Used by the GUI to populate the "Skip Steps" checkbox list before
+/// the user creates a new session.  Returns an empty list when `config_path`
+/// is `None` (built-in default) or when the config has no steps.
+#[tauri::command]
+pub fn get_config_steps(config_path: Option<String>) -> std::result::Result<Vec<String>, String> {
+    let yaml = match config_path {
+        Some(path) => {
+            std::fs::read_to_string(&path).map_err(|e| format!("Failed to read config: {e}"))?
+        }
+        None => return Ok(vec![]),
+    };
+    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
+        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    Ok(config.steps.keys().cloned().collect())
 }
 
 /// Approve a session, transitioning it from "Awaiting Approval" to "Planned".
@@ -750,6 +770,7 @@ async fn execute_single_session(
     let sessions_dir = manager.sessions_dir();
     let plan_path = session.plan_path(&sessions_dir);
     let input = session.input.clone();
+    let skipped_steps = session.skipped_steps.clone();
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
@@ -800,6 +821,7 @@ async fn execute_single_session(
                 option_handler: &handler,
                 config_reloader: None,
                 working_dir: Some(&exec_root_path),
+                skipped_steps: &skipped_steps,
             };
 
             let handle = tokio::runtime::Handle::current();

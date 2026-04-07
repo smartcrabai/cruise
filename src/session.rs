@@ -96,6 +96,9 @@ pub struct SessionState {
     /// True when the session is waiting for user input (option step).
     #[serde(default)]
     pub awaiting_input: bool,
+    /// Steps selected by the user to be skipped before execution.
+    #[serde(default)]
+    pub skipped_steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +156,7 @@ impl SessionState {
             config_path: None,
             updated_at: None,
             awaiting_input: false,
+            skipped_steps: vec![],
         }
     }
 
@@ -2125,5 +2129,100 @@ mod tests {
 
         // When/Then: writing does not panic even if the parent directory doesn't exist
         logger.write("this should not panic");
+    }
+
+    // --- skipped_steps tests ---
+
+    #[test]
+    fn test_skipped_steps_defaults_to_empty_on_new() {
+        // Given: a newly created SessionState
+        let state = SessionState::new(
+            "20260407000000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "add feature".to_string(),
+        );
+        // When: checking skipped_steps
+        // Then: it is empty by default
+        assert!(
+            state.skipped_steps.is_empty(),
+            "skipped_steps should be empty for a new session"
+        );
+    }
+
+    #[test]
+    fn test_skipped_steps_deserializes_from_existing_json_without_field() {
+        // Given: a state.json that does NOT contain skipped_steps (legacy format)
+        let json = r#"{
+            "id": "20260407000001",
+            "base_dir": "/repo",
+            "phase": "AwaitingApproval",
+            "config_source": "cruise.yaml",
+            "input": "add feature",
+            "current_step": null,
+            "created_at": "2026-04-07T03:02:37Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        }"#;
+        // When: deserializing the JSON
+        let state: SessionState = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("failed to deserialize legacy JSON: {e:?}"));
+        // Then: skipped_steps defaults to empty vec via #[serde(default)]
+        assert!(
+            state.skipped_steps.is_empty(),
+            "skipped_steps should default to empty when absent from JSON"
+        );
+    }
+
+    #[test]
+    fn test_skipped_steps_round_trips_through_save_and_load() {
+        // Given: a session with user-selected skipped steps
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260407000002".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "add feature".to_string(),
+        );
+        state.skipped_steps = vec!["plan".to_string(), "write-test".to_string()];
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+        manager.save(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loading the session back
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: skipped_steps are preserved exactly
+        assert_eq!(
+            loaded.skipped_steps,
+            vec!["plan", "write-test"],
+            "skipped_steps should round-trip through save and load"
+        );
+    }
+
+    #[test]
+    fn test_skipped_steps_empty_list_round_trips() {
+        // Given: a session with no skipped steps
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260407000003".to_string();
+        let state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loading the session
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: skipped_steps is empty
+        assert!(
+            loaded.skipped_steps.is_empty(),
+            "empty skipped_steps should round-trip as empty"
+        );
     }
 }
