@@ -251,6 +251,7 @@ async fn run_after_pr_steps(
         option_handler: &CliOptionHandler,
         config_reloader: None,
         working_dir: Some(working_dir),
+        skipped_steps: &[],
     };
     match execute_steps(&ctx, vars, tracker, first_step).await {
         Ok(_) | Err(CruiseError::StepPaused) => {}

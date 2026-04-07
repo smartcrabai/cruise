@@ -3,8 +3,10 @@ use std::io::IsTerminal;
 use console::style;
 use inquire::InquireError;
 
+use indexmap::IndexMap;
+
 use crate::cli::{DEFAULT_MAX_RETRIES, PlanArgs};
-use crate::config::{WorkflowConfig, validate_config};
+use crate::config::{StepConfig, WorkflowConfig, validate_config};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
@@ -183,6 +185,30 @@ async fn approve_with_title(
     manager.save(session)
 }
 
+/// Present a `MultiSelect` prompt so the user can choose which steps to skip.
+/// Returns an empty `Vec` when there are no steps, the user cancels, or
+/// an interruption is received (so the approve flow can continue unblocked).
+fn select_steps_to_skip(steps: &IndexMap<String, StepConfig>) -> Result<Vec<String>> {
+    let step_names: Vec<&str> = steps.keys().map(std::string::String::as_str).collect();
+    if step_names.is_empty() {
+        return Ok(vec![]);
+    }
+    match inquire::MultiSelect::new(
+        "Steps to skip (Space to toggle, Enter to confirm):",
+        step_names,
+    )
+    .with_help_message("No selection = run all steps")
+    .prompt()
+    {
+        Ok(selected) => Ok(selected
+            .into_iter()
+            .map(std::string::ToString::to_string)
+            .collect()),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(vec![]),
+        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+}
+
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
 /// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
 /// without prompting so that inquire never tries to read from a non-TTY stdin.
@@ -243,6 +269,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
+                session.skipped_steps = select_steps_to_skip(&config.steps)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Session {} created.",
@@ -273,6 +300,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
+                session.skipped_steps = select_steps_to_skip(&config.steps)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Executing session {}...",

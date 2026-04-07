@@ -350,6 +350,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let log_path = manager.run_log_path(&session_id);
     let logger = SessionLogger::new(log_path);
     logger.write("--- run started ---");
+    let skipped_steps = session.skipped_steps.clone();
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let on_step_start = |step: &str| {
@@ -371,6 +372,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         option_handler: &CliOptionHandler,
         config_reloader: config_reloader.as_deref(),
         working_dir: Some(execution_workspace.path()),
+        skipped_steps: &skipped_steps,
     };
     let exec_result = tokio::select! {
         result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,

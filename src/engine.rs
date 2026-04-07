@@ -40,6 +40,9 @@ pub struct ExecutionContext<'a> {
     /// When set, both the LLM subprocess and shell commands run with this as their `cwd`,
     /// ensuring that relative-path file writes land inside the `FileTracker` root.
     pub working_dir: Option<&'a std::path::Path>,
+    /// Step names that the user selected to skip before execution.
+    /// Applied in addition to YAML-configured `skip` conditions.
+    pub skipped_steps: &'a [String],
 }
 
 /// Mutable counters threaded through the execution loop.
@@ -237,6 +240,7 @@ pub async fn execute_steps(
             option_handler: ctx.option_handler,
             config_reloader: None,
             working_dir: ctx.working_dir,
+            skipped_steps: ctx.skipped_steps,
         };
         let outcome =
             step_loop_iteration(&active_ctx, vars, tracker, &current_step, &mut state).await?;
@@ -303,7 +307,9 @@ async fn step_loop_iteration(
         return Ok(outcome);
     }
 
-    if should_skip(step_config.skip.as_ref(), vars)? {
+    if should_skip(step_config.skip.as_ref(), vars)?
+        || ctx.skipped_steps.iter().any(|s| s == current_step)
+    {
         state.counters.skipped += 1;
         eprintln!("{} skipping: {}", style("→").yellow(), current_step);
         return Ok(get_next_step(&ctx.compiled.steps, current_step, None)
@@ -868,6 +874,7 @@ mod tests {
         config_reloader: Option<&dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>>>,
         cancel_token: Option<&CancellationToken>,
         option_handler: &dyn OptionHandler,
+        skipped_steps: &[String],
     ) -> Result<ExecutionResult> {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
@@ -890,6 +897,7 @@ mod tests {
             option_handler,
             config_reloader,
             working_dir: Some(tracker_root.as_path()),
+            skipped_steps,
         };
         execute_steps(&ctx, &mut vars, &mut tracker, &step).await
     }
@@ -911,6 +919,34 @@ mod tests {
             None,
             None,
             &NoOpOptionHandler,
+            &[],
+        )
+        .await
+    }
+
+    /// Run config with user-selected skipped steps.
+    /// Useful for testing the user-skip feature independently from the YAML `skip` condition.
+    async fn run_config_with_skipped(
+        yaml: &str,
+        input: &str,
+        start_step: Option<&str>,
+        skipped_steps: &[&str],
+    ) -> Result<ExecutionResult> {
+        let skipped: Vec<String> = skipped_steps
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        run_config_inner(
+            yaml,
+            input,
+            start_step,
+            std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &skipped,
         )
         .await
     }
@@ -934,6 +970,7 @@ mod tests {
             None,
             None,
             &NoOpOptionHandler,
+            &[],
         )
         .await
     }
@@ -1481,6 +1518,7 @@ steps:
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
             working_dir: None,
+            skipped_steps: &[],
         };
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
 
@@ -1622,6 +1660,7 @@ steps:
             None,
             None,
             &NoOpOptionHandler,
+            &[],
         )
         .await;
         // Then: workflow does NOT return StepMadeNoFileChanges (files changed, so no-change failure is skipped)
@@ -2055,6 +2094,7 @@ steps:
             Some(&reloader),
             None,
             &NoOpOptionHandler,
+            &[],
         )
         .await;
         // Then: completes successfully and reloader has been called
@@ -2092,6 +2132,7 @@ steps:
             Some(&reloader),
             None,
             &NoOpOptionHandler,
+            &[],
         )
         .await;
         // Then: completes successfully (steps executed with the updated config)
@@ -2124,6 +2165,7 @@ steps:
             Some(&reloader),
             None,
             &NoOpOptionHandler,
+            &[],
         )
         .await;
         // Then: retains the old config and completes successfully (step1 is executed)
@@ -2154,6 +2196,7 @@ steps:
             None,
             cancel_token,
             handler,
+            &[],
         )
         .await
     }
@@ -2258,6 +2301,7 @@ steps:
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
             working_dir: None,
+            skipped_steps: &[],
         };
         // When: execute_steps runs; step2's on_step_start triggers cancellation
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
@@ -2389,5 +2433,145 @@ steps:
             result.run, 2,
             "before and after steps should be counted as run"
         );
+    }
+
+    // --- user-selected skipped_steps tests ---
+
+    #[tokio::test]
+    async fn test_user_skipped_step_increments_skipped_counter() {
+        // Given: a workflow with 3 command steps where step2 would fail if executed
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo step1"
+  step2:
+    command: "exit 1"
+  step3:
+    command: "echo step3"
+"#;
+        // When: step2 is in user-selected skipped_steps
+        let result = run_config_with_skipped(yaml, "", None, &["step2"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: step2 is counted as skipped, step1 and step3 run
+        assert_eq!(result.skipped, 1, "one step should be counted as skipped");
+        assert_eq!(result.run, 2, "two steps should be counted as run");
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_step_is_not_executed() {
+        // Given: a workflow where a step would fail if executed
+        let yaml = r#"
+command: [echo]
+steps:
+  before:
+    command: "echo before"
+  should_not_run:
+    command: "exit 1"
+  after:
+    command: "echo after"
+"#;
+        // When: the failing step is in user-selected skipped_steps
+        let result = run_config_with_skipped(yaml, "", None, &["should_not_run"]).await;
+
+        // Then: the workflow succeeds because the failing step was not executed
+        assert!(
+            result.is_ok(),
+            "workflow should succeed when failing step is user-skipped: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_skip_nonexistent_step_name_is_silently_ignored() {
+        // Given: a workflow with 2 steps
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo step1"
+  step2:
+    command: "echo step2"
+"#;
+        // When: a step name that does not exist is in skipped_steps
+        let result = run_config_with_skipped(yaml, "", None, &["does_not_exist"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: all steps run normally, skipped counter remains 0
+        assert_eq!(result.run, 2, "all steps should run");
+        assert_eq!(
+            result.skipped, 0,
+            "nonexistent step name should not affect skip count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_yaml_skip_and_user_skip_are_both_respected() {
+        // Given: a workflow with one YAML-based skip and one user-selected skip
+        let yaml = r#"
+command: [echo]
+steps:
+  yaml_skipped:
+    command: "exit 1"
+    skip: true
+  user_skipped:
+    command: "exit 1"
+  step3:
+    command: "echo done"
+"#;
+        // When: user_skipped is also in skipped_steps (yaml_skipped is handled by YAML)
+        let result = run_config_with_skipped(yaml, "", None, &["user_skipped"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: both mechanisms each skip one step; step3 runs
+        assert_eq!(result.skipped, 2, "both steps should be skipped");
+        assert_eq!(result.run, 1, "only step3 should run");
+    }
+
+    #[tokio::test]
+    async fn test_user_skip_empty_list_runs_all_steps() {
+        // Given: a workflow with 2 steps
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo step1"
+  step2:
+    command: "echo step2"
+"#;
+        // When: skipped_steps is empty (no user selection)
+        let result = run_config_with_skipped(yaml, "", None, &[]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: all steps run, nothing is skipped
+        assert_eq!(
+            result.run, 2,
+            "all steps should run when skipped_steps is empty"
+        );
+        assert_eq!(result.skipped, 0, "no steps should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_user_skip_multiple_steps_all_skipped() {
+        // Given: a workflow with 4 steps
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo step1"
+  step2:
+    command: "exit 1"
+  step3:
+    command: "exit 1"
+  step4:
+    command: "echo step4"
+"#;
+        // When: step2 and step3 are both in user-selected skipped_steps
+        let result = run_config_with_skipped(yaml, "", None, &["step2", "step3"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: step2 and step3 are skipped, step1 and step4 run
+        assert_eq!(result.skipped, 2, "two steps should be skipped");
+        assert_eq!(result.run, 2, "two steps should run");
     }
 }
