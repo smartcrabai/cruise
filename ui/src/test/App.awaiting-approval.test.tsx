@@ -49,6 +49,7 @@ vi.mock("../lib/commands", () => ({
 
 vi.mock("../lib/updater", () => ({
   checkForUpdate: vi.fn().mockResolvedValue(null),
+  checkForUpdateManual: vi.fn().mockResolvedValue(null),
   downloadAndInstall: vi.fn(),
 }));
 
@@ -285,9 +286,9 @@ describe("App: Awaiting Approval -- Ask flow", () => {
   });
 });
 
-// ─── Awaiting Approval: Fixing display state ─────────────────────────────────
+// --- Awaiting Approval: Fixing display state ---
 
-describe("App: Awaiting Approval — Fixing display state", () => {
+describe("App: Awaiting Approval -- Fixing display state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
@@ -318,10 +319,10 @@ describe("App: Awaiting Approval — Fixing display state", () => {
     );
     await selectAwaitingApprovalSession();
 
-    // When: start the fix by clicking Fix → typing feedback → clicking Apply
+    // When: start the fix by clicking Fix -> typing feedback -> clicking Apply
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -344,7 +345,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
     // When: submit the fix
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -371,7 +372,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -389,7 +390,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -402,7 +403,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
   });
 });
 
-// ─── Awaiting Approval: Fix flow ─────────────────────────────────────────────
+// --- Awaiting Approval: Fix flow ---
 
 describe("App: Awaiting Approval -- Fix flow", () => {
   beforeEach(() => {
