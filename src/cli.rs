@@ -2,18 +2,27 @@ use clap::{Parser, Subcommand};
 
 pub(crate) const DEFAULT_MAX_RETRIES: usize = 10;
 pub(crate) const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
+pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
 
 #[derive(Parser, Debug)]
 #[command(
     name = "cruise",
     version,
-    about = "YAML-driven coding agent workflow orchestrator"
+    about = "YAML-driven coding agent workflow orchestrator",
+    args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
+    /// Create a plan in the background and return immediately.
+    ///
+    /// Pass `stdin` to read the task description from piped stdin explicitly.
+    #[arg(long, value_name = "INPUT", conflicts_with = "input")]
+    pub plan: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
     /// Initial input (legacy: no subcommand is treated as `plan`).
+    #[arg(conflicts_with = "plan")]
     pub input: Option<String>,
 }
 
@@ -21,6 +30,8 @@ pub struct Cli {
 pub enum Commands {
     /// Create an implementation plan for a task.
     Plan(PlanArgs),
+    #[command(hide = true)]
+    PlanWorker(PlanWorkerArgs),
     /// Execute a planned session.
     Run(RunArgs),
     /// List and manage sessions interactively.
@@ -43,6 +54,17 @@ pub struct PlanArgs {
     /// Print the plan step without executing it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Maximum number of rate-limit retries per LLM call.
+    #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
+    pub rate_limit_retries: usize,
+}
+
+#[derive(Parser, Debug)]
+pub struct PlanWorkerArgs {
+    /// Session ID whose plan should be generated.
+    #[arg(long)]
+    pub session: String,
 
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
@@ -96,6 +118,7 @@ pub fn parse_cli() -> Cli {
 
     // Backward compat: no subcommand + stdin pipe → read input from stdin.
     if cli.command.is_none()
+        && cli.plan.is_none()
         && cli.input.is_none()
         && !std::io::IsTerminal::is_terminal(&std::io::stdin())
     {
@@ -199,6 +222,30 @@ mod tests {
             }
             _ => panic!("expected Run subcommand"),
         }
+    }
+
+    #[test]
+    fn test_root_plan_flag_with_inline_input_parses() {
+        // Given / When: the new root-level --plan flag is used with inline text
+        let cli = Cli::try_parse_from(["cruise", "--plan", "add feature X"])
+            .unwrap_or_else(|e| panic!("expected --plan to parse successfully: {e}"));
+
+        // Then: it stays on the root command path instead of falling back to legacy positional input
+        assert!(cli.command.is_none(), "expected no subcommand: {cli:?}");
+        assert_eq!(cli.plan, Some("add feature X".to_string()));
+        assert_eq!(cli.input, None, "legacy positional input should stay empty");
+    }
+
+    #[test]
+    fn test_root_plan_flag_with_stdin_literal_parses() {
+        // Given / When: the new root-level --plan flag is used with the explicit stdin sentinel
+        let cli = Cli::try_parse_from(["cruise", "--plan", "stdin"])
+            .unwrap_or_else(|e| panic!("expected --plan stdin to parse successfully: {e}"));
+
+        // Then: it is accepted as a root invocation
+        assert!(cli.command.is_none(), "expected no subcommand: {cli:?}");
+        assert_eq!(cli.plan, Some(PLAN_STDIN_SENTINEL.to_string()));
+        assert_eq!(cli.input, None, "legacy positional input should stay empty");
     }
 
     #[test]
