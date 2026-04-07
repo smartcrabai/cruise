@@ -501,10 +501,8 @@ describe("App: WorkflowRunner tab selection persistence", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    // Select Session A and switch to Plan tab
+    // Select Session A — Plan tab is the default
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
-    await waitFor(() => screen.getByRole("tab", { name: "Plan" }));
-    await userEvent.click(screen.getByRole("tab", { name: "Plan" }));
 
     // Verify Plan tab is active: Info tab's "Base dir" label is not shown
     await waitFor(() => {
@@ -558,7 +556,7 @@ describe("App: WorkflowRunner tab selection persistence", () => {
 
   it("loads plan content when returning to session with remembered Plan tab", async () => {
     // Given: session A and session B
-    const sessA = makeSession({ id: "sess-a", input: "task A" });
+    const sessA = makeSession({ id: "sess-a", input: "task A", planAvailable: true });
     const sessB = makeSession({ id: "sess-b", input: "task B" });
     vi.mocked(commands.listSessions).mockResolvedValue([sessA, sessB]);
     vi.mocked(commands.getSessionPlan).mockResolvedValue("# Loaded plan");
@@ -566,10 +564,8 @@ describe("App: WorkflowRunner tab selection persistence", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    // Select Session A and open Plan tab (triggers initial loadPlan)
+    // Select Session A — Plan tab is the default and triggers initial loadPlan
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
-    await waitFor(() => screen.getByRole("tab", { name: "Plan" }));
-    await userEvent.click(screen.getByRole("tab", { name: "Plan" }));
     await waitFor(() => expect(commands.getSessionPlan).toHaveBeenCalledWith("sess-a"));
 
     // Reset the call count to track new calls
@@ -685,5 +681,129 @@ describe("App: Approval-ready notification transitions", () => {
       expect.anything(),
       expect.stringContaining("Plan ready"),
     );
+  });
+});
+
+// --- Plan tab as default and plan-availability gating -------------------------
+
+describe("App: Plan tab as default and plan-availability gating", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("defaults to Plan tab when first opening a session with planAvailable: true", async () => {
+    // Given: a session that has a plan available
+    const sess = makeSession({ id: "sess-plan", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([sess]);
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("# My Plan");
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+
+    // When: open the session for the first time (no remembered tab)
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+
+    // Then: Plan tab is active by default — Info tab's "Base dir" label is not visible
+    await waitFor(() => {
+      expect(screen.queryByText("Base dir")).toBeNull();
+    });
+    // And: getSessionPlan was called because planAvailable is true
+    await waitFor(() => {
+      expect(commands.getSessionPlan).toHaveBeenCalledWith("sess-plan");
+    });
+  });
+
+  it("does not call getSessionPlan when opening a session with planAvailable: false", async () => {
+    // Given: a session whose plan is not yet ready
+    const sess = makeSession({ id: "sess-no-plan", planAvailable: false });
+    vi.mocked(commands.listSessions).mockResolvedValue([sess]);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+
+    // When: open the session (should default to Plan tab, but plan is not available)
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+
+    // Then: Plan tab is active (no "Base dir") and shows the empty-state text
+    await waitFor(() => {
+      expect(screen.queryByText("Base dir")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("No plan available.")).toBeInTheDocument();
+    });
+    // And: getSessionPlan was NOT called — plan is not available yet
+    expect(commands.getSessionPlan).not.toHaveBeenCalled();
+  });
+
+  it("auto-loads plan when open session transitions from planAvailable: false to planAvailable: true", async () => {
+    // Given: session starts without a plan; Plan tab is the default
+    const sessV1 = makeSession({ id: "sess-late-plan", planAvailable: false });
+    vi.mocked(commands.listSessions).mockResolvedValue([sessV1]);
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("# Late plan");
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+
+    // Select the session — Plan tab is shown but plan is not loaded
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+    await waitFor(() => screen.getByText("No plan available."));
+
+    // Confirm that no plan fetch has occurred yet
+    expect(commands.getSessionPlan).not.toHaveBeenCalled();
+
+    // When: sidebar poll sees the session transition to planAvailable: true
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-late-plan", planAvailable: true }),
+    ]);
+    // Trigger a silent sidebar reload via visibilitychange (same mechanism as the 3s poll)
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // Then: the plan is fetched automatically without any user interaction
+    await waitFor(() => {
+      expect(commands.getSessionPlan).toHaveBeenCalledWith("sess-late-plan");
+    });
+  });
+
+  it("remembered non-Plan tab persists over the Plan default after navigation", async () => {
+    // Given: two sessions both with plans available
+    const sessA = makeSession({ id: "sess-a", input: "task A", planAvailable: true });
+    const sessB = makeSession({ id: "sess-b", input: "task B", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([sessA, sessB]);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("task A"));
+
+    // Open session A — Plan tab is the default
+    await userEvent.click(screen.getByRole("button", { name: /task A/ }));
+    await waitFor(() => screen.getByRole("tab", { name: "Plan" }));
+
+    // Switch to Log tab for session A (overrides the default)
+    await userEvent.click(screen.getByRole("tab", { name: "Log" }));
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
+    });
+
+    // Navigate to session B, then back to session A
+    await userEvent.click(screen.getByRole("button", { name: /task B/ }));
+    await userEvent.click(screen.getByRole("button", { name: /task A/ }));
+
+    // Then: Log tab is still active for session A — the remembered tab wins over the default
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
+    });
+    expect(screen.getByRole("tab", { name: "Plan" })).toHaveAttribute("aria-selected", "false");
   });
 });
