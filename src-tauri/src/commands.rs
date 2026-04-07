@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use cruise::cancellation::CancellationToken;
 use cruise::session::{
-    SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode, current_iso8601,
-    get_cruise_home,
+    PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
+    current_iso8601, get_cruise_home,
 };
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
@@ -173,6 +173,12 @@ fn prepare_run_session(
     } else {
         session.workspace_mode
     };
+
+    // Preflight: verify `gh` is available before doing any workspace setup so
+    // the session is never left in Running phase when `gh` is absent.
+    if effective_workspace_mode == WorkspaceMode::Worktree {
+        cruise::worktree_pr::ensure_gh_available()?;
+    }
 
     session.workspace_mode = effective_workspace_mode;
     let execution_workspace =
@@ -354,8 +360,6 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
-const PLAN_VAR: &str = "plan";
-
 /// Invoke the LLM to generate/fix a plan using `template`, writing output to the
 /// path stored in `vars` under the `"plan"` variable.
 async fn run_plan_prompt_template(
@@ -728,6 +732,23 @@ async fn execute_single_session(
     let exec_root =
         prepare_run_session(&manager, &mut session, workspace_mode).map_err(|e| e.to_string())?;
 
+    // Build WorktreeContext from session fields set by prepare_run_session, so the
+    // blocking closure can call handle_worktree_pr without holding the session reference.
+    let worktree_ctx_for_pr = if session.workspace_mode == WorkspaceMode::Worktree {
+        session
+            .worktree_path
+            .as_ref()
+            .zip(session.worktree_branch.as_ref())
+            .map(|(path, branch)| cruise::worktree::WorktreeContext {
+                path: path.clone(),
+                branch: branch.clone(),
+                original_dir: session.base_dir.clone(),
+            })
+    } else {
+        None
+    };
+    let sid_for_pr = session_id.to_string();
+
     let cancel_token = CancellationToken::new();
     {
         let mut guard = state
@@ -741,7 +762,7 @@ async fn execute_single_session(
             .active_session_id
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = Some(session_id.to_string());
+        *guard = Some(sid_for_pr.clone());
     }
 
     let option_responder = Arc::clone(&state.option_responder);
@@ -751,8 +772,8 @@ async fn execute_single_session(
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
-    let sid_for_spawn = session_id.to_string();
-    let sid_for_emitter = session_id.to_string();
+    let sid_for_spawn = sid_for_pr.clone();
+    let sid_for_emitter = sid_for_pr.clone();
     let log_path = manager.run_log_path(session_id);
 
     let exec_result = tokio::task::spawn_blocking(
@@ -785,7 +806,7 @@ async fn execute_single_session(
             let handler = GuiOptionHandler::new(emitter, sid_for_spawn, option_responder);
 
             let mut vars = VariableStore::new(input);
-            vars.set_named_file("plan", plan_path);
+            vars.set_named_file(PLAN_VAR, plan_path);
             let exec_root_path = exec_root.clone();
             let mut tracker = FileTracker::with_root(exec_root);
 
@@ -818,7 +839,29 @@ async fn execute_single_session(
                 let _ = std::env::set_current_dir(dir);
             }
 
-            result
+            let exec = result?;
+            if let Some(ref ctx) = worktree_ctx_for_pr {
+                let manager_for_pr =
+                    new_session_manager().map_err(cruise::error::CruiseError::Other)?;
+                let mut session_for_pr = manager_for_pr
+                    .load(&sid_for_pr)
+                    .map_err(|e| cruise::error::CruiseError::Other(e.to_string()))?;
+                let pr_result = handle.block_on(cruise::worktree_pr::handle_worktree_pr(
+                    ctx,
+                    &compiled,
+                    &mut vars,
+                    &mut tracker,
+                    &mut session_for_pr,
+                    5,
+                    10,
+                ));
+                if pr_result.is_ok() {
+                    let _ = manager_for_pr.save(&session_for_pr);
+                }
+                pr_result.map(|()| exec)
+            } else {
+                Ok(exec)
+            }
         },
     )
     .await
@@ -1905,5 +1948,103 @@ mod tests {
 
         // Then: the returned base_dir equals the input path exactly
         assert_eq!(base, repo_dir.path());
+    }
+
+    // ─── prepare_run_session: worktree gh preflight ──────────────────────────
+
+    /// Given: worktree-mode session, no `gh` in PATH (empty bin directory)
+    /// When:  prepare_run_session is called with WorkspaceMode::Worktree
+    /// Then:  fails with a gh-related error before saving the Running phase
+    ///
+    /// This test verifies the new preflight behaviour required by the plan:
+    /// the GUI must check that `gh` is available **before** committing the
+    /// session to `Running`, just as the CLI already does in `run_cmd.rs`.
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_run_session_worktree_fails_before_running_when_gh_not_available() {
+        // Given: a fresh worktree-mode session (WorkspaceMode::Worktree is the
+        // default created by make_session / SessionState::new)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260406100000";
+        let session = make_session(session_id, &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Replace PATH with an empty directory so gh (and git) cannot be found.
+        // The gh preflight must fire before any git worktree operations.
+        let empty_bin = tmp.path().join("empty_bin");
+        fs::create_dir_all(&empty_bin).unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = cruise::test_support::lock_process();
+        let _path_guard = cruise::test_support::EnvGuard::set("PATH", empty_bin.as_os_str());
+
+        // When: prepare_run_session is called with worktree mode
+        let result = prepare_run_session(&manager, &mut loaded, WorkspaceMode::Worktree);
+
+        // Then: fails with an error that mentions "gh"
+        assert!(
+            result.is_err(),
+            "expected prepare_run_session to fail when gh is absent"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("gh"),
+            "error should mention gh: {err}"
+        );
+
+        // And: the session is NOT saved in Running phase (preflight fired early)
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            saved.phase,
+            SessionPhase::Planned,
+            "session should remain Planned when gh preflight fails"
+        );
+    }
+
+    /// Given: worktree-mode session, a fake `gh` is available in PATH
+    /// When:  prepare_run_session is called with WorkspaceMode::Worktree
+    /// Then:  the session is saved as Running and a workspace is returned
+    ///
+    /// Positive counterpart of the gh-preflight test: proves that a
+    /// correctly installed `gh` does not block the run.
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_run_session_worktree_succeeds_when_gh_available() {
+        // Given: a fresh worktree-mode session with a fake gh that passes --version
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260406100001";
+        let session = make_session(session_id, &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        cruise::test_support::install_version_only_gh(&bin_dir);
+
+        let _lock = cruise::test_support::lock_process();
+        let _path_guard = cruise::test_support::prepend_to_path(&bin_dir);
+
+        // When: prepare_run_session is called with worktree mode
+        let result = prepare_run_session(&manager, &mut loaded, WorkspaceMode::Worktree);
+
+        // Then: succeeds and the session is saved as Running
+        assert!(
+            result.is_ok(),
+            "expected prepare_run_session to succeed when gh is available: {result:?}"
+        );
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved.phase, SessionPhase::Running);
+        assert_eq!(saved.workspace_mode, WorkspaceMode::Worktree);
+        assert!(
+            saved.worktree_branch.is_some(),
+            "worktree branch should be set"
+        );
     }
 }

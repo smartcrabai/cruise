@@ -8,12 +8,12 @@ use inquire::InquireError;
 
 use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
-use crate::config::{DEFAULT_PR_LANGUAGE, validate_config};
-use crate::engine::{execute_steps, print_dry_run, resolve_command_with_model};
+use crate::config::validate_config;
+use crate::engine::{execute_steps, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
-use crate::plan_cmd::PLAN_VAR;
+use crate::session::PLAN_VAR;
 use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
     SessionStateFingerprint, WorkspaceMode, current_iso8601, get_cruise_home,
@@ -21,12 +21,7 @@ use crate::session::{
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
 use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
-use crate::worktree;
 
-const PR_LANGUAGE_VAR: &str = "pr.language";
-const PR_NUMBER_VAR: &str = "pr.number";
-const PR_URL_VAR: &str = "pr.url";
-const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 const SESSION_STATE_CONFLICT_ABORT_LABEL: &str = "Abort run";
 const SESSION_STATE_CONFLICT_OVERWRITE_LABEL: &str = "Overwrite external state";
 const WORKSPACE_WORKTREE_LABEL: &str = "Create worktree (new branch)";
@@ -83,17 +78,6 @@ impl Drop for CurrentDirGuard {
             let _ = std::env::set_current_dir(fallback_root());
         }
     }
-}
-
-fn build_pr_prompt(vars: &mut VariableStore, compiled: &CompiledWorkflow) -> Result<String> {
-    let lang = compiled.pr_language.trim();
-    let lang = if lang.is_empty() {
-        DEFAULT_PR_LANGUAGE
-    } else {
-        lang
-    };
-    vars.set_named_value(PR_LANGUAGE_VAR, lang.to_string());
-    vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
 }
 
 fn save_session_state_with_conflict_resolution(
@@ -316,7 +300,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     };
     session.workspace_mode = effective_workspace_mode;
     if effective_workspace_mode == WorkspaceMode::Worktree {
-        ensure_gh_available()?;
+        crate::worktree_pr::ensure_gh_available()?;
     }
     let start_step = session.current_step.clone().map_or_else(
         || {
@@ -418,7 +402,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             match &execution_workspace {
                 ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
                 ExecutionWorkspace::Worktree { ctx, .. } => {
-                    handle_worktree_pr(
+                    crate::worktree_pr::handle_worktree_pr(
                         ctx,
                         &compiled,
                         &mut vars,
@@ -510,166 +494,6 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
     }
 }
 
-/// Handle PR creation and after-PR steps for a worktree execution.
-async fn handle_worktree_pr(
-    ctx: &worktree::WorktreeContext,
-    compiled: &CompiledWorkflow,
-    vars: &mut VariableStore,
-    tracker: &mut FileTracker,
-    session: &mut SessionState,
-    rate_limit_retries: usize,
-    max_retries: usize,
-) -> Result<()> {
-    let (pr_title, pr_body) =
-        generate_pr_description(compiled, vars, rate_limit_retries, &ctx.path).await;
-
-    match attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body) {
-        Ok(pr_attempt) => {
-            pr_attempt.report();
-            match pr_attempt {
-                PrAttemptOutcome::Created { url, .. } => {
-                    eprintln!("{} PR created: {}", style("✓").green().bold(), url);
-                    if let Some(number) = extract_last_path_segment(&url) {
-                        vars.set_named_value(PR_NUMBER_VAR, number);
-                    }
-                    vars.set_named_value(PR_URL_VAR, url.clone());
-                    session.pr_url = Some(url);
-                    run_after_pr_steps(
-                        compiled,
-                        vars,
-                        tracker,
-                        max_retries,
-                        rate_limit_retries,
-                        ctx.path.as_path(),
-                    )
-                    .await;
-                    Ok(())
-                }
-                PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
-                    "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
-                    ctx.branch
-                ))),
-                PrAttemptOutcome::CreateFailed { error, .. } => {
-                    eprintln!("warning: PR creation failed: {error}");
-                    Ok(())
-                }
-            }
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Generate a PR title and body using the LLM, returning empty strings on failure.
-async fn generate_pr_description(
-    compiled: &CompiledWorkflow,
-    vars: &mut VariableStore,
-    rate_limit_retries: usize,
-    working_dir: &Path,
-) -> (String, String) {
-    // If LLM API is configured, try the API path first.
-    if let Some(ref api_config) = compiled.llm_api
-        && let Ok(plan_path_str) = vars.get_variable(PLAN_VAR)
-    {
-        let plan_path = PathBuf::from(&plan_path_str);
-        match crate::llm_api::generate_pr_metadata(
-            api_config,
-            &plan_path,
-            &compiled.pr_language,
-            working_dir,
-        )
-        .await
-        {
-            Ok((title, body)) => return (title, body),
-            Err(e) => {
-                eprintln!("warning: LLM API call failed, falling back to CLI: {e}");
-            }
-        }
-    }
-
-    let pr_prompt = match build_pr_prompt(vars, compiled) {
-        Err(e) => {
-            eprintln!("warning: PR prompt resolution failed: {e}");
-            return (String::new(), String::new());
-        }
-        Ok(p) => p,
-    };
-    let pr_model = compiled.model.as_deref();
-    let has_placeholder = compiled.command.iter().any(|s| s.contains("{model}"));
-    let (resolved_command, model_arg) = if has_placeholder {
-        (
-            resolve_command_with_model(&compiled.command, pr_model),
-            None,
-        )
-    } else {
-        (compiled.command.clone(), pr_model.map(str::to_string))
-    };
-    let spinner = crate::spinner::Spinner::start("Generating PR description...");
-    let env = std::collections::HashMap::new();
-    let llm_output = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
-        match crate::step::prompt::run_prompt(
-            &resolved_command,
-            model_arg.as_deref(),
-            &pr_prompt,
-            rate_limit_retries,
-            &env,
-            Some(&on_retry),
-            None,
-            None,
-        )
-        .await
-        {
-            Ok(r) => r.output,
-            Err(e) => {
-                eprintln!("warning: PR description generation failed: {e}");
-                String::new()
-            }
-        }
-    };
-    drop(spinner);
-    let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
-    if pr_title.is_empty() && !llm_output.trim().is_empty() {
-        let truncated: String = llm_output.chars().take(500).collect();
-        eprintln!(
-            "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
-            style("⚠").yellow(),
-            truncated
-        );
-    }
-    (pr_title, pr_body)
-}
-
-/// Run the after-PR workflow steps, logging any errors.
-async fn run_after_pr_steps(
-    compiled: &CompiledWorkflow,
-    vars: &mut VariableStore,
-    tracker: &mut FileTracker,
-    max_retries: usize,
-    rate_limit_retries: usize,
-    working_dir: &std::path::Path,
-) {
-    let Some(first_step) = compiled.after_pr.keys().next() else {
-        return;
-    };
-    let after_compiled = compiled.to_after_pr_compiled();
-    let ctx = crate::engine::ExecutionContext {
-        compiled: &after_compiled,
-        max_retries,
-        rate_limit_retries,
-        on_step_start: &|_| Ok(()),
-        cancel_token: None,
-        option_handler: &CliOptionHandler,
-        config_reloader: None,
-        working_dir: Some(working_dir),
-    };
-    match execute_steps(&ctx, vars, tracker, first_step).await {
-        Ok(_) | Err(CruiseError::StepPaused) => {}
-        Err(e) => {
-            eprintln!("warning: after-pr steps failed: {e}");
-        }
-    }
-}
-
 async fn run_all(args: RunArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
     let mut seen: HashSet<String> = HashSet::new();
@@ -716,260 +540,6 @@ async fn run_all(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommitOutcome {
-    Created,
-    NoChanges,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PrAttemptOutcome {
-    Created {
-        url: String,
-        commit_outcome: CommitOutcome,
-    },
-    SkippedNoCommits,
-    CreateFailed {
-        error: String,
-        commit_outcome: CommitOutcome,
-    },
-}
-
-impl PrAttemptOutcome {
-    fn report(&self) {
-        match self {
-            Self::Created { commit_outcome, .. } | Self::CreateFailed { commit_outcome, .. } => {
-                report_commit_outcome(*commit_outcome);
-            }
-            Self::SkippedNoCommits => {}
-        }
-    }
-}
-
-fn report_commit_outcome(commit_outcome: CommitOutcome) {
-    match commit_outcome {
-        CommitOutcome::Created => {
-            eprintln!("{} Changes committed", style("✓").green().bold());
-        }
-        CommitOutcome::NoChanges => {
-            eprintln!(
-                "{} No new changes to commit; using existing branch commits",
-                style("→").cyan()
-            );
-        }
-    }
-}
-
-fn attempt_pr_creation(
-    ctx: &worktree::WorktreeContext,
-    message: &str,
-    title: &str,
-    body: &str,
-) -> Result<PrAttemptOutcome> {
-    let trimmed_title = title.trim();
-    let commit_message = if trimmed_title.is_empty() {
-        message
-    } else {
-        trimmed_title
-    };
-    let commit_outcome = commit_changes(&ctx.path, commit_message)?;
-    if branch_commit_count(ctx)? == 0 {
-        return Ok(PrAttemptOutcome::SkippedNoCommits);
-    }
-
-    push_branch(&ctx.path, &ctx.branch)?;
-
-    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body) {
-        Ok(url) => Ok(PrAttemptOutcome::Created {
-            url,
-            commit_outcome,
-        }),
-        Err(e) => Ok(PrAttemptOutcome::CreateFailed {
-            error: e.to_string(),
-            commit_outcome,
-        }),
-    }
-}
-
-fn branch_commit_count(ctx: &worktree::WorktreeContext) -> Result<usize> {
-    let base_head = git_stdout(
-        &ctx.original_dir,
-        &["rev-parse", "HEAD"],
-        "git rev-parse HEAD failed",
-    )?;
-    let merge_base = git_stdout(
-        &ctx.path,
-        &["merge-base", "HEAD", &base_head],
-        "git merge-base failed",
-    )?;
-    let count = git_stdout(
-        &ctx.path,
-        &["rev-list", "--count", &format!("{merge_base}..HEAD")],
-        "git rev-list --count failed",
-    )?;
-    count.parse::<usize>().map_err(|e| {
-        CruiseError::Other(format!(
-            "failed to parse branch commit count from `{count}`: {e}"
-        ))
-    })
-}
-
-fn git_stdout(current_dir: &Path, args: &[&str], context: &str) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(current_dir)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git {}: {}", args.join(" "), e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!("{context}: {}", stderr.trim())));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        Err(CruiseError::Other(format!(
-            "{context}: command produced no stdout"
-        )))
-    } else {
-        Ok(stdout)
-    }
-}
-
-/// Stage all changes and commit them.
-fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> {
-    // git add -A
-    let add = std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git add: {e}")))?;
-    if !add.status.success() {
-        let stderr = String::from_utf8_lossy(&add.stderr);
-        return Err(CruiseError::Other(format!(
-            "git add -A failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    // Check if there are staged changes
-    let diff = std::process::Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git diff: {e}")))?;
-    if diff.status.success() {
-        // No changes to commit
-        return Ok(CommitOutcome::NoChanges);
-    }
-
-    // git commit
-    let commit = std::process::Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git commit: {e}")))?;
-    if !commit.status.success() {
-        let stderr = String::from_utf8_lossy(&commit.stderr);
-        return Err(CruiseError::Other(format!(
-            "git commit failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(CommitOutcome::Created)
-}
-
-fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["push", "-u", "origin", branch])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git push: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!(
-            "git push failed: {}",
-            stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
-/// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise `--fill`.
-/// Falls back to `gh pr view` if a PR already exists.
-fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
-    let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
-    if title.is_empty() {
-        gh_args.push("--fill");
-    } else {
-        gh_args.extend(["--title", title, "--body", body]);
-    }
-    let output = std::process::Command::new("gh")
-        .args(&gh_args)
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {e}")))?;
-
-    if output.status.success()
-        && let Some(url) = gh_output_line(&output.stdout)
-    {
-        return Ok(url);
-    }
-
-    // PR may already exist — try to fetch the URL.
-    let fallback = std::process::Command::new("gh")
-        .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {e}")))?;
-
-    if fallback.status.success()
-        && let Some(url) = gh_output_line(&fallback.stdout)
-    {
-        return Ok(url);
-    }
-
-    let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
-    Err(CruiseError::Other(format!(
-        "gh pr create failed: {create_stderr}; gh pr view also failed: {view_stderr}"
-    )))
-}
-
-/// Trim and return a non-empty line from `gh` stdout bytes, or `None`.
-fn gh_output_line(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8_lossy(bytes).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-/// Extracts the last path segment from a URL, stripping any query string or fragment.
-/// Returns `None` if the URL has no non-empty trailing path segment.
-fn extract_last_path_segment(url: &str) -> Option<String> {
-    url.rsplit('/')
-        .next()
-        .map(|s| s.split_once(['?', '#']).map_or(s, |(prefix, _)| prefix))
-        .filter(|s| !s.is_empty())
-        .map(std::string::ToString::to_string)
-}
-
-/// Verify that `gh` CLI is available in PATH.
-fn ensure_gh_available() -> Result<()> {
-    let ok = std::process::Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if ok {
-        Ok(())
-    } else {
-        Err(CruiseError::Other(
-            "gh CLI is not installed. Install it from https://cli.github.com/".to_string(),
-        ))
-    }
 }
 
 /// Select a pending session interactively (or automatically if only one).
@@ -1022,133 +592,6 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
         .position(|l| l.as_str() == selected)
         .ok_or_else(|| CruiseError::Other(format!("selected session not found: {selected}")))?;
     Ok(pending[idx].id.clone())
-}
-
-/// Strip an optional markdown code block wrapper from `s`.
-///
-/// Handles both ` ```md ` and plain ` ``` ` prefixes. Returns the inner
-/// content with trailing newlines removed, or the trimmed input unchanged if
-/// no well-formed code block is found.
-///
-/// Also handles the case where the code block is preceded by preamble text:
-/// searches for the first ` ``` ` line and attempts extraction from there.
-fn strip_code_block(s: &str) -> &str {
-    let trimmed = s.trim();
-
-    // Fast path: starts directly with ```
-    if let Some(after_backticks) = trimmed.strip_prefix("```") {
-        if let Some(newline_pos) = after_backticks.find('\n') {
-            let inner = &after_backticks[newline_pos + 1..];
-            if let Some(close) = inner.rfind("```") {
-                return inner[..close].trim_end_matches('\n');
-            }
-        }
-        return trimmed;
-    }
-
-    // Slow path: look for a ``` line somewhere in the text (preamble case).
-    // iter_line_offsets yields lines without trailing CR/LF so the ```
-    // marker is always cleanly on its own line; inner content starts on
-    // the next line.
-    for (line_start, line) in iter_line_offsets(trimmed) {
-        if line.starts_with("```") {
-            let rest = &trimmed[line_start + line.len()..];
-            let rest = skip_newline(rest);
-            if let Some(close) = rest.rfind("```") {
-                return rest[..close].trim_end_matches('\n');
-            }
-            break;
-        }
-    }
-
-    trimmed
-}
-
-/// Strip a leading newline (`\r\n` or `\n`) from `s`, if present.
-fn skip_newline(s: &str) -> &str {
-    s.strip_prefix("\r\n")
-        .or_else(|| s.strip_prefix('\n'))
-        .unwrap_or(s)
-}
-
-/// Iterate over (`byte_offset_of_line_start`, `line_content`) pairs in `s`.
-///
-/// Uses `split('\n')` so that the raw byte length (including any trailing `\r`
-/// from CRLF line endings) is used for offset accounting, while the returned
-/// line content has the trailing `\r` stripped for clean comparisons.
-fn iter_line_offsets(s: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0;
-    s.split('\n').map(move |raw| {
-        let start = offset;
-        offset += raw.len() + 1; // raw.len() includes \r if CRLF; +1 for the consumed '\n'
-        (start, raw.trim_end_matches('\r'))
-    })
-}
-
-/// Try to parse Markdown heading format from `content`:
-///
-/// ```text
-/// # My PR title
-/// PR body here
-/// ```
-///
-/// Only `# ` (h1) is treated as the title line; `## ` (h2) headings may
-/// appear in the body and are left as-is.  Returns `None` if no h1 is found.
-fn try_parse_heading_format(content: &str) -> Option<(String, String)> {
-    for (line_start, line) in iter_line_offsets(content) {
-        if let Some(rest) = line.strip_prefix("# ") {
-            let title = rest.trim().to_string();
-            if title.is_empty() {
-                continue;
-            }
-            // Body: everything after the title line, using tracked offset to
-            // avoid content.find(line) which would match the first occurrence.
-            let after = &content[line_start + line.len()..];
-            let after = skip_newline(after);
-            return Some((title, after.to_string()));
-        }
-    }
-    None
-}
-
-/// Parse LLM output into (title, body) from frontmatter format:
-///
-/// ```text
-/// ---
-/// title: "My PR title"
-/// ---
-/// PR body here
-/// ```
-///
-/// Also accepts Markdown h1 heading format as a fallback:
-///
-/// ```text
-/// # My PR title
-/// PR body here
-/// ```
-///
-/// Returns `(String::new(), String::new())` if parsing fails.
-fn parse_pr_metadata(output: &str) -> (String, String) {
-    let content = strip_code_block(output);
-
-    // 1. Try parsing the whole content as frontmatter
-    if let Some(result) = crate::metadata::try_parse_frontmatter(content) {
-        return result;
-    }
-
-    // 2. Search for \n---\n in the text and try from that position
-    if let Some(pos) = content.find("\n---\n")
-        && let Some(result) = crate::metadata::try_parse_frontmatter(&content[pos + 1..])
-    {
-        return result;
-    }
-
-    // 3. Fallback: Markdown h1 heading format
-    if let Some(result) = try_parse_heading_format(content) {
-        return result;
-    }
-
-    (String::new(), String::new())
 }
 
 /// Format a summary of all sessions run by `run --all`.
@@ -1217,6 +660,10 @@ mod tests {
     use super::*;
     use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
     use crate::session::WorkspaceMode;
+    use crate::worktree_pr::{
+        CommitOutcome, PrAttemptOutcome, attempt_pr_creation, build_pr_prompt,
+        extract_last_path_segment, parse_pr_metadata, strip_code_block,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1224,6 +671,7 @@ mod tests {
 
     use crate::test_binary_support::PathEnvGuard;
     use crate::test_support::{init_git_repo, run_git_ok};
+    use crate::worktree;
 
     fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

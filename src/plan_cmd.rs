@@ -8,12 +8,10 @@ use crate::config::{WorkflowConfig, validate_config};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionState, get_cruise_home};
+use crate::session::{PLAN_VAR, SessionManager, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
 
-/// Name of the variable that holds the plan file path.
-pub const PLAN_VAR: &str = "plan";
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");

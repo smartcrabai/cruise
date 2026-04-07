@@ -145,12 +145,13 @@ fn git_stdout(repo_dir: &Path, args: &[&str], context: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{init_git_repo, make_session, run_git_ok};
+    use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
     fn test_prepare_execution_workspace_worktree_mode_creates_session_worktree() {
+        let _lock = lock_process();
         // Given: a planned session in a clean git repository
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".cruise");
@@ -190,6 +191,7 @@ mod tests {
     #[test]
     fn test_prepare_execution_workspace_current_branch_mode_uses_base_repo_and_sets_target_branch()
     {
+        let _lock = lock_process();
         // Given: a fresh session targeting the current branch
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".cruise");
@@ -225,6 +227,7 @@ mod tests {
 
     #[test]
     fn test_prepare_execution_workspace_current_branch_mode_rejects_dirty_tree_on_fresh_run() {
+        let _lock = lock_process();
         // Given: a fresh current-branch session with uncommitted changes in the base repo
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".cruise");
@@ -249,6 +252,7 @@ mod tests {
 
     #[test]
     fn test_prepare_execution_workspace_current_branch_mode_rejects_detached_head() {
+        let _lock = lock_process();
         // Given: a fresh current-branch session on a detached HEAD
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".cruise");

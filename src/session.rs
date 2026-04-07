@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CruiseError, Result};
 
+/// Name of the variable that holds the plan file path in the variable store.
+pub const PLAN_VAR: &str = "plan";
+
 /// Phase of a session's lifecycle.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum SessionPhase {
