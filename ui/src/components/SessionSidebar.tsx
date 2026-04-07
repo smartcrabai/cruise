@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "../lib/updater";
-import { checkForUpdate, downloadAndInstall } from "../lib/updater";
+import { checkForUpdate, checkForUpdateManual, downloadAndInstall } from "../lib/updater";
 import { listSessions, cleanSessions, getUpdateReadiness } from "../lib/commands";
 import type { Session, UpdateReadiness } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
@@ -22,7 +22,7 @@ interface SessionSidebarProps {
   onSelect: (session: Session) => void;
   onNewSession: () => void;
   onRunAll: () => void;
-  /** When true, Run All is actively executing — button is enabled regardless of pending sessions and shown in active state. */
+  /** When true, Run All is actively executing -- button is enabled regardless of pending sessions and shown in active state. */
   runAllActive?: boolean;
   onRefreshRef?: MutableRefObject<(() => void) | null>;
   /** Called after each load() when the currently selected session appears in
@@ -55,6 +55,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
   const [updateState, setUpdateState] = useState<UpdateState>("available");
   const [updateReadiness, setUpdateReadiness] = useState<UpdateReadiness | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [manualCheck, setManualCheck] = useState<"idle" | "checking" | "upToDate" | { error: string }>("idle");
   const lastFingerprintRef = useRef("");
   const inflightRef = useRef(false);
 
@@ -146,6 +147,28 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
       clearInterval(updateIntervalId);
     };
   }, []);
+
+  async function handleCheckUpdates() {
+    setManualCheck("checking");
+    try {
+      const u = await checkForUpdateManual();
+      if (u) {
+        setUpdate(u);
+        setManualCheck("idle");
+      } else {
+        setManualCheck("upToDate");
+      }
+    } catch (e) {
+      setManualCheck({ error: String(e) });
+    }
+  }
+
+  function handleDismissError() {
+    setUpdate(null);
+    setUpdateState("available");
+    setErrorMsg("");
+    setManualCheck("idle");
+  }
 
   async function handleInstall() {
     setUpdateState("downloading");
@@ -287,13 +310,41 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
             <div className="text-xs text-red-400">{errorMsg}</div>
             <button
               type="button"
-              onClick={() => { setUpdate(null); setUpdateState("available"); setErrorMsg(""); }}
+              onClick={handleDismissError}
               className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
             >
               Dismiss
             </button>
           </div>
         )}
+        <div className="mt-1">
+          {manualCheck === "checking" ? (
+            <div className="text-xs text-gray-400">Checking...</div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleCheckUpdates()}
+              className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+            >
+              Check Updates
+            </button>
+          )}
+          {manualCheck === "upToDate" && !update && (
+            <div className="mt-0.5 text-xs text-gray-400">Up to date</div>
+          )}
+          {typeof manualCheck === "object" && (
+            <div className="mt-0.5 space-y-1">
+              <div className="text-xs text-red-400">{manualCheck.error}</div>
+              <button
+                type="button"
+                onClick={() => setManualCheck("idle")}
+                className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
