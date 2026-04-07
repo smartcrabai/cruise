@@ -1,18 +1,19 @@
+use std::collections::HashSet;
+use std::fmt;
 use std::io::IsTerminal;
 
 use console::style;
 use inquire::InquireError;
 
-use indexmap::IndexMap;
-
 use crate::cli::{DEFAULT_MAX_RETRIES, PlanArgs};
-use crate::config::{StepConfig, WorkflowConfig, validate_config};
+use crate::config::{WorkflowConfig, validate_config};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{PLAN_VAR, SessionManager, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
+use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
@@ -185,25 +186,75 @@ async fn approve_with_title(
     manager.save(session)
 }
 
+#[derive(Clone)]
+struct FlatNode {
+    label: String,
+    expanded_step_ids: Vec<String>,
+}
+
+impl fmt::Display for FlatNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+fn flatten_nodes(nodes: &[SkippableStepNode]) -> Vec<FlatNode> {
+    let mut flat = Vec::new();
+    flatten_nodes_into(nodes, 0, &mut flat);
+    flat
+}
+
+fn flatten_nodes_into(nodes: &[SkippableStepNode], depth: usize, flat: &mut Vec<FlatNode>) {
+    for node in nodes {
+        let label = if depth == 0 {
+            node.id.clone()
+        } else {
+            node.id
+                .rsplit('/')
+                .next()
+                .unwrap_or(node.id.as_str())
+                .to_string()
+        };
+        flat.push(FlatNode {
+            label: format!("{}{}", "  ".repeat(depth), label),
+            expanded_step_ids: node.expanded_step_ids.clone(),
+        });
+        flatten_nodes_into(&node.children, depth + 1, flat);
+    }
+}
+
+fn collect_expanded_ids(selected_nodes: Vec<FlatNode>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut expanded_ids = Vec::new();
+
+    for expanded_id in selected_nodes
+        .into_iter()
+        .flat_map(|node| node.expanded_step_ids)
+    {
+        if seen.insert(expanded_id.clone()) {
+            expanded_ids.push(expanded_id);
+        }
+    }
+
+    expanded_ids
+}
+
 /// Present a `MultiSelect` prompt so the user can choose which steps to skip.
 /// Returns an empty `Vec` when there are no steps, the user cancels, or
 /// an interruption is received (so the approve flow can continue unblocked).
-fn select_steps_to_skip(steps: &IndexMap<String, StepConfig>) -> Result<Vec<String>> {
-    let step_names: Vec<&str> = steps.keys().map(std::string::String::as_str).collect();
-    if step_names.is_empty() {
+fn select_steps_to_skip(config: &WorkflowConfig) -> Result<Vec<String>> {
+    let nodes = list_skippable_steps(config)?;
+    if nodes.is_empty() {
         return Ok(vec![]);
     }
-    match inquire::MultiSelect::new(
-        "Steps to skip (Space to toggle, Enter to confirm):",
-        step_names,
-    )
-    .with_help_message("No selection = run all steps")
-    .prompt()
+
+    let flat = flatten_nodes(&nodes);
+
+    match inquire::MultiSelect::new("Steps to skip (Space to toggle, Enter to confirm):", flat)
+        .with_help_message("No selection = run all steps")
+        .prompt()
     {
-        Ok(selected) => Ok(selected
-            .into_iter()
-            .map(std::string::ToString::to_string)
-            .collect()),
+        Ok(selected_nodes) => Ok(collect_expanded_ids(selected_nodes)),
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(vec![]),
         Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
@@ -269,7 +320,7 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                session.skipped_steps = select_steps_to_skip(&config.steps)?;
+                session.skipped_steps = select_steps_to_skip(config)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Session {} created.",
@@ -300,7 +351,7 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                session.skipped_steps = select_steps_to_skip(&config.steps)?;
+                session.skipped_steps = select_steps_to_skip(config)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Executing session {}...",
@@ -504,5 +555,27 @@ mod tests {
         });
         // Then: only leading/trailing whitespace is removed, internal newlines are preserved
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
+    }
+
+    #[test]
+    fn test_collect_expanded_ids_deduplicates_parent_and_child_selection() {
+        let selected = vec![
+            FlatNode {
+                label: "review-pass".to_string(),
+                expanded_step_ids: vec![
+                    "review-pass/simplify".to_string(),
+                    "review-pass/coderabbit".to_string(),
+                ],
+            },
+            FlatNode {
+                label: "  simplify".to_string(),
+                expanded_step_ids: vec!["review-pass/simplify".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            collect_expanded_ids(selected),
+            vec!["review-pass/simplify", "review-pass/coderabbit"]
+        );
     }
 }

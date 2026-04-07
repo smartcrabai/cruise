@@ -26,6 +26,90 @@ pub struct InvocationMeta {
     pub step_count: usize,
 }
 
+/// A node in the skippable step tree returned by [`list_skippable_steps`].
+///
+/// This structure is used by both the CLI and GUI to present a hierarchical
+/// view of steps, where group call sites appear as parent nodes with their
+/// sub-steps as children. The `expanded_step_ids` field contains the actual
+/// executable step IDs that should be stored in `session.skipped_steps`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippableStepNode {
+    /// UI-stable identifier. For regular steps this is the step name.
+    /// For group parent nodes this is the call-site name. For children
+    /// of group parents this is the expanded step ID (e.g. `review-pass/simplify`).
+    pub id: String,
+    /// The executable step IDs that are skipped when this node is selected.
+    /// For a regular step this contains one element. For a group parent it
+    /// contains all expanded child IDs. For a child node it contains only
+    /// its own expanded ID.
+    pub expanded_step_ids: Vec<String>,
+    /// Child nodes for group parent steps. Empty for regular steps and
+    /// for child nodes (which are leaves).
+    pub children: Vec<SkippableStepNode>,
+}
+
+/// Build a tree of skippable steps from a [`WorkflowConfig`].
+///
+/// This function mirrors the group-expansion logic in [`compile`] so that
+/// the UI and CLI can present parent/child relationships for group calls.
+/// The returned nodes are in the same order as the top-level steps in the
+/// config, and `after_pr` is excluded.
+///
+/// # Errors
+///
+/// Returns an error if the config references undefined groups or uses
+/// invalid group configurations.
+pub fn list_skippable_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStepNode>> {
+    let (expanded_steps, _invocations, step_to_invocation) =
+        expand_steps(&config.steps, &config.groups)?;
+    let mut expanded_ids_by_call_site: HashMap<String, Vec<String>> = HashMap::new();
+
+    for expanded_id in expanded_steps.keys() {
+        if let Some(call_site) = step_to_invocation.get(expanded_id) {
+            expanded_ids_by_call_site
+                .entry(call_site.clone())
+                .or_default()
+                .push(expanded_id.clone());
+        }
+    }
+
+    config
+        .steps
+        .iter()
+        .map(|(step_name, step_config)| {
+            if step_config.group.is_some() {
+                let expanded_ids =
+                    expanded_ids_by_call_site.remove(step_name).ok_or_else(|| {
+                        crate::error::CruiseError::InvalidStepConfig(format!(
+                            "group call step '{step_name}' produced no expanded steps"
+                        ))
+                    })?;
+                let children = expanded_ids
+                    .iter()
+                    .cloned()
+                    .map(|expanded_id| SkippableStepNode {
+                        id: expanded_id.clone(),
+                        expanded_step_ids: vec![expanded_id],
+                        children: Vec::new(),
+                    })
+                    .collect();
+                Ok(SkippableStepNode {
+                    id: step_name.clone(),
+                    expanded_step_ids: expanded_ids,
+                    children,
+                })
+            } else {
+                Ok(SkippableStepNode {
+                    id: step_name.clone(),
+                    expanded_step_ids: vec![step_name.clone()],
+                    children: Vec::new(),
+                })
+            }
+        })
+        .collect()
+}
+
 /// Flat, executable representation of a workflow after group-call expansion.
 ///
 /// Group call steps (e.g. `review-pass: {group: review}`) are replaced by
@@ -194,6 +278,11 @@ fn expand_steps(
             );
         } else {
             // Regular step: pass through unchanged
+            if flat.contains_key(step_name) {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "expanded step key '{step_name}' collides with an existing step name"
+                )));
+            }
             flat.insert(step_name.clone(), step.clone());
         }
     }
@@ -209,6 +298,7 @@ fn expand_steps(
 mod tests {
     use super::*;
     use crate::config::WorkflowConfig;
+    use crate::test_support::err_string;
 
     fn parsed(yaml: &str) -> WorkflowConfig {
         WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"))
@@ -430,12 +520,7 @@ steps:
         let result = compile(parsed(yaml));
         // Then: error mentions undefined group
         assert!(result.is_err());
-        assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("undefined group")
-        );
+        assert!(err_string(result).contains("undefined group"));
     }
 
     #[test]
@@ -457,9 +542,7 @@ steps:
         let result = compile(parsed(yaml));
         // Then: migration error pointing users to groups.<name>.steps
         assert!(result.is_err());
-        let msg = result
-            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-            .to_string();
+        let msg = err_string(result);
         assert!(
             msg.contains("migration")
                 || msg.contains("groups.<name>.steps")
@@ -485,10 +568,7 @@ steps:
         // Then: error mentions empty group
         assert!(result.is_err());
         assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("empty"),
+            err_string(result).contains("empty"),
             "expected 'empty' in error"
         );
     }
@@ -515,9 +595,7 @@ steps:
         let result = compile(parsed(yaml));
         // Then: nested group call is rejected
         assert!(result.is_err());
-        let msg = result
-            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-            .to_string();
+        let msg = err_string(result);
         assert!(
             msg.contains("nested") || msg.contains("group call") || msg.contains("group"),
             "expected nested-group-call error in: {msg}"
@@ -545,10 +623,7 @@ steps:
         // Then: individual `if` inside group step is rejected
         assert!(result.is_err());
         assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("if"),
+            err_string(result).contains("if"),
             "expected 'if' in error message"
         );
     }
@@ -574,9 +649,31 @@ steps:
         let result = compile(parsed(yaml));
         // Then: error mentions collision
         assert!(result.is_err());
-        let msg = result
-            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-            .to_string();
+        let msg = err_string(result);
+        assert!(
+            msg.contains("collides"),
+            "expected 'collides' in error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compile_step_key_collision_returns_error_when_regular_step_follows_group() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: echo simplify
+steps:
+  call:
+    group: review
+  call/simplify:
+    command: echo manual
+";
+        let result = compile(parsed(yaml));
+        assert!(result.is_err());
+        let msg = err_string(result);
         assert!(
             msg.contains("collides"),
             "expected 'collides' in error message, got: {msg}"
@@ -678,6 +775,243 @@ steps:
         assert!(
             step.fail_if_no_file_changes,
             "fail_if_no_file_changes should be preserved after compilation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_skippable_steps tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_list_skippable_steps_non_group_steps_unchanged() {
+        // Given: workflow with no group calls
+        let yaml = r"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+  step2:
+    command: echo world
+";
+        // When: list_skippable_steps is called
+        let nodes = list_skippable_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: nodes are flat, each with one expanded ID matching the step name
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, "step1");
+        assert_eq!(nodes[0].expanded_step_ids, vec!["step1"]);
+        assert!(nodes[0].children.is_empty());
+        assert_eq!(nodes[1].id, "step2");
+        assert_eq!(nodes[1].expanded_step_ids, vec!["step2"]);
+        assert!(nodes[1].children.is_empty());
+    }
+
+    #[test]
+    fn test_list_skippable_steps_group_call_parent_and_children() {
+        // Given: workflow with one group call
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+      coderabbit:
+        prompt: /cr
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+";
+        // When: list_skippable_steps is called
+        let nodes = list_skippable_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: nodes include parent and children in correct order
+        assert_eq!(nodes.len(), 2);
+        // First node is the regular step
+        assert_eq!(nodes[0].id, "test");
+        assert_eq!(nodes[0].expanded_step_ids, vec!["test"]);
+        assert!(nodes[0].children.is_empty());
+        // Second node is the group parent
+        assert_eq!(nodes[1].id, "review-pass");
+        // Parent's expanded IDs are all children
+        assert_eq!(
+            nodes[1].expanded_step_ids,
+            vec!["review-pass/simplify", "review-pass/coderabbit"]
+        );
+        // Parent has children
+        assert_eq!(nodes[1].children.len(), 2);
+        // Children have their own expanded IDs
+        assert_eq!(nodes[1].children[0].id, "review-pass/simplify");
+        assert_eq!(
+            nodes[1].children[0].expanded_step_ids,
+            vec!["review-pass/simplify"]
+        );
+        assert_eq!(nodes[1].children[1].id, "review-pass/coderabbit");
+        assert_eq!(
+            nodes[1].children[1].expanded_step_ids,
+            vec!["review-pass/coderabbit"]
+        );
+    }
+
+    #[test]
+    fn test_list_skippable_steps_order_preserved() {
+        // Given: group with three steps in specific order
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps:
+      alpha:
+        command: echo alpha
+      beta:
+        command: echo beta
+      gamma:
+        command: echo gamma
+steps:
+  call:
+    group: review
+";
+        // When: list_skippable_steps is called
+        let nodes = list_skippable_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: order matches YAML definition
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "call");
+        assert_eq!(
+            nodes[0].expanded_step_ids,
+            vec!["call/alpha", "call/beta", "call/gamma"]
+        );
+        assert_eq!(nodes[0].children[0].id, "call/alpha");
+        assert_eq!(nodes[0].children[1].id, "call/beta");
+        assert_eq!(nodes[0].children[2].id, "call/gamma");
+    }
+
+    #[test]
+    fn test_list_skippable_steps_multiple_call_sites() {
+        // Given: same group invoked from two separate call sites
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test1:
+    command: cargo test --lib
+  review-after-lib:
+    group: review
+  test2:
+    command: cargo test --doc
+  review-after-doc:
+    group: review
+";
+        // When: list_skippable_steps is called
+        let nodes = list_skippable_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: both call sites appear as separate parent nodes
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[0].id, "test1");
+        assert_eq!(nodes[1].id, "review-after-lib");
+        assert_eq!(
+            nodes[1].expanded_step_ids,
+            vec!["review-after-lib/simplify"]
+        );
+        assert_eq!(nodes[2].id, "test2");
+        assert_eq!(nodes[3].id, "review-after-doc");
+        assert_eq!(
+            nodes[3].expanded_step_ids,
+            vec!["review-after-doc/simplify"]
+        );
+    }
+
+    #[test]
+    fn test_list_skippable_steps_excludes_after_pr() {
+        // Given: workflow with steps and after-pr containing a group call
+        let yaml = r"
+command: [echo]
+groups:
+  notify:
+    steps:
+      slack:
+        command: echo slack
+steps:
+  build:
+    command: cargo build
+after-pr:
+  post-notify:
+    group: notify
+";
+        // When: list_skippable_steps is called
+        let nodes = list_skippable_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: only steps are included, after-pr is excluded
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "build");
+    }
+
+    #[test]
+    fn test_list_skippable_steps_rejects_old_membership_style() {
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+    prompt: /legacy
+";
+        let err = list_skippable_steps(&parsed(yaml))
+            .err()
+            .unwrap_or_else(|| panic!("expected Err"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("old membership style") || msg.contains("groups.<name>.steps"),
+            "expected migration hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_list_skippable_steps_rejects_empty_group() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps: {}
+steps:
+  review-pass:
+    group: review
+";
+        let err = list_skippable_steps(&parsed(yaml))
+            .err()
+            .unwrap_or_else(|| panic!("expected Err"));
+        assert!(
+            err.to_string().contains("empty"),
+            "expected empty-group error"
+        );
+    }
+
+    #[test]
+    fn test_list_skippable_steps_rejects_expanded_key_collision() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: echo simplify
+steps:
+  review-pass:
+    group: review
+  review-pass/simplify:
+    command: echo collision
+";
+        let err = list_skippable_steps(&parsed(yaml))
+            .err()
+            .unwrap_or_else(|| panic!("expected Err"));
+        assert!(
+            err.to_string().contains("collides"),
+            "expected collision error"
         );
     }
 }

@@ -312,6 +312,20 @@ async fn step_loop_iteration(
     {
         state.counters.skipped += 1;
         eprintln!("{} skipping: {}", style("→").yellow(), current_step);
+        // When the first substep of a group with file-changed is user-skipped,
+        // the normal "before" snapshot is never taken (it happens in the
+        // non-skip path below). Take it here so the group-level file-changed
+        // comparison still works for the remaining substeps.
+        if let Some(call_site) = step_call_site
+            && let Some(meta) = ctx.compiled.invocations.get(call_site)
+            && meta.first_step == current_step
+            && meta
+                .if_condition
+                .as_ref()
+                .is_some_and(|c| c.file_changed.is_some())
+        {
+            tracker.take_snapshot(&group_snapshot_key(call_site))?;
+        }
         return Ok(get_next_step(&ctx.compiled.steps, current_step, None)
             .map_or(StepOutcome::Done, StepOutcome::Next));
     }
@@ -1655,7 +1669,7 @@ steps:
             "",
             None,
             dir.path().to_path_buf(),
-            1,
+            10,
             0,
             None,
             None,
@@ -2573,5 +2587,197 @@ steps:
         // Then: step2 and step3 are skipped, step1 and step4 run
         assert_eq!(result.skipped, 2, "two steps should be skipped");
         assert_eq!(result.run, 2, "two steps should run");
+    }
+
+    // --- user-selected skipped_steps for grouped steps ---
+
+    #[tokio::test]
+    async fn test_user_skipped_grouped_step_is_not_executed() {
+        // Given: a workflow with a group call where one substep would fail if executed
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: "exit 1"
+      coderabbit:
+        command: "echo coderabbit"
+steps:
+  before:
+    command: "echo before"
+  review-pass:
+    group: review
+  after:
+    command: "echo after"
+"#;
+        // When: the failing substep is in user-selected skipped_steps (expanded ID)
+        let result = run_config_with_skipped(yaml, "", None, &["review-pass/simplify"]).await;
+
+        // Then: the workflow succeeds because the failing substep was not executed
+        assert!(
+            result.is_ok(),
+            "workflow should succeed when grouped substep is user-skipped: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_grouped_step_increments_skipped_counter() {
+        // Given: a workflow with a group call
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: "echo simplify"
+      coderabbit:
+        command: "echo coderabbit"
+steps:
+  before:
+    command: "echo before"
+  review-pass:
+    group: review
+  after:
+    command: "echo after"
+"#;
+        // When: one grouped substep is in user-selected skipped_steps
+        let result = run_config_with_skipped(yaml, "", None, &["review-pass/simplify"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: the grouped substep is counted as skipped
+        assert_eq!(
+            result.skipped, 1,
+            "one grouped step should be counted as skipped"
+        );
+        assert_eq!(
+            result.run, 3,
+            "before, other group step, and after should run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_multiple_grouped_steps() {
+        // Given: a workflow with a group call
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: "exit 1"
+      coderabbit:
+        command: "exit 1"
+steps:
+  before:
+    command: "echo before"
+  review-pass:
+    group: review
+  after:
+    command: "echo after"
+"#;
+        // When: both substeps are in user-selected skipped_steps
+        let result = run_config_with_skipped(
+            yaml,
+            "",
+            None,
+            &["review-pass/simplify", "review-pass/coderabbit"],
+        )
+        .await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: both grouped substeps are skipped, before and after run
+        assert_eq!(result.skipped, 2, "both grouped steps should be skipped");
+        assert_eq!(result.run, 2, "before and after should run");
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_grouped_step_with_non_group_step() {
+        // Given: a workflow with both regular and grouped steps
+        let yaml = r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: "exit 1"
+steps:
+  step1:
+    command: "echo step1"
+  review-call:
+    group: review
+  step2:
+    command: "exit 1"
+"#;
+        // When: both a regular step and a grouped substep are in skipped_steps
+        let result =
+            run_config_with_skipped(yaml, "", None, &["step2", "review-call/simplify"]).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+
+        // Then: both are skipped, step1 runs
+        assert_eq!(result.skipped, 2, "two steps should be skipped");
+        assert_eq!(result.run, 1, "one step should run");
+    }
+
+    // --- snapshot regression tests for group-level if.file-changed with skipped first step ---
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_group_first_step_skipped_snapshot_still_taken() {
+        // Regression test: when the first substep of a group is user-skipped,
+        // the group-level if.file-changed should still work because the group
+        // snapshot needs to be taken even when the first step is skipped.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let marker_file = dir.path().join("changed.txt");
+        let yaml = format!(
+            r#"
+command: [echo]
+groups:
+  review:
+    max_retries: 1
+    if:
+      file-changed: bootstrap
+    steps:
+      first:
+        command: "echo first"
+      second:
+        command: "touch {}"
+steps:
+  bootstrap:
+    command: "echo bootstrap"
+  review-pass:
+    group: review
+  done:
+    command: "echo done"
+"#,
+            marker_file.display()
+        );
+        // When: first substep is skipped but second substep modifies a file
+        // and group-level if.file-changed jumps back to an earlier step
+        let skipped: Vec<String> = vec!["review-pass/first".to_string()];
+        let result = run_config_inner(
+            &yaml,
+            "",
+            None,
+            dir.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &skipped,
+        )
+        .await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        // Then: the group-level if.file-changed should trigger, causing bootstrap
+        // to run a second time before the group's retry budget skips the group.
+        assert_eq!(
+            result.run, 4,
+            "expected bootstrap -> second -> bootstrap -> done"
+        );
+        assert_eq!(
+            result.skipped, 3,
+            "expected the initial skipped first step plus one skipped group retry"
+        );
     }
 }

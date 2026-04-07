@@ -145,3 +145,11 @@ export interface UpdateReadiness {
   /** Human-readable remediation guidance. */
   guidance?: string;
 }
+
+// --- Skippable steps tree ------------------------------------------------------
+
+export interface SkippableStepDto {
+  id: string;
+  expandedStepIds: string[];
+  children: SkippableStepDto[];
+}

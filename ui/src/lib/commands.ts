@@ -6,6 +6,7 @@ import type {
   DirEntry,
   PlanEvent,
   Session,
+  SkippableStepDto,
   UpdateReadiness,
   WorkspaceMode,
   WorkflowEvent,
@@ -124,9 +125,10 @@ export function listConfigs(): Promise<ConfigEntry[]> {
   return invoke<ConfigEntry[]>("list_configs");
 }
 
-/** Return step names defined in a workflow config file. */
-export function getConfigSteps(configPath?: string): Promise<string[]> {
-  return invoke<string[]>("get_config_steps", {
+/** Return the skippable-step tree for the config the GUI would actually use. */
+export function getConfigSteps(baseDir: string, configPath?: string): Promise<SkippableStepDto[]> {
+  return invoke<SkippableStepDto[]>("get_config_steps", {
+    baseDir,
     configPath: configPath ?? null,
   });
 }

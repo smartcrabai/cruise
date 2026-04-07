@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
@@ -71,6 +71,33 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     ...overrides,
   };
 }
+
+const BUILD_ONLY_STEP = [
+  {
+    id: "build",
+    expandedStepIds: ["build"],
+    children: [],
+  },
+];
+
+const BUILD_AND_REVIEW_STEPS = [
+  {
+    id: "build",
+    expandedStepIds: ["build"],
+    children: [],
+  },
+  {
+    id: "review-pass",
+    expandedStepIds: ["review-pass/simplify"],
+    children: [
+      {
+        id: "review-pass/simplify",
+        expandedStepIds: ["review-pass/simplify"],
+        children: [],
+      },
+    ],
+  },
+];
 
 // --- New Session draft state persistence -------------------------------------
 
@@ -162,6 +189,78 @@ describe("App: New Session draft state persistence", () => {
     ).toHaveValue("/my/typed/dir");
   });
 
+});
+
+describe("App: New Session skip-step selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("keeps selected skip steps that still exist after auto-config refresh", async () => {
+    vi.mocked(commands.getConfigSteps)
+      .mockResolvedValueOnce(BUILD_AND_REVIEW_STEPS)
+      .mockResolvedValueOnce(BUILD_ONLY_STEP);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await waitFor(() => expect(screen.getByLabelText("build")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByLabelText("build"));
+    expect(screen.getByLabelText("build")).toBeChecked();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
+      { target: { value: "/tmp/other-repo" } }
+    );
+
+    await waitFor(() => {
+      expect(commands.getConfigSteps).toHaveBeenLastCalledWith("/tmp/other-repo", undefined);
+    });
+    expect(screen.getByLabelText("build")).toBeChecked();
+  });
+
+  it("does not refetch config steps or clear selections when baseDir changes under an explicit config", async () => {
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/custom.yaml", name: "custom.yaml" },
+    ]);
+    vi.mocked(commands.getConfigSteps)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(BUILD_ONLY_STEP);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
+    await waitFor(() => expect(screen.getByLabelText("build")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByLabelText("build"));
+    expect(screen.getByLabelText("build")).toBeChecked();
+
+    const callCountBeforeBaseDirEdit = vi.mocked(commands.getConfigSteps).mock.calls.length;
+
+    fireEvent.change(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
+      { target: { value: "/tmp/new-worktree" } }
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+      ).toHaveValue("/tmp/new-worktree");
+    });
+    expect(vi.mocked(commands.getConfigSteps).mock.calls).toHaveLength(callCountBeforeBaseDirEdit);
+    expect(screen.getByLabelText("build")).toBeChecked();
+  });
 });
 
 // --- Non-blocking session creation -------------------------------------------
