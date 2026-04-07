@@ -12,10 +12,12 @@ use crate::error::{CruiseError, Result};
 /// - Missing file → returns [`AppConfig::default()`].
 /// - Invalid JSON or invalid field values → returns a clear error (never silently clamped).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     /// Maximum number of sessions to execute concurrently in `run --all` mode.
     ///
     /// Must be ≥ 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
+    #[serde(alias = "run_all_parallelism")]
     pub run_all_parallelism: usize,
 }
 
