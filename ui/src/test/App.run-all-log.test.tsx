@@ -46,6 +46,8 @@ vi.mock("../lib/commands", () => ({
   runAllSessions: vi.fn(),
   fixSession: vi.fn(),
   askSession: vi.fn(),
+  getAppConfig: vi.fn(),
+  updateAppConfig: vi.fn(),
 }));
 
 vi.mock("../lib/updater", () => ({
@@ -117,6 +119,8 @@ describe("Run All: live log display", () => {
     vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
     vi.mocked(commands.runAllSessions).mockResolvedValue();
+    vi.mocked(commands.getAppConfig).mockResolvedValue({ runAllParallelism: 1 });
+    vi.mocked(commands.updateAppConfig).mockResolvedValue();
   });
 
   afterEach(() => {
@@ -130,15 +134,18 @@ describe("Run All: live log display", () => {
     const { channel, container } = await navigateToRunAll();
 
     // When: a full single-session event sequence flows
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1 } });
+    // runAllStarted requires both `total` and `parallelism` (new field for concurrent batch display)
+    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "build feature", total: 1 },
     });
-    channel.onmessage!({ event: "stepStarted", data: { step: "Write code" } });
+    // stepStarted now carries `sessionId` to attribute concurrent progress to the correct session
+    channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Write code" } });
+    // workflowCompleted now carries `sessionId` to identify which session completed
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -164,7 +171,7 @@ describe("Run All: live log display", () => {
     ]);
 
     // When: first session starts
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "first task", total: 1 },
@@ -187,15 +194,15 @@ describe("Run All: live log display", () => {
     ]);
 
     // When: first session runs to completion
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "task alpha", total: 1 },
     });
-    channel.onmessage!({ event: "stepStarted", data: { step: "Step A" } });
+    channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Step A" } });
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -207,10 +214,10 @@ describe("Run All: live log display", () => {
       event: "runAllSessionStarted",
       data: { sessionId: "s2", input: "task beta", total: 1 },
     });
-    channel.onmessage!({ event: "stepStarted", data: { step: "Step B" } });
+    channel.onmessage!({ event: "stepStarted", data: { sessionId: "s2", step: "Step B" } });
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s2", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -236,14 +243,15 @@ describe("Run All: live log display", () => {
     const { channel, container } = await navigateToRunAll();
 
     // When: session starts and then fails
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "do thing", total: 1 },
     });
+    // workflowFailed now carries `sessionId` to route the failure to the correct session
     channel.onmessage!({
       event: "workflowFailed",
-      data: { error: "build error: missing dependency" },
+      data: { sessionId: "s1", error: "build error: missing dependency" },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -265,12 +273,13 @@ describe("Run All: live log display", () => {
     const { channel, container } = await navigateToRunAll();
 
     // When: session starts and is cancelled
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "do thing", total: 1 },
     });
-    channel.onmessage!({ event: "workflowCancelled" });
+    // workflowCancelled now carries `data.sessionId` (no longer a unit variant)
+    channel.onmessage!({ event: "workflowCancelled", data: { sessionId: "s1" } });
     channel.onmessage!({
       event: "runAllSessionFinished",
       data: { sessionId: "s1", input: "do thing", phase: "Suspended" },
@@ -291,14 +300,14 @@ describe("Run All: live log display", () => {
     const { channel, container } = await navigateToRunAll();
 
     // When: both workflowCompleted and runAllSessionFinished fire
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "do thing", total: 1 },
     });
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -321,12 +330,12 @@ describe("Run All: live log display", () => {
     const { channel, container } = await navigateToRunAll();
 
     // When: some steps run, then optionRequired fires
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "interactive task", total: 1 },
     });
-    channel.onmessage!({ event: "stepStarted", data: { step: "Analyze code" } });
+    channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Analyze code" } });
     channel.onmessage!({
       event: "optionRequired",
       data: {
@@ -351,10 +360,10 @@ describe("Run All: live log display", () => {
     // Given: Run All is running
     const { channel, container } = await navigateToRunAll();
 
-    // When: runAllStarted fires
-    channel.onmessage!({ event: "runAllStarted", data: { total: 3 } });
+    // When: runAllStarted fires — now includes `parallelism` for display/debugging
+    channel.onmessage!({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
 
-    // Then: the log area is visible and contains a start indicator
+    // Then: the log area is visible and contains a start indicator (includes total count)
     const logPre = getLogPre(container);
     await waitFor(() => {
       expect(logPre.textContent).toMatch(/3/);
@@ -369,14 +378,14 @@ describe("Run All: live log display", () => {
     ]);
 
     // When: both sessions complete and batch finishes
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2 } });
+    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
       data: { sessionId: "s1", input: "task 1", total: 1 },
     });
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",
@@ -388,7 +397,7 @@ describe("Run All: live log display", () => {
     });
     channel.onmessage!({
       event: "workflowCompleted",
-      data: { run: 1, skipped: 0, failed: 0 },
+      data: { sessionId: "s2", run: 1, skipped: 0, failed: 0 },
     });
     channel.onmessage!({
       event: "runAllSessionFinished",

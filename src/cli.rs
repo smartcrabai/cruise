@@ -27,6 +27,8 @@ pub enum Commands {
     List(ListArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
+    /// Show or update application-level configuration (`~/.config/cruise/config.json`).
+    Config(ConfigArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -78,6 +80,15 @@ pub struct ListArgs {
     /// Output all sessions as a JSON array to stdout.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ConfigArgs {
+    /// Set the maximum number of sessions to run concurrently in `run --all` mode.
+    ///
+    /// Must be ≥ 1. Omit to show the current configuration.
+    #[arg(long, value_name = "N")]
+    pub set_parallelism: Option<usize>,
 }
 
 pub fn parse_cli() -> Cli {
@@ -279,5 +290,58 @@ mod tests {
             }
             _ => panic!("expected Run subcommand"),
         }
+    }
+
+    // ── Config subcommand ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_subcommand_no_flags_shows_current_config() {
+        // Given: `cruise config` with no arguments
+        let cli = Cli::parse_from(["cruise", "config"]);
+        // When/Then: Config subcommand with no set_parallelism (show mode)
+        match cli.command {
+            Some(Commands::Config(args)) => {
+                assert_eq!(
+                    args.set_parallelism, None,
+                    "no flags means show-only mode (set_parallelism is None)"
+                );
+            }
+            _ => panic!("expected Config subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_config_subcommand_set_parallelism_parses_value() {
+        // Given: `cruise config --set-parallelism 4`
+        let cli = Cli::parse_from(["cruise", "config", "--set-parallelism", "4"]);
+        // When/Then: set_parallelism is Some(4)
+        match cli.command {
+            Some(Commands::Config(args)) => {
+                assert_eq!(
+                    args.set_parallelism,
+                    Some(4),
+                    "expected set_parallelism = Some(4)"
+                );
+            }
+            _ => panic!("expected Config subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_config_subcommand_set_parallelism_one() {
+        // Given: `cruise config --set-parallelism 1` — minimum valid value
+        let cli = Cli::parse_from(["cruise", "config", "--set-parallelism", "1"]);
+        match cli.command {
+            Some(Commands::Config(args)) => {
+                assert_eq!(args.set_parallelism, Some(1));
+            }
+            _ => panic!("expected Config subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_config_subcommand_is_registered_in_cli_verify() {
+        // Given/When/Then: clap validates the full command definition including Config
+        Cli::command().debug_assert();
     }
 }

@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use cruise::cancellation::CancellationToken;
 use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
     current_iso8601, get_cruise_home,
@@ -10,7 +9,6 @@ use cruise::session::{
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 
 use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
@@ -290,37 +288,36 @@ pub fn get_session_plan(session_id: String) -> std::result::Result<String, Strin
 /// Cancel the currently running workflow session.
 #[tauri::command]
 pub fn cancel_session(state: tauri::State<'_, AppState>) -> std::result::Result<(), String> {
-    do_cancel_session(&state.cancel_token, &state.option_responder)
+    // TODO: accept a session_id parameter so the caller can cancel a specific session.
+    state.cancel_all_sessions();
+    Ok(())
 }
 
 /// Deliver the frontend's option-step response to the engine.
 #[tauri::command]
 pub fn respond_to_option(
     result: OptionResultDto,
+    session_id: String,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
-    // Clear awaiting_input on the active session before unblocking the engine.
-    let session_id = {
-        let guard = state
-            .active_session_id
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        guard.clone()
-    };
-    if let Some(id) = session_id {
-        if let Ok(manager) = new_session_manager() {
-            if let Ok(mut s) = manager.load(&id) {
-                s.awaiting_input = false;
-                let _ = manager.save(&s);
-            }
-        }
-    }
-
     let option_result = OptionResult {
         next_step: result.next_step,
         text_input: result.text_input,
     };
-    do_respond_to_option(&state.option_responder, option_result)
+    let sent = state.respond_to_option(&session_id, option_result);
+    if sent {
+        // Best-effort: clear awaiting_input so the UI reflects the response immediately.
+        // The engine will also clear this when the session finishes.
+        if let Ok(manager) = new_session_manager() {
+            if let Ok(mut s) = manager.load(&session_id) {
+                s.awaiting_input = false;
+                let _ = manager.save(&s);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("no pending option for session {session_id}"))
+    }
 }
 
 /// Remove Completed sessions whose PR is closed or merged.
@@ -769,23 +766,7 @@ async fn execute_single_session(
     };
     let sid_for_pr = session_id.to_string();
 
-    let cancel_token = CancellationToken::new();
-    {
-        let mut guard = state
-            .cancel_token
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = Some(cancel_token.clone());
-    }
-    {
-        let mut guard = state
-            .active_session_id
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = Some(sid_for_pr.clone());
-    }
-
-    let option_responder = Arc::clone(&state.option_responder);
+    let (option_responder, cancel_token) = state.register_session(sid_for_pr.clone());
     let sessions_dir = manager.sessions_dir();
     let plan_path = session.plan_path(&sessions_dir);
     let input = session.input.clone();
@@ -793,11 +774,10 @@ async fn execute_single_session(
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
-    let sid_for_spawn = sid_for_pr.clone();
-    let sid_for_emitter = sid_for_pr.clone();
+    let sid_for_cleanup = sid_for_pr.clone();
     let log_path = manager.run_log_path(session_id);
 
-    let exec_result = tokio::task::spawn_blocking(
+    let join_result = tokio::task::spawn_blocking(
         move || -> cruise::error::Result<cruise::engine::ExecutionResult> {
             use cruise::engine::{ExecutionContext, execute_steps};
             use cruise::file_tracker::FileTracker;
@@ -815,6 +795,7 @@ async fn execute_single_session(
             let on_step_start = |step: &str| -> cruise::error::Result<()> {
                 logger.write(step);
                 let _ = channel_for_step.send(WorkflowEvent::StepStarted {
+                    session_id: sid_for_pr.clone(),
                     step: step.to_string(),
                 });
                 Ok(())
@@ -822,9 +803,9 @@ async fn execute_single_session(
 
             let emitter = Arc::new(StateSavingEmitter::new(
                 channel_for_emitter,
-                sid_for_emitter,
+                sid_for_pr.clone(),
             ));
-            let handler = GuiOptionHandler::new(emitter, sid_for_spawn, option_responder);
+            let handler = GuiOptionHandler::new(emitter, sid_for_pr.clone(), option_responder);
 
             let mut vars = VariableStore::new(input);
             vars.set_named_file(PLAN_VAR, plan_path);
@@ -886,24 +867,12 @@ async fn execute_single_session(
             }
         },
     )
-    .await
-    .map_err(|e| format!("execution task panicked: {e}"))?;
+    .await;
 
-    // Clear the cancel token and active session slots.
-    {
-        let mut guard = state
-            .cancel_token
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = None;
-    }
-    {
-        let mut guard = state
-            .active_session_id
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        *guard = None;
-    }
+    // Unregister the session from AppState regardless of panic/error.
+    state.unregister_session(sid_for_cleanup.as_str());
+
+    let exec_result = join_result.map_err(|e| format!("execution task panicked: {e}"))?;
 
     // Reload session to pick up any intermediate saves, then apply the final phase.
     let mut final_session = manager.load(session_id).unwrap_or(session);
@@ -914,6 +883,7 @@ async fn execute_single_session(
             final_session.phase = SessionPhase::Completed;
             final_session.completed_at = Some(current_iso8601());
             let _ = channel.send(WorkflowEvent::WorkflowCompleted {
+                session_id: sid_for_cleanup.clone(),
                 run: exec.run,
                 skipped: exec.skipped,
                 failed: exec.failed,
@@ -923,7 +893,9 @@ async fn execute_single_session(
         }
         Err(cruise::error::CruiseError::Interrupted) => {
             final_session.phase = SessionPhase::Suspended;
-            let _ = channel.send(WorkflowEvent::WorkflowCancelled);
+            let _ = channel.send(WorkflowEvent::WorkflowCancelled {
+                session_id: sid_for_cleanup.clone(),
+            });
             manager.save(&final_session).map_err(|e| e.to_string())?;
             Ok(SessionPhase::Suspended)
         }
@@ -931,7 +903,10 @@ async fn execute_single_session(
             let msg = e.to_string();
             final_session.phase = SessionPhase::Failed(msg.clone());
             final_session.completed_at = Some(current_iso8601());
-            let _ = channel.send(WorkflowEvent::WorkflowFailed { error: msg.clone() });
+            let _ = channel.send(WorkflowEvent::WorkflowFailed {
+                session_id: sid_for_cleanup.clone(),
+                error: msg.clone(),
+            });
             // Ignore save errors so the original workflow error is preserved.
             let _ = manager.save(&final_session);
             Ok(SessionPhase::Failed(msg))
@@ -974,8 +949,12 @@ pub async fn run_all_sessions(
     let mut remaining = manager
         .run_all_remaining(&seen)
         .map_err(|e| e.to_string())?;
+    let parallelism = cruise::app_config::AppConfig::load()
+        .map_err(|e| e.to_string())?
+        .run_all_parallelism;
     let _ = channel.send(WorkflowEvent::RunAllStarted {
         total: remaining.len(),
+        parallelism,
     });
 
     loop {
@@ -1025,59 +1004,6 @@ pub async fn run_all_sessions(
 
     let _ = channel.send(WorkflowEvent::RunAllCompleted { cancelled });
 
-    Ok(())
-}
-
-/// Inner logic for the `cancel_session` IPC command.
-///
-/// Extracted from the Tauri command handler for testability.
-/// Calls `cancel()` on the active token if one is present; succeeds silently if not.
-/// The token is removed from the slot after cancellation to free the underlying `Arc`.
-/// Also drops any pending option-step sender so that `blocking_recv()` in
-/// `GuiOptionHandler::select_option` returns immediately with `CruiseError::Interrupted`.
-///
-/// # Errors
-///
-/// Returns an error string if either mutex is poisoned.
-pub fn do_cancel_session(
-    cancel_token: &Mutex<Option<CancellationToken>>,
-    option_responder: &Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
-) -> std::result::Result<(), String> {
-    let mut guard = cancel_token
-        .lock()
-        .map_err(|e| format!("lock poisoned: {e}"))?;
-    if let Some(token) = guard.take() {
-        token.cancel();
-    }
-    // Drop pending option sender so blocking_recv() in select_option unblocks immediately.
-    let mut opt_guard = option_responder
-        .lock()
-        .map_err(|e| format!("lock poisoned: {e}"))?;
-    let _ = opt_guard.take();
-    Ok(())
-}
-
-/// Inner logic for the `respond_to_option` IPC command.
-///
-/// Extracted from the Tauri command handler for testability.
-/// Takes the pending `oneshot::Sender` from `option_responder` and delivers the user's choice.
-///
-/// # Errors
-///
-/// Returns an error string if the mutex is poisoned or no option request is currently pending.
-pub fn do_respond_to_option(
-    option_responder: &Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
-    result: OptionResult,
-) -> std::result::Result<(), String> {
-    let mut guard = option_responder
-        .lock()
-        .map_err(|e| format!("lock poisoned: {e}"))?;
-    let sender = guard
-        .take()
-        .ok_or_else(|| "no pending option request".to_string())?;
-    sender
-        .send(result)
-        .map_err(|_| "option receiver dropped: response not delivered".to_string())?;
     Ok(())
 }
 
@@ -1165,6 +1091,22 @@ pub fn check_update_readiness_for_path(exe_path: &std::path::Path) -> UpdateRead
     }
 }
 
+/// Return the current application-level configuration from `~/.config/cruise/config.json`.
+///
+/// If the file does not exist, returns the default config (`run_all_parallelism: 1`).
+#[tauri::command]
+pub fn get_app_config() -> std::result::Result<cruise::app_config::AppConfig, String> {
+    cruise::app_config::AppConfig::load().map_err(|e| e.to_string())
+}
+
+/// Persist an updated application-level configuration to `~/.config/cruise/config.json`.
+///
+/// Validates the config before writing (e.g. `run_all_parallelism` must be ≥ 1).
+#[tauri::command]
+pub fn update_app_config(config: cruise::app_config::AppConfig) -> std::result::Result<(), String> {
+    config.save().map_err(|e| e.to_string())
+}
+
 /// Return whether the current launch context supports automatic in-place update.
 ///
 /// On macOS the updater replaces the `.app` bundle in-place.  If the app is
@@ -1186,11 +1128,12 @@ pub fn get_update_readiness() -> UpdateReadinessDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cruise::cancellation::CancellationToken;
     use cruise::test_support::{init_git_repo, make_session};
     use std::fs;
     use std::path::Path;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+    use tokio::sync::oneshot;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
     fn wait_for_pending(pending: &Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>) {
@@ -1206,183 +1149,6 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    }
-
-    // ─── cancel_session ──────────────────────────────────────────────────────
-
-    fn empty_option_responder() -> Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> {
-        Arc::new(Mutex::new(None))
-    }
-
-    #[test]
-    fn test_cancel_session_with_no_active_token_succeeds() {
-        // Given: no active cancellation token in state
-        let cancel_token: Mutex<Option<CancellationToken>> = Mutex::new(None);
-        // When: cancel is requested
-        let result = do_cancel_session(&cancel_token, &empty_option_responder());
-        // Then: succeeds without error
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_cancel_session_with_active_token_cancels_it() {
-        // Given: an active token stored in state
-        let token = CancellationToken::new();
-        let token_for_assert = token.clone();
-        let cancel_token: Mutex<Option<CancellationToken>> = Mutex::new(Some(token));
-        // When: cancel is requested
-        let result = do_cancel_session(&cancel_token, &empty_option_responder());
-        // Then: succeeds and the token reports cancelled
-        assert!(result.is_ok());
-        assert!(token_for_assert.is_cancelled());
-    }
-
-    #[test]
-    fn test_cancel_session_clears_token_from_slot_after_cancelling() {
-        // Given: an active token
-        let token = CancellationToken::new();
-        let cancel_token: Mutex<Option<CancellationToken>> = Mutex::new(Some(token));
-        // When: cancel is requested
-        let _ = do_cancel_session(&cancel_token, &empty_option_responder());
-        // Then: the token slot is cleared (frees the Arc)
-        assert!(
-            cancel_token
-                .lock()
-                .unwrap_or_else(|e| panic!("{e}"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_cancel_session_drops_pending_option_sender() {
-        // Given: a pending option sender in the responder slot
-        let (tx, rx) = oneshot::channel::<OptionResult>();
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(Some(tx)));
-        let cancel_token: Mutex<Option<CancellationToken>> = Mutex::new(None);
-        // When: cancel is requested
-        let result = do_cancel_session(&cancel_token, &option_responder);
-        // Then: succeeds and the receiver observes the sender was dropped
-        assert!(result.is_ok());
-        assert!(
-            rx.blocking_recv().is_err(),
-            "sender should have been dropped"
-        );
-    }
-
-    // ─── respond_to_option ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_respond_to_option_with_no_pending_request_returns_error() {
-        // Given: no pending option request
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(None));
-        // When: respond_to_option is called
-        let result = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: None,
-                text_input: None,
-            },
-        );
-        // Then: returns an error mentioning no pending request
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_lowercase()
-                .contains("no pending option request"),
-            "error message should mention 'no pending option request'"
-        );
-    }
-
-    #[test]
-    fn test_respond_to_option_sends_next_step_to_handler() {
-        // Given: a pending option request (sender in state)
-        let (tx, rx) = oneshot::channel::<OptionResult>();
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(Some(tx)));
-        // When: respond_to_option is called with a next_step choice
-        let result = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: Some("next_step".to_string()),
-                text_input: None,
-            },
-        );
-        // Then: succeeds and the handler receives the next_step
-        assert!(result.is_ok());
-        let received = rx.blocking_recv().unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(received.next_step, Some("next_step".to_string()));
-        assert_eq!(received.text_input, None);
-    }
-
-    #[test]
-    fn test_respond_to_option_sends_text_input_to_handler() {
-        // Given: a pending option request
-        let (tx, rx) = oneshot::channel::<OptionResult>();
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(Some(tx)));
-        // When: respond_to_option is called with text input
-        let result = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: None,
-                text_input: Some("my text input".to_string()),
-            },
-        );
-        // Then: the text is delivered to the handler
-        assert!(result.is_ok());
-        let received = rx.blocking_recv().unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(received.text_input, Some("my text input".to_string()));
-    }
-
-    #[test]
-    fn test_respond_to_option_clears_sender_from_state_after_use() {
-        // Given: a pending option request
-        let (tx, _rx) = oneshot::channel::<OptionResult>();
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(Some(tx)));
-        // When: respond_to_option is called
-        let _ = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: None,
-                text_input: None,
-            },
-        );
-        // Then: the sender slot is cleared (idempotency guard)
-        assert!(
-            option_responder
-                .lock()
-                .unwrap_or_else(|e| panic!("{e}"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_respond_to_option_second_call_returns_error() {
-        // Given: a request that was already handled
-        let (tx, _rx) = oneshot::channel::<OptionResult>();
-        let option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> =
-            Arc::new(Mutex::new(Some(tx)));
-        let _ = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: None,
-                text_input: None,
-            },
-        );
-        // When: respond_to_option is called again
-        let result = do_respond_to_option(
-            &option_responder,
-            OptionResult {
-                next_step: None,
-                text_input: None,
-            },
-        );
-        // Then: returns an error (no pending request remains)
-        assert!(result.is_err());
     }
 
     #[test]
@@ -1517,9 +1283,7 @@ mod tests {
     //   GuiOptionHandler::select_option (engine thread)
     //     → stores sender in shared pending_response slot
     //     → emits WorkflowEvent::OptionRequired
-    //   do_respond_to_option (IPC command handler / test thread)
-    //     → extracts sender from slot
-    //     → sends OptionResult
+    //   test thread: extracts sender from slot and sends OptionResult
     //   GuiOptionHandler::select_option (engine thread)
     //     → blocking_recv returns OptionResult
     //
@@ -1569,14 +1333,17 @@ mod tests {
 
         // And: the IPC command thread responds once the sender is populated
         wait_for_pending(&pending_for_cmd);
-        do_respond_to_option(
-            &pending_for_cmd,
-            OptionResult {
+        let sender = pending_for_cmd
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .take()
+            .expect("sender should be present after wait_for_pending");
+        sender
+            .send(OptionResult {
                 next_step: Some("finalize".to_string()),
                 text_input: None,
-            },
-        )
-        .unwrap_or_else(|e| panic!("respond_to_option failed: {e}"));
+            })
+            .unwrap_or_else(|_| panic!("respond_to_option: receiver dropped"));
 
         // Then: the engine thread receives the OptionResult
         let result = engine_thread

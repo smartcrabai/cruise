@@ -35,9 +35,11 @@ interface SessionSidebarProps {
    *  App uses this to detect phase transitions (approval-ready, completed)
    *  and fire notifications without depending on the 3-second idle poll. */
   onSessionsChanged?: (sessions: Session[]) => void;
+  /** Called when the user clicks the Settings button. */
+  onSettings?: () => void;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds, onSettings }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
   onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
@@ -240,6 +242,17 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
             >
               + New
             </button>
+            {onSettings && (
+              <button
+                type="button"
+                onClick={onSettings}
+                aria-label="Settings"
+                title="Settings"
+                className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
+              >
+                {'\u2699'}
+              </button>
+            )}
           </div>
         </div>
         {cleanMessage && (
