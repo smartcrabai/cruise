@@ -102,19 +102,27 @@ export function listConfigs(): Promise<ConfigEntry[]> {
   return invoke<ConfigEntry[]>("list_configs");
 }
 
+/** Return step names defined in a workflow config file. */
+export function getConfigSteps(configPath?: string): Promise<string[]> {
+  return invoke<string[]>("get_config_steps", {
+    configPath: configPath ?? null,
+  });
+}
+
 /**
  * Create a new session and generate a plan, streaming PlanEvents via `channel`.
  *
  * @returns The new session ID.
  */
 export function createSession(
-  params: { input: string; configPath?: string; baseDir: string },
+  params: { input: string; configPath?: string; baseDir: string; skippedSteps?: string[] },
   channel: Channel<PlanEvent>
 ): Promise<string> {
   return invoke<string>("create_session", {
     input: params.input,
     configPath: params.configPath ?? null,
     baseDir: params.baseDir,
+    skippedSteps: params.skippedSteps ?? [],
     channel,
   });
 }

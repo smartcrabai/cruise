@@ -17,6 +17,7 @@ import {
   createSession,
   deleteSession,
   fixSession,
+  getConfigSteps,
   getSession,
   getSessionLog,
   getSessionPlan,
@@ -944,12 +945,37 @@ interface NewSessionFormProps {
 
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
+  const [configSteps, setConfigSteps] = useState<string[]>([]);
+  const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
   }
+
+  useEffect(() => {
+    let active = true;
+    if (!configPath) {
+      setConfigSteps([]);
+      setSkippedSteps(new Set());
+      return;
+    }
+    void getConfigSteps(configPath)
+      .then((steps) => {
+        if (active) {
+          setConfigSteps(steps);
+          setSkippedSteps(new Set());
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setConfigSteps([]);
+          setSkippedSteps(new Set());
+        }
+      });
+    return () => { active = false; };
+  }, [configPath]);
 
   // Load configs and default base_dir on mount
   useEffect(() => {
@@ -993,7 +1019,12 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
 
     try {
       await createSession(
-        { input: input.trim(), configPath: configPath || undefined, baseDir: baseDir || "." },
+        {
+          input: input.trim(),
+          configPath: configPath || undefined,
+          baseDir: baseDir || ".",
+          skippedSteps: Array.from(skippedSteps),
+        },
         channel,
       );
     } catch (e) {
@@ -1035,6 +1066,34 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             ))}
           </select>
         </div>
+
+        {/* Skip steps */}
+        {configSteps.length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {configSteps.map((step) => (
+                <label key={step} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={skippedSteps.has(step)}
+                    onChange={(e) => {
+                      setSkippedSteps((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(step);
+                        else next.delete(step);
+                        return next;
+                      });
+                    }}
+                    disabled={isGenerating}
+                    className="accent-blue-500"
+                  />
+                  <span className="text-sm text-gray-300">{step}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Base dir */}
         <div className="space-y-1.5">
