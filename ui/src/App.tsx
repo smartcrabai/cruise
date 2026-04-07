@@ -457,9 +457,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setDeleting(false);
   }, [session.id]);
 
-  // Clear the parent's fixing state when this runner unmounts (e.g. user navigates
-  // to another session while a fix is in-flight). Without this, fixingSessionIds in
-  // App retains a stale entry and the sidebar keeps showing "Fixing" indefinitely.
+  // Clear the ephemeral fixingSessionIds entry from App when this runner unmounts.
+  // The sidebar's "Fixing" badge now persists correctly via session.fixInProgress
+  // (DTO field), so this only keeps the parent's in-memory set tidy.
   useEffect(() => {
     return () => {
       onFixingChange(session.id, false);
@@ -603,7 +603,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
 
     const channel = new Channel<PlanEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "planGenerated") {
+      if (event.event === "planGenerating") {
+        void refreshSession();
+      } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
         onFixingChange(session.id, false);
@@ -644,8 +646,13 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }
 
-  const isFixing = replanPhase === "generating";
-  const actions = getSessionActions(session, status, isFixing);
+  // isFixing drives the PhaseBadge header; includes the DTO field so the badge
+  // stays correct after navigating away and back (replanPhase resets to "idle").
+  const isFixing = replanPhase === "generating" || !!session.fixInProgress;
+  // isApprovalReady() already checks !session.fixInProgress, so only the local
+  // ephemeral flag needs to be forwarded to suppress buttons while the request
+  // is in flight within this component instance.
+  const actions = getSessionActions(session, status, replanPhase === "generating");
   const notBusy = replanPhase === "idle" && askPhase === "idle";
   const canShowFix = actions.showFix && notBusy;
   const canShowAsk = actions.showAsk && notBusy;

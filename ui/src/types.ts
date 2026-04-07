@@ -29,6 +29,8 @@ export interface Session {
   awaitingInput?: boolean;
   /** Whether a valid (non-empty) plan.md exists for this session. */
   planAvailable?: boolean;
+  /** True while a plan-fix request is in progress (persisted in session state). */
+  fixInProgress?: boolean;
 }
 
 // --- IPC Events ---------------------------------------------------------------
