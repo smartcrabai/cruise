@@ -236,6 +236,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::lock_process;
     use tempfile::TempDir;
 
     fn init_git_repo(dir: &Path) {
@@ -256,6 +257,7 @@ mod tests {
 
     #[test]
     fn test_setup_session_worktree_and_cleanup() {
+        let _lock = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("myrepo");
         fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
@@ -285,6 +287,7 @@ mod tests {
 
     #[test]
     fn test_setup_session_worktree_empty_input() {
+        let _lock = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("myrepo");
         fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
