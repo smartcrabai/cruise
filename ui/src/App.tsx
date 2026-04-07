@@ -394,10 +394,10 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   }, [activeTab, loadSavedLog, status]);
 
   useEffect(() => {
-    if (activeTab === "plan" && !planContent) {
+    if (activeTab === "plan" && !planContent && session.planAvailable) {
       void loadPlan();
     }
-  }, [activeTab, loadPlan, planContent]);
+  }, [activeTab, loadPlan, planContent, session.planAvailable]);
 
 
   useEffect(() => {
@@ -1437,7 +1437,7 @@ export default function App() {
           <WorkflowRunner
             key={selectedSession.id}
             session={selectedSession}
-            activeTab={sessionTabMap[selectedSession.id] ?? "info"}
+            activeTab={sessionTabMap[selectedSession.id] ?? "plan"}
             onActiveTabChange={(tab) =>
               setSessionTabMap((prev) => ({ ...prev, [selectedSession.id]: tab }))
             }

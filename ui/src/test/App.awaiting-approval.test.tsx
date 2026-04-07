@@ -321,7 +321,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
     // When: start the fix by clicking Fix → typing feedback → clicking Apply
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -344,7 +344,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
     // When: submit the fix
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -371,7 +371,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -389,7 +389,7 @@ describe("App: Awaiting Approval — Fixing display state", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Fix" }));
     await userEvent.type(
-      screen.getByPlaceholderText("Describe the changes needed…"),
+      screen.getByPlaceholderText("Describe the changes needed..."),
       "Make it better"
     );
     await userEvent.click(screen.getByRole("button", { name: "Apply" }));
