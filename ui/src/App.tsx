@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
+  AppConfig,
   ChoiceDto,
   ConfigEntry,
   PlanEvent,
@@ -17,6 +18,7 @@ import {
   createSession,
   deleteSession,
   fixSession,
+  getAppConfig,
   getSession,
   getSessionLog,
   getSessionPlan,
@@ -26,6 +28,7 @@ import {
   respondToOption,
   runAllSessions,
   runSession,
+  updateAppConfig,
 } from "./lib/commands";
 import { notifyDesktop } from "./lib/desktopNotifications";
 import { DirectoryPicker } from "./components/DirectoryPicker";
@@ -225,6 +228,81 @@ function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCa
             className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50"
           >
             {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- SettingsModal ----------------------------------------------------------------
+
+interface SettingsModalProps {
+  initialParallelism: number;
+  onSave: (config: AppConfig) => Promise<void>;
+  onClose: () => void;
+}
+
+function SettingsModal({ initialParallelism, onSave, onClose }: SettingsModalProps) {
+  const [value, setValue] = useState<number>(initialParallelism);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const titleId = useId();
+
+  async function handleSave() {
+    if (Number.isNaN(value) || value <= 0) {
+      setError("Must be at least 1");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({ runAllParallelism: value });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-sm w-full space-y-4"
+      >
+        <h2 id={titleId} className="text-lg font-semibold text-gray-100">Settings</h2>
+        <div className="space-y-1.5">
+          <label htmlFor="run-all-parallelism" className="text-sm text-gray-400">
+            Run All Parallelism
+          </label>
+          <input
+            id="run-all-parallelism"
+            type="number"
+            min={1}
+            value={Number.isNaN(value) ? "" : value}
+            onChange={(e) => setValue(e.target.valueAsNumber)}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500"
+          />
+          {error && <p className="text-sm text-red-400">{error}</p>}
+        </div>
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="px-4 py-2 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={saving}
+            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "Save"}
           </button>
         </div>
       </div>
@@ -503,9 +581,11 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     nextStep?: string;
     textInput?: string;
   }) {
+    const sessionId = pendingOption?.requestId;
     setPendingOption(null);
+    if (!sessionId) return;
     try {
-      await respondToOption(result);
+      await respondToOption(sessionId, result);
       // Re-sync after awaiting_input = false is saved
       await refreshSession();
     } catch (e) {
@@ -1249,6 +1329,23 @@ export default function App() {
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const [fixingSessionIds, setFixingSessionIds] = useState<ReadonlySet<string>>(new Set());
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsParallelism, setSettingsParallelism] = useState<number>(1);
+
+  async function handleOpenSettings() {
+    try {
+      const config = await getAppConfig();
+      setSettingsParallelism(config.runAllParallelism);
+      setShowSettings(true);
+    } catch (e) {
+      addToast({ kind: "failed", sessionInput: "Settings", detail: String(e).slice(0, 80) });
+    }
+  }
+
+  async function handleSaveSettings(config: AppConfig) {
+    await updateAppConfig(config);
+    setShowSettings(false);
+  }
 
   const handleFixingChange = useCallback((sessionId: string, fixing: boolean) => {
     setFixingSessionIds((prev) => {
@@ -1383,9 +1480,11 @@ export default function App() {
   }
 
   async function handleRunAllOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    const sessionId = runAllState?.pendingOption?.requestId;
     patchRunAll({ pendingOption: null });
+    if (!sessionId) return;
     try {
-      await respondToOption(result);
+      await respondToOption(sessionId, result);
     } catch (e) {
       patchRunAll({ runError: String(e) });
     }
@@ -1404,6 +1503,13 @@ export default function App() {
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
       <WorkflowToastStack toasts={toasts} onDismiss={dismissToast} />
+      {showSettings && (
+        <SettingsModal
+          initialParallelism={settingsParallelism}
+          onSave={handleSaveSettings}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
       {/* Sidebar */}
       <aside className="w-72 flex-shrink-0 border-r border-gray-800 flex flex-col">
         <SessionSidebar
@@ -1416,6 +1522,7 @@ export default function App() {
           onSelectedSessionUpdated={(s) => setSelectedSession(s)}
           fixingSessionIds={fixingSessionIds}
           onSessionsChanged={handleSessionsChanged}
+          onSettings={() => void handleOpenSettings()}
         />
       </aside>
       {/* Main content */}

@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  AppConfig,
   CleanupResult,
   ConfigEntry,
   DirEntry,
@@ -61,11 +62,32 @@ export function runAllSessions(
  * @param result.nextStep  The next step to jump to (selector choice).
  * @param result.textInput Free-text input (text-input choice).
  */
-export function respondToOption(result: {
-  nextStep?: string;
-  textInput?: string;
-}): Promise<void> {
-  return invoke<void>("respond_to_option", { result });
+export function respondToOption(
+  sessionId: string,
+  result: { nextStep?: string; textInput?: string },
+): Promise<void> {
+  return invoke<void>("respond_to_option", { sessionId, result });
+}
+
+// ─── App config ───────────────────────────────────────────────────────────────
+
+/**
+ * Retrieve the current application configuration from `~/.config/cruise/config.json`.
+ *
+ * If the file does not exist the server returns the default config (`runAllParallelism: 1`).
+ */
+export function getAppConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_app_config");
+}
+
+/**
+ * Persist an updated application configuration.
+ *
+ * The server validates the config before writing (e.g. `runAllParallelism` must be ≥ 1).
+ * Throws if validation fails or the file cannot be written.
+ */
+export function updateAppConfig(config: AppConfig): Promise<void> {
+  return invoke<void>("update_app_config", { config });
 }
 
 /** Remove Completed sessions whose PR is closed or merged. */
