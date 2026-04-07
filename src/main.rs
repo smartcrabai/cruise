@@ -27,6 +27,7 @@ mod variable;
 mod workflow;
 mod workspace;
 mod worktree;
+mod worktree_pr;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

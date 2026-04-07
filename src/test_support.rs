@@ -96,6 +96,52 @@ pub fn init_git_repo(dir: &Path) {
     run_git_ok(dir, &["branch", "-M", "main"]);
 }
 
+/// Prepend `dir` to the current `PATH` and return a guard that restores the
+/// original value on drop.  Caller must hold `GLOBAL_PROCESS_LOCK`.
+///
+/// # Panics
+///
+/// Panics if the resulting path cannot be joined into a valid `OsString`.
+#[must_use]
+pub fn prepend_to_path(dir: &Path) -> EnvGuard {
+    let prev_path = std::env::var_os("PATH");
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(ref existing) = prev_path {
+        paths.extend(std::env::split_paths(existing));
+    }
+    let joined = std::env::join_paths(&paths).unwrap_or_else(|e| panic!("{e}"));
+    EnvGuard::set("PATH", joined)
+}
+
+/// Install a minimal `gh` stub that exits 0 for `--version` and 1 for
+/// everything else.  Used to simulate an installed `gh` CLI that passes the
+/// preflight check.
+///
+/// # Panics
+///
+/// Panics if writing the script file, reading its metadata, or setting
+/// permissions fails.
+#[cfg(unix)]
+pub fn install_version_only_gh(bin_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script_path = bin_dir.join("gh");
+    let script = concat!(
+        "#!/bin/sh\n",
+        "if [ \"$1\" = \"--version\" ]; then\n",
+        "  printf 'gh version test\\n'\n",
+        "  exit 0\n",
+        "fi\n",
+        "exit 1\n",
+    );
+    std::fs::write(&script_path, script).unwrap_or_else(|e| panic!("{e:?}"));
+    let mut perms = std::fs::metadata(&script_path)
+        .unwrap_or_else(|e| panic!("{e:?}"))
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
+}
+
 /// Create a minimal `Planned` session for use in tests.
 #[must_use]
 pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
