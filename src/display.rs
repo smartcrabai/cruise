@@ -1,4 +1,4 @@
-use console::{Term, measure_text_width, style};
+use console::{measure_text_width, style, Term};
 
 /// Print `text` inside a Unicode box-drawing border.
 ///
@@ -7,9 +7,9 @@ use console::{Term, measure_text_width, style};
 pub fn print_bordered(text: &str, title: Option<&str>) {
     let term_width = Term::stdout().size().1 as usize;
     let box_width = term_width.clamp(20, 100);
-    let content_width = box_width - 4; // "│ " + content + " │"
+    let content_width = box_width - 4; // "| " + content + " |"
 
-    let bar = "─".repeat(box_width - 2);
+    let bar = "-".repeat(box_width - 2);
 
     // Top border
     let top = match title {
@@ -19,26 +19,26 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
             let remaining = box_width.saturating_sub(3 + label_width);
             format!(
                 "{}{}{}{}",
-                style("┌─").cyan(),
+                style("+-").cyan(),
                 style(&label).cyan().bold(),
-                style("─".repeat(remaining)).cyan(),
-                style("┐").cyan(),
+                style("-".repeat(remaining)).cyan(),
+                style("+").cyan(),
             )
         }
         None => format!(
             "{}{}{}",
-            style("┌").cyan(),
-            style(&bar).cyan(),
-            style("┐").cyan()
+            style("+").cyan(),
+            style("-".repeat(box_width - 2)).cyan(),
+            style("+").cyan()
         ),
     };
 
     // Bottom border
     let bottom = format!(
         "{}{}{}",
-        style("└").cyan(),
+        style("+").cyan(),
         style(&bar).cyan(),
-        style("┘").cyan()
+        style("+").cyan()
     );
 
     println!();
@@ -50,10 +50,10 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
             let pad = content_width.saturating_sub(visible_width);
             println!(
                 "{} {}{} {}",
-                style("│").cyan(),
+                style("|").cyan(),
                 chunk,
                 " ".repeat(pad),
-                style("│").cyan(),
+                style("|").cyan(),
             );
         }
     }
@@ -61,7 +61,7 @@ pub fn print_bordered(text: &str, title: Option<&str>) {
     println!("{bottom}");
 }
 
-/// Truncate `s` to `max` characters (first line only), appending `…` if truncated.
+/// Truncate `s` to `max` characters (first line only), appending `...` if truncated.
 #[must_use]
 pub fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
@@ -69,7 +69,7 @@ pub fn truncate(s: &str, max: usize) -> String {
     if first_line.chars().count() <= max {
         first_line.to_string()
     } else {
-        format!("{}…", first_line.chars().take(max).collect::<String>())
+        format!("{}...", first_line.chars().take(max).collect::<String>())
     }
 }
 
@@ -167,9 +167,9 @@ mod tests {
 
     #[test]
     fn test_truncate_long_string() {
-        // strings exceeding max get `…` appended at the end
+        // strings exceeding max get `...` appended at the end
         let result = truncate("hello world", 5);
-        assert_eq!(result, "hello…");
+        assert_eq!(result, "hello...");
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(result, "first line");
     }
 
-    // ── truncate ──────────────────────────────────────────────────────────────
+    // -- truncate --------------------------------------------------------------
 
     #[test]
     fn test_truncate_short_single_line_returns_as_is() {
@@ -193,8 +193,8 @@ mod tests {
     fn test_truncate_long_single_line_appends_ellipsis() {
         // Given: a single line exceeding max
         let result = truncate("abcde", 3);
-        // Then: truncated to 3 chars + "…"
-        assert_eq!(result, "abc…");
+        // Then: truncated to 3 chars + "..."
+        assert_eq!(result, "abc...");
     }
 
     #[test]
@@ -211,8 +211,8 @@ mod tests {
         let first = "a".repeat(100);
         let input = format!("{first}\nshort");
         let result = truncate(&input, 10);
-        // Then: truncated to 10 chars + "…", "short" is not included
-        assert_eq!(result, format!("{}…", "a".repeat(10)));
+        // Then: truncated to 10 chars + "...", "short" is not included
+        assert_eq!(result, format!("{}...", "a".repeat(10)));
         assert!(!result.contains("short"));
     }
 

@@ -18,7 +18,7 @@ pub(crate) fn sha256_digest(data: &[u8]) -> [u8; 32] {
 /// SHA-256 digest of a single file.
 type FileHash = [u8; 32];
 
-/// A snapshot of a directory tree: file path → hash.
+/// A snapshot of a directory tree: file path -> hash.
 type Snapshot = HashMap<PathBuf, FileHash>;
 
 /// Tracks file changes between workflow steps using SHA-256 snapshots.
@@ -106,7 +106,7 @@ impl Default for FileTracker {
     }
 }
 
-/// Scan `root` recursively and return a path→hash map, skipping excluded dirs.
+/// Scan `root` recursively and return a path->hash map, skipping excluded dirs.
 fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
     let mut snapshot = HashMap::new();
 
@@ -186,11 +186,9 @@ mod tests {
         tracker
             .take_snapshot("step1")
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            !tracker
-                .has_files_changed("step1")
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        );
+        assert!(!tracker
+            .has_files_changed("step1")
+            .unwrap_or_else(|e| panic!("{e:?}")));
     }
 
     #[test]
@@ -204,11 +202,9 @@ mod tests {
         std::fs::write(dir.path().join("file1.txt"), "modified content")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(
-            tracker
-                .has_files_changed("step1")
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        );
+        assert!(tracker
+            .has_files_changed("step1")
+            .unwrap_or_else(|e| panic!("{e:?}")));
     }
 
     #[test]
@@ -222,11 +218,9 @@ mod tests {
         std::fs::write(dir.path().join("new_file.txt"), "new content")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(
-            tracker
-                .has_files_changed("step1")
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        );
+        assert!(tracker
+            .has_files_changed("step1")
+            .unwrap_or_else(|e| panic!("{e:?}")));
     }
 
     #[test]
@@ -239,21 +233,17 @@ mod tests {
 
         std::fs::remove_file(dir.path().join("file1.txt")).unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(
-            tracker
-                .has_files_changed("step1")
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        );
+        assert!(tracker
+            .has_files_changed("step1")
+            .unwrap_or_else(|e| panic!("{e:?}")));
     }
 
     #[test]
     fn test_no_snapshot_returns_false() {
         let tracker = FileTracker::new();
-        assert!(
-            !tracker
-                .has_files_changed("nonexistent")
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        );
+        assert!(!tracker
+            .has_files_changed("nonexistent")
+            .unwrap_or_else(|e| panic!("{e:?}")));
     }
 
     #[test]

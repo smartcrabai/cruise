@@ -16,14 +16,14 @@ use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
 use crate::worktree;
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// --- Constants ----------------------------------------------------------------
 
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const PR_LANGUAGE_VAR: &str = "pr.language";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// --- Types --------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitOutcome {
@@ -58,18 +58,18 @@ impl PrAttemptOutcome {
 fn report_commit_outcome(commit_outcome: CommitOutcome) {
     match commit_outcome {
         CommitOutcome::Created => {
-            eprintln!("{} Changes committed", style("✓").green().bold());
+            eprintln!("{} Changes committed", style("v").green().bold());
         }
         CommitOutcome::NoChanges => {
             eprintln!(
                 "{} No new changes to commit; using existing branch commits",
-                style("→").cyan()
+                style("->").cyan()
             );
         }
     }
 }
 
-// ─── Preflight ────────────────────────────────────────────────────────────────
+// --- Preflight ---------------------------------------------------------------
 
 /// Verify that the `gh` CLI is available in `PATH`.
 ///
@@ -97,7 +97,7 @@ pub fn ensure_gh_available() -> Result<()> {
     }
 }
 
-// ─── PR post-processing ───────────────────────────────────────────────────────
+// --- PR post-processing ------------------------------------------------------
 
 /// Handle PR creation and after-PR steps for a worktree execution.
 ///
@@ -121,7 +121,7 @@ pub async fn handle_worktree_pr(
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {
-            eprintln!("{} PR created: {}", style("✓").green().bold(), url);
+            eprintln!("{} PR created: {}", style("v").green().bold(), url);
             if let Some(number) = extract_last_path_segment(&url) {
                 vars.set_named_value(PR_NUMBER_VAR, number);
             }
@@ -222,7 +222,7 @@ async fn generate_pr_description(
         let truncated: String = llm_output.chars().take(500).collect();
         eprintln!(
             "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
-            style("⚠").yellow(),
+            style("!").yellow(),
             truncated
         );
     }
@@ -428,7 +428,7 @@ fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Res
         return Ok(url);
     }
 
-    // PR may already exist — try to fetch the URL.
+    // PR may already exist -- try to fetch the URL.
     let fallback = std::process::Command::new("gh")
         .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
         .current_dir(worktree_path)
@@ -558,7 +558,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ─── ensure_gh_available ─────────────────────────────────────────────────
+    // --- ensure_gh_available ------------------------------------------------
 
     /// Given: fake `gh` that responds to --version with exit 0
     /// When: `ensure_gh_available` is called

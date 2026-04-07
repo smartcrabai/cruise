@@ -128,6 +128,17 @@ export interface ConfigEntry {
   name: string;
 }
 
+export interface NewSessionHistorySummary {
+  lastRequestedConfigPath?: string;
+  lastWorkingDir?: string;
+  recentWorkingDirs: string[];
+}
+
+export interface NewSessionConfigDefaults {
+  steps: string[];
+  defaultSkippedSteps: string[];
+}
+
 export type PlanEvent =
   | { event: "sessionCreated"; data: { sessionId: string } }
   | { event: "planGenerating"; data: Record<string, never> }

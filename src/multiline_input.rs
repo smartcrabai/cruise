@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use crate::error::Result;
 use reedline::{
-    Emacs, KeyCode, KeyModifiers, Keybindings, Prompt, PromptEditMode, PromptHistorySearch,
-    Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
+    default_emacs_keybindings, Emacs, KeyCode, KeyModifiers, Keybindings, Prompt, PromptEditMode,
+    PromptHistorySearch, Reedline, ReedlineEvent, Signal,
 };
 
 /// Result of a multiline input prompt.
@@ -18,8 +18,8 @@ pub(crate) enum InputResult {
 impl InputResult {
     /// Convert into a plain `Result<String>`.
     ///
-    /// `Submitted(text)` → `Ok(text)` preserving internal newlines.
-    /// `Cancelled`       → `Err(CruiseError::StepPaused)`.
+    /// `Submitted(text)` -> `Ok(text)` preserving internal newlines.
+    /// `Cancelled`       -> `Err(CruiseError::StepPaused)`.
     ///
     /// # Errors
     ///
@@ -49,7 +49,7 @@ impl Prompt for CruisePrompt {
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
-        Cow::Borrowed("… ")
+        Cow::Borrowed("... ")
     }
 
     fn render_prompt_history_search_indicator(
@@ -63,10 +63,10 @@ impl Prompt for CruisePrompt {
 /// Display a multiline-capable prompt and return the user's input.
 ///
 /// Keys:
-/// - Enter           → submit (rejected if blank)
-/// - Alt+Enter       → newline
-/// - Shift+Enter     → newline (kitty protocol terminals)
-/// - Ctrl+C / Esc    → cancel
+/// - Enter           -> submit (rejected if blank)
+/// - Alt+Enter       -> newline
+/// - Shift+Enter     -> newline (kitty protocol terminals)
+/// - Ctrl+C / Esc    -> cancel
 ///
 /// # Errors
 ///
@@ -124,14 +124,14 @@ fn map_signal(signal: Signal) -> Option<InputResult> {
     }
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
+// --- Tests ---------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use reedline::{EditCommand, KeyCode, KeyModifiers, ReedlineEvent, Signal};
 
-    // ── InputResult::into_result ─────────────────────────────────────────────
+    // -- InputResult::into_result ----------------------------------------------
 
     #[test]
     fn test_into_result_submitted_returns_text() {
@@ -154,7 +154,7 @@ mod tests {
     fn test_into_result_submitted_empty_string_returns_ok() {
         // Given: a Submitted result with an empty string (edge case)
         let result = InputResult::Submitted(String::new()).into_result();
-        // Then: returns Ok("") — into_result does not validate content
+        // Then: returns Ok("") -- into_result does not validate content
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "");
     }
 
@@ -169,7 +169,7 @@ mod tests {
         );
     }
 
-    // ── map_signal ───────────────────────────────────────────────────────────
+    // -- map_signal ------------------------------------------------------------
 
     #[test]
     fn test_map_signal_success_nonempty_returns_submitted() {
@@ -213,7 +213,7 @@ mod tests {
         let sig = Signal::Success("   \t  ".to_string());
         // When: mapped
         let result = map_signal(sig);
-        // Then: returns None — blank submission is rejected
+        // Then: returns None -- blank submission is rejected
         assert_eq!(result, None);
     }
 
@@ -223,7 +223,7 @@ mod tests {
         let sig = Signal::Success("  \n  \n  ".to_string());
         // When: mapped
         let result = map_signal(sig);
-        // Then: returns None — all-blank multiline is rejected
+        // Then: returns None -- all-blank multiline is rejected
         assert_eq!(result, None);
     }
 
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(result, Some(InputResult::Cancelled));
     }
 
-    // ── build_keybindings ────────────────────────────────────────────────────
+    // -- build_keybindings -----------------------------------------------------
 
     #[test]
     fn test_keybindings_alt_enter_is_insert_newline() {

@@ -1,12 +1,12 @@
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 use std::time::Duration;
 
 use console::Term;
 
-const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const FRAMES: &[char] = &['-', '/', '|', '\\', '-', '/', '|', '\\', '-', '/'];
 
 /// An animated terminal spinner that cleans up on drop.
 pub struct Spinner {

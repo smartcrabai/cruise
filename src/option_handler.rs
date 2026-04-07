@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::step::OptionChoice;
 use crate::step::option::OptionResult;
+use crate::step::OptionChoice;
 
 /// Abstraction over the UI mechanism used to present option choices to the user.
 ///
@@ -43,7 +43,7 @@ impl OptionHandler for NoOpOptionHandler {
         _plan: Option<&str>,
     ) -> Result<OptionResult> {
         panic!(
-            "NoOpOptionHandler: unexpected option step — use FirstChoiceOptionHandler if option steps are expected"
+            "NoOpOptionHandler: unexpected option step -- use FirstChoiceOptionHandler if option steps are expected"
         );
     }
 }

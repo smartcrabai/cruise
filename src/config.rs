@@ -1464,7 +1464,7 @@ steps:
         // When: validate_if_conditions is called
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         let result = validate_if_conditions(&config);
-        // Then: no error — legacy field alone is accepted (backward compatibility)
+        // Then: no error -- legacy field alone is accepted (backward compatibility)
         assert!(
             result.is_ok(),
             "legacy fail-if-no-file-changes alone should pass validate_if_conditions, got: {result:?}"
@@ -1693,7 +1693,7 @@ steps:
         assert_object_map_property(schema, "after-pr");
     }
 
-    // ── LlmApiConfigYaml ─────────────────────────────────────────────────────
+    // -- LlmApiConfigYaml ----------------------------------------------------
 
     #[test]
     fn test_llm_api_config_absent_when_no_llm_section() {
