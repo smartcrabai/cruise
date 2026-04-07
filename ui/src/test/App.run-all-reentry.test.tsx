@@ -45,6 +45,8 @@ vi.mock("../lib/commands", () => ({
   runAllSessions: vi.fn(),
   fixSession: vi.fn(),
   askSession: vi.fn(),
+  getAppConfig: vi.fn(),
+  updateAppConfig: vi.fn(),
 }));
 
 vi.mock("../lib/updater", () => ({
@@ -141,6 +143,8 @@ describe("App: Run All re-entry and state persistence", () => {
     vi.mocked(commands.listDirectory).mockResolvedValue([]);
     vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+    vi.mocked(commands.getAppConfig).mockResolvedValue({ runAllParallelism: 1 });
+    vi.mocked(commands.updateAppConfig).mockResolvedValue();
   });
 
   afterEach(() => {

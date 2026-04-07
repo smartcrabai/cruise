@@ -58,6 +58,10 @@ pub enum ChoiceKind {
 #[serde(tag = "event", content = "data", rename_all = "camelCase")]
 pub enum WorkflowEvent {
     StepStarted {
+        /// The session this event belongs to.
+        /// Required for attributing concurrent progress to the correct session.
+        #[serde(rename = "sessionId")]
+        session_id: String,
         step: String,
     },
     StepCompleted {
@@ -74,16 +78,28 @@ pub enum WorkflowEvent {
         plan: Option<String>,
     },
     WorkflowCompleted {
+        /// The session this event belongs to.
+        #[serde(rename = "sessionId")]
+        session_id: String,
         run: usize,
         skipped: usize,
         failed: usize,
     },
     WorkflowFailed {
+        /// The session this event belongs to.
+        #[serde(rename = "sessionId")]
+        session_id: String,
         error: String,
     },
-    WorkflowCancelled,
+    WorkflowCancelled {
+        /// The session this event belongs to.
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     RunAllStarted {
         total: usize,
+        /// Configured parallelism for this batch (for display / debugging).
+        parallelism: usize,
     },
     RunAllSessionStarted {
         #[serde(rename = "sessionId")]
@@ -165,12 +181,17 @@ mod tests {
     // --- StepStarted ---
 
     #[test]
-    fn test_step_started_serializes_step_name_only() {
+    fn test_step_started_serializes_step_name_and_session_id() {
+        // Given: a StepStarted event with session context
         let event = WorkflowEvent::StepStarted {
+            session_id: "sess-42".to_string(),
             step: "build".to_string(),
         };
+        // When: serialized
         let json = to_json(&event);
+        // Then: sessionId and step are both present under camelCase keys
         assert_eq!(json["event"], "stepStarted");
+        assert_eq!(json["data"]["sessionId"], "sess-42");
         assert_eq!(json["data"]["step"], "build");
     }
 
@@ -252,17 +273,19 @@ mod tests {
     // --- WorkflowCompleted ---
 
     #[test]
-    fn test_workflow_completed_serializes_run_skipped_failed_counts() {
-        // Given: a WorkflowCompleted event
+    fn test_workflow_completed_serializes_session_id_and_counts() {
+        // Given: a WorkflowCompleted event with session context
         let event = WorkflowEvent::WorkflowCompleted {
+            session_id: "sess-1".to_string(),
             run: 3,
             skipped: 1,
             failed: 0,
         };
         // When: serialized
         let json = to_json(&event);
-        // Then: counts are present
+        // Then: sessionId and all counts are present
         assert_eq!(json["event"], "workflowCompleted");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
         assert_eq!(json["data"]["run"], 3);
         assert_eq!(json["data"]["skipped"], 1);
         assert_eq!(json["data"]["failed"], 0);
@@ -271,29 +294,33 @@ mod tests {
     // --- WorkflowFailed ---
 
     #[test]
-    fn test_workflow_failed_serializes_with_error_message() {
-        // Given: a WorkflowFailed event
+    fn test_workflow_failed_serializes_session_id_and_error_message() {
+        // Given: a WorkflowFailed event with session context
         let event = WorkflowEvent::WorkflowFailed {
+            session_id: "sess-2".to_string(),
             error: "step 'build' failed".to_string(),
         };
         // When: serialized
         let json = to_json(&event);
-        // Then: error message is present under the correct tag
+        // Then: sessionId and error message are both present
         assert_eq!(json["event"], "workflowFailed");
+        assert_eq!(json["data"]["sessionId"], "sess-2");
         assert_eq!(json["data"]["error"], "step 'build' failed");
     }
 
     // --- WorkflowCancelled ---
 
     #[test]
-    fn test_workflow_cancelled_serializes_event_tag_without_data() {
-        // Given: a WorkflowCancelled unit variant
-        let event = WorkflowEvent::WorkflowCancelled;
+    fn test_workflow_cancelled_serializes_session_id() {
+        // Given: a WorkflowCancelled event with session context
+        let event = WorkflowEvent::WorkflowCancelled {
+            session_id: "sess-3".to_string(),
+        };
         // When: serialized
         let json = to_json(&event);
-        // Then: only the event tag is present; adjacently-tagged unit variants omit data
+        // Then: sessionId is present (WorkflowCancelled is no longer a unit variant)
         assert_eq!(json["event"], "workflowCancelled");
-        assert!(json.get("data").is_none() || json["data"] == Value::Null);
+        assert_eq!(json["data"]["sessionId"], "sess-3");
     }
 
     // --- ChoiceKind ---
@@ -301,14 +328,31 @@ mod tests {
     // --- RunAllStarted ---
 
     #[test]
-    fn test_run_all_started_serializes_total() {
-        // Given: a RunAllStarted event with 3 candidate sessions
-        let event = WorkflowEvent::RunAllStarted { total: 3 };
+    fn test_run_all_started_serializes_total_and_parallelism() {
+        // Given: a RunAllStarted event with 3 candidate sessions and parallelism=2
+        let event = WorkflowEvent::RunAllStarted {
+            total: 3,
+            parallelism: 2,
+        };
         // When: serialized to JSON
         let json = to_json(&event);
-        // Then: event tag is camelCase and total is correct
+        // Then: event tag is camelCase; both total and parallelism are present
         assert_eq!(json["event"], "runAllStarted");
         assert_eq!(json["data"]["total"], 3);
+        assert_eq!(json["data"]["parallelism"], 2);
+    }
+
+    #[test]
+    fn test_run_all_started_parallelism_one_is_backward_compatible_default() {
+        // Given: a RunAllStarted event with parallelism=1 (sequential default)
+        let event = WorkflowEvent::RunAllStarted {
+            total: 5,
+            parallelism: 1,
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: parallelism field is present and equals 1
+        assert_eq!(json["data"]["parallelism"], 1);
     }
 
     // --- RunAllSessionStarted ---
