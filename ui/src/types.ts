@@ -35,7 +35,7 @@ export interface Session {
 
 export interface StepStartedEvent {
   event: "stepStarted";
-  data: { step: string };
+  data: { sessionId: string; step: string };
 }
 
 export interface StepCompletedEvent {
@@ -56,21 +56,28 @@ export interface OptionRequiredEvent {
 
 export interface WorkflowCompletedEvent {
   event: "workflowCompleted";
-  data: { run: number; skipped: number; failed: number };
+  data: { sessionId: string; run: number; skipped: number; failed: number };
 }
 
 export interface WorkflowFailedEvent {
   event: "workflowFailed";
-  data: { error: string };
+  data: { sessionId: string; error: string };
 }
 
 export interface WorkflowCancelledEvent {
   event: "workflowCancelled";
+  data: { sessionId: string };
 }
 
 export interface RunAllStartedEvent {
   event: "runAllStarted";
-  data: { total: number };
+  data: { total: number; parallelism: number };
+}
+
+// --- App config ---------------------------------------------------------------
+
+export interface AppConfig {
+  runAllParallelism: number;
 }
 
 export interface RunAllSessionStartedEvent {

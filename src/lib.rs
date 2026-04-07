@@ -1,4 +1,6 @@
 // Core modules exported for the Tauri GUI (src-tauri) and other library consumers.
+pub mod app_config;
+pub mod batch_run;
 pub mod cancellation;
 pub mod condition;
 pub mod config;

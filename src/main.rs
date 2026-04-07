@@ -1,8 +1,10 @@
+mod app_config;
 mod cancellation;
 mod clean_cmd;
 mod cli;
 mod condition;
 mod config;
+mod config_cmd;
 mod display;
 mod engine;
 mod error;
@@ -44,6 +46,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
+        Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         None => {
             // Backward compat: no subcommand → treat as `plan`.
             let plan_args = cli::PlanArgs {
