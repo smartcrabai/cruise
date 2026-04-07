@@ -12,6 +12,11 @@ export async function checkForUpdate(): Promise<Update | null> {
   }
 }
 
+/** Like checkForUpdate but propagates errors -- use for manual user-initiated checks. */
+export async function checkForUpdateManual(): Promise<Update | null> {
+  return check();
+}
+
 export async function downloadAndInstall(update: Update): Promise<void> {
   await update.downloadAndInstall();
   await relaunch();
