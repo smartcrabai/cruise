@@ -50,6 +50,12 @@ This removes the Gatekeeper quarantine attribute, allowing the app to launch.
 # Create a session (plan → approve)
 cruise plan "implement the feature"
 
+# Create a session and generate the plan in the background
+cruise --plan "implement the feature"
+
+# Background planning from stdin
+echo "implement the feature" | cruise --plan stdin
+
 # Execute the approved session
 cruise run
 
@@ -66,13 +72,17 @@ cruise "implement the feature"
 ### CLI Reference
 
 ```
-cruise [INPUT] [COMMAND]
+cruise [OPTIONS] [INPUT] [COMMAND]
 
 Commands:
-  plan   Create an implementation plan for a task
-  run    Execute a planned session
-  list   List and manage sessions interactively
-  clean  Remove sessions with closed/merged PRs
+  plan         Create an implementation plan for a task
+  run          Execute a planned session
+  list         List and manage sessions interactively
+  clean        Remove sessions with closed/merged PRs
+  config       Show or update application-level configuration
+
+Options:
+      --plan <INPUT>   Create a plan in the background and return immediately
 ```
 
 #### `cruise plan`
@@ -106,6 +116,14 @@ Options:
 
 `--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
 
+#### `cruise --plan`
+
+```
+cruise --plan <INPUT|stdin>
+```
+
+Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
+
 #### `cruise clean`
 
 ```
@@ -123,12 +141,13 @@ Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
 ### Session Lifecycle
 
 1. **`cruise plan "task"`** — Runs the built-in plan step to generate an implementation plan, then presents an approve-plan menu.
-2. **Approve-plan menu** — Choose one of:
+2. **`cruise --plan "task"`** — Creates the session immediately and generates the plan in the background. Review it later from `cruise list`.
+3. **Approve-plan menu** — Choose one of:
    - **Approve** — Mark the session as ready to run.
    - **Fix** — Provide feedback; the plan step reruns with your input.
    - **Ask** — Ask a question; the answer is shown before the menu reappears.
    - **Execute now** — Skip approval and run immediately.
-3. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
+4. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
 Sessions remain in `~/.cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
@@ -146,6 +165,8 @@ The interactive session list shows a menu of actions depending on the session's 
 | **Completed** | Open PR*, Reset to Planned, Delete, Back |
 
 \* Open PR is shown only when the session has a PR URL.
+
+`cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` appears only after a non-empty `plan.md` is available.
 
 - **Approve** — Approve the plan and transition the session to the Planned phase.
 - **Run / Resume** — Execute (or continue) the session.

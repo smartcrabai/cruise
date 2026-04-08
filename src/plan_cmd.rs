@@ -1,18 +1,21 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
+use std::path::Path;
+use std::process::Stdio;
 
 use console::style;
 use inquire::InquireError;
 
-use crate::cli::{DEFAULT_MAX_RETRIES, PlanArgs};
+use crate::cli::{
+    DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs,
+};
 use crate::config::{WorkflowConfig, validate_config};
-use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{NewSessionHistory, resolved_config_key_for_session};
+use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionState, get_cruise_home};
-use crate::step::PromptStep;
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
@@ -43,87 +46,29 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
     validate_config(&config)?;
 
-    // Set up session.
     let manager = SessionManager::new(get_cruise_home()?);
-
-    let session_id = SessionManager::new_session_id();
-    let base_dir = std::env::current_dir()?;
-    let mut session = SessionState::new(
-        session_id.clone(),
-        base_dir,
-        source.display_string(),
-        input.trim().to_string(),
-    );
-    session.config_path = source.path().cloned();
-    manager.create(&session)?;
-
-    // Save config.yaml copy to session dir only for built-in config (no external file path).
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(&session_id);
-        std::fs::write(session_dir.join("config.yaml"), &yaml)?;
-    }
+    let mut session = create_planning_session(&manager, &source, &yaml, input.trim().to_string())?;
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
-
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
-    // Run the built-in plan step (LLM writes plan.md).
-    let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
-    let plan_prompt = vars.resolve(PLAN_PROMPT_TEMPLATE)?;
-
-    eprintln!(
-        "\n{} {}",
-        style(">").cyan().bold(),
-        style("[plan] creating plan...").bold()
-    );
-
-    let plan_step = PromptStep {
-        model: plan_model,
-        prompt: plan_prompt,
-        instruction: None,
-    };
-
-    let spinner = crate::spinner::Spinner::start("Cruising...");
-    let env = std::collections::HashMap::new();
-    let result = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
-        let effective_model = plan_step.model.as_deref().or(config.model.as_deref());
-        let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
-        let (resolved_command, model_arg) = if has_placeholder {
-            (
-                resolve_command_with_model(&config.command, effective_model),
-                None,
-            )
-        } else {
-            (config.command.clone(), effective_model.map(str::to_string))
-        };
-        crate::step::prompt::run_prompt(
-            &resolved_command,
-            model_arg.as_deref(),
-            &plan_step.prompt,
-            args.rate_limit_retries,
-            &env,
-            Some(&on_retry),
-            None,
-            None,
-        )
-        .await
-    };
-    drop(spinner);
-    let prompt_result = result?;
-    if let Err(e) = crate::metadata::resolve_plan_content(
+    if let Err(e) = generate_plan_markdown(
+        &config,
+        &mut vars,
         &plan_path,
-        &prompt_result.output,
-        &prompt_result.stderr,
-    ) {
+        args.rate_limit_retries,
+        Some(session.base_dir.as_path()),
+    )
+    .await
+    {
         eprintln!(
             "\n{} Plan generation failed. Session {} discarded.",
-            style("x").red().bold(),
-            session_id
+            style("✗").red().bold(),
+            session.id
         );
-        if let Err(del_err) = manager.delete(&session_id) {
+        if let Err(del_err) = manager.delete(&session.id) {
             eprintln!("warning: failed to clean up session: {del_err}");
         }
         return Err(e);
@@ -142,10 +87,63 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     .await
 }
 
+pub fn launch_background_plan(plan_input: &str) -> Result<()> {
+    let (yaml, source) = crate::resolver::resolve_config(None)?;
+    eprintln!("{}", style(source.display_string()).dim());
+
+    let config = WorkflowConfig::from_yaml(&yaml)
+        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    validate_config(&config)?;
+
+    let input = read_background_plan_input(plan_input)?;
+    let manager = SessionManager::new(get_cruise_home()?);
+    let session = create_planning_session(&manager, &source, &yaml, input)?;
+
+    spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
+
+    eprintln!(
+        "\n{} Session {} created. Planning in background.",
+        style("✓").green().bold(),
+        session.id
+    );
+    eprintln!("  Check status with: {}", style("cruise list").cyan());
+    eprintln!(
+        "  Run once ready: {}",
+        style(format!("cruise run {}", session.id)).cyan()
+    );
+    Ok(())
+}
+
+pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
+    let manager = SessionManager::new(get_cruise_home()?);
+    let mut session = match manager.load(&args.session) {
+        Ok(session) => session,
+        Err(CruiseError::SessionError(_)) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    session.plan_error = None;
+    manager.save(&session)?;
+
+    let result = generate_plan_for_session(&manager, &session, args.rate_limit_retries).await;
+    match result {
+        Ok(plan_markdown) => {
+            crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
+            session.plan_error = None;
+            manager.save(&session)?;
+            Ok(())
+        }
+        Err(err) => {
+            let plan_error = err.to_string();
+            session.plan_error = Some(plan_error.clone());
+            manager.save(&session)?;
+            Err(CruiseError::Other(plan_error))
+        }
+    }
+}
+
 /// Read task input from CLI arg, piped stdin, or interactive prompt.
 fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String> {
     let stdin_input = if input.is_none() && noninteractive {
-        use std::io::Read;
         let mut s = String::new();
         std::io::stdin()
             .read_to_string(&mut s)
@@ -163,6 +161,35 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
         }
         prompt_for_plan_input()
     })
+}
+
+fn read_background_plan_input(input: &str) -> Result<String> {
+    if input == PLAN_STDIN_SENTINEL {
+        if std::io::stdin().is_terminal() {
+            return Err(CruiseError::Other(format!(
+                "--plan {PLAN_STDIN_SENTINEL} requires piped stdin"
+            )));
+        }
+        let mut stdin_input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut stdin_input)
+            .map_err(CruiseError::IoError)?;
+        let trimmed = stdin_input.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CruiseError::Other(
+                "no input provided on stdin for background planning".to_string(),
+            ));
+        }
+        return Ok(trimmed);
+    }
+
+    let trimmed = input.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(CruiseError::Other(
+            "background planning input cannot be empty".to_string(),
+        ));
+    }
+    Ok(trimmed)
 }
 
 async fn approve_with_title(
@@ -185,6 +212,81 @@ async fn approve_with_title(
     }
     session.approve();
     manager.save(session)
+}
+
+fn create_planning_session(
+    manager: &SessionManager,
+    source: &ConfigSource,
+    yaml: &str,
+    input: String,
+) -> Result<SessionState> {
+    let session_id = SessionManager::new_session_id();
+    let base_dir = std::env::current_dir()?;
+    let mut session =
+        SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
+    session.config_path = source.path().cloned();
+    manager.create(&session)?;
+
+    if session.config_path.is_none() {
+        let session_dir = manager.sessions_dir().join(&session_id);
+        std::fs::write(session_dir.join("config.yaml"), yaml)?;
+    }
+
+    Ok(session)
+}
+
+fn spawn_plan_worker(session_id: &str, rate_limit_retries: usize) -> Result<()> {
+    let exe = std::env::current_exe().map_err(CruiseError::IoError)?;
+    std::process::Command::new(exe)
+        .arg("plan-worker")
+        .arg("--session")
+        .arg(session_id)
+        .arg("--rate-limit-retries")
+        .arg(rate_limit_retries.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| CruiseError::ProcessSpawnError(format!("failed to spawn plan worker: {e}")))?;
+    Ok(())
+}
+
+async fn generate_plan_for_session(
+    manager: &SessionManager,
+    session: &SessionState,
+    rate_limit_retries: usize,
+) -> Result<String> {
+    let config = manager.load_config(session)?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    generate_plan_markdown(
+        &config,
+        &mut vars,
+        &plan_path,
+        rate_limit_retries,
+        Some(session.base_dir.as_path()),
+    )
+    .await
+}
+
+async fn generate_plan_markdown(
+    config: &WorkflowConfig,
+    vars: &mut VariableStore,
+    plan_path: &Path,
+    rate_limit_retries: usize,
+    working_dir: Option<&Path>,
+) -> Result<String> {
+    let prompt_result = crate::planning::run_plan_prompt_template(
+        config,
+        vars,
+        PLAN_PROMPT_TEMPLATE,
+        "[plan] creating plan...",
+        rate_limit_retries,
+        working_dir,
+    )
+    .await?;
+    crate::metadata::resolve_plan_content(plan_path, &prompt_result.output, &prompt_result.stderr)
 }
 
 #[derive(Clone)]
@@ -335,6 +437,10 @@ fn select_skipped_steps_with_history(
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
 /// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
 /// without prompting so that inquire never tries to read from a non-TTY stdin.
+#[expect(
+    clippy::too_many_lines,
+    reason = "approve/fix/ask/execute loop with multiple action branches"
+)]
 async fn run_approve_loop(
     config: &WorkflowConfig,
     manager: &SessionManager,
@@ -345,6 +451,7 @@ async fn run_approve_loop(
     noninteractive: bool,
 ) -> Result<()> {
     let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
+    let working_dir = session.base_dir.clone();
 
     // Read the plan once up front; re-read only after Fix modifies it.
     let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
@@ -411,7 +518,13 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_fix_plan(config, vars, rate_limit_retries).await?;
+                run_fix_plan(
+                    config,
+                    vars,
+                    rate_limit_retries,
+                    Some(working_dir.as_path()),
+                )
+                .await?;
                 plan_content = crate::metadata::read_plan_markdown(plan_path)?;
             }
             "Ask" => {
@@ -420,7 +533,13 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_ask_plan(config, vars, rate_limit_retries).await?;
+                run_ask_plan(
+                    config,
+                    vars,
+                    rate_limit_retries,
+                    Some(working_dir.as_path()),
+                )
+                .await?;
             }
             "Execute now" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
@@ -456,14 +575,16 @@ pub async fn generate_plan(
     vars: &mut crate::variable::VariableStore,
     rate_limit_retries: usize,
 ) -> crate::error::Result<()> {
-    run_plan_prompt(
+    crate::planning::run_plan_prompt_template(
         config,
         vars,
-        rate_limit_retries,
         PLAN_PROMPT_TEMPLATE,
         "[plan] creating plan...",
+        rate_limit_retries,
+        None,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 /// Replan an existing session using the built-in fix-plan prompt.
@@ -478,10 +599,18 @@ pub async fn replan_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
-    run_fix_plan(&config, &mut vars, rate_limit_retries).await?;
+    let working_dir = session.base_dir.clone();
+    run_fix_plan(
+        &config,
+        &mut vars,
+        rate_limit_retries,
+        Some(working_dir.as_path()),
+    )
+    .await?;
 
     let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
     crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+    session.plan_error = None;
     manager.save(session)?;
     Ok(())
 }
@@ -491,6 +620,7 @@ async fn run_fix_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
+    working_dir: Option<&Path>,
 ) -> Result<()> {
     run_plan_prompt(
         config,
@@ -498,6 +628,7 @@ async fn run_fix_plan(
         rate_limit_retries,
         FIX_PLAN_PROMPT_TEMPLATE,
         "[fix-plan] applying fixes...",
+        working_dir,
     )
     .await
 }
@@ -507,6 +638,7 @@ async fn run_ask_plan(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
+    working_dir: Option<&Path>,
 ) -> Result<()> {
     run_plan_prompt(
         config,
@@ -514,6 +646,7 @@ async fn run_ask_plan(
         rate_limit_retries,
         ASK_PLAN_PROMPT_TEMPLATE,
         "[ask-plan] answering question...",
+        working_dir,
     )
     .await
 }
@@ -526,17 +659,20 @@ async fn run_plan_prompt(
     rate_limit_retries: usize,
     template: &str,
     label: &str,
+    working_dir: Option<&Path>,
 ) -> Result<()> {
-    let prompt = vars.resolve(template)?;
-    let step = PromptStep {
-        model: config.plan_model.clone().or_else(|| config.model.clone()),
-        prompt,
-        instruction: None,
-    };
-    let env = std::collections::HashMap::new();
-    eprintln!("\n{} {}", style(">").cyan().bold(), style(label).bold());
-    let compiled = crate::workflow::compile(config.clone())?;
-    run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env, None, None).await?;
+    let result = crate::planning::run_plan_prompt_template(
+        config,
+        vars,
+        template,
+        label,
+        rate_limit_retries,
+        working_dir,
+    )
+    .await?;
+    vars.set_prev_output(Some(result.output));
+    vars.set_prev_stderr(Some(result.stderr));
+    vars.set_prev_input(None);
     Ok(())
 }
 
