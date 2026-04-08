@@ -38,7 +38,16 @@ import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
-import { formatLocalTime, workflowEventLogLine, PHASE_ICON } from "./lib/format";
+import {
+  formatLocalTime,
+  workflowEventLogLine,
+  runAllCompletedLogLine,
+  runAllSessionStartedLogLine,
+  runAllStartedLogLine,
+  runAllStepLogLine,
+  runAllWorkflowEventLogLine,
+  PHASE_ICON,
+} from "./lib/format";
 
 // --- OptionDialog ----------------------------------------------------------------
 
@@ -1364,14 +1373,19 @@ interface RunAllSessionResult {
   error?: string;
 }
 
+interface RunAllRunningSession {
+  input: string;
+  currentStep: string | null;
+}
+
 interface RunAllUiState {
   status: RunAllStatus;
   total: number;
-  currentSession: { id: string; input: string } | null;
-  currentStep: string | null;
+  parallelism: number | null;
+  runningSessions: Record<string, RunAllRunningSession>;
   results: RunAllSessionResult[];
   runError: string | null;
-  pendingOption: PendingOption | null;
+  pendingOptions: PendingOption[];
   liveLog: string[];
 }
 
@@ -1383,11 +1397,19 @@ interface RunAllViewProps {
 }
 
 function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProps) {
-  const { status, total, currentSession, currentStep, results, runError, pendingOption, liveLog } = state;
-  const progressCount = results.length + (currentSession ? 1 : 0);
-  const completedCount = results.filter((r) => r.phase === "Completed").length;
-  const failedCount = results.filter((r) => r.phase === "Failed").length;
-  const suspendedCount = results.filter((r) => r.phase === "Suspended").length;
+  const { status, total, parallelism, runningSessions, results, runError, pendingOptions, liveLog } = state;
+  const runningEntries = Object.entries(runningSessions);
+  const progressCount = results.length + runningEntries.length;
+  const { completedCount, failedCount, suspendedCount } = results.reduce(
+    (acc, r) => {
+      if (r.phase === "Completed") acc.completedCount++;
+      else if (r.phase === "Failed") acc.failedCount++;
+      else if (r.phase === "Suspended") acc.suspendedCount++;
+      return acc;
+    },
+    { completedCount: 0, failedCount: 0, suspendedCount: 0 },
+  );
+  const visiblePendingOption = pendingOptions[0];
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => {
@@ -1423,8 +1445,11 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
         <div className="mb-4">
           <div className="flex justify-between text-xs text-gray-400 mb-1">
             {total > 0 && <span>{progressCount} / {total} sessions</span>}
-            {status === "running" && currentSession && (
-              <span className="text-green-400 animate-pulse">Running...</span>
+            {status === "running" && runningEntries.length > 0 && (
+              <span className="text-green-400 animate-pulse">
+                Running {runningEntries.length}
+                {parallelism !== null && ` / ${parallelism}`}
+              </span>
             )}
             {status === "completed" && <span className="text-green-400">Completed</span>}
             {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
@@ -1441,18 +1466,25 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
         </div>
       )}
 
-      {status === "running" && currentSession && (
-        <div className="mb-4 p-3 bg-gray-900 border border-green-900/50 rounded">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-xs text-gray-400 font-mono">{currentSession.id}</span>
-          </div>
-          <p className="text-sm text-gray-200 truncate">{currentSession.input}</p>
-          {currentStep && (
-            <p className="text-xs text-gray-500 mt-1">
-              {currentStep}
-            </p>
-          )}
+      {status === "running" && runningEntries.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {runningEntries.map(([sessionId, sessionState]) => (
+            <div
+              key={sessionId}
+              className="p-3 bg-gray-900 border border-green-900/50 rounded"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                <span className="text-xs text-gray-400 font-mono">{sessionId}</span>
+              </div>
+              <p className="text-sm text-gray-200 truncate">{sessionState.input}</p>
+              {sessionState.currentStep && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {sessionState.currentStep}
+                </p>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
@@ -1492,15 +1524,20 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
         </div>
       )}
 
-      {pendingOption && (
+      {visiblePendingOption && (
         <OptionDialog
-          choices={pendingOption.choices}
-          plan={pendingOption.plan}
+          choices={visiblePendingOption.choices}
+          plan={visiblePendingOption.plan}
           onRespond={onOptionRespond}
         />
       )}
     </div>
   );
+}
+
+function appendLog(log: string[], line: string): string[] {
+  const next = [...log, line];
+  return next.length > 2000 ? next.slice(-2000) : next;
 }
 
 // --- App -------------------------------------------------------------------------
@@ -1571,7 +1608,7 @@ export default function App() {
 
   const emitNotification = useCallback((kind: ToastKind, sessionInput: string, detail?: string) => {
     addToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
-    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} — ${(detail ?? sessionInput).slice(0, 60)}`);
+    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} -- ${(detail ?? sessionInput).slice(0, 60)}`);
   }, [addToast]);
 
   const handleSessionsChanged = useCallback((sessions: Session[]) => {
@@ -1624,38 +1661,102 @@ export default function App() {
     setRunAllState({
       status: "running",
       total: 0,
-      currentSession: null,
-      currentStep: null,
+      parallelism: null,
+      runningSessions: {},
       results: [],
       runError: null,
-      pendingOption: null,
+      pendingOptions: [],
       liveLog: [],
     });
 
     channel.onmessage = (event) => {
       if (event.event === "runAllStarted") {
-        setRunAllState((prev) => prev ? { ...prev, total: event.data.total, liveLog: [...prev.liveLog, `--- Run All started (${event.data.total} sessions) ---`] } : prev);
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          const { total, parallelism } = event.data;
+          return {
+            ...prev,
+            total,
+            parallelism,
+            liveLog: appendLog(prev.liveLog, runAllStartedLogLine(total, parallelism)),
+          };
+        });
       } else if (event.event === "runAllSessionStarted") {
-        setRunAllState((prev) => prev ? { ...prev, total: event.data.total, currentSession: { id: event.data.sessionId, input: event.data.input }, currentStep: null, liveLog: [...prev.liveLog, `--- Session: ${event.data.input} (${event.data.sessionId}) ---`] } : prev);
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            runningSessions: {
+              ...prev.runningSessions,
+              [event.data.sessionId]: {
+                input: event.data.input,
+                currentStep: null,
+              },
+            },
+            liveLog: appendLog(prev.liveLog, runAllSessionStartedLogLine(event.data.sessionId, event.data.input)),
+          };
+        });
       } else if (event.event === "runAllSessionFinished") {
         setRunAllState((prev) => {
           if (!prev) return prev;
           const { sessionId, input, phase, error } = event.data;
-          return { ...prev, results: [...prev.results, { sessionId, input, phase, error }], currentSession: null, currentStep: null, pendingOption: null };
+          const { [sessionId]: _finishedSession, ...remainingSessions } = prev.runningSessions;
+          return {
+            ...prev,
+            runningSessions: remainingSessions,
+            results: [...prev.results, { sessionId, input, phase, error }],
+            pendingOptions: prev.pendingOptions.filter((option) => option.requestId !== sessionId),
+          };
         });
         sidebarRefreshRef.current?.();
       } else if (event.event === "runAllCompleted") {
-        setRunAllState((prev) => prev ? { ...prev, status: event.data.cancelled > 0 ? "cancelled" : "completed", liveLog: [...prev.liveLog, `--- Run All finished (cancelled: ${event.data.cancelled}) ---`] } : prev);
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            status: event.data.cancelled > 0 ? "cancelled" : "completed",
+            liveLog: appendLog(prev.liveLog, runAllCompletedLogLine(event.data.cancelled)),
+          };
+        });
       } else if (event.event === "stepStarted") {
-        setRunAllState((prev) => prev ? { ...prev, currentStep: event.data.step, liveLog: [...prev.liveLog, event.data.step] } : prev);
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          const runningSession = prev.runningSessions[event.data.sessionId];
+          return {
+            ...prev,
+            runningSessions: runningSession ? {
+              ...prev.runningSessions,
+              [event.data.sessionId]: {
+                ...runningSession,
+                currentStep: event.data.step,
+              },
+            } : prev.runningSessions,
+            liveLog: appendLog(prev.liveLog, runAllStepLogLine(event.data.sessionId, event.data.step)),
+          };
+        });
       } else if (event.event === "optionRequired") {
-        patchRunAll({ pendingOption: { requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan } });
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            pendingOptions: [
+              ...prev.pendingOptions,
+              { requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan },
+            ],
+          };
+        });
       } else if (
         event.event === "workflowCompleted" ||
         event.event === "workflowFailed" ||
         event.event === "workflowCancelled"
       ) {
-        setRunAllState((prev) => prev ? { ...prev, liveLog: [...prev.liveLog, workflowEventLogLine(event)] } : prev);
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            liveLog: appendLog(prev.liveLog, runAllWorkflowEventLogLine(event)),
+          };
+        });
       }
     };
 
@@ -1673,8 +1774,8 @@ export default function App() {
   }
 
   async function handleRunAllOptionRespond(result: { nextStep?: string; textInput?: string }) {
-    const sessionId = runAllState?.pendingOption?.requestId;
-    patchRunAll({ pendingOption: null });
+    const sessionId = runAllState?.pendingOptions[0]?.requestId;
+    setRunAllState((prev) => prev ? { ...prev, pendingOptions: prev.pendingOptions.filter((o) => o.requestId !== sessionId) } : prev);
     if (!sessionId) return;
     try {
       await respondToOption(sessionId, result);
