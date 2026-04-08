@@ -87,7 +87,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     .await
 }
 
-pub async fn launch_background_plan(plan_input: String) -> Result<()> {
+pub fn launch_background_plan(plan_input: &str) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(None)?;
     eprintln!("{}", style(source.display_string()).dim());
 
@@ -163,7 +163,7 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
     })
 }
 
-fn read_background_plan_input(input: String) -> Result<String> {
+fn read_background_plan_input(input: &str) -> Result<String> {
     if input == PLAN_STDIN_SENTINEL {
         if std::io::stdin().is_terminal() {
             return Err(CruiseError::Other(format!(
@@ -437,6 +437,10 @@ fn select_skipped_steps_with_history(
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
 /// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
 /// without prompting so that inquire never tries to read from a non-TTY stdin.
+#[expect(
+    clippy::too_many_lines,
+    reason = "approve/fix/ask/execute loop with multiple action branches"
+)]
 async fn run_approve_loop(
     config: &WorkflowConfig,
     manager: &SessionManager,

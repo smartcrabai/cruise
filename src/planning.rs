@@ -10,6 +10,11 @@ use crate::step::prompt::{PromptResult, run_prompt};
 use crate::variable::VariableStore;
 
 /// Resolve and execute a plan-related prompt template with the workflow's LLM command.
+///
+/// # Errors
+///
+/// Returns an error if variable resolution fails, the LLM command fails, or a rate limit is hit
+/// and retries are exhausted.
 pub async fn run_plan_prompt_template(
     config: &WorkflowConfig,
     vars: &mut VariableStore,

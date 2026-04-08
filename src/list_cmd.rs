@@ -113,6 +113,10 @@ fn write_sessions_json_with_manager<W: Write>(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "interactive session picker with multiple action branches"
+)]
 pub async fn run(args: ListArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
 

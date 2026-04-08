@@ -54,7 +54,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
-        None if plan.is_some() => plan_cmd::launch_background_plan(plan.unwrap_or_default()).await,
+        None if plan.is_some() => plan_cmd::launch_background_plan(&plan.unwrap_or_default()),
         None => {
             // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
