@@ -496,7 +496,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       await approveSession(session.id);
       await refreshSession();
     } catch (e) {
-      onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}`.slice(0, 80) });
+      onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}` });
     }
   }
 
@@ -525,7 +525,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       } else if (event.event === "workflowFailed") {
         setStatus("failed");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-        onToast({ kind: "failed", sessionInput: session.input, detail: event.data.error?.slice(0, 80) });
       } else if (event.event === "workflowCancelled") {
         setStatus("cancelled");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
@@ -1527,7 +1526,7 @@ export default function App() {
       setSettingsParallelism(config.runAllParallelism);
       setShowSettings(true);
     } catch (e) {
-      addToast({ kind: "failed", sessionInput: "Settings", detail: String(e).slice(0, 80) });
+      emitNotification("failed", "Settings", String(e));
     }
   }
 
@@ -1591,6 +1590,11 @@ export default function App() {
       const wasCompleted = prev !== undefined && prev.phase === "Completed";
       if (isCompleted && !wasCompleted) {
         emitNotification("completed", session.input);
+      }
+      const isFailed = session.phase === "Failed";
+      const wasFailed = prev !== undefined && prev.phase === "Failed";
+      if (isFailed && !wasFailed) {
+        emitNotification("failed", session.input, session.phaseError);
       }
     }
   }, [emitNotification]);
