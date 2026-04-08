@@ -135,7 +135,7 @@ export interface NewSessionHistorySummary {
 }
 
 export interface NewSessionConfigDefaults {
-  steps: string[];
+  steps: SkippableStepDto[];
   defaultSkippedSteps: string[];
 }
 
@@ -155,4 +155,12 @@ export interface UpdateReadiness {
   bundlePath?: string;
   /** Human-readable remediation guidance. */
   guidance?: string;
+}
+
+// --- Skippable steps tree ------------------------------------------------------
+
+export interface SkippableStepDto {
+  id: string;
+  expandedStepIds: string[];
+  children: SkippableStepDto[];
 }

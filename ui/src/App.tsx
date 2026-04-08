@@ -8,6 +8,7 @@ import type {
   PlanEvent,
   Session,
   SessionPhase,
+  SkippableStepDto,
   WorkflowEvent,
   WorkspaceMode,
 } from "./types";
@@ -1017,6 +1018,25 @@ function createInitialNewSessionDraft(): NewSessionDraft {
   };
 }
 
+function collectExpandedStepIds(nodes: SkippableStepDto[]): Set<string> {
+  const ids = new Set<string>();
+
+  function visit(node: SkippableStepDto) {
+    for (const id of node.expandedStepIds) {
+      ids.add(id);
+    }
+    for (const child of node.children) {
+      visit(child);
+    }
+  }
+
+  for (const node of nodes) {
+    visit(node);
+  }
+
+  return ids;
+}
+
 interface NewSessionFormProps {
   draft: NewSessionDraft;
   onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
@@ -1025,12 +1045,13 @@ interface NewSessionFormProps {
 
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
-  const [configSteps, setConfigSteps] = useState<string[]>([]);
+  const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
   const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
+  const configLookupBaseDir = configPath ? "." : (baseDir || ".");
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
@@ -1061,13 +1082,16 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   useEffect(() => {
     let active = true;
     void getNewSessionConfigDefaults({
-      baseDir: baseDir || ".",
+      baseDir: configLookupBaseDir,
       configPath: configPath || undefined,
     })
       .then((defaults) => {
         if (active) {
+          const validStepIds = collectExpandedStepIds(defaults.steps);
           setConfigSteps(defaults.steps);
-          setSkippedSteps(new Set(defaults.defaultSkippedSteps));
+          setSkippedSteps(
+            new Set(defaults.defaultSkippedSteps.filter((id) => validStepIds.has(id))),
+          );
         }
       })
       .catch(() => {
@@ -1077,7 +1101,77 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         }
       });
     return () => { active = false; };
-  }, [baseDir, configPath]);
+  }, [configLookupBaseDir, configPath]);
+
+  function isParentChecked(node: SkippableStepDto): boolean {
+    return node.expandedStepIds.every((id) => skippedSteps.has(id));
+  }
+
+  function isParentIndeterminate(node: SkippableStepDto): boolean {
+    const selected = node.expandedStepIds.filter((id) => skippedSteps.has(id));
+    return selected.length > 0 && selected.length < node.expandedStepIds.length;
+  }
+
+  function toggleStepIds(ids: Iterable<string>, checked: boolean) {
+    setSkippedSteps((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (checked) {
+          next.add(id);
+        } else {
+          next.delete(id);
+        }
+      }
+      return next;
+    });
+  }
+
+  function stepNodeLabel(node: SkippableStepDto, isChild: boolean): string {
+    if (!isChild) {
+      return node.id;
+    }
+    const slash = node.id.lastIndexOf("/");
+    return slash === -1 ? node.id : node.id.slice(slash + 1);
+  }
+
+  function renderStepNode(node: SkippableStepDto, isChild: boolean): React.ReactElement {
+    const label = stepNodeLabel(node, isChild);
+
+    if (node.children.length === 0) {
+      return (
+        <label key={node.id} className={`flex items-center gap-2 cursor-pointer${isChild ? " pl-6" : ""}`}>
+          <input
+            type="checkbox"
+            checked={skippedSteps.has(node.id)}
+            onChange={(e) => toggleStepIds([node.id], e.target.checked)}
+            disabled={isGenerating}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300">{label}</span>
+        </label>
+      );
+    }
+    return (
+      <div key={node.id}>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={isParentChecked(node)}
+            ref={(el) => {
+              if (el) el.indeterminate = isParentIndeterminate(node);
+            }}
+            onChange={(e) => toggleStepIds(node.expandedStepIds, e.target.checked)}
+            disabled={isGenerating}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300 font-medium">{label}</span>
+        </label>
+        <div className="space-y-1 ml-4">
+          {node.children.map((child) => renderStepNode(child, true))}
+        </div>
+      </div>
+    );
+  }
 
   // Load configs and history-backed defaults on mount.
   useEffect(() => {
@@ -1170,7 +1264,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             disabled={isGenerating}
             className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
           >
-            <option value="">Auto (local / ~/.cruise / builtin)</option>
+            <option value="">Auto (repo / ~/.cruise / builtin)</option>
             {configs.map((c) => (
               <option key={c.path} value={c.path}>
                 {c.name}
@@ -1184,25 +1278,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <div className="space-y-1.5">
             <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
             <div className="space-y-1 max-h-40 overflow-y-auto">
-              {configSteps.map((step) => (
-                <label key={step} className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={skippedSteps.has(step)}
-                    onChange={(e) => {
-                      setSkippedSteps((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(step);
-                        else next.delete(step);
-                        return next;
-                      });
-                    }}
-                    disabled={isGenerating}
-                    className="accent-blue-500"
-                  />
-                  <span className="text-sm text-gray-300">{step}</span>
-                </label>
-              ))}
+              {configSteps.map((node) => renderStepNode(node, false))}
             </div>
           </div>
         )}
