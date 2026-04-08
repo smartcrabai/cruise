@@ -20,6 +20,30 @@ use crate::{
     session::{SessionManager, SessionState},
 };
 
+/// Interval between periodic candidate re-scans when idle worker slots are available.
+///
+/// A new `Planned` session added while the batch is running will be picked up
+/// within at most this interval, even if no in-flight worker has completed yet.
+const PERIODIC_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Fetch newly-added sessions from the manager and append any not already
+/// queued or seen to `candidates`.
+fn enqueue_fresh(
+    manager: &SessionManager,
+    seen: &HashSet<String>,
+    queued: &mut HashSet<String>,
+    candidates: &mut std::collections::VecDeque<SessionState>,
+) -> Result<()> {
+    let fresh = manager.run_all_remaining(seen)?;
+    for s in fresh {
+        if !queued.contains(&s.id) {
+            queued.insert(s.id.clone());
+            candidates.push_back(s);
+        }
+    }
+    Ok(())
+}
+
 /// The result of executing a single session within a batch.
 #[derive(Debug)]
 pub struct BatchSessionResult {
@@ -86,12 +110,10 @@ where
     let mut join_set: tokio::task::JoinSet<(usize, String, Result<()>)> =
         tokio::task::JoinSet::new();
 
-    // Seed: fetch initial candidates and mark them queued.
-    let initial = manager.run_all_remaining(&seen)?;
-    for s in &initial {
-        queued.insert(s.id.clone());
-    }
-    let mut candidates: std::collections::VecDeque<SessionState> = initial.into_iter().collect();
+    // Seed: fetch initial candidates.
+    let mut candidates: std::collections::VecDeque<SessionState> =
+        std::collections::VecDeque::new();
+    enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
 
     loop {
         // Fill up to `parallelism` concurrent workers.
@@ -122,8 +144,27 @@ where
             break;
         }
 
-        // Wait for the next worker to finish.
-        let Some(task_result) = join_set.join_next().await else {
+        // When there are idle worker slots and no candidates queued, use a periodic
+        // re-scan so that newly-added Planned sessions are picked up without waiting
+        // for an in-flight worker to finish first.
+        let has_idle_slot =
+            candidates.is_empty() && join_set.len() < parallelism && !cancel_token.is_cancelled();
+        let task_result_opt = if has_idle_slot {
+            tokio::select! {
+                result = join_set.join_next() => result,
+                () = tokio::time::sleep(PERIODIC_SCAN_INTERVAL) => {
+                    // Skip if already cancelled so no new sessions are scheduled.
+                    if !cancel_token.is_cancelled() {
+                        enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            join_set.join_next().await
+        };
+
+        let Some(task_result) = task_result_opt else {
             break;
         };
 
@@ -149,15 +190,8 @@ where
             continue;
         }
 
-        // Re-scan for sessions added while we were running, skipping any that are
-        // already queued or scheduled to avoid duplicating entries in the deque.
-        let fresh = manager.run_all_remaining(&seen)?;
-        for s in fresh {
-            if !queued.contains(&s.id) {
-                queued.insert(s.id.clone());
-                candidates.push_back(s);
-            }
-        }
+        // Re-scan so late-added sessions are picked up before the next scheduling cycle.
+        enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
     }
 
     // Sort by scheduling order before returning.
@@ -352,28 +386,19 @@ mod tests {
         make_planned_session(&manager, "20260101000001", tmp.path()); // slow (index 0)
         make_planned_session(&manager, "20260101000002", tmp.path()); // fast (index 1)
 
-        // Barrier: session-1 waits until session-2 calls it
+        // Barrier: both sessions rendezvous so neither can complete before
+        // the other reaches the wait point -- ensuring concurrent execution.
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let slow_id = "20260101000001".to_string();
-        let manager_clone = Arc::clone(&manager);
-        let barrier_clone = Arc::clone(&barrier);
 
         let run_fn = {
-            let manager = Arc::clone(&manager_clone);
-            let barrier = Arc::clone(&barrier_clone);
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
             move |session: SessionState, _cancel: CancellationToken| {
                 let manager = Arc::clone(&manager);
                 let barrier = Arc::clone(&barrier);
                 let id = session.id.clone();
-                let slow = id == slow_id;
                 Box::pin(async move {
-                    if slow {
-                        // Wait for the fast session to also reach the barrier
-                        barrier.wait().await;
-                    } else {
-                        // Signal that we're ready; the slow session can proceed after this
-                        barrier.wait().await;
-                    }
+                    barrier.wait().await;
                     let mut state = manager
                         .load(&id)
                         .unwrap_or_else(|e| panic!("load {id}: {e}"));
@@ -469,6 +494,178 @@ mod tests {
             "session added mid-run must be picked up; got IDs: {:?}",
             results.iter().map(|r| &r.session_id).collect::<Vec<_>>()
         );
+    }
+
+    // -- Periodic rescan: idle-slot pickup ------------------------------------
+
+    #[tokio::test]
+    async fn test_idle_slot_picks_up_new_planned_session_without_waiting_for_running_worker() {
+        // Given: parallelism=2 so there is one idle slot while session-1 is running.
+        // session-1 does NOT finish until session-2 has started, which proves that
+        // the scheduler used the idle slot via periodic re-scan -- not a completion hook.
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+
+        let session1_started = Arc::new(tokio::sync::Notify::new());
+        let session2_started = Arc::new(tokio::sync::Notify::new());
+
+        let manager_for_adder = Arc::clone(&manager);
+        let tmp_path = tmp.path().to_path_buf();
+        let s1_for_adder = Arc::clone(&session1_started);
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let s1 = Arc::clone(&session1_started);
+            let s2 = Arc::clone(&session2_started);
+            move |session: SessionState, _cancel: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let s1 = Arc::clone(&s1);
+                let s2 = Arc::clone(&s2);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    if id == "20260101000001" {
+                        // Notify the adder that the idle slot is open.
+                        s1.notify_one();
+                        // Block until session-2 is running concurrently in the idle slot.
+                        // If no periodic scan fires, this future never resolves and the
+                        // outer timeout will catch the deadlock.
+                        s2.notified().await;
+                    } else {
+                        // session-2 picked up via idle-slot periodic scan.
+                        s2.notify_one();
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        // Adder: once session-1 has started (idle slot is open), inject session-2 onto disk.
+        let adder = tokio::spawn(async move {
+            s1_for_adder.notified().await;
+            make_planned_session(&manager_for_adder, "20260101000002", &tmp_path);
+        });
+
+        let cancel = CancellationToken::new();
+        // The timeout guards against the current broken behaviour: without periodic
+        // re-scan session-1 hangs indefinitely waiting for session-2 to start.
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_all_with_parallelism(&manager, 2, cancel, run_fn),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out: with parallelism=2 and an idle slot, a newly added \
+                 Planned session must be picked up by periodic re-scan while the \
+                 running worker is still in-flight"
+            )
+        })
+        .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        adder.await.unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: both sessions were executed (session-2 via periodic idle-slot scan).
+        assert_eq!(
+            results.len(),
+            2,
+            "session-2 added mid-run must be picked up into the idle slot; \
+             got IDs: {:?}",
+            results.iter().map(|r| &r.session_id).collect::<Vec<_>>()
+        );
+        let ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.session_id.as_str()).collect();
+        assert!(ids.contains("20260101000001"));
+        assert!(ids.contains("20260101000002"));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_does_not_schedule_new_sessions_after_cancellation() {
+        // Given: parallelism=2 (idle slot), session-1 cancels the batch while running.
+        // Then a new session is added. Even if the periodic scan fires during session-1's
+        // remaining lifetime, it must not start session-2.
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+
+        let cancel = CancellationToken::new();
+        let cancel_for_fn = cancel.clone();
+
+        let session1_started = Arc::new(tokio::sync::Notify::new());
+        let s1_for_adder = Arc::clone(&session1_started);
+
+        let execution_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_fn = Arc::clone(&execution_log);
+
+        let manager_for_adder = Arc::clone(&manager);
+        let tmp_path = tmp.path().to_path_buf();
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let s1 = Arc::clone(&session1_started);
+            move |session: SessionState, _cancel_arg: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let s1 = Arc::clone(&s1);
+                let cancel = cancel_for_fn.clone();
+                let log = Arc::clone(&log_for_fn);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    log.lock()
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .push(id.clone());
+                    if id == "20260101000001" {
+                        // Cancel the batch, then let the adder add session-2.
+                        cancel.cancel();
+                        s1.notify_one();
+                        // Stay alive long enough for the periodic scan to tick at least once,
+                        // giving it a chance to (incorrectly) pick up session-2 if cancellation
+                        // is not honoured.  500 ms >> any reasonable scan interval.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        // Adder: adds session-2 only after cancel has been triggered.
+        let adder = tokio::spawn(async move {
+            s1_for_adder.notified().await;
+            make_planned_session(&manager_for_adder, "20260101000002", &tmp_path);
+        });
+
+        let results = run_all_with_parallelism(&manager, 2, cancel, run_fn)
+            .await
+            .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        adder.await.unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: only session-1 was executed; periodic scan must not schedule session-2
+        // even though there was an idle slot and session-2 appeared on disk.
+        let log = execution_log
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .clone();
+        assert!(
+            log.contains(&"20260101000001".to_string()),
+            "session-1 must run"
+        );
+        assert!(
+            !log.contains(&"20260101000002".to_string()),
+            "session-2 must NOT run after cancellation even if periodic scan fires"
+        );
+        assert_eq!(results.len(), 1, "only session-1 must appear in results");
     }
 
     // -- Seen set: no duplicate execution -------------------------------------
