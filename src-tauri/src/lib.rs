@@ -7,6 +7,7 @@ pub mod state;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -35,7 +36,8 @@ pub fn run() {
             commands::list_directory,
             commands::run_all_sessions,
             commands::get_update_readiness,
-            commands::get_config_steps,
+            commands::get_new_session_history_summary,
+            commands::get_new_session_config_defaults,
             commands::get_app_config,
             commands::update_app_config,
         ])

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -53,6 +53,12 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, PerSessionState>>>,
     /// Shared cancellation token for an active Run All batch, if any.
     pub batch_cancel_token: Arc<Mutex<Option<CancellationToken>>>,
+    /// Session IDs that currently have a plan-fix request in flight.
+    ///
+    /// Tracked in memory (not persisted to disk) so that stale flags never
+    /// survive an app restart.  A fix that was interrupted by a crash will
+    /// therefore show up as `fix_in_progress: false` on the next launch.
+    pub fixing_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppState {
@@ -62,6 +68,7 @@ impl AppState {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             batch_cancel_token: Arc::new(Mutex::new(None)),
+            fixing_sessions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -76,6 +83,36 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| panic!("batch_cancel_token mutex poisoned: {e}"))
     }
+
+    fn fixing_set(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.fixing_sessions
+            .lock()
+            .unwrap_or_else(|e| panic!("fixing_sessions mutex poisoned: {e}"))
+    }
+
+    /// Record that a plan-fix request has started for `session_id`.
+    pub fn start_fixing(&self, session_id: &str) {
+        self.fixing_set().insert(session_id.to_owned());
+    }
+
+    /// Return a snapshot of session IDs that currently have a fix in flight.
+    ///
+    /// Acquires the lock once so that callers iterating over many sessions
+    /// avoid N separate lock acquisitions.
+    pub fn snapshot_fixing(&self) -> HashSet<String> {
+        self.fixing_set().clone()
+    }
+
+    /// Clear the in-flight fix flag for `session_id` (idempotent).
+    pub fn stop_fixing(&self, session_id: &str) {
+        self.fixing_set().remove(session_id);
+    }
+
+    /// Return `true` if a plan-fix request is currently in flight for `session_id`.
+    pub fn is_fixing(&self, session_id: &str) -> bool {
+        self.fixing_set().contains(session_id)
+    }
+
 
     /// Register a new active session, returning its option-responder and cancellation token.
     ///

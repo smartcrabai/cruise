@@ -29,6 +29,8 @@ export interface Session {
   awaitingInput?: boolean;
   /** Whether a valid (non-empty) plan.md exists for this session. */
   planAvailable?: boolean;
+  /** True while a plan-fix request is in progress (persisted in session state). */
+  fixInProgress?: boolean;
 }
 
 // --- IPC Events ---------------------------------------------------------------
@@ -128,6 +130,17 @@ export interface ConfigEntry {
   name: string;
 }
 
+export interface NewSessionHistorySummary {
+  lastRequestedConfigPath?: string;
+  lastWorkingDir?: string;
+  recentWorkingDirs: string[];
+}
+
+export interface NewSessionConfigDefaults {
+  steps: SkippableStepDto[];
+  defaultSkippedSteps: string[];
+}
+
 export type PlanEvent =
   | { event: "sessionCreated"; data: { sessionId: string } }
   | { event: "planGenerating"; data: Record<string, never> }
@@ -144,4 +157,12 @@ export interface UpdateReadiness {
   bundlePath?: string;
   /** Human-readable remediation guidance. */
   guidance?: string;
+}
+
+// --- Skippable steps tree ------------------------------------------------------
+
+export interface SkippableStepDto {
+  id: string;
+  expandedStepIds: string[];
+  children: SkippableStepDto[];
 }

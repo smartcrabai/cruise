@@ -35,7 +35,11 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
-  getConfigSteps: vi.fn().mockResolvedValue([]),
+  getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
+  getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
+    steps: [],
+    defaultSkippedSteps: [],
+  }),
   listDirectory: vi.fn(),
   getUpdateReadiness: vi.fn(),
   cleanSessions: vi.fn(),
@@ -284,5 +288,41 @@ describe("App: RunAll — completed notification on session finish", () => {
 
     // Then: no completed notification for pre-existing completed sessions (startup suppression)
     expect(vi.mocked(desktopNotifications.notifyDesktop)).not.toHaveBeenCalled();
+  });
+
+  it("includes the session phase error in failed notifications", async () => {
+    // Given: session starts as approval-ready
+    const session = makeSession({ id: "sess-run", input: "task run", phase: "Awaiting Approval", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+
+    const control = setupRunAllSessions();
+
+    render(<App />);
+    await waitFor(() => screen.getByText("task run"));
+
+    // Navigate to Run All
+    await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+
+    await act(async () => { control.emitRunAllStarted(1); });
+    await act(async () => { control.emitSessionStarted("sess-run", "task run"); });
+
+    // When: session finishes; listSessions now returns Failed phase with phaseError
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      { ...session, phase: "Failed", phaseError: "build error: missing dependency" },
+    ]);
+    await act(async () => {
+      control.emitSessionFinished("sess-run", "task run", "Failed", "build error: missing dependency");
+    });
+
+    // Then: failure desktop notification includes the failure reason
+    await waitFor(() => {
+      expect(vi.mocked(desktopNotifications.notifyDesktop)).toHaveBeenCalledWith(
+        "Cruise",
+        expect.stringContaining("build error: missing dependency"),
+      );
+    });
+
+    // Cleanup
+    await act(async () => { control.emitCompleted(); });
   });
 });

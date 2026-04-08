@@ -4,6 +4,8 @@ import type {
   CleanupResult,
   ConfigEntry,
   DirEntry,
+  NewSessionConfigDefaults,
+  NewSessionHistorySummary,
   PlanEvent,
   Session,
   UpdateReadiness,
@@ -124,10 +126,19 @@ export function listConfigs(): Promise<ConfigEntry[]> {
   return invoke<ConfigEntry[]>("list_configs");
 }
 
-/** Return step names defined in a workflow config file. */
-export function getConfigSteps(configPath?: string): Promise<string[]> {
-  return invoke<string[]>("get_config_steps", {
-    configPath: configPath ?? null,
+/** Return persisted defaults for the New Session form. */
+export function getNewSessionHistorySummary(): Promise<NewSessionHistorySummary> {
+  return invoke<NewSessionHistorySummary>("get_new_session_history_summary");
+}
+
+/** Resolve the effective config for the New Session form and return the skippable-step
+ *  tree together with history-backed default skip selections. */
+export function getNewSessionConfigDefaults(
+  params: { baseDir: string; configPath?: string }
+): Promise<NewSessionConfigDefaults> {
+  return invoke<NewSessionConfigDefaults>("get_new_session_config_defaults", {
+    baseDir: params.baseDir,
+    configPath: params.configPath ?? null,
   });
 }
 

@@ -17,6 +17,7 @@ struct ListSessionJson {
     base_dir: String,
     phase: &'static str,
     phase_error: Option<String>,
+    plan_error: Option<String>,
     config_source: String,
     input: String,
     title: Option<String>,
@@ -31,10 +32,19 @@ struct ListSessionJson {
     config_path: Option<String>,
     updated_at: Option<String>,
     awaiting_input: bool,
+    plan_available: bool,
 }
 
 /// `Failed(msg)` is normalized to `phase = "Failed"` + `phase_error = Some(msg)`.
+#[cfg(test)]
 fn session_to_json(session: SessionState) -> ListSessionJson {
+    session_to_json_with_plan_availability(session, false)
+}
+
+fn session_to_json_with_plan_availability(
+    session: SessionState,
+    plan_available: bool,
+) -> ListSessionJson {
     let (phase, phase_error): (&'static str, Option<String>) = match session.phase {
         SessionPhase::AwaitingApproval => ("AwaitingApproval", None),
         SessionPhase::Planned => ("Planned", None),
@@ -48,6 +58,7 @@ fn session_to_json(session: SessionState) -> ListSessionJson {
         base_dir: session.base_dir.to_string_lossy().into_owned(),
         phase,
         phase_error,
+        plan_error: session.plan_error,
         config_source: session.config_source,
         input: session.input,
         title: session.title,
@@ -66,10 +77,12 @@ fn session_to_json(session: SessionState) -> ListSessionJson {
             .map(|p| p.to_string_lossy().into_owned()),
         updated_at: session.updated_at,
         awaiting_input: session.awaiting_input,
+        plan_available,
     }
 }
 
 /// Serialize a list of sessions to a JSON array (pretty-printed) followed by a newline.
+#[cfg(test)]
 fn write_sessions_json<W: Write>(mut writer: W, sessions: Vec<SessionState>) -> Result<()> {
     let dtos: Vec<ListSessionJson> = sessions.into_iter().map(session_to_json).collect();
     serde_json::to_writer_pretty(&mut writer, &dtos)
@@ -80,12 +93,40 @@ fn write_sessions_json<W: Write>(mut writer: W, sessions: Vec<SessionState>) -> 
     Ok(())
 }
 
+fn write_sessions_json_with_manager<W: Write>(
+    mut writer: W,
+    sessions: Vec<SessionState>,
+    manager: &SessionManager,
+) -> Result<()> {
+    let dtos: Vec<ListSessionJson> = sessions
+        .into_iter()
+        .map(|session| {
+            let plan_available = plan_available_for_session(&session, manager);
+            session_to_json_with_plan_availability(session, plan_available)
+        })
+        .collect();
+    serde_json::to_writer_pretty(&mut writer, &dtos)
+        .map_err(|e| CruiseError::Other(format!("JSON serialization error: {e}")))?;
+    writer
+        .write_all(b"\n")
+        .map_err(|e| CruiseError::Other(format!("write error: {e}")))?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "interactive session picker with multiple action branches"
+)]
 pub async fn run(args: ListArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
 
     if args.json {
         let sessions = manager.list()?;
-        write_sessions_json(std::io::BufWriter::new(std::io::stdout()), sessions)?;
+        write_sessions_json_with_manager(
+            std::io::BufWriter::new(std::io::stdout()),
+            sessions,
+            &manager,
+        )?;
         return Ok(());
     }
 
@@ -95,6 +136,8 @@ pub async fn run(args: ListArgs) -> Result<()> {
         };
 
         loop {
+            let plan_available = plan_available_for_session(&session, &manager);
+
             // Show plan.md content.
             let plan_path = session.plan_path(&manager.sessions_dir());
             if let Ok(content) = std::fs::read_to_string(&plan_path) {
@@ -102,7 +145,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
             }
 
             // Action menu.
-            let actions = session_actions(&session);
+            let actions = session_actions_with_plan_availability(&session, plan_available);
 
             let action = match inquire::Select::new("Action:", actions).prompt() {
                 Ok(a) => a,
@@ -112,6 +155,10 @@ pub async fn run(args: ListArgs) -> Result<()> {
 
             match action {
                 "Approve" => {
+                    if !plan_available || session.plan_error.is_some() {
+                        eprintln!("{} plan is not ready for approval yet", style("!").yellow());
+                        continue;
+                    }
                     if let Err(err) =
                         crate::metadata::refresh_session_title_from_session(&manager, &mut session)
                     {
@@ -121,7 +168,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     manager.save(&session)?;
                     eprintln!(
                         "{} Session {} approved. Run with: {}",
-                        style("✓").green(),
+                        style("v").green(),
                         session.id,
                         style(format!("cruise run {}", session.id)).cyan()
                     );
@@ -157,10 +204,10 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     })?;
                     match open_pr_in_browser(url) {
                         Ok(()) => {
-                            eprintln!("{} Opening PR in browser…", style("✓").green());
+                            eprintln!("{} Opening PR in browser...", style("v").green());
                         }
                         Err(e) => {
-                            eprintln!("{} {e}", style("✗").red());
+                            eprintln!("{} {e}", style("x").red());
                         }
                     }
                 }
@@ -169,17 +216,17 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     manager.save(&session)?;
                     eprintln!(
                         "{} Session {} reset to Planned.",
-                        style("✓").green(),
+                        style("v").green(),
                         session.id
                     );
                 }
                 "Delete" => {
                     manager.delete(&session.id)?;
-                    eprintln!("{} Session {} deleted.", style("✓").green(), session.id);
+                    eprintln!("{} Session {} deleted.", style("v").green(), session.id);
                     break;
                 }
                 _ => {
-                    // "Back" — return to the session list.
+                    // "Back" -- return to the session list.
                     break;
                 }
             }
@@ -195,7 +242,15 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
         eprintln!("No sessions found.");
         return Ok(None);
     }
-    let labels: Vec<String> = sessions.iter().map(format_session_label).collect();
+    let labels: Vec<String> = sessions
+        .iter()
+        .map(|session| {
+            format_session_label_with_plan_availability(
+                session,
+                plan_available_for_session(session, manager),
+            )
+        })
+        .collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
     let selected = match inquire::Select::new("Select a session:", label_refs).prompt() {
         Ok(s) => s,
@@ -217,11 +272,23 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
 /// "Open PR" appears for Completed sessions that have a PR URL.
 /// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
 /// "Delete" and "Back" are always present (in that order) at the end.
+#[cfg(test)]
 fn session_actions(session: &SessionState) -> Vec<&'static str> {
+    let plan_available =
+        !matches!(session.phase, SessionPhase::AwaitingApproval) || session.plan_error.is_none();
+    session_actions_with_plan_availability(session, plan_available)
+}
+
+fn session_actions_with_plan_availability(
+    session: &SessionState,
+    plan_available: bool,
+) -> Vec<&'static str> {
     let mut actions = vec![];
     match &session.phase {
         SessionPhase::AwaitingApproval => {
-            actions.push("Approve");
+            if plan_available && session.plan_error.is_none() {
+                actions.push("Approve");
+            }
         }
         SessionPhase::Planned => {
             actions.push("Run");
@@ -247,6 +314,11 @@ fn session_actions(session: &SessionState) -> Vec<&'static str> {
     actions
 }
 
+fn plan_available_for_session(session: &SessionState, manager: &SessionManager) -> bool {
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    crate::metadata::plan_markdown_available(&plan_path)
+}
+
 fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
     let status = std::process::Command::new("gh")
         .args(["pr", "view", pr_url, "--web"])
@@ -260,16 +332,29 @@ fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn format_session_label(s: &SessionState) -> String {
+    let plan_available =
+        !matches!(s.phase, SessionPhase::AwaitingApproval) || s.plan_error.is_none();
+    format_session_label_with_plan_availability(s, plan_available)
+}
+
+fn format_session_label_with_plan_availability(s: &SessionState, plan_available: bool) -> String {
     let (icon, phase_str) = match &s.phase {
-        SessionPhase::AwaitingApproval => {
-            (style("○").magenta(), style("Awaiting Approval").magenta())
+        SessionPhase::AwaitingApproval if s.plan_error.is_some() => {
+            (style("✗").red(), style("Plan Failed").red())
         }
-        SessionPhase::Planned => (style("●").cyan(), style("Planned").cyan()),
-        SessionPhase::Running => (style("▶").yellow(), style("Running").yellow()),
-        SessionPhase::Completed => (style("✓").green(), style("Completed").green()),
-        SessionPhase::Failed(_) => (style("✗").red(), style("Failed").red()),
-        SessionPhase::Suspended => (style("⏸").yellow(), style("Suspended").yellow()),
+        SessionPhase::AwaitingApproval if !plan_available => {
+            (style("◌").yellow(), style("Planning").yellow())
+        }
+        SessionPhase::AwaitingApproval => {
+            (style("o").magenta(), style("Awaiting Approval").magenta())
+        }
+        SessionPhase::Planned => (style("o").cyan(), style("Planned").cyan()),
+        SessionPhase::Running => (style(">").yellow(), style("Running").yellow()),
+        SessionPhase::Completed => (style("v").green(), style("Completed").green()),
+        SessionPhase::Failed(_) => (style("x").red(), style("Failed").red()),
+        SessionPhase::Suspended => (style("||").yellow(), style("Suspended").yellow()),
     };
     let date = format_session_date(&s.id);
     let suffix = format_suffix(s);
@@ -277,7 +362,7 @@ fn format_session_label(s: &SessionState) -> String {
     format!("{icon} {date} {phase_str} {input_preview}{suffix}")
 }
 
-/// "`YYYYMMDDHHmmss`" → "MM/DD HH:MM"
+/// "`YYYYMMDDHHmmss`" -> "MM/DD HH:MM"
 fn format_session_date(id: &str) -> String {
     let (Some(month), Some(day), Some(hour), Some(min)) =
         (id.get(4..6), id.get(6..8), id.get(8..10), id.get(10..12))
@@ -656,7 +741,7 @@ mod tests {
         let label = strip(&format_session_label(&s));
 
         // Then: contains icon, date, phase, and input
-        assert!(label.contains('●'), "should contain ● icon: {label}");
+        assert!(label.contains('o'), "should contain o icon: {label}");
         assert!(
             label.contains("03/06 14:30"),
             "should contain date: {label}"
@@ -677,8 +762,8 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: contains ▶ icon and step info
-        assert!(label.contains('▶'), "should contain ▶ icon: {label}");
+        // Then: contains > icon and step info
+        assert!(label.contains('>'), "should contain > icon: {label}");
         assert!(label.contains("Running"), "should contain Running: {label}");
         assert!(label.contains("[test]"), "should contain step: {label}");
     }
@@ -692,8 +777,8 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: contains ✓ icon and PR number
-        assert!(label.contains('✓'), "should contain ✓ icon: {label}");
+        // Then: contains v icon and PR number
+        assert!(label.contains('v'), "should contain v icon: {label}");
         assert!(
             label.contains("Completed"),
             "should contain Completed: {label}"
@@ -713,8 +798,8 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: contains ✗ icon
-        assert!(label.contains('✗'), "should contain ✗ icon: {label}");
+        // Then: contains x icon
+        assert!(label.contains('x'), "should contain x icon: {label}");
         assert!(label.contains("Failed"), "should contain Failed: {label}");
     }
 
@@ -727,9 +812,9 @@ mod tests {
         // When
         let label = strip(&format_session_label(&s));
 
-        // Then: contains ellipsis "…" and total label length is 200 chars or less
+        // Then: contains ellipsis "..." and total label length is 200 chars or less
         assert!(
-            label.contains('…'),
+            label.contains("..."),
             "long input should be truncated: {label}"
         );
     }
@@ -778,11 +863,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // session_actions — Reset to Planned coverage
+    // session_actions -- Reset to Planned coverage
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // session_actions — Suspended
+    // session_actions -- Suspended
     // -----------------------------------------------------------------------
 
     #[test]
@@ -795,7 +880,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // format_suffix — Suspended
+    // format_suffix -- Suspended
     // -----------------------------------------------------------------------
 
     #[test]
@@ -824,7 +909,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // format_session_label — Suspended
+    // format_session_label -- Suspended
     // -----------------------------------------------------------------------
 
     #[test]
@@ -845,7 +930,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // session_actions — Delete/Back tail check (all phases including Suspended)
+    // session_actions -- Delete/Back tail check (all phases including Suspended)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -924,7 +1009,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // session_actions — Open PR coverage
+    // session_actions -- Open PR coverage
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1028,7 +1113,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AwaitingApproval phase — actions and labels
+    // AwaitingApproval phase -- actions and labels
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1070,8 +1155,33 @@ mod tests {
         // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
-        // When / Then: order is Approve → Delete → Back
+        // When / Then: order is Approve -> Delete -> Back
         assert_eq!(session_actions(&session), vec!["Approve", "Delete", "Back"]);
+    }
+
+    #[test]
+    fn test_session_actions_awaiting_approval_with_plan_error_hides_approve() {
+        // Given: background planning failed before approval
+        let mut session = make_session("20260311100002", "task", SessionPhase::AwaitingApproval);
+        session.plan_error = Some("model error".to_string());
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: approval stays gated until planning succeeds again
+        assert_eq!(actions, vec!["Delete", "Back"]);
+    }
+
+    #[test]
+    fn test_session_actions_awaiting_approval_without_plan_hides_approve() {
+        // Given: background planning is still in progress
+        let session = make_session("20260311100004", "task", SessionPhase::AwaitingApproval);
+
+        // When
+        let actions = session_actions_with_plan_availability(&session, false);
+
+        // Then: approval stays hidden until a real plan exists
+        assert_eq!(actions, vec!["Delete", "Back"]);
     }
 
     #[test]
@@ -1091,7 +1201,7 @@ mod tests {
             label.contains("Awaiting Approval"),
             "label should contain 'Awaiting Approval': {label}"
         );
-        assert!(label.contains('○'), "label should contain ○ icon: {label}");
+        assert!(label.contains('o'), "label should contain o icon: {label}");
         assert!(
             label.contains("pending task"),
             "label should contain input: {label}"
@@ -1117,7 +1227,54 @@ mod tests {
         );
     }
 
-    // ── format_session_label: multiline input ─────────────────────────────────
+    #[test]
+    fn test_format_session_label_awaiting_approval_with_plan_error_shows_plan_failed() {
+        // Given: background planning failed before approval
+        let mut s = make_session(
+            "20260311100003",
+            "some task",
+            SessionPhase::AwaitingApproval,
+        );
+        s.plan_error = Some("model error".to_string());
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: the list surfaces the failure instead of looking approval-ready
+        assert!(
+            label.contains("Plan Failed"),
+            "label should show Plan Failed: {label}"
+        );
+        assert!(
+            !label.contains("Awaiting Approval"),
+            "label should not look approval-ready: {label}"
+        );
+    }
+
+    #[test]
+    fn test_format_session_label_awaiting_approval_without_plan_shows_planning() {
+        // Given: background planning has started but plan.md is not ready yet
+        let s = make_session(
+            "20260311100005",
+            "some task",
+            SessionPhase::AwaitingApproval,
+        );
+
+        // When
+        let label = strip(&format_session_label_with_plan_availability(&s, false));
+
+        // Then: the list shows an in-progress label instead of approval-ready text
+        assert!(
+            label.contains("Planning"),
+            "label should show Planning: {label}"
+        );
+        assert!(
+            !label.contains("Awaiting Approval"),
+            "label should not show Awaiting Approval: {label}"
+        );
+    }
+
+    // -- format_session_label: multiline input ---------------------------------
 
     #[test]
     fn test_format_session_label_multiline_input_shows_first_line_only() {
@@ -1212,6 +1369,38 @@ mod tests {
                 "phase_error should be None for {expected_str}"
             );
         }
+    }
+
+    #[test]
+    fn test_session_to_json_awaiting_approval_plan_error_is_preserved() {
+        // Given: a session whose background planning failed before approval
+        let mut session = make_session("20260306143000", "task", SessionPhase::AwaitingApproval);
+        session.plan_error = Some("planner exited 1".to_string());
+
+        // When
+        let dto = session_to_json(session);
+        let value =
+            serde_json::to_value(&dto).unwrap_or_else(|e| panic!("serialization failed: {e}"));
+
+        // Then: the durable planning error is exposed separately from run-phase failures
+        assert_eq!(value["phase"], "AwaitingApproval");
+        assert_eq!(value["phase_error"], serde_json::Value::Null);
+        assert_eq!(value["plan_error"], "planner exited 1");
+        assert_eq!(value["plan_available"], false);
+    }
+
+    #[test]
+    fn test_session_to_json_with_plan_availability_sets_flag() {
+        // Given: an AwaitingApproval session whose plan.md is ready
+        let session = make_session("20260306143001", "task", SessionPhase::AwaitingApproval);
+
+        // When
+        let dto = session_to_json_with_plan_availability(session, true);
+        let value =
+            serde_json::to_value(&dto).unwrap_or_else(|e| panic!("serialization failed: {e}"));
+
+        // Then
+        assert_eq!(value["plan_available"], true);
     }
 
     #[test]

@@ -96,6 +96,9 @@ pub struct SessionState {
     /// True when the session is waiting for user input (option step).
     #[serde(default)]
     pub awaiting_input: bool,
+    /// Durable background-planning failure detail, if plan generation failed before approval.
+    #[serde(default)]
+    pub plan_error: Option<String>,
     /// Steps selected by the user to be skipped before execution.
     #[serde(default)]
     pub skipped_steps: Vec<String>,
@@ -156,6 +159,7 @@ impl SessionState {
             config_path: None,
             updated_at: None,
             awaiting_input: false,
+            plan_error: None,
             skipped_steps: vec![],
         }
     }
@@ -186,6 +190,7 @@ impl SessionState {
             "approve() called on session in '{}' phase",
             self.phase.label()
         );
+        self.plan_error = None;
         self.phase = SessionPhase::Planned;
     }
 
@@ -198,6 +203,7 @@ impl SessionState {
         self.current_step = None;
         self.completed_at = None;
         self.pr_url = None;
+        self.plan_error = None;
     }
 
     /// Returns a `WorktreeContext` if the session has a valid, existing worktree.
@@ -480,7 +486,7 @@ impl SessionManager {
                 continue;
             }
             let Some(ref pr_url) = session.pr_url else {
-                // No PR URL recorded — skip silently.
+                // No PR URL recorded -- skip silently.
                 continue;
             };
 
@@ -712,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_parse_iso8601_known_date() {
-        // 2026-03-06T00:00:00Z = days from 1970-01-01 × 86400
+        // 2026-03-06T00:00:00Z = days from 1970-01-01 * 86400
         let secs =
             parse_iso8601_secs("2026-03-06T00:00:00Z").unwrap_or_else(|| panic!("unexpected None"));
         let (year, month, day, h, m, s) = seconds_to_datetime(secs);
@@ -767,6 +773,42 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Running));
         assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_new_session_defaults_plan_error_to_none() {
+        // Given: a newly created session state
+        let state = SessionState::new(
+            "20260310130002".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+
+        // Then: no durable planning error is recorded yet
+        assert_eq!(state.plan_error, None);
+    }
+
+    #[test]
+    fn test_session_save_and_load_preserves_plan_error() {
+        // Given: a session whose background planning failed before approval
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260310130003".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.plan_error = Some("planner exited 1".to_string());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the session is reloaded from disk
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the durable planning error is still present
+        assert_eq!(loaded.plan_error.as_deref(), Some("planner exited 1"));
     }
 
     #[test]
@@ -1323,7 +1365,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SessionPhase::Suspended — basic properties
+    // SessionPhase::Suspended -- basic properties
     // -----------------------------------------------------------------------
 
     #[test]

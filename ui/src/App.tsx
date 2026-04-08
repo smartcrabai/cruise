@@ -8,6 +8,7 @@ import type {
   PlanEvent,
   Session,
   SessionPhase,
+  SkippableStepDto,
   WorkflowEvent,
   WorkspaceMode,
 } from "./types";
@@ -18,13 +19,13 @@ import {
   createSession,
   deleteSession,
   fixSession,
-  getConfigSteps,
   getAppConfig,
+  getNewSessionConfigDefaults,
+  getNewSessionHistorySummary,
   getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
-  listSessions,
   resetSession,
   respondToOption,
   runAllSessions,
@@ -466,9 +467,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setDeleting(false);
   }, [session.id]);
 
-  // Clear the parent's fixing state when this runner unmounts (e.g. user navigates
-  // to another session while a fix is in-flight). Without this, fixingSessionIds in
-  // App retains a stale entry and the sidebar keeps showing "Fixing" indefinitely.
+  // Clear the ephemeral fixingSessionIds entry from App when this runner unmounts.
+  // The sidebar's "Fixing" badge now persists correctly via session.fixInProgress
+  // (DTO field), so this only keeps the parent's in-memory set tidy.
   useEffect(() => {
     return () => {
       onFixingChange(session.id, false);
@@ -504,7 +505,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       await approveSession(session.id);
       await refreshSession();
     } catch (e) {
-      onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}`.slice(0, 80) });
+      onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}` });
     }
   }
 
@@ -533,7 +534,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       } else if (event.event === "workflowFailed") {
         setStatus("failed");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-        onToast({ kind: "failed", sessionInput: session.input, detail: event.data.error?.slice(0, 80) });
       } else if (event.event === "workflowCancelled") {
         setStatus("cancelled");
         setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
@@ -612,7 +612,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
 
     const channel = new Channel<PlanEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "planGenerated") {
+      if (event.event === "planGenerating") {
+        void refreshSession();
+      } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
         onFixingChange(session.id, false);
@@ -653,8 +655,13 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }
 
-  const isFixing = replanPhase === "generating";
-  const actions = getSessionActions(session, status, isFixing);
+  // isFixing drives the PhaseBadge header; includes the DTO field so the badge
+  // stays correct after navigating away and back (replanPhase resets to "idle").
+  const isFixing = replanPhase === "generating" || !!session.fixInProgress;
+  // isApprovalReady() already checks !session.fixInProgress, so only the local
+  // ephemeral flag needs to be forwarded to suppress buttons while the request
+  // is in flight within this component instance.
+  const actions = getSessionActions(session, status, replanPhase === "generating");
   const notBusy = replanPhase === "idle" && askPhase === "idle";
   const canShowFix = actions.showFix && notBusy;
   const canShowAsk = actions.showAsk && notBusy;
@@ -1026,6 +1033,25 @@ function createInitialNewSessionDraft(): NewSessionDraft {
   };
 }
 
+function collectExpandedStepIds(nodes: SkippableStepDto[]): Set<string> {
+  const ids = new Set<string>();
+
+  function visit(node: SkippableStepDto) {
+    for (const id of node.expandedStepIds) {
+      ids.add(id);
+    }
+    for (const child of node.children) {
+      visit(child);
+    }
+  }
+
+  for (const node of nodes) {
+    visit(node);
+  }
+
+  return ids;
+}
+
 interface NewSessionFormProps {
   draft: NewSessionDraft;
   onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
@@ -1034,27 +1060,53 @@ interface NewSessionFormProps {
 
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
-  const [configSteps, setConfigSteps] = useState<string[]>([]);
+  const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
+  const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
+  const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
+  const configLookupBaseDir = configPath ? "." : (baseDir || ".");
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
   }
 
   useEffect(() => {
-    let active = true;
-    if (!configPath) {
-      setConfigSteps([]);
-      setSkippedSteps(new Set());
-      return;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const refreshHistorySummary = useCallback(async () => {
+    try {
+      const summary = await getNewSessionHistorySummary();
+      if (isMountedRef.current) {
+        setRecentWorkingDirs(summary.recentWorkingDirs);
+      }
+      return summary;
+    } catch {
+      if (isMountedRef.current) {
+        setRecentWorkingDirs([]);
+      }
+      return null;
     }
-    void getConfigSteps(configPath)
-      .then((steps) => {
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void getNewSessionConfigDefaults({
+      baseDir: configLookupBaseDir,
+      configPath: configPath || undefined,
+    })
+      .then((defaults) => {
         if (active) {
-          setConfigSteps(steps);
-          setSkippedSteps(new Set());
+          const validStepIds = collectExpandedStepIds(defaults.steps);
+          setConfigSteps(defaults.steps);
+          setSkippedSteps(
+            new Set(defaults.defaultSkippedSteps.filter((id) => validStepIds.has(id))),
+          );
         }
       })
       .catch(() => {
@@ -1064,27 +1116,106 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         }
       });
     return () => { active = false; };
-  }, [configPath]);
+  }, [configLookupBaseDir, configPath]);
 
-  // Load configs and default base_dir on mount
-  useEffect(() => {
-    void listConfigs().then(setConfigs).catch(() => {});
-    // Use the most recently updated session's baseDir as default, but only when
-    // the draft baseDir is empty (don't overwrite a user-edited value).
-    void listSessions()
-      .then((sessions) => {
-        if (sessions.length > 0) {
-          const latest = sessions.reduce((max, s) =>
-            (s.updatedAt ?? s.createdAt) > (max.updatedAt ?? max.createdAt) ? s : max
-          );
-          onDraftChange((prev) => {
-            if (prev.baseDir !== "") return prev;
-            return { ...prev, baseDir: latest.baseDir };
-          });
+  function isParentChecked(node: SkippableStepDto): boolean {
+    return node.expandedStepIds.every((id) => skippedSteps.has(id));
+  }
+
+  function isParentIndeterminate(node: SkippableStepDto): boolean {
+    const selected = node.expandedStepIds.filter((id) => skippedSteps.has(id));
+    return selected.length > 0 && selected.length < node.expandedStepIds.length;
+  }
+
+  function toggleStepIds(ids: Iterable<string>, checked: boolean) {
+    setSkippedSteps((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (checked) {
+          next.add(id);
+        } else {
+          next.delete(id);
         }
+      }
+      return next;
+    });
+  }
+
+  function stepNodeLabel(node: SkippableStepDto, isChild: boolean): string {
+    if (!isChild) {
+      return node.id;
+    }
+    const slash = node.id.lastIndexOf("/");
+    return slash === -1 ? node.id : node.id.slice(slash + 1);
+  }
+
+  function renderStepNode(node: SkippableStepDto, isChild: boolean): React.ReactElement {
+    const label = stepNodeLabel(node, isChild);
+
+    if (node.children.length === 0) {
+      return (
+        <label key={node.id} className={`flex items-center gap-2 cursor-pointer${isChild ? " pl-6" : ""}`}>
+          <input
+            type="checkbox"
+            checked={skippedSteps.has(node.id)}
+            onChange={(e) => toggleStepIds([node.id], e.target.checked)}
+            disabled={isGenerating}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300">{label}</span>
+        </label>
+      );
+    }
+    return (
+      <div key={node.id}>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={isParentChecked(node)}
+            ref={(el) => {
+              if (el) el.indeterminate = isParentIndeterminate(node);
+            }}
+            onChange={(e) => toggleStepIds(node.expandedStepIds, e.target.checked)}
+            disabled={isGenerating}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300 font-medium">{label}</span>
+        </label>
+        <div className="space-y-1 ml-4">
+          {node.children.map((child) => renderStepNode(child, true))}
+        </div>
+      </div>
+    );
+  }
+
+  // Load configs and history-backed defaults on mount.
+  useEffect(() => {
+    let active = true;
+    void listConfigs().then(setConfigs).catch(() => {});
+    void refreshHistorySummary()
+      .then((summary) => {
+        if (!active || !summary) return;
+        onDraftChange((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          if (prev.baseDir === "" && summary.lastWorkingDir) {
+            next.baseDir = summary.lastWorkingDir;
+            changed = true;
+          }
+          if (prev.configPath === "" && summary.lastRequestedConfigPath) {
+            next.configPath = summary.lastRequestedConfigPath;
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
       })
-      .catch(() => {});
-  }, [onDraftChange]);
+      .catch((e) => {
+        console.error("Failed to refresh history summary:", e);
+      });
+    return () => {
+      active = false;
+    };
+  }, [onDraftChange, refreshHistorySummary]);
 
   async function handleGenerate() {
     if (!input.trim()) return;
@@ -1100,6 +1231,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           baseDir: prev.baseDir,
           configPath: prev.configPath,
         }));
+        void refreshHistorySummary();
         onRefreshSidebar();
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
@@ -1147,7 +1279,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             disabled={isGenerating}
             className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
           >
-            <option value="">Default (builtin)</option>
+            <option value="">Auto (repo / ~/.cruise / builtin)</option>
             {configs.map((c) => (
               <option key={c.path} value={c.path}>
                 {c.name}
@@ -1161,25 +1293,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <div className="space-y-1.5">
             <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
             <div className="space-y-1 max-h-40 overflow-y-auto">
-              {configSteps.map((step) => (
-                <label key={step} className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={skippedSteps.has(step)}
-                    onChange={(e) => {
-                      setSkippedSteps((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(step);
-                        else next.delete(step);
-                        return next;
-                      });
-                    }}
-                    disabled={isGenerating}
-                    className="accent-blue-500"
-                  />
-                  <span className="text-sm text-gray-300">{step}</span>
-                </label>
-              ))}
+              {configSteps.map((node) => renderStepNode(node, false))}
             </div>
           </div>
         )}
@@ -1194,6 +1308,21 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             disabled={isGenerating}
             placeholder="e.g. /Users/you/projects/myapp"
           />
+          {recentWorkingDirs.length > 0 && (
+            <div className="relative z-[60] flex flex-wrap gap-2 pt-1">
+              {recentWorkingDirs.map((dir) => (
+                <button
+                  key={dir}
+                  type="button"
+                  onClick={() => set("baseDir", dir)}
+                  disabled={isGenerating}
+                  className="px-2.5 py-1 rounded-full border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {dir}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Task input */}
@@ -1434,7 +1563,7 @@ export default function App() {
       setSettingsParallelism(config.runAllParallelism);
       setShowSettings(true);
     } catch (e) {
-      addToast({ kind: "failed", sessionInput: "Settings", detail: String(e).slice(0, 80) });
+      emitNotification("failed", "Settings", String(e));
     }
   }
 
@@ -1498,6 +1627,11 @@ export default function App() {
       const wasCompleted = prev !== undefined && prev.phase === "Completed";
       if (isCompleted && !wasCompleted) {
         emitNotification("completed", session.input);
+      }
+      const isFailed = session.phase === "Failed";
+      const wasFailed = prev !== undefined && prev.phase === "Failed";
+      if (isFailed && !wasFailed) {
+        emitNotification("failed", session.input, session.phaseError);
       }
     }
   }, [emitNotification]);

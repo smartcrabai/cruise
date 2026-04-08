@@ -13,8 +13,10 @@ mod list_cmd;
 mod llm_api;
 mod metadata;
 mod multiline_input;
+mod new_session_history;
 mod option_handler;
 mod plan_cmd;
+mod planning;
 mod platform;
 mod resolver;
 mod run_cmd;
@@ -40,17 +42,23 @@ async fn main() {
 }
 
 async fn run() -> error::Result<()> {
-    let cli = cli::parse_cli();
-    match cli.command {
+    let cli::Cli {
+        plan,
+        command,
+        input,
+    } = cli::parse_cli();
+    match command {
+        Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
         Some(cli::Commands::Plan(args)) => plan_cmd::run(args).await,
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
+        None if plan.is_some() => plan_cmd::launch_background_plan(&plan.unwrap_or_default()),
         None => {
-            // Backward compat: no subcommand → treat as `plan`.
+            // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
-                input: cli.input,
+                input,
                 config: None,
                 dry_run: false,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,

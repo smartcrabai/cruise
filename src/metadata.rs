@@ -35,10 +35,10 @@ pub(crate) fn derive_session_title(plan_markdown: &str) -> String {
 /// Resolve plan content from multiple sources with fallback.
 ///
 /// Fallback order:
-/// 1. `plan_path` exists and is non-empty → return its content
-/// 2. `stdout` is non-empty → write to `plan_path`, return it
-/// 3. `stderr` is non-empty → write to `plan_path`, return it
-/// 4. All sources empty → return a descriptive error
+/// 1. `plan_path` exists and is non-empty -> return its content
+/// 2. `stdout` is non-empty -> write to `plan_path`, return it
+/// 3. `stderr` is non-empty -> write to `plan_path`, return it
+/// 4. All sources empty -> return a descriptive error
 ///
 /// # Errors
 ///
@@ -47,8 +47,8 @@ pub(crate) fn derive_session_title(plan_markdown: &str) -> String {
 pub fn resolve_plan_content(plan_path: &Path, stdout: &str, stderr: &str) -> Result<String> {
     match std::fs::read_to_string(plan_path) {
         Ok(content) if !content.trim().is_empty() => return Ok(content),
-        Ok(_) => {} // file exists but is empty — fall through to stdout/stderr
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // not yet written — fall through
+        Ok(_) => {} // file exists but is empty -- fall through to stdout/stderr
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // not yet written -- fall through
         Err(e) => {
             return Err(crate::error::CruiseError::Other(format!(
                 "failed to read plan at {}: {e}",
@@ -73,6 +73,11 @@ pub fn resolve_plan_content(plan_path: &Path, stdout: &str, stderr: &str) -> Res
         "plan generation produced no output: {}, stdout, and stderr were all empty",
         plan_path.display()
     )))
+}
+
+#[must_use]
+pub fn plan_markdown_available(path: &Path) -> bool {
+    read_plan_markdown(path).is_ok()
 }
 
 pub(crate) fn read_plan_markdown(path: &Path) -> Result<String> {
@@ -173,7 +178,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    // ── resolve_plan_content ─────────────────────────────────────────────────
+    // -- resolve_plan_content --------------------------------------------------
 
     #[test]
     fn test_resolve_plan_content_prefers_file_over_stdout() {
@@ -218,7 +223,7 @@ mod tests {
         assert!(resolve_plan_content(&plan_path, "", "").is_err());
     }
 
-    // ── read_plan_markdown ────────────────────────────────────────────────────
+    // -- read_plan_markdown ----------------------------------------------------
 
     #[test]
     fn test_read_plan_markdown_returns_err_when_file_missing() {
