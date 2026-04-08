@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use cruise::batch_run::run_all_with_parallelism;
 use cruise::new_session_history::{
     NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
 };
@@ -17,7 +18,7 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
-// ─── DTOs ─────────────────────────────────────────────────────────────────────
+// --- DTOs ---------------------------------------------------------------------
 
 /// Serializable representation of a session, sent to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -111,7 +112,7 @@ pub struct CleanupResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateReadinessDto {
     pub can_auto_update: bool,
-    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` — set when `can_auto_update` is false.
+    /// `"translocated"` | `"mountedVolume"` | `"unknownBundlePath"` -- set when `can_auto_update` is false.
     pub reason: Option<String>,
     /// The resolved `.app` bundle path, for display in the UI.
     pub bundle_path: Option<String>,
@@ -129,7 +130,7 @@ pub struct OptionResultDto {
     pub text_input: Option<String>,
 }
 
-// ─── StateSavingEmitter ────────────────────────────────────────────────────────
+// --- StateSavingEmitter --------------------------------------------------------
 
 /// Wraps the Tauri IPC channel and intercepts `OptionRequired` events to update
 /// the session's `awaiting_input` field in `state.json`.
@@ -158,7 +159,7 @@ impl crate::gui_option_handler::EventEmitter for StateSavingEmitter {
     }
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+// --- Helpers -------------------------------------------------------------------
 
 /// RAII guard that clears the in-flight fix flag when dropped.
 ///
@@ -214,7 +215,7 @@ fn prepare_run_session(
     Ok(execution_workspace.path().to_path_buf())
 }
 
-// ─── Filesystem commands ───────────────────────────────────────────────────────
+// --- Filesystem commands -------------------------------------------------------
 
 /// List subdirectories of `path`, returning up to 50 entries sorted alphabetically.
 ///
@@ -259,7 +260,7 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
     Ok(entries)
 }
 
-// ─── Read commands ─────────────────────────────────────────────────────────────
+// --- Read commands -------------------------------------------------------------
 
 /// List all sessions, sorted oldest-first.
 #[tauri::command]
@@ -310,7 +311,7 @@ pub fn get_session_plan(session_id: String) -> std::result::Result<String, Strin
         .map_err(|e| format!("failed to read plan {}: {}", plan_path.display(), e))
 }
 
-// ─── Write commands ────────────────────────────────────────────────────────────
+// --- Write commands ------------------------------------------------------------
 
 /// Cancel the currently running workflow session.
 #[tauri::command]
@@ -378,13 +379,13 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
     }
 }
 
-// ─── Plan generation helpers ───────────────────────────────────────────────────
+// --- Plan generation helpers ---------------------------------------------------
 
 /// Plan generation prompt templates, embedded at compile-time.
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
-// ─── Session creation commands ─────────────────────────────────────────────────
+// --- Session creation commands -------------------------------------------------
 
 /// A discovered workflow config file, returned to the frontend.
 #[derive(Debug, Serialize)]
@@ -634,7 +635,7 @@ pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
 
 /// Delete a session and clean up its git worktree if one exists.
 ///
-/// Running sessions cannot be deleted — cancel them first.
+/// Running sessions cannot be deleted -- cancel them first.
 #[tauri::command]
 pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
@@ -754,7 +755,7 @@ pub(crate) async fn do_ask_session(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Return raw output only — do NOT call resolve_plan_content(), which would
+    // Return raw output only -- do NOT call resolve_plan_content(), which would
     // overwrite plan.md with the answer and corrupt the saved plan.
     Ok(result.output)
 }
@@ -769,7 +770,7 @@ pub async fn ask_session(
     do_ask_session(&manager, &session_id, question).await
 }
 
-// ─── run_session / run_all_sessions ────────────────────────────────────────────
+// --- run_session / run_all_sessions --------------------------------------------
 
 /// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
 ///
@@ -778,7 +779,7 @@ pub async fn ask_session(
 /// [`SessionPhase`] so callers can decide how to proceed (e.g. break a batch loop
 /// on `Suspended`).
 ///
-/// Infrastructure errors (mutex poisoned, session not found, …) are returned as
+/// Infrastructure errors (mutex poisoned, session not found, ...) are returned as
 /// `Err(String)`.  Workflow-level errors (step failure) are returned as
 /// `Ok(SessionPhase::Failed(msg))` so that `run_all_sessions` can log them and
 /// continue to the next session instead of aborting the batch.
@@ -789,6 +790,7 @@ async fn execute_single_session(
     channel: &tauri::ipc::Channel<WorkflowEvent>,
     state: &AppState,
     manager: &SessionManager,
+    cancel_token: cruise::cancellation::CancellationToken,
 ) -> std::result::Result<SessionPhase, String> {
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
 
@@ -835,7 +837,8 @@ async fn execute_single_session(
     };
     let sid_for_pr = session_id.to_string();
 
-    let (option_responder, cancel_token) = state.register_session(sid_for_pr.clone());
+    let option_responder =
+        state.register_session_with_token(sid_for_pr.clone(), cancel_token.clone());
     let sessions_dir = manager.sessions_dir();
     let plan_path = session.plan_path(&sessions_dir);
     let input = session.input.clone();
@@ -898,13 +901,13 @@ async fn execute_single_session(
 
             match &result {
                 Ok(exec) => logger.write(&format!(
-                    "✓ completed — run: {}, skipped: {}, failed: {}",
+                    "[OK] completed -- run: {}, skipped: {}, failed: {}",
                     exec.run, exec.skipped, exec.failed
                 )),
                 Err(cruise::error::CruiseError::Interrupted) => {
-                    logger.write("⏸ cancelled");
+                    logger.write("[paused] cancelled");
                 }
-                Err(e) => logger.write(&format!("✗ failed: {}", e.detailed_message())),
+                Err(e) => logger.write(&format!("[FAIL] failed: {}", e.detailed_message())),
             }
 
             if let Some(dir) = original_dir {
@@ -996,80 +999,103 @@ pub async fn run_session(
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
-    match execute_single_session(&session_id, workspace_mode, &channel, &state, &manager).await? {
+    match execute_single_session(
+        &session_id,
+        workspace_mode,
+        &channel,
+        &state,
+        &manager,
+        cruise::cancellation::CancellationToken::new(),
+    )
+    .await?
+    {
         SessionPhase::Failed(msg) => Err(msg),
         _ => Ok(()),
     }
 }
 
-/// Execute all Planned / Suspended sessions in series, streaming batch-level
+/// Execute all Planned / Suspended sessions with bounded concurrency, streaming batch-level
 /// [`WorkflowEvent`]s (plus the per-session events from each run) over `channel`.
 ///
-/// Individual session failures are logged and the batch continues.  Only a
-/// `Suspended` result (user cancelled) stops the loop early.
+/// Individual session failures are logged and the batch continues. Cancelling any
+/// active Run All session propagates through the shared batch token so no new
+/// sessions are scheduled.
 #[tauri::command]
 pub async fn run_all_sessions(
     channel: tauri::ipc::Channel<WorkflowEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
-    let manager = new_session_manager()?;
-    let mut cancelled = 0usize;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut remaining = manager
-        .run_all_remaining(&seen)
-        .map_err(|e| e.to_string())?;
+    let manager = Arc::new(new_session_manager()?);
     let parallelism = cruise::app_config::AppConfig::load()
         .map_err(|e| e.to_string())?
         .run_all_parallelism;
-    let _ = channel.send(WorkflowEvent::RunAllStarted {
-        total: remaining.len(),
+    let total = manager
+        .run_all_remaining(&std::collections::HashSet::new())
+        .map_err(|e| e.to_string())?
+        .len();
+    let _ = channel.send(WorkflowEvent::RunAllStarted { total, parallelism });
+
+    let app_state = state.inner().clone();
+    let batch_cancel_token = cruise::cancellation::CancellationToken::new();
+    app_state.register_batch_cancel_token(batch_cancel_token.clone());
+    let channel_for_batch = channel.clone();
+    let manager_for_batch = Arc::clone(&manager);
+    let results = run_all_with_parallelism(
+        &manager,
         parallelism,
-    });
+        batch_cancel_token,
+        move |session: SessionState, cancel_token| {
+            let channel = channel_for_batch.clone();
+            let manager = Arc::clone(&manager_for_batch);
+            let state = app_state.clone();
+            async move {
+                let session_id = session.id.clone();
+                let input = session.input.clone();
+                let workspace_mode = session.workspace_mode;
 
-    loop {
-        let remaining_count = remaining.len();
-        let Some(session) = remaining.into_iter().next() else {
-            break;
-        };
-        seen.insert(session.id.clone());
+                let _ = channel.send(WorkflowEvent::RunAllSessionStarted {
+                    session_id: session_id.clone(),
+                    input: input.clone(),
+                });
 
-        let session_id = session.id;
-        let input = session.input;
-        let workspace_mode = session.workspace_mode;
-        let total = seen.len() + remaining_count - 1;
-        let _ = channel.send(WorkflowEvent::RunAllSessionStarted {
-            session_id: session_id.clone(),
-            input: input.clone(),
-            total,
-        });
+                let phase = execute_single_session(
+                    &session_id,
+                    workspace_mode,
+                    &channel,
+                    &state,
+                    &manager,
+                    cancel_token,
+                )
+                .await
+                .unwrap_or_else(SessionPhase::Failed);
 
-        let phase = execute_single_session(&session_id, workspace_mode, &channel, &state, &manager)
-            .await
-            .unwrap_or_else(SessionPhase::Failed);
+                let error = match &phase {
+                    SessionPhase::Failed(msg) => Some(msg.clone()),
+                    _ => None,
+                };
 
-        let (error, should_break) = match &phase {
-            SessionPhase::Suspended => {
-                cancelled += 1;
-                (None, true)
+                let _ = channel.send(WorkflowEvent::RunAllSessionFinished {
+                    session_id,
+                    input,
+                    phase: phase.label().to_string(),
+                    error,
+                });
+
+                match phase {
+                    SessionPhase::Suspended => Err(cruise::error::CruiseError::Interrupted),
+                    _ => Ok(()),
+                }
             }
-            SessionPhase::Failed(msg) => (Some(msg.clone()), false),
-            _ => (None, false),
-        };
+        },
+    )
+    .await;
+    state.clear_batch_cancel_token();
+    let results = results.map_err(|e| e.to_string())?;
 
-        let _ = channel.send(WorkflowEvent::RunAllSessionFinished {
-            session_id,
-            input,
-            phase: phase.label().to_string(),
-            error,
-        });
-
-        if should_break {
-            break;
-        }
-        remaining = manager
-            .run_all_remaining(&seen)
-            .map_err(|e| e.to_string())?;
-    }
+    let cancelled = results
+        .iter()
+        .filter(|result| matches!(result.outcome, Err(cruise::error::CruiseError::Interrupted)))
+        .count();
 
     let _ = channel.send(WorkflowEvent::RunAllCompleted { cancelled });
 
@@ -1170,7 +1196,7 @@ pub fn get_app_config() -> std::result::Result<cruise::app_config::AppConfig, St
 
 /// Persist an updated application-level configuration to `~/.config/cruise/config.json`.
 ///
-/// Validates the config before writing (e.g. `run_all_parallelism` must be ≥ 1).
+/// Validates the config before writing (e.g. `run_all_parallelism` must be >= 1).
 #[tauri::command]
 pub fn update_app_config(config: cruise::app_config::AppConfig) -> std::result::Result<(), String> {
     config.save().map_err(|e| e.to_string())
@@ -1404,15 +1430,15 @@ mod tests {
         assert_eq!(saved.phase, SessionPhase::Planned);
     }
 
-    // ─── Integration: full option-selection round-trip ────────────────────────
+    // --- Integration: full option-selection round-trip ------------------------
     //
     // Data flow:
     //   GuiOptionHandler::select_option (engine thread)
-    //     → stores sender in shared pending_response slot
-    //     → emits WorkflowEvent::OptionRequired
+    //     -> stores sender in shared pending_response slot
+    //     -> emits WorkflowEvent::OptionRequired
     //   test thread: extracts sender from slot and sends OptionResult
     //   GuiOptionHandler::select_option (engine thread)
-    //     → blocking_recv returns OptionResult
+    //     -> blocking_recv returns OptionResult
     //
     // Modules covered: events, gui_option_handler, state, commands
     //
@@ -1497,7 +1523,7 @@ mod tests {
         }
     }
 
-    // ─── check_update_readiness_for_path ─────────────────────────────────────
+    // --- check_update_readiness_for_path -------------------------------------
 
     #[test]
     fn test_readiness_normal_applications_path_allows_update() {
@@ -1602,7 +1628,7 @@ mod tests {
         assert_eq!(r.reason.as_deref(), Some("mountedVolume"));
     }
 
-    // ─── do_ask_session ───────────────────────────────────────────────────────
+    // --- do_ask_session -------------------------------------------------------
 
     /// Write a minimal `config.yaml` that uses the given shell command as the LLM.
     ///
@@ -1614,7 +1640,7 @@ mod tests {
     }
 
     /// Create a temporary SessionManager with a session that has `plan.md` and `config.yaml`.
-    /// Returns `(TempDir, SessionManager)` — callers must keep `_tmp` alive for the test duration.
+    /// Returns `(TempDir, SessionManager)` -- callers must keep `_tmp` alive for the test duration.
     fn setup_ask_session(
         session_id: &str,
         plan_content: &str,
@@ -1709,7 +1735,7 @@ mod tests {
         // Given: no session with the given ID exists
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().join(".cruise"));
-        // sessions dir doesn't even exist — load will fail immediately
+        // sessions dir doesn't even exist -- load will fail immediately
 
         // When: ask_session is called with a nonexistent ID
         let result =
@@ -1719,7 +1745,7 @@ mod tests {
         assert!(result.is_err(), "expected Err for missing session, got Ok");
     }
 
-    // ─── resolve_gui_session_paths ───────────────────────────────────────────
+    // --- resolve_gui_session_paths -------------------------------------------
 
     #[test]
     fn test_resolve_gui_session_paths_local_config_beats_user_dir() {
@@ -1932,7 +1958,7 @@ steps:
         );
     }
 
-    // ─── prepare_run_session: worktree gh preflight ──────────────────────────
+    // --- prepare_run_session: worktree gh preflight --------------------------
 
     /// Given: worktree-mode session, no `gh` in PATH (empty bin directory)
     /// When:  prepare_run_session is called with WorkspaceMode::Worktree

@@ -352,6 +352,84 @@ mod tests {
         assert_eq!(ids, ["20260101000001", "20260101000002", "20260101000003"]);
     }
 
+    #[tokio::test]
+    async fn test_parallelism_two_fills_both_slots_before_starting_third_session() {
+        // Given: three planned sessions and a scheduler allowed to run two at once
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        for id in ["20260101000001", "20260101000002", "20260101000003"] {
+            make_planned_session(&manager, id, tmp.path());
+        }
+
+        // The first two scheduled sessions wait at this barrier so the third cannot start
+        // unless the scheduler incorrectly under-fills the available parallel slots.
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let started = Arc::clone(&started);
+            move |session: SessionState, _cancel: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+                let started = Arc::clone(&started);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    started
+                        .lock()
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .push(id.clone());
+                    if id != "20260101000003" {
+                        barrier.wait().await;
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        let manager_for_task = Arc::clone(&manager);
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            run_all_with_parallelism(&manager_for_task, 2, cancel, run_fn).await
+        });
+
+        // When: the scheduler begins launching work
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if started.lock().unwrap_or_else(|e| panic!("{e}")).len() >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the first two sessions to start"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Then: both parallel slots are filled before the third session is started
+        let started_before_release = started.lock().unwrap_or_else(|e| panic!("{e}")).clone();
+        assert_eq!(
+            started_before_release,
+            vec!["20260101000001".to_string(), "20260101000002".to_string()]
+        );
+
+        // Release the blocked workers and let the batch complete normally.
+        barrier.wait().await;
+        let results = handle
+            .await
+            .unwrap_or_else(|e| panic!("join failed: {e}"))
+            .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        assert_eq!(results.len(), 3);
+    }
+
     // -- Result ordering -------------------------------------------------------
 
     #[tokio::test]

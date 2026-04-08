@@ -18,6 +18,30 @@ export function workflowEventLogLine(event: WorkflowTerminalEvent): string {
   return `${PHASE_ICON.Suspended} Cancelled`;
 }
 
+export function runAllStartedLogLine(total: number, parallelism: number): string {
+  return `--- Run All started (${total} sessions, parallelism: ${parallelism}) ---`;
+}
+
+export function runAllSessionStartedLogLine(sessionId: string, input: string): string {
+  return `--- Session: ${input} (${sessionId}) ---`;
+}
+
+function withSessionPrefix(sessionId: string, line: string): string {
+  return `[${sessionId}] ${line}`;
+}
+
+export function runAllStepLogLine(sessionId: string, step: string): string {
+  return withSessionPrefix(sessionId, step);
+}
+
+export function runAllWorkflowEventLogLine(event: WorkflowTerminalEvent): string {
+  return withSessionPrefix(event.data.sessionId, workflowEventLogLine(event));
+}
+
+export function runAllCompletedLogLine(cancelled: number): string {
+  return `--- Run All finished (cancelled: ${cancelled}) ---`;
+}
+
 export function formatLocalTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "--";

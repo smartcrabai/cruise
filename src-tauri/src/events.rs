@@ -105,7 +105,6 @@ pub enum WorkflowEvent {
         #[serde(rename = "sessionId")]
         session_id: String,
         input: String,
-        total: usize,
     },
     RunAllSessionFinished {
         #[serde(rename = "sessionId")]
@@ -359,11 +358,10 @@ mod tests {
 
     #[test]
     fn test_run_all_session_started_serializes_all_fields_as_camel_case() {
-        // Given: a RunAllSessionStarted event with all fields including total
+        // Given: a RunAllSessionStarted event
         let event = WorkflowEvent::RunAllSessionStarted {
             session_id: "sess-1".to_string(),
             input: "do something".to_string(),
-            total: 3,
         };
         // When: serialized to JSON
         let json = to_json(&event);
@@ -371,7 +369,6 @@ mod tests {
         assert_eq!(json["event"], "runAllSessionStarted");
         assert_eq!(json["data"]["sessionId"], "sess-1");
         assert_eq!(json["data"]["input"], "do something");
-        assert_eq!(json["data"]["total"], 3);
     }
 
     // --- RunAllSessionFinished ---

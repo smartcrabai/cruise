@@ -142,7 +142,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "build feature", total: 1 },
+      data: { sessionId: "s1", input: "build feature" },
     });
     // stepStarted now carries `sessionId` to attribute concurrent progress to the correct session
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Write code" } });
@@ -178,7 +178,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "first task", total: 1 },
+      data: { sessionId: "s1", input: "first task" },
     });
 
     // Then: log contains the first session boundary
@@ -201,7 +201,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "task alpha", total: 1 },
+      data: { sessionId: "s1", input: "task alpha" },
     });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Step A" } });
     channel.onmessage!({
@@ -216,7 +216,7 @@ describe("Run All: live log display", () => {
     // And: second session starts and runs
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s2", input: "task beta", total: 1 },
+      data: { sessionId: "s2", input: "task beta" },
     });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s2", step: "Step B" } });
     channel.onmessage!({
@@ -250,7 +250,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing", total: 1 },
+      data: { sessionId: "s1", input: "do thing" },
     });
     // workflowFailed now carries `sessionId` to route the failure to the correct session
     channel.onmessage!({
@@ -280,7 +280,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing", total: 1 },
+      data: { sessionId: "s1", input: "do thing" },
     });
     // workflowCancelled now carries `data.sessionId` (no longer a unit variant)
     channel.onmessage!({ event: "workflowCancelled", data: { sessionId: "s1" } });
@@ -307,7 +307,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing", total: 1 },
+      data: { sessionId: "s1", input: "do thing" },
     });
     channel.onmessage!({
       event: "workflowCompleted",
@@ -337,7 +337,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "interactive task", total: 1 },
+      data: { sessionId: "s1", input: "interactive task" },
     });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Analyze code" } });
     channel.onmessage!({
@@ -385,7 +385,7 @@ describe("Run All: live log display", () => {
     channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "task 1", total: 1 },
+      data: { sessionId: "s1", input: "task 1" },
     });
     channel.onmessage!({
       event: "workflowCompleted",
@@ -397,7 +397,7 @@ describe("Run All: live log display", () => {
     });
     channel.onmessage!({
       event: "runAllSessionStarted",
-      data: { sessionId: "s2", input: "task 2", total: 1 },
+      data: { sessionId: "s2", input: "task 2" },
     });
     channel.onmessage!({
       event: "workflowCompleted",
