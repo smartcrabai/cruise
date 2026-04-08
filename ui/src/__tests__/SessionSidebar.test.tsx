@@ -549,4 +549,56 @@ describe("SessionSidebar", () => {
     });
   });
 
+  // --- fixInProgress DTO field (persisted source of truth) -----------------
+
+  it("shows 'Fixing' label when session has fixInProgress: true (DTO-driven, no fixingSessionIds prop needed)", async () => {
+    // Given: the session DTO itself carries fixInProgress: true (set by the backend)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true, fixInProgress: true }),
+    ]);
+
+    // When: sidebar is rendered without a fixingSessionIds override
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: the row badge shows "Fixing" driven by the DTO field alone
+    await waitFor(() => {
+      expect(screen.getByText(FIXING_LABEL)).toBeTruthy();
+    });
+
+    // And: the approval-ready blue dot is suppressed
+    expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
+  });
+
+  it("shows normal Awaiting Approval state when fixInProgress is false", async () => {
+    // Given: fixInProgress is explicitly false (no fix running)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true, fixInProgress: false }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: approval-ready blue dot is visible, not "Fixing"
+    await waitFor(() => {
+      expect(screen.getByLabelText("plan ready for approval")).toBeTruthy();
+    });
+    expect(screen.queryByText(FIXING_LABEL)).toBeNull();
+  });
+
+  it("does not show 'Fixing' for sessions where fixInProgress is absent (safe default)", async () => {
+    // Given: a DTO that omits fixInProgress (field absent → treated as false)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: normal approval-ready state (undefined treated as false)
+    await waitFor(() => {
+      expect(screen.getByLabelText("plan ready for approval")).toBeTruthy();
+    });
+    expect(screen.queryByText(FIXING_LABEL)).toBeNull();
+  });
+
 });

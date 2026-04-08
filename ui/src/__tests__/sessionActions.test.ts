@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getSessionActions } from "../lib/sessionActions";
+import { getSessionActions, isApprovalReady } from "../lib/sessionActions";
 import type { Session } from "../types";
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -559,6 +559,88 @@ describe("getSessionActions", () => {
       expect(withFalse.showApprove).toBe(withDefault.showApprove);
       expect(withFalse.showFix).toBe(withDefault.showFix);
       expect(withFalse.showAsk).toBe(withDefault.showAsk);
+    });
+  });
+
+  // --- fixInProgress DTO field (persisted fix-in-progress state) -----------
+
+  describe("when session.fixInProgress is true", () => {
+    it("hides Approve, Fix, and Ask via the DTO field without needing the isFixing argument", () => {
+      // Given: an Awaiting Approval session whose DTO carries fixInProgress: true
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: true });
+
+      // When: no isFixing argument is passed (the DTO field is the only source)
+      const actions = getSessionActions(session, "idle");
+
+      // Then: all review-stage actions are suppressed by the persisted field alone
+      expect(actions.showApprove).toBe(false);
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
+    });
+
+    it("keeps Delete visible when fixInProgress is true", () => {
+      // Given: Awaiting Approval session with fixInProgress: true
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: true });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: delete is unaffected by the persisted fixing state
+      expect(actions.showDelete).toBe(true);
+    });
+
+    it("fixInProgress: false produces the same result as omitting the field", () => {
+      // Given: two otherwise identical sessions – one with explicit false, one with undefined
+      const withFalse = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: false });
+      const withUndefined = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actionsWithFalse = getSessionActions(withFalse, "idle");
+      const actionsWithUndefined = getSessionActions(withUndefined, "idle");
+
+      // Then: both show the full review actions (approval-ready state)
+      expect(actionsWithFalse.showApprove).toBe(actionsWithUndefined.showApprove);
+      expect(actionsWithFalse.showFix).toBe(actionsWithUndefined.showFix);
+      expect(actionsWithFalse.showAsk).toBe(actionsWithUndefined.showAsk);
+    });
+  });
+
+  // --- isApprovalReady function ---------------------------------------------
+
+  describe("isApprovalReady", () => {
+    it("returns true for Awaiting Approval with planAvailable: true", () => {
+      // Given
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When / Then
+      expect(isApprovalReady(session)).toBe(true);
+    });
+
+    it("returns false when fixInProgress is true even when planAvailable is true", () => {
+      // Given: the backend has persisted a fix-in-progress flag
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: true });
+
+      // When
+      const ready = isApprovalReady(session);
+
+      // Then: the persisted flag overrides the plan-available check
+      expect(ready).toBe(false);
+    });
+
+    it("returns true when fixInProgress is false (no effect)", () => {
+      // Given: fixInProgress is explicitly false
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: false });
+
+      // When / Then: false has no suppressing effect
+      expect(isApprovalReady(session)).toBe(true);
+    });
+
+    it("returns false when planAvailable is false regardless of fixInProgress", () => {
+      // Given: no plan yet
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: false, fixInProgress: false });
+
+      // When / Then
+      expect(isApprovalReady(session)).toBe(false);
     });
   });
 

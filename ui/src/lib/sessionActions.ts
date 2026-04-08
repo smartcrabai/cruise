@@ -4,7 +4,7 @@ export type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled
 
 /** True when the session is in "Awaiting Approval" phase with a plan ready for review. */
 export function isApprovalReady(session: Session): boolean {
-  return session.phase === "Awaiting Approval" && session.planAvailable === true;
+  return session.phase === "Awaiting Approval" && session.planAvailable === true && !session.fixInProgress;
 }
 
 /** Which action buttons are visible in the session detail pane. */
