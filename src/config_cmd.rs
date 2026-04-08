@@ -1,4 +1,4 @@
-//! `cruise config` — show or update application-level configuration.
+//! `cruise config` -- show or update application-level configuration.
 
 use crate::{cli::ConfigArgs, error::Result};
 
