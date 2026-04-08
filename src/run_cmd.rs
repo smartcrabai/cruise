@@ -2323,7 +2323,7 @@ steps:
             "summary should contain PR URL: {summary}"
         );
         assert!(
-            !summary.contains("Failed") && !summary.contains("x"),
+            !summary.contains("Failed") && !summary.contains('x'),
             "completed session should not show failure: {summary}"
         );
     }
@@ -2346,7 +2346,7 @@ steps:
             "summary should contain input: {summary}"
         );
         assert!(
-            !summary.contains("Failed") && !summary.contains("x"),
+            !summary.contains("Failed") && !summary.contains('x'),
             "completed session should not show failure: {summary}"
         );
     }
@@ -2452,7 +2452,7 @@ steps:
             .find(|l| l.contains("refactor cache layer"))
             .unwrap_or_else(|| panic!("refactor cache layer line not found in summary"));
         assert!(
-            !refactor_line.contains("Failed") && !refactor_line.contains("x"),
+            !refactor_line.contains("Failed") && !refactor_line.contains('x'),
             "completed session should not show failure, got: {refactor_line:?}"
         );
 
