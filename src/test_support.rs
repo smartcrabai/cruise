@@ -154,3 +154,22 @@ pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
     session.phase = SessionPhase::Planned;
     session
 }
+
+/// Set up a fake HOME directory for tests.
+///
+/// Returns a list of `EnvGuard`s that restore the original values on drop.
+/// Caller must hold [`lock_process`] for the lifetime of the returned guards.
+#[cfg(unix)]
+#[must_use]
+pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
+    vec![EnvGuard::set("HOME", path.as_os_str())]
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
+    vec![
+        EnvGuard::remove("HOME"),
+        EnvGuard::set("USERPROFILE", path.as_os_str()),
+    ]
+}

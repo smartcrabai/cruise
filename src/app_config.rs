@@ -9,14 +9,14 @@ use crate::error::{CruiseError, Result};
 /// This is distinct from per-workflow YAML configs (which live in `~/.cruise/sessions/`).
 ///
 /// ## Behaviour
-/// - Missing file → returns [`AppConfig::default()`].
-/// - Invalid JSON or invalid field values → returns a clear error (never silently clamped).
+/// - Missing file -> returns [`AppConfig::default()`].
+/// - Invalid JSON or invalid field values -> returns a clear error (never silently clamped).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     /// Maximum number of sessions to execute concurrently in `run --all` mode.
     ///
-    /// Must be ≥ 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
+    /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]
     pub run_all_parallelism: usize,
 }
@@ -54,8 +54,8 @@ impl AppConfig {
 
     /// Load the app config from an explicit path (useful in tests and alternative config locations).
     ///
-    /// - File absent → returns [`AppConfig::default()`].
-    /// - File present but invalid → returns an error.
+    /// - File absent -> returns [`AppConfig::default()`].
+    /// - File present but invalid -> returns an error.
     ///
     /// # Errors
     ///
@@ -127,7 +127,7 @@ impl AppConfig {
 
     /// Validate the config, returning a clear error for any invalid field.
     ///
-    /// `run_all_parallelism` must be ≥ 1. A value of `0` is never silently clamped.
+    /// `run_all_parallelism` must be >= 1. A value of `0` is never silently clamped.
     ///
     /// # Errors
     ///
@@ -135,7 +135,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         if self.run_all_parallelism == 0 {
             return Err(CruiseError::Other(
-                "run_all_parallelism must be ≥ 1 (got 0)".to_string(),
+                "run_all_parallelism must be >= 1 (got 0)".to_string(),
             ));
         }
         Ok(())
@@ -147,7 +147,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // -- Helpers --------------------------------------------------------------
 
     /// Write `content` to `<dir>/.config/cruise/config.json`, creating parent dirs.
     /// Returns the path to the written file.
@@ -159,17 +159,17 @@ mod tests {
         config_path
     }
 
-    // ── AppConfig::default() ──────────────────────────────────────────────────
+    // -- AppConfig::default() --------------------------------------------------
 
     #[test]
     fn test_default_parallelism_is_one() {
         // Given/When: a default AppConfig
         let config = AppConfig::default();
-        // Then: run_all_parallelism is 1 — backward-compatible sequential behaviour
+        // Then: run_all_parallelism is 1 -- backward-compatible sequential behaviour
         assert_eq!(config.run_all_parallelism, 1);
     }
 
-    // ── AppConfig::validate() ─────────────────────────────────────────────────
+    // -- AppConfig::validate() ------------------------------------------------
 
     #[test]
     fn test_validate_accepts_parallelism_of_one() {
@@ -193,13 +193,13 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_zero_parallelism() {
-        // Given: parallelism of 0 — explicitly invalid
+        // Given: parallelism of 0 -- explicitly invalid
         let config = AppConfig {
             run_all_parallelism: 0,
         };
         // When: validate
         let result = config.validate();
-        // Then: returns a clear error — must NOT be silently clamped
+        // Then: returns a clear error -- must NOT be silently clamped
         assert!(
             result.is_err(),
             "expected error for run_all_parallelism=0, got Ok"
@@ -214,7 +214,7 @@ mod tests {
         );
     }
 
-    // ── AppConfig::config_path() ──────────────────────────────────────────────
+    // -- AppConfig::config_path() ----------------------------------------------
 
     #[test]
     fn test_config_path_ends_with_config_cruise_config_json() {
@@ -235,7 +235,7 @@ mod tests {
         );
     }
 
-    // ── AppConfig::load_from() ────────────────────────────────────────────────
+    // -- AppConfig::load_from() ------------------------------------------------
 
     #[test]
     fn test_load_from_returns_defaults_when_file_absent() {
@@ -260,18 +260,18 @@ mod tests {
         let config_path = write_config_file(tmp.path(), "not valid json at all");
         // When: load_from
         let result = AppConfig::load_from(&config_path);
-        // Then: returns an error — not silently ignored or defaulted
+        // Then: returns an error -- not silently ignored or defaulted
         assert!(result.is_err(), "expected error for invalid JSON, got Ok");
     }
 
     #[test]
     fn test_load_from_returns_error_for_empty_json_object() {
-        // Given: {} is valid JSON but missing required fields — depends on serde defaults
+        // Given: {} is valid JSON but missing required fields -- depends on serde defaults
         // The expected behaviour is to fill in the default. An explicit {} should work.
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let config_path = write_config_file(tmp.path(), "{}");
-        // When: load_from — {} has no run_all_parallelism; serde may use field default
-        // Then: should succeed (serde can apply field-level default) or error gracefully —
+        // When: load_from -- {} has no run_all_parallelism; serde may use field default
+        // Then: should succeed (serde can apply field-level default) or error gracefully --
         //       never panic. Either outcome is acceptable; we just verify no panic.
         let _result = AppConfig::load_from(&config_path);
         // (no assertion on Ok/Err; just verifying the call completes safely)
@@ -279,12 +279,12 @@ mod tests {
 
     #[test]
     fn test_load_from_returns_error_for_zero_parallelism_in_file() {
-        // Given: a config file with run_all_parallelism = 0 — explicitly invalid
+        // Given: a config file with run_all_parallelism = 0 -- explicitly invalid
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let config_path = write_config_file(tmp.path(), r#"{"run_all_parallelism": 0}"#);
         // When: load_from
         let result = AppConfig::load_from(&config_path);
-        // Then: returns a clear error — must NOT silently clamp to 1
+        // Then: returns a clear error -- must NOT silently clamp to 1
         assert!(
             result.is_err(),
             "expected error for run_all_parallelism=0, got Ok"
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(config.run_all_parallelism, 4);
     }
 
-    // ── AppConfig::save_to() + load_from() round-trip ─────────────────────────
+    // -- AppConfig::save_to() + load_from() round-trip ------------------------
 
     #[test]
     fn test_save_to_then_load_from_round_trips_parallelism() {

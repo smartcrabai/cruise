@@ -92,7 +92,7 @@ fn save_session_state_with_conflict_resolution(
         return manager.save_with_fingerprint(session);
     }
 
-    // Conflict detected — build a user-facing message from the already-read contents.
+    // Conflict detected -- build a user-facing message from the already-read contents.
     let state_path = manager.state_path(&session.id);
     let message = session_state_conflict_message(&state_path, &current_contents);
 
@@ -142,7 +142,7 @@ fn prompt_for_session_state_conflict(message: &str) -> Result<SessionStateConfli
         return Ok(choice);
     }
 
-    eprintln!("{} {}", style("⚠").yellow().bold(), message);
+    eprintln!("{} {}", style("!").yellow().bold(), message);
     let options = vec![
         SESSION_STATE_CONFLICT_ABORT_LABEL,
         SESSION_STATE_CONFLICT_OVERWRITE_LABEL,
@@ -385,10 +385,10 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     // Handle Ctrl+C: save as Suspended so the session can be resumed later.
     if matches!(exec_result, Err(CruiseError::Interrupted)) {
-        logger.write("⏸ cancelled");
+        logger.write("|| cancelled");
         eprintln!(
-            "\n{} Interrupted — session saved as Suspended.",
-            style("⏸").yellow().bold()
+            "\n{} Interrupted -- session saved as Suspended.",
+            style("||").yellow().bold()
         );
         session.phase = SessionPhase::Suspended;
         manager.save(session)?;
@@ -398,7 +398,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let overall_result = match exec_result {
         Ok(exec) => {
             logger.write(&format!(
-                "✓ completed — run: {}, skipped: {}, failed: {}",
+                "v completed -- run: {}, skipped: {}, failed: {}",
                 exec.run, exec.skipped, exec.failed
             ));
             match &execution_workspace {
@@ -418,7 +418,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             }
         }
         Err(e) => {
-            logger.write(&format!("✗ failed: {}", e.detailed_message()));
+            logger.write(&format!("x failed: {}", e.detailed_message()));
             Err(e)
         }
     };
@@ -439,9 +439,9 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
 /// Apply the result of a step execution to the session state.
 ///
-/// - `Ok(())` → `Completed`
-/// - `Err(StepPaused)` → keep `Running` (session can be resumed with `cruise run`)
-/// - `Err(other)` → `Failed`
+/// - `Ok(())` -> `Completed`
+/// - `Err(StepPaused)` -> keep `Running` (session can be resumed with `cruise run`)
+/// - `Err(other)` -> `Failed`
 fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
     match result {
         Ok(()) => {
@@ -465,12 +465,12 @@ fn log_resume_message(session: &SessionState) {
     };
     match &session.phase {
         SessionPhase::Running | SessionPhase::Suspended => {
-            eprintln!("{} Resuming from step: {}", style("↺").cyan(), step);
+            eprintln!("{} Resuming from step: {}", style("R").cyan(), step);
         }
         SessionPhase::Failed(_) => {
             eprintln!(
                 "{} Retrying from failed step: {}",
-                style("↺").yellow(),
+                style("R").yellow(),
                 step
             );
         }
@@ -485,13 +485,13 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
             let suffix = if *reused { " (reused)" } else { "" };
             eprintln!(
                 "{} worktree: {}{}",
-                style("→").cyan(),
+                style("->").cyan(),
                 ctx.path.display(),
                 suffix
             );
         }
         ExecutionWorkspace::CurrentBranch { path } => {
-            eprintln!("{} current branch: {}", style("→").cyan(), path.display());
+            eprintln!("{} current branch: {}", style("->").cyan(), path.display());
         }
     }
 }
@@ -557,8 +557,8 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
     if pending.len() == 1 {
         let s = &pending[0];
         eprintln!(
-            "{} Selected session: {} — {}",
-            style("→").cyan(),
+            "{} Selected session: {} -- {}",
+            style("->").cyan(),
             s.id,
             crate::display::truncate(&s.input, 60)
         );
@@ -619,30 +619,30 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                 let pr = result
                     .pr_url
                     .as_deref()
-                    .map(|url| format!(" {} {url}", style("→").yellow()))
+                    .map(|url| format!(" {} {url}", style("->").yellow()))
                     .unwrap_or_default();
                 format!(
                     "[{}] {} {}{}",
                     i + 1,
-                    style("✓").green().bold(),
+                    style("v").green().bold(),
                     truncated,
                     pr
                 )
             }
             SessionPhase::Failed(err) => {
                 format!(
-                    "[{}] {} {} — Failed: {}",
+                    "[{}] {} {} -- Failed: {}",
                     i + 1,
-                    style("✗").red().bold(),
+                    style("x").red().bold(),
                     truncated,
                     err
                 )
             }
             SessionPhase::Suspended => {
                 format!(
-                    "[{}] {} {} — Suspended",
+                    "[{}] {} {} -- Suspended",
                     i + 1,
-                    style("⏸").yellow().bold(),
+                    style("||").yellow().bold(),
                     truncated
                 )
             }
@@ -2211,7 +2211,7 @@ steps:
     }
 
     // -----------------------------------------------------------------------
-    // format_run_all_summary — Suspended
+    // format_run_all_summary -- Suspended
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2323,7 +2323,7 @@ steps:
             "summary should contain PR URL: {summary}"
         );
         assert!(
-            !summary.contains("Failed") && !summary.contains("✗"),
+            !summary.contains("Failed") && !summary.contains('x'),
             "completed session should not show failure: {summary}"
         );
     }
@@ -2346,7 +2346,7 @@ steps:
             "summary should contain input: {summary}"
         );
         assert!(
-            !summary.contains("Failed") && !summary.contains("✗"),
+            !summary.contains("Failed") && !summary.contains('x'),
             "completed session should not show failure: {summary}"
         );
     }
@@ -2414,7 +2414,7 @@ steps:
 
     #[test]
     fn test_format_run_all_summary_mixed_with_completed_no_pr() {
-        // Given: 3 sessions — success with PR, completed without PR, and explicit failure
+        // Given: 3 sessions -- success with PR, completed without PR, and explicit failure
         let results = vec![
             make_session(
                 "add auth module",
@@ -2452,7 +2452,7 @@ steps:
             .find(|l| l.contains("refactor cache layer"))
             .unwrap_or_else(|| panic!("refactor cache layer line not found in summary"));
         assert!(
-            !refactor_line.contains("Failed") && !refactor_line.contains("✗"),
+            !refactor_line.contains("Failed") && !refactor_line.contains('x'),
             "completed session should not show failure, got: {refactor_line:?}"
         );
 
@@ -2488,7 +2488,7 @@ steps:
 
     // -----------------------------------------------------------------------
     // apply_run_result_to_session() integration tests
-    // These test the finalization logic across engine → run_cmd → session.
+    // These test the finalization logic across engine -> run_cmd -> session.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2508,7 +2508,7 @@ steps:
     #[test]
     fn test_apply_run_result_step_paused_keeps_running_phase() {
         // Given: a Running session and a StepPaused error
-        // (StepPaused means user pressed Esc — session should be resumable)
+        // (StepPaused means user pressed Esc -- session should be resumable)
         let mut session = make_session("some task", SessionPhase::Running, None);
         // When: applying StepPaused
         apply_run_result_to_session(&mut session, &Err(CruiseError::StepPaused));
@@ -2576,7 +2576,7 @@ steps:
         );
     }
 
-    // ── prompt_workspace_mode unit tests ──────────────────────────────────
+    // -- prompt_workspace_mode unit tests --------------------------------
 
     #[test]
     fn test_prompt_workspace_mode_returns_worktree_when_noninteractive() {
@@ -2633,7 +2633,7 @@ steps:
         );
     }
 
-    // ── run_single workspace mode selection integration tests ─────────────
+    // -- run_single workspace mode selection integration tests ------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_single_prompts_on_fresh_default_session_and_selects_current_branch() {
@@ -2743,7 +2743,7 @@ steps:
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_single_does_not_prompt_when_session_already_has_current_branch_mode() {
         // Given: a session with workspace_mode=CurrentBranch already set (no current_step)
-        // TEST_WORKSPACE_MODE_ENV is intentionally absent — if prompt were called, it would hang
+        // TEST_WORKSPACE_MODE_ENV is intentionally absent -- if prompt were called, it would hang
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let mut process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
@@ -2784,7 +2784,7 @@ steps:
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_single_does_not_prompt_when_resuming_saved_current_branch_session() {
         // Given: a session being resumed (current_step is Some) in CurrentBranch mode
-        // TEST_WORKSPACE_MODE_ENV is absent — if prompt were called, it would hang
+        // TEST_WORKSPACE_MODE_ENV is absent -- if prompt were called, it would hang
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let mut process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
@@ -2907,7 +2907,7 @@ steps:
         let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
 
         let session_id_1 = "20260403400000";
-        let session_id_2 = "20260403400001"; // added mid-run — newer ID
+        let session_id_2 = "20260403400001"; // added mid-run -- newer ID
 
         let mut session_1 = SessionState::new(
             session_id_1.to_string(),

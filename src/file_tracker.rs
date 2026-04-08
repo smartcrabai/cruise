@@ -18,7 +18,7 @@ pub(crate) fn sha256_digest(data: &[u8]) -> [u8; 32] {
 /// SHA-256 digest of a single file.
 type FileHash = [u8; 32];
 
-/// A snapshot of a directory tree: file path → hash.
+/// A snapshot of a directory tree: file path -> hash.
 type Snapshot = HashMap<PathBuf, FileHash>;
 
 /// Tracks file changes between workflow steps using SHA-256 snapshots.
@@ -106,7 +106,7 @@ impl Default for FileTracker {
     }
 }
 
-/// Scan `root` recursively and return a path→hash map, skipping excluded dirs.
+/// Scan `root` recursively and return a path->hash map, skipping excluded dirs.
 fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
     let mut snapshot = HashMap::new();
 

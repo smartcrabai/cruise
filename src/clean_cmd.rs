@@ -14,7 +14,7 @@ pub fn run(_args: CleanArgs) -> Result<()> {
     } else {
         eprintln!(
             "{} Removed {} session(s) with closed/merged PRs.",
-            style("✓").green().bold(),
+            style("v").green().bold(),
             report.deleted,
         );
     }

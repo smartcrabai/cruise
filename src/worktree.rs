@@ -97,7 +97,7 @@ pub fn setup_session_worktree(
 ///
 /// Returns an error only if the `git` process itself fails to spawn (e.g. git is not found).
 /// If the git command exits with a non-zero status (e.g. the worktree or branch no longer
-/// exists), the failure is logged as a warning and `Ok(())` is returned — cleanup is
+/// exists), the failure is logged as a warning and `Ok(())` is returned -- cleanup is
 /// best-effort and partial failures do not propagate.
 pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
     let output = Command::new("git")

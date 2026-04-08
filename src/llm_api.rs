@@ -19,7 +19,7 @@ pub struct LlmApiConfig {
     pub model: String,
 }
 
-// ── Internal API types ────────────────────────────────────────────────────
+// -- Internal API types ----------------------------------------------------
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct ApiMessage {
@@ -86,7 +86,7 @@ struct ApiResponseMessage {
     tool_calls: Option<Vec<ApiToolCall>>,
 }
 
-// ── Public functions ──────────────────────────────────────────────────────
+// -- Public functions ------------------------------------------------------
 
 /// Resolve LLM API config from environment variables and/or config file values.
 ///
@@ -153,7 +153,7 @@ fn validate_read_file_path(working_dir: &Path, file_path: &str) -> Result<PathBu
     }
     // Return the joined (non-canonicalized) path so the result starts_with
     // the original working_dir even on systems where it contains symlinks
-    // (e.g. /var → /private/var on macOS).
+    // (e.g. /var -> /private/var on macOS).
     Ok(candidate)
 }
 
@@ -210,7 +210,7 @@ pub async fn generate_pr_metadata(
     let system_content = format!(
         "You are a helpful assistant that generates Pull Request metadata. \
          Use the available tools to inspect git diffs. \
-         After gathering enough information, output ONLY the following block — \
+         After gathering enough information, output ONLY the following block -- \
          no preamble, explanation, or commentary:\n\n\
          ---\ntitle: \"Write a concise PR title here\"\n---\n\
          Write the PR description here.\n\n\
@@ -284,7 +284,7 @@ pub async fn generate_pr_metadata(
         }
     }
 
-    // Max tool rounds exceeded — request final response without tools
+    // Max tool rounds exceeded -- request final response without tools
     let req = ChatRequest {
         model: &config.model,
         messages: &messages,
@@ -318,7 +318,7 @@ pub async fn generate_session_title(
 
     let system_content = "You are a helpful assistant that generates concise session titles. \
          Given a task description and a plan, output ONLY a short title (maximum 80 characters). \
-         No preamble, explanation, quotes, or commentary — just the title text.";
+         No preamble, explanation, quotes, or commentary -- just the title text.";
 
     let user_content = format!("Task: {input}\n\nPlan:\n{plan_content}");
 
@@ -355,7 +355,7 @@ pub async fn generate_session_title(
     Ok(trimmed)
 }
 
-// ── Private helpers ───────────────────────────────────────────────────────
+// -- Private helpers -------------------------------------------------------
 
 fn build_client(config: &LlmApiConfig) -> Result<reqwest::Client> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -572,7 +572,7 @@ mod tests {
         )
     }
 
-    // ── resolve_llm_api_config ────────────────────────────────────────────────
+    // -- resolve_llm_api_config -------------------------------------------------
 
     #[test]
     fn test_resolve_llm_api_config_returns_none_when_no_api_key() {
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(config.model, "claude-opus-4-5");
     }
 
-    // ── validate_read_file_path ──────────────────────────────────────────────
+    // -- validate_read_file_path ----------------------------------------------
 
     #[test]
     fn test_validate_read_file_path_allows_file_within_working_dir() {
@@ -857,11 +857,11 @@ mod tests {
         );
     }
 
-    // ── validate_git_subcommand ──────────────────────────────────────────────
+    // -- validate_git_subcommand ------------------------------------------------
 
     #[test]
     fn test_validate_git_subcommand_allows_diff() {
-        // Given: "diff" — a read-only subcommand
+        // Given: "diff" -- a read-only subcommand
         // When / Then: returns Ok
         assert!(
             validate_git_subcommand("diff").is_ok(),
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_validate_git_subcommand_rejects_push() {
-        // Given: "push" — a destructive subcommand
+        // Given: "push" -- a destructive subcommand
         // When / Then: returns Err
         assert!(
             validate_git_subcommand("push").is_err(),
@@ -953,7 +953,7 @@ mod tests {
         );
     }
 
-    // ── validate_git_args ────────────────────────────────────────────────────
+    // -- validate_git_args -----------------------------------------------------
 
     #[test]
     fn test_validate_git_args_allows_empty() {

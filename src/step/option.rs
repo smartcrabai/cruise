@@ -27,7 +27,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
     let labels: Vec<&str> = choices.iter().map(super::OptionChoice::label).collect();
 
     if labels.is_empty() {
-        // Nothing to select — continue to the next step.
+        // Nothing to select -- continue to the next step.
         return Ok(OptionResult {
             next_step: None,
             text_input: None,

@@ -27,7 +27,7 @@ pub struct VariableStore {
 /// A named variable value.
 #[derive(Debug, Clone)]
 pub enum NamedVariable {
-    /// A file path – resolves to the path string itself (not the file contents).
+    /// A file path - resolves to the path string itself (not the file contents).
     FilePath(std::path::PathBuf),
     /// A plain string value.
     Value(String),
@@ -106,7 +106,7 @@ impl VariableStore {
                     let value = self.get_variable(&var_name)?;
                     result.push_str(&value);
                 } else {
-                    // No closing brace — emit literally.
+                    // No closing brace -- emit literally.
                     result.push('{');
                     result.push_str(&var_name);
                 }
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn test_resolve_unclosed_brace() {
         let store = VariableStore::new("input".to_string());
-        // No closing brace — emit literally.
+        // No closing brace -- emit literally.
         assert_eq!(
             store
                 .resolve("Hello {unclosed")
@@ -340,9 +340,9 @@ mod tests {
 
     #[test]
     fn test_resolve_double_brace() {
-        // Given: template "{{input}}" — outer `{` opens a var whose name is "{input"
+        // Given: template "{{input}}" -- outer `{` opens a var whose name is "{input"
         let store = VariableStore::new("hello".to_string());
-        // The parser sees `{` → starts collecting; collects `{input` until `}` is hit.
+        // The parser sees `{` -> starts collecting; collects `{input` until `}` is hit.
         // Then calls get_variable("{input") which is undefined.
         let err = store
             .resolve("{{input}}")
@@ -355,9 +355,9 @@ mod tests {
 
     #[test]
     fn test_resolve_empty_var_name() {
-        // Given: template "{}" — empty variable name
+        // Given: template "{}" -- empty variable name
         let store = VariableStore::new("hello".to_string());
-        // get_variable("") falls through to named lookup, nothing registered → UndefinedVariable
+        // get_variable("") falls through to named lookup, nothing registered -> UndefinedVariable
         let err = store
             .resolve("{}")
             .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
@@ -369,9 +369,9 @@ mod tests {
 
     #[test]
     fn test_resolve_trailing_open_brace() {
-        // Given: template "trailing {" — no closing brace
+        // Given: template "trailing {" -- no closing brace
         let store = VariableStore::new("hello".to_string());
-        // Parser hits `{`, collects until end-of-string, closed=false → emits literally.
+        // Parser hits `{`, collects until end-of-string, closed=false -> emits literally.
         let result = store
             .resolve("trailing {")
             .unwrap_or_else(|e| panic!("{e:?}"));

@@ -35,7 +35,8 @@ pub fn run() {
             commands::list_directory,
             commands::run_all_sessions,
             commands::get_update_readiness,
-            commands::get_config_steps,
+            commands::get_new_session_history_summary,
+            commands::get_new_session_config_defaults,
             commands::get_app_config,
             commands::update_app_config,
         ])

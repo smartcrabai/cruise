@@ -10,6 +10,9 @@ use crate::config::{StepConfig, WorkflowConfig, validate_config};
 use crate::engine::{resolve_command_with_model, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
+use crate::new_session_history::{
+    NewSessionHistory, resolved_config_key_for_session, skipped_steps_to_default_indices,
+};
 use crate::session::{PLAN_VAR, SessionManager, SessionState, get_cruise_home};
 use crate::step::PromptStep;
 use crate::variable::VariableStore;
@@ -73,7 +76,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     eprintln!(
         "\n{} {}",
-        style("▶").cyan().bold(),
+        style(">").cyan().bold(),
         style("[plan] creating plan...").bold()
     );
 
@@ -118,7 +121,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     ) {
         eprintln!(
             "\n{} Plan generation failed. Session {} discarded.",
-            style("✗").red().bold(),
+            style("x").red().bold(),
             session_id
         );
         if let Err(del_err) = manager.delete(&session_id) {
@@ -185,28 +188,86 @@ async fn approve_with_title(
     manager.save(session)
 }
 
+enum StepSkipSelection {
+    Confirmed(Vec<String>),
+    Cancelled,
+}
+
 /// Present a `MultiSelect` prompt so the user can choose which steps to skip.
-/// Returns an empty `Vec` when there are no steps, the user cancels, or
-/// an interruption is received (so the approve flow can continue unblocked).
-fn select_steps_to_skip(steps: &IndexMap<String, StepConfig>) -> Result<Vec<String>> {
+/// Returns [`StepSkipSelection::Cancelled`] when the user cancels or an
+/// interruption is received so the approve flow can continue unblocked.
+///
+/// `default_indices` pre-selects steps by their 0-based position in `steps`.
+fn select_steps_to_skip(
+    steps: &IndexMap<String, StepConfig>,
+    default_indices: &[usize],
+) -> Result<StepSkipSelection> {
     let step_names: Vec<&str> = steps.keys().map(std::string::String::as_str).collect();
     if step_names.is_empty() {
-        return Ok(vec![]);
+        return Ok(StepSkipSelection::Confirmed(vec![]));
     }
-    match inquire::MultiSelect::new(
+    let prompt = inquire::MultiSelect::new(
         "Steps to skip (Space to toggle, Enter to confirm):",
         step_names,
     )
     .with_help_message("No selection = run all steps")
-    .prompt()
-    {
-        Ok(selected) => Ok(selected
-            .into_iter()
-            .map(std::string::ToString::to_string)
-            .collect()),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(vec![]),
+    .with_default(default_indices);
+    match prompt.prompt() {
+        Ok(selected) => Ok(StepSkipSelection::Confirmed(
+            selected
+                .into_iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        )),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            Ok(StepSkipSelection::Cancelled)
+        }
         Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
+}
+
+fn apply_skip_step_selection(
+    history: &mut NewSessionHistory,
+    resolved_config_key: &str,
+    selection: StepSkipSelection,
+) -> (Vec<String>, bool) {
+    match selection {
+        StepSkipSelection::Confirmed(skipped_steps) => {
+            history.record_skip_selection_for_config(resolved_config_key, skipped_steps.clone());
+            (skipped_steps, true)
+        }
+        StepSkipSelection::Cancelled => (vec![], false),
+    }
+}
+
+/// Let the user choose steps to skip with history-based defaults, then record
+/// the selection for future sessions. History is loaded once.
+fn select_skipped_steps_with_history(
+    session: &SessionState,
+    config: &WorkflowConfig,
+) -> Result<Vec<String>> {
+    if config.steps.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let key = resolved_config_key_for_session(session.config_path.as_ref());
+    let mut history = NewSessionHistory::load_best_effort();
+
+    let default_indices = match history.latest_entry_for_config(&key) {
+        Some(entry) => {
+            let all_steps: Vec<&str> = config.steps.keys().map(String::as_str).collect();
+            skipped_steps_to_default_indices(&all_steps, &entry.skipped_steps)
+        }
+        None => vec![],
+    };
+
+    let selection = select_steps_to_skip(&config.steps, &default_indices)?;
+    let (skipped_steps, should_persist) = apply_skip_step_selection(&mut history, &key, selection);
+    if should_persist {
+        history.save_best_effort();
+    }
+
+    Ok(skipped_steps)
 }
 
 /// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
@@ -229,7 +290,7 @@ async fn run_approve_loop(
         Err(err) => {
             eprintln!(
                 "\n{} Generated plan is missing or empty. Session {} discarded.",
-                style("✗").red().bold(),
+                style("x").red().bold(),
                 session.id
             );
             if let Err(del_err) = manager.delete(&session.id) {
@@ -246,7 +307,7 @@ async fn run_approve_loop(
             approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
             eprintln!(
                 "\n{} Session {} created.",
-                style("✓").green().bold(),
+                style("v").green().bold(),
                 session.id
             );
             eprintln!(
@@ -269,11 +330,11 @@ async fn run_approve_loop(
 
         match selected {
             "Approve" => {
-                session.skipped_steps = select_steps_to_skip(&config.steps)?;
+                session.skipped_steps = select_skipped_steps_with_history(session, config)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Session {} created.",
-                    style("✓").green().bold(),
+                    style("v").green().bold(),
                     session.id
                 );
                 eprintln!(
@@ -300,11 +361,11 @@ async fn run_approve_loop(
                 run_ask_plan(config, vars, rate_limit_retries).await?;
             }
             "Execute now" => {
-                session.skipped_steps = select_steps_to_skip(&config.steps)?;
+                session.skipped_steps = select_skipped_steps_with_history(session, config)?;
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Executing session {}...",
-                    style("→").cyan(),
+                    style("->").cyan(),
                     session.id
                 );
                 let run_args = crate::cli::RunArgs {
@@ -411,7 +472,7 @@ async fn run_plan_prompt(
         instruction: None,
     };
     let env = std::collections::HashMap::new();
-    eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
+    eprintln!("\n{} {}", style(">").cyan().bold(), style(label).bold());
     let compiled = crate::workflow::compile(config.clone())?;
     run_prompt_step(vars, &compiled, &step, rate_limit_retries, &env, None, None).await?;
     Ok(())
@@ -447,6 +508,7 @@ fn prompt_for_plan_input() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
 
     #[test]
     fn test_resolve_input_from_arg() {
@@ -479,7 +541,7 @@ mod tests {
         );
     }
 
-    // ── resolve_input with multiline stdin ───────────────────────────────────
+    // -- resolve_input with multiline stdin ----------------------------------
 
     #[test]
     fn test_resolve_input_multiline_from_stdin_preserves_internal_newlines() {
@@ -504,5 +566,77 @@ mod tests {
         });
         // Then: only leading/trailing whitespace is removed, internal newlines are preserved
         assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
+    }
+
+    #[test]
+    fn test_apply_skip_step_selection_records_confirmed_empty_selection() {
+        let mut history = NewSessionHistory::default();
+        let (skipped_steps, should_persist) = apply_skip_step_selection(
+            &mut history,
+            "/config/a.yaml",
+            StepSkipSelection::Confirmed(vec![]),
+        );
+
+        assert!(should_persist);
+        assert!(skipped_steps.is_empty());
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(
+            history.entries[0],
+            NewSessionHistoryEntry {
+                selected_at: history.entries[0].selected_at.clone(),
+                requested_config_path: None,
+                working_dir: String::new(),
+                resolved_config_key: "/config/a.yaml".to_string(),
+                skipped_steps: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_apply_skip_step_selection_does_not_record_cancelled_prompt() {
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            requested_config_path: None,
+            working_dir: String::new(),
+            resolved_config_key: "/config/a.yaml".to_string(),
+            skipped_steps: vec!["review".to_string()],
+        });
+
+        let (skipped_steps, should_persist) =
+            apply_skip_step_selection(&mut history, "/config/a.yaml", StepSkipSelection::Cancelled);
+
+        assert!(!should_persist);
+        assert!(skipped_steps.is_empty());
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
+    }
+
+    #[test]
+    fn test_apply_skip_step_selection_updates_existing_gui_history_entry() {
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: "2026-04-07T00:00:00Z".to_string(),
+            requested_config_path: Some("/config/a.yaml".to_string()),
+            working_dir: "/tmp/project".to_string(),
+            resolved_config_key: "/config/a.yaml".to_string(),
+            skipped_steps: vec!["plan".to_string()],
+        });
+
+        let (skipped_steps, should_persist) = apply_skip_step_selection(
+            &mut history,
+            "/config/a.yaml",
+            StepSkipSelection::Confirmed(vec!["review".to_string()]),
+        );
+
+        assert!(should_persist);
+        assert_eq!(skipped_steps, vec!["review"]);
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(
+            history.entries[0].requested_config_path.as_deref(),
+            Some("/config/a.yaml")
+        );
+        assert_eq!(history.entries[0].working_dir, "/tmp/project");
+        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
     }
 }
