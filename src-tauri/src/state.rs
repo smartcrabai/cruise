@@ -113,7 +113,6 @@ impl AppState {
         self.fixing_set().contains(session_id)
     }
 
-
     /// Register a new active session, returning its option-responder and cancellation token.
     ///
     /// Returns `(option_responder, cancel_token)` in a single lock acquisition.
