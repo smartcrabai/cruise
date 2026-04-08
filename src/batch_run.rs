@@ -38,11 +38,11 @@ pub struct BatchSessionResult {
 ///
 /// # Arguments
 ///
-/// * `manager`      – Provides candidate enumeration via [`SessionManager::run_all_remaining`].
-/// * `parallelism`  – Maximum number of sessions running concurrently (must be ≥ 1).
-/// * `cancel_token` – When cancelled, no new sessions are scheduled; in-flight sessions
+/// * `manager`      - Provides candidate enumeration via [`SessionManager::run_all_remaining`].
+/// * `parallelism`  - Maximum number of sessions running concurrently (must be >= 1).
+/// * `cancel_token` - When cancelled, no new sessions are scheduled; in-flight sessions
 ///   receive the *same* token clone so they can observe cancellation.
-/// * `run_fn`       – Called once per session; receives the session state and a
+/// * `run_fn`       - Called once per session; receives the session state and a
 ///   cancellation token clone. Must return a `Send` future.
 ///
 /// # Returns
@@ -65,7 +65,7 @@ where
 {
     if parallelism == 0 {
         return Err(crate::error::CruiseError::Other(
-            "run_all_with_parallelism: parallelism must be ≥ 1 (got 0)".to_string(),
+            "run_all_with_parallelism: parallelism must be >= 1 (got 0)".to_string(),
         ));
     }
 
@@ -177,7 +177,7 @@ mod tests {
         session::{SessionManager, SessionPhase, SessionState, WorkspaceMode},
     };
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // -- Helpers --------------------------------------------------------------
 
     /// Create a minimal `Planned` session and register it with the manager.
     fn make_planned_session(manager: &SessionManager, id: &str, base_dir: &std::path::Path) {
@@ -253,7 +253,7 @@ mod tests {
         }
     }
 
-    // ── Basic scheduling ──────────────────────────────────────────────────────
+    // -- Basic scheduling ------------------------------------------------------
 
     #[tokio::test]
     async fn test_empty_candidate_list_returns_empty_results() {
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(ids, ["20260101000001", "20260101000002", "20260101000003"]);
     }
 
-    // ── Result ordering ───────────────────────────────────────────────────────
+    // -- Result ordering -------------------------------------------------------
 
     #[tokio::test]
     async fn test_results_are_sorted_by_batch_index_ascending() {
@@ -342,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_results_maintain_scheduling_order_when_completions_are_out_of_order() {
-        // Given: two sessions — session-A is slow, session-B is fast.
+        // Given: two sessions -- session-A is slow, session-B is fast.
         // With parallelism=2 both start simultaneously.
         // Session B completes first; session A completes second.
         // Expected: results[0].session_id == "A" (scheduled first) regardless.
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(results[1].batch_index, 1);
     }
 
-    // ── Session added mid-run ─────────────────────────────────────────────────
+    // -- Session added mid-run ------------------------------------------------
 
     #[tokio::test]
     async fn test_session_added_while_first_is_running_is_picked_up() {
@@ -471,7 +471,7 @@ mod tests {
         );
     }
 
-    // ── Seen set: no duplicate execution ─────────────────────────────────────
+    // -- Seen set: no duplicate execution -------------------------------------
 
     #[tokio::test]
     async fn test_session_is_not_executed_twice() {
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(count, 1, "session must not be executed twice");
     }
 
-    // ── Cancellation ─────────────────────────────────────────────────────────
+    // -- Cancellation ---------------------------------------------------------
 
     #[tokio::test]
     async fn test_cancellation_before_start_returns_empty_results() {
@@ -608,11 +608,11 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
-    // ── Error cases ───────────────────────────────────────────────────────────
+    // -- Error cases ----------------------------------------------------------
 
     #[tokio::test]
     async fn test_zero_parallelism_returns_error() {
-        // Given: parallelism = 0 — explicitly invalid
+        // Given: parallelism = 0 -- explicitly invalid
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
         make_planned_session(&manager, "20260101000001", tmp.path());

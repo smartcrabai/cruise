@@ -2,6 +2,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use cruise::new_session_history::{
+    NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
+};
 use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
     current_iso8601, get_cruise_home,
@@ -214,19 +217,6 @@ fn prepare_run_session(
 }
 
 // ─── Filesystem commands ───────────────────────────────────────────────────────
-
-/// Expand a leading `~` to the home directory. Returns the path unchanged if it does
-/// not start with `~`.
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with('~') {
-        let home = home::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        format!("{}{}", home, &path[1..])
-    } else {
-        path.to_string()
-    }
-}
 
 /// List subdirectories of `path`, returning up to 50 entries sorted alphabetically.
 ///
@@ -443,6 +433,23 @@ pub struct ConfigEntryDto {
     pub name: String,
 }
 
+/// Summary of the latest GUI "New Session" selections.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSessionHistorySummaryDto {
+    pub last_requested_config_path: Option<String>,
+    pub last_working_dir: Option<String>,
+    pub recent_working_dirs: Vec<String>,
+}
+
+/// Step list and default skip-step selections for the GUI form.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSessionConfigDefaultsDto {
+    pub steps: Vec<cruise::workflow::SkippableStepNode>,
+    pub default_skipped_steps: Vec<String>,
+}
+
 /// List available workflow config files in `~/.cruise/` (excluding sessions/ and worktrees/).
 #[tauri::command]
 pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
@@ -507,6 +514,17 @@ pub async fn create_session(
     session.config_path = source.path().cloned();
     session.skipped_steps = skipped_steps;
     manager.create(&session).map_err(|e| e.to_string())?;
+
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        requested_config_path: config_path,
+        working_dir: base.to_string_lossy().into_owned(),
+        resolved_config_key: resolved_config_key_for_session(source.path()),
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
+
     let _ = channel.send(PlanEvent::SessionCreated {
         session_id: session_id.clone(),
     });
@@ -558,22 +576,58 @@ pub async fn create_session(
     }
 }
 
-/// Return the ordered list of step names defined in a workflow config file.
-///
-/// Used by the GUI to populate the "Skip Steps" checkbox list before
-/// the user creates a new session.  Returns an empty list when `config_path`
-/// is `None` (built-in default) or when the config has no steps.
+/// Return the latest persisted New Session selections and recent working directories.
 #[tauri::command]
-pub fn get_config_steps(config_path: Option<String>) -> std::result::Result<Vec<String>, String> {
-    let yaml = match config_path {
-        Some(path) => {
-            std::fs::read_to_string(&path).map_err(|e| format!("Failed to read config: {e}"))?
+pub fn get_new_session_history_summary() -> std::result::Result<NewSessionHistorySummaryDto, String>
+{
+    let history = NewSessionHistory::load_best_effort();
+    let mut seen = HashSet::new();
+    let mut recent_working_dirs = Vec::new();
+    let mut last_requested_config_path = None;
+    let mut last_working_dir = None;
+    for entry in &history.entries {
+        if entry.working_dir.is_empty() {
+            continue;
         }
-        None => return Ok(vec![]),
-    };
+        if last_working_dir.is_none() {
+            last_requested_config_path = entry.requested_config_path.clone();
+            last_working_dir = Some(entry.working_dir.clone());
+        }
+        if seen.insert(entry.working_dir.clone()) && recent_working_dirs.len() < 5 {
+            recent_working_dirs.push(entry.working_dir.clone());
+        }
+    }
+    Ok(NewSessionHistorySummaryDto {
+        last_requested_config_path,
+        last_working_dir,
+        recent_working_dirs,
+    })
+}
+
+/// Resolve the effective config for the New Session form and return the skippable-step
+/// tree together with history-backed default skip selections.
+#[tauri::command]
+pub fn get_new_session_config_defaults(
+    base_dir: String,
+    config_path: Option<String>,
+) -> std::result::Result<NewSessionConfigDefaultsDto, String> {
+    let (_, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
     let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| format!("Failed to parse config: {e}"))?;
-    Ok(config.steps.keys().cloned().collect())
+    cruise::config::validate_config(&config)
+        .map_err(|e| format!("Failed to validate config: {e}"))?;
+    let steps = cruise::workflow::list_skippable_steps(&config)
+        .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
+    let resolved_config_key = resolved_config_key_for_session(source.path());
+    let history = NewSessionHistory::load_best_effort();
+    let default_skipped_steps = history
+        .latest_entry_for_config(&resolved_config_key)
+        .map(|entry| entry.skipped_steps.clone())
+        .unwrap_or_default();
+    Ok(NewSessionConfigDefaultsDto {
+        steps,
+        default_skipped_steps,
+    })
 }
 
 /// Approve a session, transitioning it from "Awaiting Approval" to "Planned".
@@ -1169,6 +1223,9 @@ pub fn get_update_readiness() -> UpdateReadinessDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cruise::new_session_history::{
+        BUILTIN_CONFIG_KEY, NewSessionHistory, NewSessionHistoryEntry,
+    };
     use cruise::test_support::{init_git_repo, make_session};
     use std::fs;
     use std::path::Path;
@@ -1244,6 +1301,44 @@ mod tests {
 
         // Then: fix_in_progress is false; it is populated from AppState in list_sessions / get_session
         assert!(!dto.fix_in_progress);
+    }
+
+    #[test]
+    fn test_get_new_session_history_summary_prefers_latest_gui_entry_even_when_auto() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            requested_config_path: Some("/Users/takumi/.cruise/team.yaml".to_string()),
+            working_dir: "/Users/takumi/projects/demo".to_string(),
+            resolved_config_key: "/Users/takumi/.cruise/team.yaml".to_string(),
+            skipped_steps: vec!["review".to_string()],
+        });
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            requested_config_path: None,
+            working_dir: "/Users/takumi/projects/another-repo".to_string(),
+            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            skipped_steps: vec!["write-tests".to_string()],
+        });
+        history.save().unwrap_or_else(|e| panic!("{e}"));
+
+        let summary = get_new_session_history_summary().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.last_requested_config_path, None);
+        assert_eq!(
+            summary.last_working_dir.as_deref(),
+            Some("/Users/takumi/projects/another-repo")
+        );
+        assert_eq!(
+            summary.recent_working_dirs,
+            vec![
+                "/Users/takumi/projects/another-repo".to_string(),
+                "/Users/takumi/projects/demo".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1795,6 +1890,72 @@ mod tests {
 
         // Then: the returned base_dir equals the input path exactly
         assert_eq!(base, repo_dir.path());
+    }
+
+    #[test]
+    fn test_get_config_steps_uses_local_config_from_base_dir() {
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: echo simplify
+steps:
+  build:
+    command: echo build
+  review-pass:
+    group: review
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let steps = get_config_steps(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None"))
+                .to_string(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id, "build");
+        assert_eq!(steps[1].id, "review-pass");
+        assert_eq!(steps[1].expanded_step_ids, vec!["review-pass/simplify"]);
+    }
+
+    #[test]
+    fn test_get_config_steps_returns_builtin_default_steps_when_no_config_found() {
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let steps = get_config_steps(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None"))
+                .to_string(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(
+            !steps.is_empty(),
+            "builtin default config should expose skippable steps"
+        );
     }
 
     // ─── prepare_run_session: worktree gh preflight ──────────────────────────

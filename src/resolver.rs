@@ -42,10 +42,10 @@ impl ConfigSource {
 /// Resolve a workflow config, returning (`yaml_content`, source).
 ///
 /// Resolution order:
-/// 1. `explicit` (`-c` flag) — error if file does not exist.
-/// 2. `CRUISE_CONFIG` env var — error if file does not exist.
-/// 3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`.
-/// 4. `~/.cruise/*.yaml` / `*.yml` — auto-select if exactly one, else prompt.
+/// 1. `explicit` (`-c` flag) -- error if file does not exist.
+/// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
+/// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
+/// 4. `~/.cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
 /// 5. Built-in default.
 ///
 /// # Errors
@@ -62,8 +62,8 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 ///
 /// This is safe to call from concurrent Tauri request handlers because it does not
 /// mutate `std::env::current_dir()`.  Resolution order is identical to [`resolve_config`]:
-/// 1. `explicit` — error if file does not exist.
-/// 2. `CRUISE_CONFIG` env var — error if file does not exist.
+/// 1. `explicit` -- error if file does not exist.
+/// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
 /// 4. `~/.cruise/*.yaml` / `*.yml`.
 /// 5. Built-in default.

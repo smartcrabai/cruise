@@ -130,6 +130,17 @@ export interface ConfigEntry {
   name: string;
 }
 
+export interface NewSessionHistorySummary {
+  lastRequestedConfigPath?: string;
+  lastWorkingDir?: string;
+  recentWorkingDirs: string[];
+}
+
+export interface NewSessionConfigDefaults {
+  steps: SkippableStepDto[];
+  defaultSkippedSteps: string[];
+}
+
 export type PlanEvent =
   | { event: "sessionCreated"; data: { sessionId: string } }
   | { event: "planGenerating"; data: Record<string, never> }
@@ -146,4 +157,12 @@ export interface UpdateReadiness {
   bundlePath?: string;
   /** Human-readable remediation guidance. */
   guidance?: string;
+}
+
+// --- Skippable steps tree ------------------------------------------------------
+
+export interface SkippableStepDto {
+  id: string;
+  expandedStepIds: string[];
+  children: SkippableStepDto[];
 }
