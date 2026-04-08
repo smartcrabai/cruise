@@ -41,6 +41,8 @@ pub struct SessionDto {
     pub workspace_mode: WorkspaceMode,
     /// Whether a valid (non-empty) `plan.md` exists for this session.
     pub plan_available: bool,
+    /// True while a plan-fix request is in progress.
+    pub fix_in_progress: bool,
 }
 
 impl SessionDto {
@@ -85,6 +87,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             awaiting_input: s.awaiting_input,
             workspace_mode: s.workspace_mode,
             plan_available: false,
+            fix_in_progress: false, // populated from AppState in list_sessions / get_session
         }
     }
 }
@@ -158,6 +161,28 @@ impl crate::gui_option_handler::EventEmitter for StateSavingEmitter {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
+
+/// RAII guard that clears the in-flight fix flag when dropped.
+///
+/// Ensures `stop_fixing` is called on every exit path of [`fix_session`]
+/// without requiring a manual call at each return site.
+struct FixingGuard<'a> {
+    state: &'a AppState,
+    session_id: String,
+}
+
+impl<'a> FixingGuard<'a> {
+    fn new(state: &'a AppState, session_id: String) -> Self {
+        state.start_fixing(&session_id);
+        Self { state, session_id }
+    }
+}
+
+impl Drop for FixingGuard<'_> {
+    fn drop(&mut self) {
+        self.state.stop_fixing(&self.session_id);
+    }
+}
 
 fn new_session_manager() -> std::result::Result<SessionManager, String> {
     let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
@@ -240,14 +265,21 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
 
 /// List all sessions, sorted oldest-first.
 #[tauri::command]
-pub fn list_sessions() -> std::result::Result<Vec<SessionDto>, String> {
+pub fn list_sessions(
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<Vec<SessionDto>, String> {
     let manager = new_session_manager()?;
+    let fixing = state.snapshot_fixing();
     manager
         .list()
         .map(|sessions| {
             sessions
                 .into_iter()
-                .map(|s| SessionDto::from_state(s, &manager))
+                .map(|s| {
+                    let mut dto = SessionDto::from_state(s, &manager);
+                    dto.fix_in_progress = fixing.contains(&dto.id);
+                    dto
+                })
                 .collect()
         })
         .map_err(|e| e.to_string())
@@ -255,11 +287,18 @@ pub fn list_sessions() -> std::result::Result<Vec<SessionDto>, String> {
 
 /// Get a single session by ID.
 #[tauri::command]
-pub fn get_session(session_id: String) -> std::result::Result<SessionDto, String> {
+pub fn get_session(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<SessionDto, String> {
     let manager = new_session_manager()?;
     manager
         .load(&session_id)
-        .map(|s| SessionDto::from_state(s, &manager))
+        .map(|s| {
+            let mut dto = SessionDto::from_state(s, &manager);
+            dto.fix_in_progress = state.is_fixing(&dto.id);
+            dto
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -655,10 +694,12 @@ pub async fn fix_session(
     session_id: String,
     feedback: String,
     channel: tauri::ipc::Channel<PlanEvent>,
+    state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
 
+    let _fixing_guard = FixingGuard::new(&state, session_id.clone());
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
@@ -1243,6 +1284,23 @@ mod tests {
         // Then: title remains absent and the raw input is still available
         assert_eq!(dto.title, None);
         assert_eq!(dto.input, "raw input");
+    }
+
+    #[test]
+    fn test_session_dto_fix_in_progress_defaults_to_false() {
+        // Given: a freshly created session
+        let session = cruise::session::SessionState::new(
+            "20260407000000".to_string(),
+            std::path::PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "test input".to_string(),
+        );
+
+        // When: converting to the IPC DTO (no AppState, so fix_in_progress is not set)
+        let dto = SessionDto::from(session);
+
+        // Then: fix_in_progress is false; it is populated from AppState in list_sessions / get_session
+        assert!(!dto.fix_in_progress);
     }
 
     #[test]

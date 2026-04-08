@@ -77,7 +77,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
         const bTime = b.updatedAt ?? b.createdAt;
         return bTime.localeCompare(aTime);
       });
-      const fingerprint = sorted.map(s => `${s.id}:${s.phase}:${s.updatedAt ?? s.createdAt}:${!!s.awaitingInput}:${!!s.planAvailable}`).join(",");
+      const fingerprint = sorted.map(s => `${s.id}:${s.phase}:${s.updatedAt ?? s.createdAt}:${!!s.awaitingInput}:${!!s.planAvailable}:${!!s.fixInProgress}`).join(",");
       if (fingerprint !== lastFingerprintRef.current) {
         lastFingerprintRef.current = fingerprint;
         setSessions(sorted);
@@ -281,7 +281,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
               <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id)} />
+              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id) || !!s.fixInProgress} />
             </div>
             <p className="text-sm text-gray-300 truncate">{s.title || s.input}</p>
             {s.title && (

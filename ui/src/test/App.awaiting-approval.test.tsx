@@ -388,6 +388,75 @@ describe("App: Awaiting Approval -- Fixing display state", () => {
     });
   });
 
+  /**
+   * Sets up a mid-fix scenario: session A is Awaiting Approval, session B is Planned.
+   * Mocks fixSession to emit planGenerating then hang indefinitely.
+   * Renders App, selects A, starts a fix, and waits until "Fixing" is visible.
+   * Returns the two session objects for further use.
+   */
+  async function renderAndStartMidFix() {
+    const sessA = makeSession({ id: "sess-a", input: "task A", planAvailable: true });
+    const sessB = makeSession({ id: "sess-b", input: "task B", phase: "Planned", planAvailable: false });
+    vi.mocked(commands.listSessions).mockResolvedValueOnce([sessA, sessB]);
+
+    const sessAFixing = makeSession({
+      id: "sess-a",
+      input: "task A",
+      planAvailable: true,
+      fixInProgress: true,
+      updatedAt: "2026-01-01T00:01:00Z",
+    });
+    vi.mocked(commands.listSessions).mockResolvedValue([sessAFixing, sessB]);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(commands.fixSession).mockImplementationOnce((_params: any, channel: any) => {
+      channel.onmessage?.({ event: "planGenerating", data: {} });
+      return new Promise<string>(() => { /* never resolves */ });
+    });
+    vi.mocked(commands.getSession).mockResolvedValue(sessAFixing);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("task A"));
+
+    await userEvent.click(screen.getByRole("button", { name: /task A/ }));
+    await waitFor(() => screen.getByRole("button", { name: "Fix" }));
+    await userEvent.click(screen.getByRole("button", { name: "Fix" }));
+    await userEvent.type(screen.getByPlaceholderText("Describe the changes needed..."), "Improve it");
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Fixing").length).toBeGreaterThanOrEqual(1);
+    });
+    return { sessB };
+  }
+
+  it("keeps 'Fixing' badge on the original session's sidebar entry after navigating to another session mid-fix", async () => {
+    await renderAndStartMidFix();
+
+    // When: navigate to session B (this used to clear fixingSessionIds via cleanup)
+    await userEvent.click(screen.getByRole("button", { name: /task B/ }));
+
+    // Then: session A's sidebar badge still shows "Fixing" (DTO-driven, not ephemeral)
+    await waitFor(() => {
+      expect(screen.getByText("Fixing")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Awaiting Approval")).toBeNull();
+  });
+
+  it("shows 'Fixing' badge in the detail header when navigating back to the session mid-fix", async () => {
+    await renderAndStartMidFix();
+
+    // Navigate away to session B, then come back to session A
+    await userEvent.click(screen.getByRole("button", { name: /task B/ }));
+    await userEvent.click(screen.getByRole("button", { name: /task A/ }));
+
+    // Then: the detail header badge still shows "Fixing" (not "Awaiting Approval")
+    await waitFor(() => {
+      expect(screen.getAllByText("Fixing").length).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.queryByText("Awaiting Approval")).toBeNull();
+  });
+
   it("clears the Fixing badge after fix fails and shows the error", async () => {
     // Given: fixSession rejects with an error
     vi.mocked(commands.fixSession).mockRejectedValue(new Error("Fix failed"));
