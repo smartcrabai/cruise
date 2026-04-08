@@ -20,6 +20,7 @@ import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
+import * as desktopNotifications from "../lib/desktopNotifications";
 
 // ─── Module mocks ──────────────────────────────────────────────────────────────
 
@@ -286,6 +287,46 @@ describe("App: Settings modal — save behaviour", () => {
     });
     // And: the dialog is still visible (not dismissed on error)
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("App: Settings modal — config load failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+    vi.mocked(commands.updateAppConfig).mockResolvedValue();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("fires desktop notification and does not open dialog when getAppConfig fails", async () => {
+    // Given: getAppConfig rejects when the settings button is clicked
+    vi.mocked(commands.getAppConfig).mockRejectedValue(new Error("config read error"));
+
+    render(<App />);
+    await waitFor(() => screen.getByRole("button", { name: /settings/i }));
+
+    // When: the settings button is clicked
+    await userEvent.click(screen.getByRole("button", { name: /settings/i }));
+
+    // Then: desktop notification is fired (not just addToast)
+    await waitFor(() => {
+      expect(vi.mocked(desktopNotifications.notifyDesktop)).toHaveBeenCalledWith(
+        "Cruise",
+        expect.stringContaining("Failed"),
+      );
+    });
+
+    // And: the settings dialog is NOT opened (error path)
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 

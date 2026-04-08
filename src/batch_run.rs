@@ -76,7 +76,7 @@ where
     let mut seen: HashSet<String> = HashSet::new();
     // Sessions currently sitting in `candidates` but not yet scheduled.
     // Tracked separately so re-scans do not push duplicates into the deque,
-    // which would otherwise cause O(N²) deque growth for large batches.
+    // which would otherwise cause O(N^2) deque growth for large batches.
     let mut queued: HashSet<String> = HashSet::new();
     let mut next_batch_index: usize = 0;
     // Stores (batch_index, session_id, outcome) from completed tasks.
