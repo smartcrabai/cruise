@@ -311,6 +311,7 @@ async fn step_loop_iteration(
         || ctx.skipped_steps.iter().any(|s| s == current_step)
     {
         state.counters.skipped += 1;
+        // sakoku-ignore-next-line
         eprintln!("{} skipping: {}", style("→").yellow(), current_step);
         // When the first substep of a group with file-changed is user-skipped,
         // the normal "before" snapshot is never taken (it happens in the

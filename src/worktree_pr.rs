@@ -61,6 +61,7 @@ fn report_commit_outcome(commit_outcome: CommitOutcome) {
             eprintln!("{} Changes committed", style("v").green().bold());
         }
         CommitOutcome::NoChanges => {
+            // sakoku-ignore-next-line
             eprintln!(
                 "{} No new changes to commit; using existing branch commits",
                 style("->").cyan()
