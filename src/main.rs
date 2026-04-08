@@ -13,6 +13,7 @@ mod list_cmd;
 mod llm_api;
 mod metadata;
 mod multiline_input;
+mod new_session_history;
 mod option_handler;
 mod plan_cmd;
 mod planning;
@@ -55,7 +56,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         None if plan.is_some() => plan_cmd::launch_background_plan(plan.unwrap_or_default()).await,
         None => {
-            // Backward compat: no subcommand → treat as `plan`.
+            // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
                 input,
                 config: None,

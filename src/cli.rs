@@ -108,7 +108,7 @@ pub struct ListArgs {
 pub struct ConfigArgs {
     /// Set the maximum number of sessions to run concurrently in `run --all` mode.
     ///
-    /// Must be ≥ 1. Omit to show the current configuration.
+    /// Must be >= 1. Omit to show the current configuration.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
 }
@@ -116,7 +116,7 @@ pub struct ConfigArgs {
 pub fn parse_cli() -> Cli {
     let mut cli = Cli::parse();
 
-    // Backward compat: no subcommand + stdin pipe → read input from stdin.
+    // Backward compat: no subcommand + stdin pipe -> read input from stdin.
     if cli.command.is_none()
         && cli.plan.is_none()
         && cli.input.is_none()
@@ -339,7 +339,7 @@ mod tests {
         }
     }
 
-    // ── Config subcommand ─────────────────────────────────────────────────────
+    // -- Config subcommand ----------------------------------------------------
 
     #[test]
     fn test_config_subcommand_no_flags_shows_current_config() {
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_config_subcommand_set_parallelism_one() {
-        // Given: `cruise config --set-parallelism 1` — minimum valid value
+        // Given: `cruise config --set-parallelism 1` -- minimum valid value
         let cli = Cli::parse_from(["cruise", "config", "--set-parallelism", "1"]);
         match cli.command {
             Some(Commands::Config(args)) => {

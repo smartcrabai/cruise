@@ -486,7 +486,7 @@ impl SessionManager {
                 continue;
             }
             let Some(ref pr_url) = session.pr_url else {
-                // No PR URL recorded — skip silently.
+                // No PR URL recorded -- skip silently.
                 continue;
             };
 
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_parse_iso8601_known_date() {
-        // 2026-03-06T00:00:00Z = days from 1970-01-01 × 86400
+        // 2026-03-06T00:00:00Z = days from 1970-01-01 * 86400
         let secs =
             parse_iso8601_secs("2026-03-06T00:00:00Z").unwrap_or_else(|| panic!("unexpected None"));
         let (year, month, day, h, m, s) = seconds_to_datetime(secs);
@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SessionPhase::Suspended — basic properties
+    // SessionPhase::Suspended -- basic properties
     // -----------------------------------------------------------------------
 
     #[test]
