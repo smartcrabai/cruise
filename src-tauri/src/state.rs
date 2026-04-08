@@ -21,11 +21,11 @@ pub struct PerSessionState {
 }
 
 impl PerSessionState {
-    /// Create a new [`PerSessionState`] with a fresh, uncancelled token and no pending response.
+    /// Create a new [`PerSessionState`] using a caller-supplied cancellation token.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn with_cancel_token(cancel_token: CancellationToken) -> Self {
         Self {
-            cancel_token: CancellationToken::new(),
+            cancel_token,
             option_responder: Arc::new(Mutex::new(None)),
         }
     }
@@ -44,12 +44,15 @@ impl PerSessionState {
 ///
 /// This version replaces the singletons with a `HashMap<session_id, PerSessionState>` so that
 /// independent sessions can each own their own cancellation token and pending dialog slot.
+#[derive(Clone)]
 pub struct AppState {
     /// Active sessions keyed by session ID.
     ///
     /// A session is present in this map while it is in the `Running` phase.
     /// It is removed when the session finishes (Completed / Failed / Cancelled).
-    pub sessions: Mutex<HashMap<String, PerSessionState>>,
+    pub sessions: Arc<Mutex<HashMap<String, PerSessionState>>>,
+    /// Shared cancellation token for an active Run All batch, if any.
+    pub batch_cancel_token: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl AppState {
@@ -57,8 +60,21 @@ impl AppState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            batch_cancel_token: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, PerSessionState>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| panic!("sessions mutex poisoned: {e}"))
+    }
+
+    fn lock_batch_token(&self) -> std::sync::MutexGuard<'_, Option<CancellationToken>> {
+        self.batch_cancel_token
+            .lock()
+            .unwrap_or_else(|e| panic!("batch_cancel_token mutex poisoned: {e}"))
     }
 
     /// Register a new active session, returning its option-responder and cancellation token.
@@ -69,6 +85,7 @@ impl AppState {
     /// # Panics
     ///
     /// Panics if the inner mutex is poisoned.
+    #[cfg(test)]
     pub fn register_session(
         &self,
         session_id: String,
@@ -76,28 +93,36 @@ impl AppState {
         Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
         CancellationToken,
     ) {
-        let state = PerSessionState::new();
+        let cancel_token = CancellationToken::new();
+        let responder = self.register_session_with_token(session_id, cancel_token.clone());
+        (responder, cancel_token)
+    }
+
+    /// Register a new active session using a caller-supplied cancellation token.
+    ///
+    /// Returns the session's option-responder slot so the caller can hand it to the
+    /// GUI option handler without creating a second session entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inner mutex is poisoned.
+    pub fn register_session_with_token(
+        &self,
+        session_id: String,
+        cancel_token: CancellationToken,
+    ) -> Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> {
+        let state = PerSessionState::with_cancel_token(cancel_token);
         let responder = Arc::clone(&state.option_responder);
-        let token = state.cancel_token.clone();
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
-            .insert(session_id, state);
-        (responder, token)
+        self.lock_sessions().insert(session_id, state);
+        responder
     }
 
     /// Return a clone of the cancellation token for an active session.
     ///
     /// Returns `None` if the session is not currently registered (not running).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     #[cfg(test)]
     pub(crate) fn cancel_token_for(&self, session_id: &str) -> Option<CancellationToken> {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
+        self.lock_sessions()
             .get(session_id)
             .map(|s| s.cancel_token.clone())
     }
@@ -105,17 +130,8 @@ impl AppState {
     /// Cancel the workflow for a specific session.
     ///
     /// Does nothing if the session is not registered.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     pub fn cancel_session(&self, session_id: &str) {
-        if let Some(state) = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
-            .get(session_id)
-        {
+        if let Some(state) = self.lock_sessions().get(session_id) {
             state.cancel_token.cancel();
         }
     }
@@ -123,37 +139,36 @@ impl AppState {
     /// Cancel **all** active sessions.
     ///
     /// Used when the user clicks "Cancel" during a Run All batch.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     pub fn cancel_all_sessions(&self) {
-        for state in self
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
-            .values()
-        {
+        if let Some(token) = self.lock_batch_token().as_ref() {
+            token.cancel();
+        }
+        for state in self.lock_sessions().values() {
             state.cancel_token.cancel();
         }
+    }
+
+    /// Register the shared cancellation token for an active Run All batch.
+    ///
+    /// Replaces any previously registered batch token.
+    pub fn register_batch_cancel_token(&self, cancel_token: CancellationToken) {
+        *self.lock_batch_token() = Some(cancel_token);
+    }
+
+    /// Clear the shared cancellation token for the active Run All batch.
+    pub fn clear_batch_cancel_token(&self) {
+        *self.lock_batch_token() = None;
     }
 
     /// Route an option-step response to the correct session by its request/session ID.
     ///
     /// Returns `true` if a pending sender was found and the result was sent.
     /// Returns `false` if the session is not registered or has no pending dialog.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     pub fn respond_to_option(&self, session_id: &str, result: OptionResult) -> bool {
         // Clone the Arc while holding the outer lock, then release it before locking the inner
         // mutex so that register_session / unregister_session are not blocked during send.
         let responder = {
-            let sessions = self
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"));
+            let sessions = self.lock_sessions();
             sessions
                 .get(session_id)
                 .map(|s| Arc::clone(&s.option_responder))
@@ -172,28 +187,14 @@ impl AppState {
     }
 
     /// Unregister a session that has finished executing.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     pub fn unregister_session(&self, session_id: &str) {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
-            .remove(session_id);
+        self.lock_sessions().remove(session_id);
     }
 
     /// Return the number of currently active (registered) sessions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
     #[cfg(test)]
     pub(crate) fn active_session_count(&self) -> usize {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| panic!("AppState mutex poisoned: {e}"))
-            .len()
+        self.lock_sessions().len()
     }
 }
 
@@ -210,7 +211,7 @@ mod tests {
         }
     }
 
-    // ── Initial state ─────────────────────────────────────────────────────────
+    // -- Initial state ---------------------------------------------------------
 
     #[test]
     fn test_new_state_has_no_active_sessions() {
@@ -220,7 +221,7 @@ mod tests {
         assert_eq!(state.active_session_count(), 0);
     }
 
-    // ── Session registration ──────────────────────────────────────────────────
+    // -- Session registration --------------------------------------------------
 
     #[test]
     fn test_register_session_adds_it_to_active_map() {
@@ -241,6 +242,23 @@ mod tests {
         state.register_session("sess-2".to_string());
         // Then: two active sessions
         assert_eq!(state.active_session_count(), 2);
+    }
+
+    #[test]
+    fn test_register_session_with_token_keeps_shared_token_wired_to_session() {
+        // Given: a caller-provided token shared with external batch state
+        let state = AppState::new();
+        let shared = CancellationToken::new();
+
+        // When: the session is registered with that token and then cancelled via AppState
+        state.register_session_with_token("sess-1".to_string(), shared.clone());
+        state.cancel_session("sess-1");
+
+        // Then: the original shared token is also cancelled
+        assert!(
+            shared.is_cancelled(),
+            "shared token should observe AppState cancellation"
+        );
     }
 
     #[test]
@@ -285,7 +303,21 @@ mod tests {
         assert!(token_2.is_cancelled(), "sess-2 should be cancelled");
     }
 
-    // ── Option routing ────────────────────────────────────────────────────────
+    #[test]
+    fn test_cancel_all_cancels_registered_batch_token_without_active_sessions() {
+        // Given: a Run All batch token is registered before any session is active
+        let state = AppState::new();
+        let batch = CancellationToken::new();
+        state.register_batch_cancel_token(batch.clone());
+
+        // When: cancel_all_sessions is invoked
+        state.cancel_all_sessions();
+
+        // Then: the shared batch token is cancelled too
+        assert!(batch.is_cancelled(), "batch token should be cancelled");
+    }
+
+    // -- Option routing --------------------------------------------------------
 
     #[test]
     fn test_respond_to_option_routes_to_correct_session() {
@@ -335,7 +367,7 @@ mod tests {
         assert!(!sent, "expected false when no pending sender");
     }
 
-    // ── Session unregistration ────────────────────────────────────────────────
+    // -- Session unregistration ------------------------------------------------
 
     #[test]
     fn test_unregister_session_removes_it_from_active_map() {
@@ -375,7 +407,7 @@ mod tests {
     fn test_cancel_session_on_unregistered_is_idempotent() {
         // Given: a fresh state
         let state = AppState::new();
-        // When: cancel a session that was never registered — must not panic
+        // When: cancel a session that was never registered -- must not panic
         state.cancel_session("nonexistent");
         // Then: still 0 sessions
         assert_eq!(state.active_session_count(), 0);

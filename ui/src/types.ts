@@ -82,7 +82,7 @@ export interface AppConfig {
 
 export interface RunAllSessionStartedEvent {
   event: "runAllSessionStarted";
-  data: { sessionId: string; input: string; total: number };
+  data: { sessionId: string; input: string };
 }
 
 export interface RunAllSessionFinishedEvent {

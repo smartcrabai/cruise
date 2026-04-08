@@ -38,11 +38,11 @@ pub struct BatchSessionResult {
 ///
 /// # Arguments
 ///
-/// * `manager`      – Provides candidate enumeration via [`SessionManager::run_all_remaining`].
-/// * `parallelism`  – Maximum number of sessions running concurrently (must be ≥ 1).
-/// * `cancel_token` – When cancelled, no new sessions are scheduled; in-flight sessions
+/// * `manager`      - Provides candidate enumeration via [`SessionManager::run_all_remaining`].
+/// * `parallelism`  - Maximum number of sessions running concurrently (must be >= 1).
+/// * `cancel_token` - When cancelled, no new sessions are scheduled; in-flight sessions
 ///   receive the *same* token clone so they can observe cancellation.
-/// * `run_fn`       – Called once per session; receives the session state and a
+/// * `run_fn`       - Called once per session; receives the session state and a
 ///   cancellation token clone. Must return a `Send` future.
 ///
 /// # Returns
@@ -65,7 +65,7 @@ where
 {
     if parallelism == 0 {
         return Err(crate::error::CruiseError::Other(
-            "run_all_with_parallelism: parallelism must be ≥ 1 (got 0)".to_string(),
+            "run_all_with_parallelism: parallelism must be >= 1 (got 0)".to_string(),
         ));
     }
 
@@ -76,7 +76,7 @@ where
     let mut seen: HashSet<String> = HashSet::new();
     // Sessions currently sitting in `candidates` but not yet scheduled.
     // Tracked separately so re-scans do not push duplicates into the deque,
-    // which would otherwise cause O(N²) deque growth for large batches.
+    // which would otherwise cause O(N^2) deque growth for large batches.
     let mut queued: HashSet<String> = HashSet::new();
     let mut next_batch_index: usize = 0;
     // Stores (batch_index, session_id, outcome) from completed tasks.
@@ -177,7 +177,7 @@ mod tests {
         session::{SessionManager, SessionPhase, SessionState, WorkspaceMode},
     };
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // -- Helpers ---------------------------------------------------------------
 
     /// Create a minimal `Planned` session and register it with the manager.
     fn make_planned_session(manager: &SessionManager, id: &str, base_dir: &std::path::Path) {
@@ -253,7 +253,7 @@ mod tests {
         }
     }
 
-    // ── Basic scheduling ──────────────────────────────────────────────────────
+    // -- Basic scheduling ------------------------------------------------------
 
     #[tokio::test]
     async fn test_empty_candidate_list_returns_empty_results() {
@@ -318,7 +318,85 @@ mod tests {
         assert_eq!(ids, ["20260101000001", "20260101000002", "20260101000003"]);
     }
 
-    // ── Result ordering ───────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_parallelism_two_fills_both_slots_before_starting_third_session() {
+        // Given: three planned sessions and a scheduler allowed to run two at once
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        for id in ["20260101000001", "20260101000002", "20260101000003"] {
+            make_planned_session(&manager, id, tmp.path());
+        }
+
+        // The first two scheduled sessions wait at this barrier so the third cannot start
+        // unless the scheduler incorrectly under-fills the available parallel slots.
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let started = Arc::clone(&started);
+            move |session: SessionState, _cancel: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+                let started = Arc::clone(&started);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    started
+                        .lock()
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .push(id.clone());
+                    if id != "20260101000003" {
+                        barrier.wait().await;
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        let manager_for_task = Arc::clone(&manager);
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            run_all_with_parallelism(&manager_for_task, 2, cancel, run_fn).await
+        });
+
+        // When: the scheduler begins launching work
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if started.lock().unwrap_or_else(|e| panic!("{e}")).len() >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the first two sessions to start"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Then: both parallel slots are filled before the third session is started
+        let started_before_release = started.lock().unwrap_or_else(|e| panic!("{e}")).clone();
+        assert_eq!(
+            started_before_release,
+            vec!["20260101000001".to_string(), "20260101000002".to_string()]
+        );
+
+        // Release the blocked workers and let the batch complete normally.
+        barrier.wait().await;
+        let results = handle
+            .await
+            .unwrap_or_else(|e| panic!("join failed: {e}"))
+            .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        assert_eq!(results.len(), 3);
+    }
+
+    // -- Result ordering -------------------------------------------------------
 
     #[tokio::test]
     async fn test_results_are_sorted_by_batch_index_ascending() {
@@ -342,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_results_maintain_scheduling_order_when_completions_are_out_of_order() {
-        // Given: two sessions — session-A is slow, session-B is fast.
+        // Given: two sessions -- session-A is slow, session-B is fast.
         // With parallelism=2 both start simultaneously.
         // Session B completes first; session A completes second.
         // Expected: results[0].session_id == "A" (scheduled first) regardless.
@@ -352,9 +430,8 @@ mod tests {
         make_planned_session(&manager, "20260101000001", tmp.path()); // slow (index 0)
         make_planned_session(&manager, "20260101000002", tmp.path()); // fast (index 1)
 
-        // Barrier: session-1 waits until session-2 calls it
+        // Barrier: both sessions rendezvous before completing
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let slow_id = "20260101000001".to_string();
         let manager_clone = Arc::clone(&manager);
         let barrier_clone = Arc::clone(&barrier);
 
@@ -365,15 +442,8 @@ mod tests {
                 let manager = Arc::clone(&manager);
                 let barrier = Arc::clone(&barrier);
                 let id = session.id.clone();
-                let slow = id == slow_id;
                 Box::pin(async move {
-                    if slow {
-                        // Wait for the fast session to also reach the barrier
-                        barrier.wait().await;
-                    } else {
-                        // Signal that we're ready; the slow session can proceed after this
-                        barrier.wait().await;
-                    }
+                    barrier.wait().await;
                     let mut state = manager
                         .load(&id)
                         .unwrap_or_else(|e| panic!("load {id}: {e}"));
@@ -405,7 +475,7 @@ mod tests {
         assert_eq!(results[1].batch_index, 1);
     }
 
-    // ── Session added mid-run ─────────────────────────────────────────────────
+    // -- Session added mid-run -------------------------------------------------
 
     #[tokio::test]
     async fn test_session_added_while_first_is_running_is_picked_up() {
@@ -471,7 +541,7 @@ mod tests {
         );
     }
 
-    // ── Seen set: no duplicate execution ─────────────────────────────────────
+    // -- Seen set: no duplicate execution -------------------------------------
 
     #[tokio::test]
     async fn test_session_is_not_executed_twice() {
@@ -511,7 +581,7 @@ mod tests {
         assert_eq!(count, 1, "session must not be executed twice");
     }
 
-    // ── Cancellation ─────────────────────────────────────────────────────────
+    // -- Cancellation ---------------------------------------------------------
 
     #[tokio::test]
     async fn test_cancellation_before_start_returns_empty_results() {
@@ -608,11 +678,11 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
-    // ── Error cases ───────────────────────────────────────────────────────────
+    // -- Error cases -----------------------------------------------------------
 
     #[tokio::test]
     async fn test_zero_parallelism_returns_error() {
-        // Given: parallelism = 0 — explicitly invalid
+        // Given: parallelism = 0 -- explicitly invalid
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
         make_planned_session(&manager, "20260101000001", tmp.path());
