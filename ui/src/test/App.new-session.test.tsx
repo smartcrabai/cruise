@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
@@ -75,6 +75,33 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     ...overrides,
   };
 }
+
+const BUILD_ONLY_STEP = [
+  {
+    id: "build",
+    expandedStepIds: ["build"],
+    children: [],
+  },
+];
+
+const BUILD_AND_REVIEW_STEPS = [
+  {
+    id: "build",
+    expandedStepIds: ["build"],
+    children: [],
+  },
+  {
+    id: "review-pass",
+    expandedStepIds: ["review-pass/simplify"],
+    children: [
+      {
+        id: "review-pass/simplify",
+        expandedStepIds: ["review-pass/simplify"],
+        children: [],
+      },
+    ],
+  },
+];
 
 // --- New Session draft state persistence -------------------------------------
 
@@ -213,7 +240,10 @@ describe("App: New Session draft state persistence", () => {
 
   it("loads skip-step defaults from the resolved config, including auto mode", async () => {
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
-      steps: ["write-tests", "implement"],
+      steps: [
+        { id: "write-tests", expandedStepIds: ["write-tests"], children: [] },
+        { id: "implement", expandedStepIds: ["implement"], children: [] },
+      ],
       defaultSkippedSteps: ["write-tests"],
     });
 
@@ -226,6 +256,90 @@ describe("App: New Session draft state persistence", () => {
     expect(implement).not.toBeChecked();
   });
 
+});
+
+describe("App: New Session skip-step selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: [],
+      defaultSkippedSteps: [],
+    });
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders tree steps and applies history-based default skip selections on config refresh", async () => {
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({
+        steps: BUILD_AND_REVIEW_STEPS,
+        defaultSkippedSteps: ["build"],
+      })
+      .mockResolvedValueOnce({
+        steps: BUILD_ONLY_STEP,
+        defaultSkippedSteps: [],
+      });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const buildCheckbox = await screen.findByRole("checkbox", { name: "build" });
+    expect(buildCheckbox).toBeChecked();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
+      { target: { value: "/tmp/other-repo" } }
+    );
+
+    await waitFor(() => {
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
+        baseDir: "/tmp/other-repo",
+        configPath: undefined,
+      });
+    });
+    expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
+  });
+
+  it("does not refetch config steps when baseDir changes under an explicit config", async () => {
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/custom.yaml", name: "custom.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: BUILD_ONLY_STEP,
+      defaultSkippedSteps: [],
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
+    await waitFor(() => expect(screen.getByLabelText("build")).toBeInTheDocument());
+
+    const callCountBeforeBaseDirEdit =
+      vi.mocked(commands.getNewSessionConfigDefaults).mock.calls.length;
+
+    fireEvent.change(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
+      { target: { value: "/tmp/new-worktree" } }
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+      ).toHaveValue("/tmp/new-worktree");
+    });
+    expect(vi.mocked(commands.getNewSessionConfigDefaults).mock.calls).toHaveLength(
+      callCountBeforeBaseDirEdit,
+    );
+  });
 });
 
 // --- Non-blocking session creation -------------------------------------------

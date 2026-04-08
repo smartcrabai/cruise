@@ -142,6 +142,18 @@ pub fn install_version_only_gh(bin_dir: &Path) {
     std::fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
 }
 
+/// Extract the error message from a `Result`, panicking if it was `Ok`.
+///
+/// # Panics
+///
+/// Panics if the result is `Ok`.
+pub fn err_string<T: std::fmt::Debug>(result: crate::error::Result<T>) -> String {
+    match result {
+        Ok(v) => panic!("expected Err, got Ok({v:?})"),
+        Err(err) => err.to_string(),
+    }
+}
+
 /// Create a minimal `Planned` session for use in tests.
 #[must_use]
 pub fn make_session(id: &str, base_dir: &Path) -> SessionState {

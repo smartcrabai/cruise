@@ -211,32 +211,6 @@ impl NewSessionHistory {
     }
 }
 
-/// Build the default pre-selection indices for a `MultiSelect` step-skip prompt.
-///
-/// Given an ordered list of all step names from the current config (`all_steps`) and a
-/// list of step names that were previously skipped (`saved_skipped`), returns the indices
-/// (0-based positions in `all_steps`) whose names appear in `saved_skipped`.
-///
-/// Only indices for steps that still exist in the current config are included; stale
-/// names that no longer exist are silently dropped.
-#[must_use]
-pub fn skipped_steps_to_default_indices(
-    all_steps: &[&str],
-    saved_skipped: &[String],
-) -> Vec<usize> {
-    all_steps
-        .iter()
-        .enumerate()
-        .filter_map(|(i, name)| {
-            if saved_skipped.iter().any(|saved| saved == *name) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 /// Return the resolved config key for a session.
 ///
 /// File-based configs use their absolute path string; the built-in default
@@ -305,6 +279,23 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use tempfile::TempDir;
+
+    fn skipped_steps_to_default_indices(
+        all_steps: &[&str],
+        saved_skipped: &[String],
+    ) -> Vec<usize> {
+        all_steps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                if saved_skipped.iter().any(|saved| saved == *name) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     fn make_entry(resolved_config_key: &str, skipped_steps: Vec<&str>) -> NewSessionHistoryEntry {
         NewSessionHistoryEntry {

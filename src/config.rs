@@ -358,6 +358,12 @@ fn validate_step_groups(
                     "step '{step_name}' references undefined group '{group_name}'"
                 )));
             }
+            if step.prompt.is_some() || step.command.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses old membership style (group + prompt/command). \
+                     Please migrate to groups.<name>.steps block style."
+                )));
+            }
             if step.if_condition.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' has both a group and an individual 'if' condition; use only the group's 'if'"
@@ -375,6 +381,11 @@ fn validate_group_inner_steps(
     use crate::error::CruiseError;
 
     for (group_name, group) in groups {
+        if group.steps.is_empty() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "group '{group_name}' is empty (no steps defined)"
+            )));
+        }
         for (sub_name, sub_step) in &group.steps {
             if sub_step.group.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
@@ -396,6 +407,7 @@ fn validate_group_inner_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::err_string;
 
     const SAMPLE_YAML: &str = r#"
 command:
@@ -858,12 +870,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         let result = validate_groups(&config);
         assert!(result.is_err());
-        assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("undefined group")
-        );
+        assert!(err_string(result).contains("undefined group"));
     }
 
     #[test]
@@ -910,11 +917,50 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         let result = validate_groups(&config);
         assert!(result.is_err());
+        assert!(err_string(result).contains("individual 'if'"));
+    }
+
+    #[test]
+    fn test_validate_groups_rejects_old_membership_style() {
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+    prompt: /legacy
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        let msg = err_string(result);
         assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("individual 'if'")
+            msg.contains("old membership style") || msg.contains("groups.<name>.steps"),
+            "expected migration hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_groups_rejects_empty_group() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    steps: {}
+steps:
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(
+            err_string(result).contains("empty"),
+            "expected empty-group error"
         );
     }
 
@@ -1048,10 +1094,7 @@ after-pr:
         // Then: returns an error because after-pr + fail-if-no-file-changes is unsupported
         assert!(result.is_err());
         assert!(
-            result
-                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-                .to_string()
-                .contains("after-pr"),
+            err_string(result).contains("after-pr"),
             "error message should mention after-pr"
         );
     }
@@ -1299,7 +1342,7 @@ steps:
         let result = validate_if_conditions(&config);
         // Then: returns an error because fail and retry are mutually exclusive
         assert!(result.is_err(), "expected Err but got Ok");
-        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        let msg = err_string(result);
         assert!(
             msg.contains("fail") || msg.contains("retry"),
             "error should mention fail/retry, got: {msg}"
@@ -1347,7 +1390,7 @@ after-pr:
             result.is_err(),
             "expected Err for after-pr + no-file-changes"
         );
-        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        let msg = err_string(result);
         assert!(
             msg.contains("after-pr") || msg.contains("notify"),
             "error should mention after-pr step, got: {msg}"
@@ -1381,7 +1424,7 @@ steps:
             result.is_err(),
             "expected Err for group-level no-file-changes"
         );
-        let msg = result.map_or_else(|e| e.to_string(), |()| panic!("expected Err"));
+        let msg = err_string(result);
         assert!(
             msg.contains("group") || msg.contains("review"),
             "error should mention group, got: {msg}"

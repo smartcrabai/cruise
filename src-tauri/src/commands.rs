@@ -407,7 +407,7 @@ pub struct NewSessionHistorySummaryDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionConfigDefaultsDto {
-    pub steps: Vec<String>,
+    pub steps: Vec<cruise::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
 }
 
@@ -565,7 +565,8 @@ pub fn get_new_session_history_summary() -> std::result::Result<NewSessionHistor
     })
 }
 
-/// Resolve the effective config for the New Session form and return skip-step defaults.
+/// Resolve the effective config for the New Session form and return the skippable-step
+/// tree together with history-backed default skip selections.
 #[tauri::command]
 pub fn get_new_session_config_defaults(
     base_dir: String,
@@ -574,18 +575,15 @@ pub fn get_new_session_config_defaults(
     let (_, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
     let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| format!("Failed to parse config: {e}"))?;
-    let steps: Vec<String> = config.steps.keys().cloned().collect();
+    cruise::config::validate_config(&config)
+        .map_err(|e| format!("Failed to validate config: {e}"))?;
+    let steps = cruise::workflow::list_skippable_steps(&config)
+        .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
     let resolved_config_key = resolved_config_key_for_session(source.path());
     let history = NewSessionHistory::load_best_effort();
     let default_skipped_steps = history
         .latest_entry_for_config(&resolved_config_key)
-        .map(|entry| {
-            steps
-                .iter()
-                .filter(|step| entry.skipped_steps.iter().any(|saved| saved == *step))
-                .cloned()
-                .collect()
-        })
+        .map(|entry| entry.skipped_steps.clone())
         .unwrap_or_default();
     Ok(NewSessionConfigDefaultsDto {
         steps,
@@ -1834,6 +1832,72 @@ mod tests {
 
         // Then: the returned base_dir equals the input path exactly
         assert_eq!(base, repo_dir.path());
+    }
+
+    #[test]
+    fn test_get_config_steps_uses_local_config_from_base_dir() {
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            r#"
+command: [echo]
+groups:
+  review:
+    steps:
+      simplify:
+        command: echo simplify
+steps:
+  build:
+    command: echo build
+  review-pass:
+    group: review
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let steps = get_config_steps(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None"))
+                .to_string(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id, "build");
+        assert_eq!(steps[1].id, "review-pass");
+        assert_eq!(steps[1].expanded_step_ids, vec!["review-pass/simplify"]);
+    }
+
+    #[test]
+    fn test_get_config_steps_returns_builtin_default_steps_when_no_config_found() {
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = cruise::test_support::lock_process();
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let steps = get_config_steps(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None"))
+                .to_string(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(
+            !steps.is_empty(),
+            "builtin default config should expose skippable steps"
+        );
     }
 
     // ─── prepare_run_session: worktree gh preflight ──────────────────────────
