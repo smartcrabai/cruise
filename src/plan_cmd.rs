@@ -290,7 +290,7 @@ async fn run_approve_loop(
         Err(err) => {
             eprintln!(
                 "\n{} Generated plan is missing or empty. Session {} discarded.",
-            style("x").red().bold(),
+                style("x").red().bold(),
                 session.id
             );
             if let Err(del_err) = manager.delete(&session.id) {
@@ -334,7 +334,7 @@ async fn run_approve_loop(
                 approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
                 eprintln!(
                     "\n{} Session {} created.",
-                style("v").green().bold(),
+                    style("v").green().bold(),
                     session.id
                 );
                 eprintln!(

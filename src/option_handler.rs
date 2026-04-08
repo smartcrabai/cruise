@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::step::option::OptionResult;
 use crate::step::OptionChoice;
+use crate::step::option::OptionResult;
 
 /// Abstraction over the UI mechanism used to present option choices to the user.
 ///

@@ -430,10 +430,12 @@ steps:
         let result = compile(parsed(yaml));
         // Then: error mentions undefined group
         assert!(result.is_err());
-        assert!(result
-            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
-            .to_string()
-            .contains("undefined group"));
+        assert!(
+            result
+                .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"))
+                .to_string()
+                .contains("undefined group")
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use crate::error::Result;
 use reedline::{
-    default_emacs_keybindings, Emacs, KeyCode, KeyModifiers, Keybindings, Prompt, PromptEditMode,
-    PromptHistorySearch, Reedline, ReedlineEvent, Signal,
+    Emacs, KeyCode, KeyModifiers, Keybindings, Prompt, PromptEditMode, PromptHistorySearch,
+    Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
 };
 
 /// Result of a multiline input prompt.

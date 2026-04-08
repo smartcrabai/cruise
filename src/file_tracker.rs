@@ -186,9 +186,11 @@ mod tests {
         tracker
             .take_snapshot("step1")
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(!tracker
-            .has_files_changed("step1")
-            .unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            !tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
@@ -202,9 +204,11 @@ mod tests {
         std::fs::write(dir.path().join("file1.txt"), "modified content")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker
-            .has_files_changed("step1")
-            .unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
@@ -218,9 +222,11 @@ mod tests {
         std::fs::write(dir.path().join("new_file.txt"), "new content")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker
-            .has_files_changed("step1")
-            .unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
@@ -233,17 +239,21 @@ mod tests {
 
         std::fs::remove_file(dir.path().join("file1.txt")).unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(tracker
-            .has_files_changed("step1")
-            .unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]
     fn test_no_snapshot_returns_false() {
         let tracker = FileTracker::new();
-        assert!(!tracker
-            .has_files_changed("nonexistent")
-            .unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            !tracker
+                .has_files_changed("nonexistent")
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]

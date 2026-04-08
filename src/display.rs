@@ -1,4 +1,4 @@
-use console::{measure_text_width, style, Term};
+use console::{Term, measure_text_width, style};
 
 /// Print `text` inside a Unicode box-drawing border.
 ///
