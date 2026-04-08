@@ -131,9 +131,9 @@ pub struct CompiledWorkflow {
     pub invocations: HashMap<String, InvocationMeta>,
     /// Invocation metadata for group calls in `after_pr`, keyed by call-site name.
     pub after_pr_invocations: HashMap<String, InvocationMeta>,
-    /// Precomputed mapping from expanded step name → call-site name, for `steps`.
+    /// Precomputed mapping from expanded step name -> call-site name, for `steps`.
     pub step_to_invocation: HashMap<String, String>,
-    /// Precomputed mapping from expanded step name → call-site name, for `after_pr`.
+    /// Precomputed mapping from expanded step name -> call-site name, for `after_pr`.
     pub after_pr_step_to_invocation: HashMap<String, String>,
     /// Resolved LLM API configuration. `None` when no API key is available.
     pub llm_api: Option<crate::llm_api::LlmApiConfig>,
@@ -204,7 +204,7 @@ fn expand_steps(
 
     for (step_name, step) in steps {
         if let Some(group_name) = &step.group {
-            // Old membership style: has group + prompt/command → migration error
+            // Old membership style: has group + prompt/command -> migration error
             if step.prompt.is_some() || step.command.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses old membership style (group + prompt/command). \
@@ -631,7 +631,7 @@ steps:
     #[test]
     fn test_compile_step_key_collision_returns_error() {
         // Given: a regular step named "call/simplify" and a group call "call" that expands to
-        // "call/simplify" — the expanded key collides with the existing regular step.
+        // "call/simplify" -- the expanded key collides with the existing regular step.
         let yaml = r"
 command: [echo]
 groups:
@@ -680,7 +680,7 @@ steps:
         );
     }
 
-    // ── llm_api field ────────────────────────────────────────────────────────
+    // -- llm_api field --------------------------------------------------------
 
     #[test]
     fn test_compile_llm_api_is_none_when_no_api_key_configured() {

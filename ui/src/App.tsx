@@ -19,13 +19,13 @@ import {
   createSession,
   deleteSession,
   fixSession,
-  getConfigSteps,
   getAppConfig,
+  getNewSessionConfigDefaults,
+  getNewSessionHistorySummary,
   getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
-  listSessions,
   resetSession,
   respondToOption,
   runAllSessions,
@@ -1047,6 +1047,8 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
+  const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
+  const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
   const configLookupBaseDir = configPath ? "." : (baseDir || ".");
@@ -1056,21 +1058,40 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const refreshHistorySummary = useCallback(async () => {
+    try {
+      const summary = await getNewSessionHistorySummary();
+      if (isMountedRef.current) {
+        setRecentWorkingDirs(summary.recentWorkingDirs);
+      }
+      return summary;
+    } catch {
+      if (isMountedRef.current) {
+        setRecentWorkingDirs([]);
+      }
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
     let active = true;
-    void getConfigSteps(configLookupBaseDir, configPath || undefined)
-      .then((steps) => {
+    void getNewSessionConfigDefaults({
+      baseDir: configLookupBaseDir,
+      configPath: configPath || undefined,
+    })
+      .then((defaults) => {
         if (active) {
-          const validStepIds = collectExpandedStepIds(steps);
-          setConfigSteps(steps);
-          setSkippedSteps((prev) => {
-            const next = new Set<string>();
-            for (const id of prev) {
-              if (validStepIds.has(id)) {
-                next.add(id);
-              }
-            }
-            return next;
-          });
+          const validStepIds = collectExpandedStepIds(defaults.steps);
+          setConfigSteps(defaults.steps);
+          setSkippedSteps(
+            new Set(defaults.defaultSkippedSteps.filter((id) => validStepIds.has(id))),
+          );
         }
       })
       .catch(() => {
@@ -1152,25 +1173,34 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     );
   }
 
-  // Load configs and default base_dir on mount
+  // Load configs and history-backed defaults on mount.
   useEffect(() => {
+    let active = true;
     void listConfigs().then(setConfigs).catch(() => {});
-    // Use the most recently updated session's baseDir as default, but only when
-    // the draft baseDir is empty (don't overwrite a user-edited value).
-    void listSessions()
-      .then((sessions) => {
-        if (sessions.length > 0) {
-          const latest = sessions.reduce((max, s) =>
-            (s.updatedAt ?? s.createdAt) > (max.updatedAt ?? max.createdAt) ? s : max
-          );
-          onDraftChange((prev) => {
-            if (prev.baseDir !== "") return prev;
-            return { ...prev, baseDir: latest.baseDir };
-          });
-        }
+    void refreshHistorySummary()
+      .then((summary) => {
+        if (!active || !summary) return;
+        onDraftChange((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          if (prev.baseDir === "" && summary.lastWorkingDir) {
+            next.baseDir = summary.lastWorkingDir;
+            changed = true;
+          }
+          if (prev.configPath === "" && summary.lastRequestedConfigPath) {
+            next.configPath = summary.lastRequestedConfigPath;
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
       })
-      .catch(() => {});
-  }, [onDraftChange]);
+      .catch((e) => {
+        console.error("Failed to refresh history summary:", e);
+      });
+    return () => {
+      active = false;
+    };
+  }, [onDraftChange, refreshHistorySummary]);
 
   async function handleGenerate() {
     if (!input.trim()) return;
@@ -1186,6 +1216,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           baseDir: prev.baseDir,
           configPath: prev.configPath,
         }));
+        void refreshHistorySummary();
         onRefreshSidebar();
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
@@ -1262,6 +1293,21 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             disabled={isGenerating}
             placeholder="e.g. /Users/you/projects/myapp"
           />
+          {recentWorkingDirs.length > 0 && (
+            <div className="relative z-[60] flex flex-wrap gap-2 pt-1">
+              {recentWorkingDirs.map((dir) => (
+                <button
+                  key={dir}
+                  type="button"
+                  onClick={() => set("baseDir", dir)}
+                  disabled={isGenerating}
+                  className="px-2.5 py-1 rounded-full border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {dir}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Task input */}

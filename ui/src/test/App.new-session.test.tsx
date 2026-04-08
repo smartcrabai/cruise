@@ -34,7 +34,11 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
-  getConfigSteps: vi.fn().mockResolvedValue([]),
+  getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
+  getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
+    steps: [],
+    defaultSkippedSteps: [],
+  }),
   listDirectory: vi.fn(),
   getUpdateReadiness: vi.fn(),
   cleanSessions: vi.fn(),
@@ -108,6 +112,11 @@ describe("App: New Session draft state persistence", () => {
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
     vi.mocked(commands.getSessionLog).mockResolvedValue("");
     vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: [],
+      defaultSkippedSteps: [],
+    });
     vi.mocked(commands.listDirectory).mockResolvedValue([]);
     vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
@@ -164,11 +173,15 @@ describe("App: New Session draft state persistence", () => {
     ).toHaveValue("/my/project/path");
   });
 
-  it("does not overwrite user-typed Working Directory with default loaded from listSessions on remount", async () => {
-    // Given: listSessions returns a session with a specific baseDir
+  it("does not overwrite user-typed Working Directory with default loaded from history summary on remount", async () => {
+    // Given: persisted history has a specific last working directory
     vi.mocked(commands.listSessions).mockResolvedValue([
-      makeSession({ id: "sess-1", input: "existing task", baseDir: "/from/latest/session" }),
+      makeSession({ id: "sess-1", input: "existing task" }),
     ]);
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastWorkingDir: "/from/history",
+      recentWorkingDirs: ["/from/history"],
+    });
     render(<App />);
     await waitFor(() => screen.getByText("existing task"));
 
@@ -179,14 +192,68 @@ describe("App: New Session draft state persistence", () => {
     await userEvent.type(baseDirInput, "/my/typed/dir");
     await userEvent.click(screen.getByRole("button", { name: /existing task/ }));
 
-    // When: navigate back to New Session (triggers remount, listSessions fires again)
+    // When: navigate back to New Session (triggers remount, history summary loads again)
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
     await act(async () => { await new Promise<void>((r) => setTimeout(r, 50)); });
 
-    // Then: the user-typed value is NOT overwritten by the listSessions default
+    // Then: the user-typed value is NOT overwritten by the persisted default
     expect(
       screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
     ).toHaveValue("/my/typed/dir");
+  });
+
+  it("applies persisted config and working directory defaults when the draft is empty", async () => {
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { name: "team.yaml", path: "/Users/takumi/.cruise/team.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastRequestedConfigPath: "/Users/takumi/.cruise/team.yaml",
+      lastWorkingDir: "/repos/cruise",
+      recentWorkingDirs: ["/repos/cruise", "/repos/other"],
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Config")).toHaveValue("/Users/takumi/.cruise/team.yaml");
+    });
+    expect(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+    ).toHaveValue("/repos/cruise");
+    expect(screen.getByRole("button", { name: "/repos/other" })).toBeInTheDocument();
+  });
+
+  it("shows recent working directories and lets the user reselect one", async () => {
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      recentWorkingDirs: ["/repos/a", "/repos/b"],
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "/repos/b" }));
+    expect(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+    ).toHaveValue("/repos/b");
+  });
+
+  it("loads skip-step defaults from the resolved config, including auto mode", async () => {
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: [
+        { id: "write-tests", expandedStepIds: ["write-tests"], children: [] },
+        { id: "implement", expandedStepIds: ["implement"], children: [] },
+      ],
+      defaultSkippedSteps: ["write-tests"],
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const writeTests = await screen.findByRole("checkbox", { name: "write-tests" });
+    const implement = screen.getByRole("checkbox", { name: "implement" });
+    expect(writeTests).toBeChecked();
+    expect(implement).not.toBeChecked();
   });
 
 });
@@ -198,6 +265,11 @@ describe("App: New Session skip-step selection", () => {
     vi.mocked(commands.listConfigs).mockResolvedValue([]);
     vi.mocked(commands.getSessionLog).mockResolvedValue("");
     vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: [],
+      defaultSkippedSteps: [],
+    });
     vi.mocked(commands.listDirectory).mockResolvedValue([]);
     vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
@@ -207,17 +279,21 @@ describe("App: New Session skip-step selection", () => {
     cleanup();
   });
 
-  it("keeps selected skip steps that still exist after auto-config refresh", async () => {
-    vi.mocked(commands.getConfigSteps)
-      .mockResolvedValueOnce(BUILD_AND_REVIEW_STEPS)
-      .mockResolvedValueOnce(BUILD_ONLY_STEP);
+  it("renders tree steps and applies history-based default skip selections on config refresh", async () => {
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({
+        steps: BUILD_AND_REVIEW_STEPS,
+        defaultSkippedSteps: ["build"],
+      })
+      .mockResolvedValueOnce({
+        steps: BUILD_ONLY_STEP,
+        defaultSkippedSteps: [],
+      });
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-    await waitFor(() => expect(screen.getByLabelText("build")).toBeInTheDocument());
-
-    await userEvent.click(screen.getByLabelText("build"));
-    expect(screen.getByLabelText("build")).toBeChecked();
+    const buildCheckbox = await screen.findByRole("checkbox", { name: "build" });
+    expect(buildCheckbox).toBeChecked();
 
     fireEvent.change(
       screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
@@ -225,28 +301,30 @@ describe("App: New Session skip-step selection", () => {
     );
 
     await waitFor(() => {
-      expect(commands.getConfigSteps).toHaveBeenLastCalledWith("/tmp/other-repo", undefined);
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
+        baseDir: "/tmp/other-repo",
+        configPath: undefined,
+      });
     });
-    expect(screen.getByLabelText("build")).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
   });
 
-  it("does not refetch config steps or clear selections when baseDir changes under an explicit config", async () => {
+  it("does not refetch config steps when baseDir changes under an explicit config", async () => {
     vi.mocked(commands.listConfigs).mockResolvedValue([
       { path: "/tmp/custom.yaml", name: "custom.yaml" },
     ]);
-    vi.mocked(commands.getConfigSteps)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(BUILD_ONLY_STEP);
+    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+      steps: BUILD_ONLY_STEP,
+      defaultSkippedSteps: [],
+    });
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
     await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
     await waitFor(() => expect(screen.getByLabelText("build")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByLabelText("build"));
-    expect(screen.getByLabelText("build")).toBeChecked();
-
-    const callCountBeforeBaseDirEdit = vi.mocked(commands.getConfigSteps).mock.calls.length;
+    const callCountBeforeBaseDirEdit =
+      vi.mocked(commands.getNewSessionConfigDefaults).mock.calls.length;
 
     fireEvent.change(
       screen.getByPlaceholderText("e.g. /Users/you/projects/myapp"),
@@ -258,8 +336,9 @@ describe("App: New Session skip-step selection", () => {
         screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
       ).toHaveValue("/tmp/new-worktree");
     });
-    expect(vi.mocked(commands.getConfigSteps).mock.calls).toHaveLength(callCountBeforeBaseDirEdit);
-    expect(screen.getByLabelText("build")).toBeChecked();
+    expect(vi.mocked(commands.getNewSessionConfigDefaults).mock.calls).toHaveLength(
+      callCountBeforeBaseDirEdit,
+    );
   });
 });
 
@@ -423,6 +502,43 @@ describe("App: Non-blocking session creation", () => {
     ).toHaveValue("/my/repo/path");
 
     // Cleanup
+    await act(async () => {
+      control.emitPlanGenerated();
+    });
+  });
+
+  it("refreshes recent working directories after sessionCreated", async () => {
+    const control = setupTwoPhaseCreateSession("sess-history");
+    vi.mocked(commands.getNewSessionHistorySummary)
+      .mockResolvedValueOnce({
+        recentWorkingDirs: ["/repos/old"],
+      })
+      .mockResolvedValueOnce({
+        lastWorkingDir: "/repos/new",
+        recentWorkingDirs: ["/repos/new", "/repos/old"],
+      });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    await userEvent.clear(baseDirInput);
+    await userEvent.type(baseDirInput, "/repos/new");
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "history refresh",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "/repos/new" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "/repos/old" })).toBeInTheDocument();
+
     await act(async () => {
       control.emitPlanGenerated();
     });

@@ -43,7 +43,7 @@ impl OptionHandler for NoOpOptionHandler {
         _plan: Option<&str>,
     ) -> Result<OptionResult> {
         panic!(
-            "NoOpOptionHandler: unexpected option step — use FirstChoiceOptionHandler if option steps are expected"
+            "NoOpOptionHandler: unexpected option step -- use FirstChoiceOptionHandler if option steps are expected"
         );
     }
 }
