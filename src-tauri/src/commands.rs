@@ -55,9 +55,7 @@ impl SessionDto {
         manager: &SessionManager,
     ) -> Self {
         let plan_path = session.plan_path(&manager.sessions_dir());
-        let plan_available = std::fs::read_to_string(&plan_path)
-            .map(|c| !c.trim().is_empty())
-            .unwrap_or(false);
+        let plan_available = cruise::metadata::plan_markdown_available(&plan_path);
         let mut dto = Self::from(session);
         dto.plan_available = plan_available;
         dto
@@ -386,43 +384,6 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
 const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
-/// Invoke the LLM to generate/fix a plan using `template`, writing output to the
-/// path stored in `vars` under the `"plan"` variable.
-async fn run_plan_prompt_template(
-    config: &cruise::config::WorkflowConfig,
-    vars: &mut cruise::variable::VariableStore,
-    template: &str,
-    rate_limit_retries: usize,
-    cwd: Option<&std::path::Path>,
-) -> std::result::Result<cruise::step::prompt::PromptResult, String> {
-    let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
-    let prompt = vars
-        .resolve(template)
-        .map_err(|e: cruise::error::CruiseError| e.to_string())?;
-    let effective_model = plan_model.as_deref();
-    let has_placeholder = config.command.iter().any(|s| s.contains("{model}"));
-    let (resolved_command, model_arg) = if has_placeholder {
-        (
-            cruise::engine::resolve_command_with_model(&config.command, effective_model),
-            None,
-        )
-    } else {
-        (config.command.clone(), effective_model.map(str::to_string))
-    };
-    cruise::step::prompt::run_prompt(
-        &resolved_command,
-        model_arg.as_deref(),
-        &prompt,
-        rate_limit_retries,
-        &std::collections::HashMap::new(),
-        None::<&fn(&str)>,
-        None,
-        cwd,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
 // ─── Session creation commands ─────────────────────────────────────────────────
 
 /// A discovered workflow config file, returned to the frontend.
@@ -541,7 +502,17 @@ pub async fn create_session(
 
     let _ = channel.send(PlanEvent::PlanGenerating);
 
-    match run_plan_prompt_template(&config, &mut vars, PLAN_PROMPT_TEMPLATE, 5, Some(&base)).await {
+    match cruise::planning::run_plan_prompt_template(
+        &config,
+        &mut vars,
+        PLAN_PROMPT_TEMPLATE,
+        "[plan] creating plan...",
+        5,
+        Some(&base),
+    )
+    .await
+    .map_err(|e| e.to_string())
+    {
         Ok(result) => {
             let content = match cruise::metadata::resolve_plan_content(
                 &plan_path,
@@ -708,14 +679,16 @@ pub async fn fix_session(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
-    match run_plan_prompt_template(
+    match cruise::planning::run_plan_prompt_template(
         &config,
         &mut vars,
         FIX_PLAN_PROMPT_TEMPLATE,
+        "[fix-plan] applying fixes...",
         5,
         Some(&session.base_dir),
     )
     .await
+    .map_err(|e| e.to_string())
     {
         Ok(result) => {
             let content = match cruise::metadata::resolve_plan_content(
@@ -770,10 +743,11 @@ pub(crate) async fn do_ask_session(
     vars.set_named_file(PLAN_VAR, plan_path);
     vars.set_prev_input(Some(question));
 
-    let result = run_plan_prompt_template(
+    let result = cruise::planning::run_plan_prompt_template(
         &config,
         &mut vars,
         ASK_PLAN_PROMPT_TEMPLATE,
+        "[ask-plan] answering question...",
         5,
         Some(&session.base_dir),
     )

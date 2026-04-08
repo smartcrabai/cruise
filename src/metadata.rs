@@ -75,6 +75,11 @@ pub fn resolve_plan_content(plan_path: &Path, stdout: &str, stderr: &str) -> Res
     )))
 }
 
+#[must_use]
+pub fn plan_markdown_available(path: &Path) -> bool {
+    read_plan_markdown(path).is_ok()
+}
+
 pub(crate) fn read_plan_markdown(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::CruiseError::Other(format!(
