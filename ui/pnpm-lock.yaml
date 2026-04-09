@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@asamuzakjp/css-color': 5.1.5
-  lru-cache: 11.2.7
+  lru-cache: 11.3.0
 
 importers:
 
@@ -1217,8 +1217,8 @@ packages:
   longest-streak@3.1.0:
     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
 
-  lru-cache@11.2.7:
-    resolution: {integrity: sha512-aY/R+aEsRelme17KGQa/1ZSIpLpNYYrhcrepKTZgE+W3WM16YMCaPwOHLHsmopZHELU0Ojin1lPVxKR0MihncA==}
+  lru-cache@11.3.0:
+    resolution: {integrity: sha512-sr8xPKE25m6vJVcrdn6NxtC0fVfuPowbscLypegRgOm0yXSqr5JNHCAY3hnusdJ7HRBW04j6Ip4khvHU778DuQ==}
     engines: {node: 20 || >=22}
 
   lz-string@1.5.0:
@@ -1798,7 +1798,7 @@ snapshots:
       '@csstools/css-color-parser': 4.0.2(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)
       '@csstools/css-parser-algorithms': 4.0.0(@csstools/css-tokenizer@4.0.0)
       '@csstools/css-tokenizer': 4.0.0
-      lru-cache: 11.2.7
+      lru-cache: 11.3.0
 
   '@asamuzakjp/dom-selector@7.0.6':
     dependencies:
@@ -1806,7 +1806,7 @@ snapshots:
       bidi-js: 1.0.3
       css-tree: 3.2.1
       is-potential-custom-element-name: 1.0.1
-      lru-cache: 11.2.7
+      lru-cache: 11.3.0
 
   '@asamuzakjp/nwsapi@2.3.9': {}
 
@@ -1851,7 +1851,7 @@ snapshots:
       '@babel/compat-data': 7.29.0
       '@babel/helper-validator-option': 7.27.1
       browserslist: 4.28.2
-      lru-cache: 11.2.7
+      lru-cache: 11.3.0
       semver: 6.3.1
 
   '@babel/helper-globals@7.28.0': {}
@@ -2756,7 +2756,7 @@ snapshots:
       decimal.js: 10.6.0
       html-encoding-sniffer: 6.0.0
       is-potential-custom-element-name: 1.0.1
-      lru-cache: 11.2.7
+      lru-cache: 11.3.0
       parse5: 8.0.0
       saxes: 6.0.0
       symbol-tree: 3.2.4
@@ -2844,7 +2844,7 @@ snapshots:
 
   longest-streak@3.1.0: {}
 
-  lru-cache@11.2.7: {}
+  lru-cache@11.3.0: {}
 
   lz-string@1.5.0: {}
 
