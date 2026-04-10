@@ -27,7 +27,7 @@
   },
   "pnpm": {
     "overrides": {
-      "@asamuzakjp/css-color": "5.1.6",
+      "@asamuzakjp/css-color": "5.1.8",
       "lru-cache": "11.3.2"
     }
   },
