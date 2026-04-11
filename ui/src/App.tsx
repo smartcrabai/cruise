@@ -1403,6 +1403,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
   const { status, total, parallelism, runningSessions, results, runError, pendingOptions, liveLog } = state;
   const runningEntries = Object.entries(runningSessions);
   const progressCount = results.length + runningEntries.length;
+  const displayTotal = Math.max(total, progressCount);
   const { completedCount, failedCount, suspendedCount } = results.reduce(
     (acc, r) => {
       if (r.phase === "Completed") acc.completedCount++;
@@ -1447,7 +1448,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
       {(total > 0 || status === "error") && (
         <div className="mb-4">
           <div className="flex justify-between text-xs text-gray-400 mb-1">
-            {total > 0 && <span>{progressCount} / {total} sessions</span>}
+            {total > 0 && <span>{progressCount} / {displayTotal} sessions</span>}
             {status === "running" && runningEntries.length > 0 && (
               <span className="text-green-400 animate-pulse">
                 Running {runningEntries.length}
@@ -1462,7 +1463,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
             <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-600 rounded-full transition-all duration-300"
-                style={{ width: `${(progressCount / total) * 100}%` }}
+                style={{ width: `${(progressCount / displayTotal) * 100}%` }}
               />
             </div>
           )}
