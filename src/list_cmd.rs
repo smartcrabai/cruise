@@ -345,7 +345,7 @@ fn format_session_label_with_plan_availability(s: &SessionState, plan_available:
             (style("✗").red(), style("Plan Failed").red())
         }
         SessionPhase::AwaitingApproval if !plan_available => {
-            (style("◌").yellow(), style("Planning").yellow())
+            (style("o").yellow(), style("Planning").yellow())
         }
         SessionPhase::AwaitingApproval => {
             (style("o").magenta(), style("Awaiting Approval").magenta())

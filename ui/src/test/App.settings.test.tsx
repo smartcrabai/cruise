@@ -21,6 +21,7 @@ import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 import * as desktopNotifications from "../lib/desktopNotifications";
+import { openSettingsModal } from "./helpers";
 
 // ─── Module mocks ──────────────────────────────────────────────────────────────
 
@@ -93,15 +94,6 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     workspaceMode: "Worktree",
     ...overrides,
   };
-}
-
-/** Open the settings modal and wait for the dialog to appear. */
-async function openSettingsModal(): Promise<void> {
-  const btn = screen.getByRole("button", { name: /settings/i });
-  await userEvent.click(btn);
-  await waitFor(() => {
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-  });
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

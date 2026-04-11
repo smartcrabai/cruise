@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cruise::batch_run::run_all_with_parallelism;
+use cruise::batch_run::run_all_with_dynamic_parallelism;
 use cruise::new_session_history::{
     NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
 };
@@ -1036,13 +1036,17 @@ pub async fn run_all_sessions(
     let _ = channel.send(WorkflowEvent::RunAllStarted { total, parallelism });
 
     let app_state = state.inner().clone();
+    app_state.set_run_all_parallelism(parallelism);
     let batch_cancel_token = cruise::cancellation::CancellationToken::new();
     app_state.register_batch_cancel_token(batch_cancel_token.clone());
     let channel_for_batch = channel.clone();
     let manager_for_batch = Arc::clone(&manager);
-    let results = run_all_with_parallelism(
+    let results = run_all_with_dynamic_parallelism(
         &manager,
-        parallelism,
+        {
+            let app_state = app_state.clone();
+            move || app_state.get_run_all_parallelism()
+        },
         batch_cancel_token,
         move |session: SessionState, cancel_token| {
             let channel = channel_for_batch.clone();
@@ -1197,9 +1201,16 @@ pub fn get_app_config() -> std::result::Result<cruise::app_config::AppConfig, St
 /// Persist an updated application-level configuration to `~/.config/cruise/config.json`.
 ///
 /// Validates the config before writing (e.g. `run_all_parallelism` must be >= 1).
+/// On success, also updates the in-memory runtime parallelism so that any active
+/// Run All batch picks up the new value at its next scheduling boundary.
 #[tauri::command]
-pub fn update_app_config(config: cruise::app_config::AppConfig) -> std::result::Result<(), String> {
-    config.save().map_err(|e| e.to_string())
+pub fn update_app_config(
+    config: cruise::app_config::AppConfig,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    config.save().map_err(|e| e.to_string())?;
+    state.set_run_all_parallelism(config.run_all_parallelism);
+    Ok(())
 }
 
 /// Return whether the current launch context supports automatic in-place update.
