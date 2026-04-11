@@ -6,16 +6,11 @@ import { checkForUpdate, checkForUpdateManual, downloadAndInstall } from "../lib
 import { listSessions, cleanSessions, getUpdateReadiness } from "../lib/commands";
 import type { Session, UpdateReadiness } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
+import { Spinner } from "./Spinner";
 import { formatLocalTime } from "../lib/format";
 import { isApprovalReady } from "../lib/sessionActions";
 
 type UpdateState = "available" | "downloading" | "error";
-
-function Spinner({ color = "border-gray-400" }: { color?: string }) {
-  return (
-    <span className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${color}`} />
-  );
-}
 
 interface SessionSidebarProps {
   selectedId: string | null;

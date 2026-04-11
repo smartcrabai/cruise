@@ -102,6 +102,36 @@ export function resetSession(sessionId: string): Promise<Session> {
   return invoke<Session>("reset_session", { sessionId });
 }
 
+/**
+ * Update session settings (config and/or skipped steps) for a session in
+ * `Awaiting Approval` or `Planned` phase.
+ */
+export function updateSessionSettings(
+  sessionId: string,
+  params: { configPath?: string; skippedSteps: string[] }
+): Promise<Session> {
+  return invoke<Session>("update_session", {
+    sessionId,
+    configPath: params.configPath ?? null,
+    skippedSteps: params.skippedSteps,
+  });
+}
+
+/**
+ * Regenerate the plan for a session, streaming PlanEvents via `channel`.
+ *
+ * @returns The updated plan markdown.
+ */
+export function regenerateSessionPlan(
+  sessionId: string,
+  channel: Channel<PlanEvent>
+): Promise<string> {
+  return invoke<string>("regenerate_session_plan", {
+    sessionId,
+    channel,
+  });
+}
+
 /** Return the run log for a session as plain text. Empty string if not yet run. */
 export function getSessionLog(sessionId: string): Promise<string> {
   return invoke<string>("get_session_log", { sessionId });

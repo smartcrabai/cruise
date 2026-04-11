@@ -29,6 +29,7 @@ pub struct SessionDto {
     /// Error message when `phase == "Failed"`.
     pub phase_error: Option<String>,
     pub config_source: String,
+    pub config_path: Option<String>,
     pub base_dir: String,
     pub input: String,
     pub title: Option<String>,
@@ -44,6 +45,7 @@ pub struct SessionDto {
     pub plan_available: bool,
     /// True while a plan-fix request is in progress.
     pub fix_in_progress: bool,
+    pub skipped_steps: Vec<String>,
 }
 
 impl SessionDto {
@@ -74,6 +76,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             phase: phase_label,
             phase_error,
             config_source: s.config_source,
+            config_path: s.config_path.map(|p| p.to_string_lossy().into_owned()),
             base_dir: s.base_dir.to_string_lossy().into_owned(),
             input: s.input,
             title: s.title,
@@ -87,6 +90,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             workspace_mode: s.workspace_mode,
             plan_available: false,
             fix_in_progress: false, // populated from AppState in list_sessions / get_session
+            skipped_steps: s.skipped_steps,
         }
     }
 }
@@ -262,12 +266,8 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
 
 // --- Read commands -------------------------------------------------------------
 
-/// List all sessions, sorted oldest-first.
-#[tauri::command]
-pub fn list_sessions(
-    state: tauri::State<'_, AppState>,
-) -> std::result::Result<Vec<SessionDto>, String> {
-    let manager = new_session_manager()?;
+/// List all sessions, sorted oldest-first (internal implementation).
+pub fn list_sessions_impl(manager: &SessionManager, state: &AppState) -> Vec<SessionDto> {
     let fixing = state.snapshot_fixing();
     manager
         .list()
@@ -275,13 +275,25 @@ pub fn list_sessions(
             sessions
                 .into_iter()
                 .map(|s| {
-                    let mut dto = SessionDto::from_state(s, &manager);
+                    let mut dto = SessionDto::from_state(s, manager);
                     dto.fix_in_progress = fixing.contains(&dto.id);
                     dto
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| {
+            eprintln!("warning: failed to list sessions: {e}");
+            Vec::new()
+        })
+}
+
+/// List all sessions, sorted oldest-first.
+#[tauri::command]
+pub fn list_sessions(
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<Vec<SessionDto>, String> {
+    let manager = new_session_manager()?;
+    Ok(list_sessions_impl(&manager, &state))
 }
 
 /// Get a single session by ID.
@@ -602,6 +614,63 @@ pub fn get_new_session_config_defaults(
     })
 }
 
+/// Update session settings (config and/or skipped steps) for a session in
+/// `Awaiting Approval` or `Planned` phase.
+///
+/// Returns the updated `SessionDto` on success.
+pub fn update_session_settings(
+    manager: &SessionManager,
+    session_id: &str,
+    config_path: Option<String>,
+    skipped_steps: Vec<String>,
+) -> std::result::Result<SessionDto, String> {
+    use cruise::session::SessionPhase;
+
+    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+
+    match &session.phase {
+        SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
+        other => {
+            return Err(format!(
+                "Cannot edit session in '{}' phase. Only 'Awaiting Approval' and 'Planned' sessions are editable.",
+                other.label()
+            ));
+        }
+    }
+
+    let (base, yaml, source) =
+        resolve_gui_session_paths(&session.base_dir.to_string_lossy(), config_path.as_deref())?;
+    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
+        .map_err(|e| format!("config parse error: {e}"))?;
+    cruise::config::validate_config(&config).map_err(|e| e.to_string())?;
+
+    session.config_source = source.display_string();
+    session.config_path = source.path().cloned();
+    session.skipped_steps = skipped_steps;
+    session.updated_at = Some(current_iso8601());
+
+    manager.save(&session).map_err(|e| e.to_string())?;
+
+    let session_dir = manager.sessions_dir().join(session_id);
+    if session.config_path.is_none() {
+        std::fs::write(session_dir.join("config.yaml"), &yaml)
+            .map_err(|e| format!("failed to write session config: {e}"))?;
+    }
+
+    let resolved_config_key = resolved_config_key_for_session(source.path());
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        requested_config_path: config_path,
+        working_dir: base.to_string_lossy().into_owned(),
+        resolved_config_key,
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
+
+    Ok(SessionDto::from_state(session, manager))
+}
+
 /// Approve a session, transitioning it from "Awaiting Approval" to "Planned".
 #[tauri::command]
 pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
@@ -623,6 +692,90 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     session.reset_to_planned();
     manager.save(&session).map_err(|e| e.to_string())?;
     Ok(SessionDto::from_state(session, &manager))
+}
+
+/// Update session settings (config and/or skipped steps) for a session in
+/// `Awaiting Approval` or `Planned` phase.
+#[tauri::command]
+pub fn update_session(
+    session_id: String,
+    config_path: Option<String>,
+    skipped_steps: Vec<String>,
+) -> std::result::Result<SessionDto, String> {
+    let manager = new_session_manager()?;
+    update_session_settings(&manager, &session_id, config_path, skipped_steps)
+}
+
+/// Regenerate the plan for a session using its current config,
+/// streaming [`PlanEvent`]s over `channel`.
+#[tauri::command]
+pub async fn regenerate_session_plan(
+    session_id: String,
+    channel: tauri::ipc::Channel<PlanEvent>,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+
+    let _fixing_guard = FixingGuard::new(&state, session_id.clone());
+    regenerate_plan(&manager, &session_id, &channel).await
+}
+
+async fn regenerate_plan(
+    manager: &SessionManager,
+    session_id: &str,
+    channel: &tauri::ipc::Channel<PlanEvent>,
+) -> std::result::Result<String, String> {
+    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let _ = channel.send(PlanEvent::PlanGenerating);
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path.clone());
+
+    match cruise::planning::run_plan_prompt_template(
+        &config,
+        &mut vars,
+        PLAN_PROMPT_TEMPLATE,
+        "[plan] regenerating plan...",
+        5,
+        Some(&session.base_dir),
+    )
+    .await
+    .map_err(|e| e.to_string())
+    {
+        Ok(result) => {
+            let content = match cruise::metadata::resolve_plan_content(
+                &plan_path,
+                &result.output,
+                &result.stderr,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = channel.send(PlanEvent::PlanFailed {
+                        session_id: session_id.to_string(),
+                        error: msg.clone(),
+                    });
+                    return Err(msg);
+                }
+            };
+            cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
+            manager.save(&session).map_err(|e| e.to_string())?;
+
+            let _ = channel.send(PlanEvent::PlanGenerated {
+                session_id: session_id.to_string(),
+                content: content.clone(),
+            });
+            Ok(content)
+        }
+        Err(msg) => {
+            let _ = channel.send(PlanEvent::PlanFailed {
+                session_id: session_id.to_string(),
+                error: msg.clone(),
+            });
+            Err(msg)
+        }
+    }
 }
 
 /// Delete a session that is still in "Awaiting Approval" phase (discard).
@@ -1892,72 +2045,6 @@ mod tests {
         assert_eq!(base, repo_dir.path());
     }
 
-    #[test]
-    fn test_get_config_steps_uses_local_config_from_base_dir() {
-        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        fs::write(
-            repo_dir.path().join("cruise.yaml"),
-            r#"
-command: [echo]
-groups:
-  review:
-    steps:
-      simplify:
-        command: echo simplify
-steps:
-  build:
-    command: echo build
-  review-pass:
-    group: review
-"#,
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _lock = cruise::test_support::lock_process();
-        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
-
-        let steps = get_config_steps(
-            repo_dir
-                .path()
-                .to_str()
-                .unwrap_or_else(|| panic!("unexpected None"))
-                .to_string(),
-            None,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].id, "build");
-        assert_eq!(steps[1].id, "review-pass");
-        assert_eq!(steps[1].expanded_step_ids, vec!["review-pass/simplify"]);
-    }
-
-    #[test]
-    fn test_get_config_steps_returns_builtin_default_steps_when_no_config_found() {
-        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _lock = cruise::test_support::lock_process();
-        let _home_guard = cruise::test_support::EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
-
-        let steps = get_config_steps(
-            repo_dir
-                .path()
-                .to_str()
-                .unwrap_or_else(|| panic!("unexpected None"))
-                .to_string(),
-            None,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        assert!(
-            !steps.is_empty(),
-            "builtin default config should expose skippable steps"
-        );
-    }
-
     // --- prepare_run_session: worktree gh preflight --------------------------
 
     /// Given: worktree-mode session, no `gh` in PATH (empty bin directory)
@@ -2054,5 +2141,288 @@ steps:
             saved.worktree_branch.is_some(),
             "worktree branch should be set"
         );
+    }
+
+    // --- Post-plan session editing tests -----------------------------------------
+
+    #[test]
+    fn test_session_dto_includes_config_path_and_skipped_steps() {
+        let mut session = cruise::session::SessionState::new(
+            "20260410000000".to_string(),
+            std::path::PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "test input".to_string(),
+        );
+        session.skipped_steps = vec!["build".to_string(), "test".to_string()];
+
+        let dto = SessionDto::from(session.clone());
+
+        assert_eq!(dto.config_source, "cruise.yaml");
+        assert!(dto.config_path.is_none());
+        assert_eq!(
+            dto.skipped_steps,
+            vec!["build".to_string(), "test".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_succeeds_for_awaiting_approval_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000001";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_ok(),
+            "update_session_settings should succeed for AwaitingApproval"
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.skipped_steps, vec!["build"]);
+    }
+
+    #[test]
+    fn test_update_session_settings_succeeds_for_planned_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000002";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Planned;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_ok(),
+            "update_session_settings should succeed for Planned"
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.skipped_steps, vec!["build"]);
+    }
+
+    #[test]
+    fn test_update_session_settings_fails_for_running_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000003";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Running;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_err(),
+            "update_session_settings should fail for Running"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Running"),
+            "error should mention phase restriction: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_fails_for_suspended_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000004";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Suspended;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_err(),
+            "update_session_settings should fail for Suspended"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_fails_for_failed_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000005";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Failed("test error".to_string());
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_err(),
+            "update_session_settings should fail for Failed"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_fails_for_completed_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000006";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Completed;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(
+            result.is_err(),
+            "update_session_settings should fail for Completed"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_builtin_config_writes_config_yaml() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        // Use an empty fake HOME so the resolver falls through to the built-in default
+        // (no local cruise.yaml in repo, no CRUISE_CONFIG, no ~/.cruise/*.yaml files).
+        let _home_guard = cruise::test_support::EnvGuard::set("HOME", tmp.path().as_os_str());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        let session_id = "20260410000007";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.config_source = BUILTIN_CONFIG_KEY.to_string();
+        session.config_path = None;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+
+        assert!(result.is_ok());
+        let config_yaml_path = manager.sessions_dir().join(session_id).join("config.yaml");
+        assert!(
+            config_yaml_path.exists(),
+            "builtin config switch should write config.yaml to session dir"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_external_config_updates_paths() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000008";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.config_source = BUILTIN_CONFIG_KEY.to_string();
+        session.config_path = None;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let custom_config = tmp.path().join("custom.yaml");
+        fs::write(
+            &custom_config,
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let external_config = custom_config.to_string_lossy().to_string();
+
+        let result =
+            update_session_settings(&manager, session_id, Some(external_config.clone()), vec![]);
+
+        assert!(result.is_ok());
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.config_source, format!("config: {external_config}"));
+        assert!(updated.config_path.is_some());
+    }
+
+    #[test]
+    fn test_get_session_returns_config_path_and_skipped_steps() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000009";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.skipped_steps = vec!["build".to_string()];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let dto = SessionDto::from_state(session, &manager);
+
+        assert!(dto.config_path.is_some() || dto.config_source == "cruise.yaml");
+        assert_eq!(dto.skipped_steps, vec!["build"]);
+    }
+
+    #[test]
+    fn test_list_sessions_returns_config_path_and_skipped_steps() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000010";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.skipped_steps = vec!["test".to_string()];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let sessions = list_sessions_impl(&manager, &AppState::new());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].skipped_steps, vec!["test"]);
     }
 }

@@ -16,6 +16,7 @@ export interface Session {
   /** Populated when phase === "Failed" */
   phaseError?: string;
   configSource: string;
+  configPath?: string;
   baseDir: string;
   input: string;
   title?: string;
@@ -31,6 +32,7 @@ export interface Session {
   planAvailable?: boolean;
   /** True while a plan-fix request is in progress (persisted in session state). */
   fixInProgress?: boolean;
+  skippedSteps: string[];
 }
 
 // --- IPC Events ---------------------------------------------------------------
