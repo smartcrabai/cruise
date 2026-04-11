@@ -1574,6 +1574,11 @@ export default function App() {
   async function handleSaveSettings(config: AppConfig) {
     await updateAppConfig(config);
     setShowSettings(false);
+    setRunAllState((prev) => {
+      if (!prev || prev.status !== "running") return prev;
+      if (prev.parallelism === config.runAllParallelism) return prev;
+      return { ...prev, parallelism: config.runAllParallelism };
+    });
   }
 
   const handleFixingChange = useCallback((sessionId: string, fixing: boolean) => {
