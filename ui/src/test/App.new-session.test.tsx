@@ -63,6 +63,22 @@ vi.mock("../lib/desktopNotifications", () => ({
 
 // --- Helpers ------------------------------------------------------------------
 
+function setupNewSessionMocks() {
+  vi.clearAllMocks();
+  vi.mocked(commands.listSessions).mockResolvedValue([]);
+  vi.mocked(commands.listConfigs).mockResolvedValue([]);
+  vi.mocked(commands.getSessionLog).mockResolvedValue("");
+  vi.mocked(commands.getSessionPlan).mockResolvedValue("");
+  vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
+  vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
+    steps: [],
+    defaultSkippedSteps: [],
+  });
+  vi.mocked(commands.listDirectory).mockResolvedValue([]);
+  vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+  vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+}
+
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: "session-1",
@@ -107,21 +123,7 @@ const BUILD_AND_REVIEW_STEPS = [
 // --- New Session draft state persistence -------------------------------------
 
 describe("App: New Session draft state persistence", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(commands.listSessions).mockResolvedValue([]);
-    vi.mocked(commands.listConfigs).mockResolvedValue([]);
-    vi.mocked(commands.getSessionLog).mockResolvedValue("");
-    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
-    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
-    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
-      steps: [],
-      defaultSkippedSteps: [],
-    });
-    vi.mocked(commands.listDirectory).mockResolvedValue([]);
-    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
-    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
-  });
+  beforeEach(setupNewSessionMocks);
 
   afterEach(() => {
     cleanup();
@@ -260,21 +262,7 @@ describe("App: New Session draft state persistence", () => {
 });
 
 describe("App: New Session skip-step selection", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(commands.listSessions).mockResolvedValue([]);
-    vi.mocked(commands.listConfigs).mockResolvedValue([]);
-    vi.mocked(commands.getSessionLog).mockResolvedValue("");
-    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
-    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
-    vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
-      steps: [],
-      defaultSkippedSteps: [],
-    });
-    vi.mocked(commands.listDirectory).mockResolvedValue([]);
-    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
-    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
-  });
+  beforeEach(setupNewSessionMocks);
 
   afterEach(() => {
     cleanup();
@@ -343,6 +331,142 @@ describe("App: New Session skip-step selection", () => {
   });
 });
 
+// --- Skip Steps following Config selector changes ----------------------------
+
+describe("App: New Session skip-step selection — Config change", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("replaces Skip Steps candidates with the new config's steps when switching explicit configs", async () => {
+    // Given: two explicit configs — configA has BUILD_AND_REVIEW_STEPS, configB has BUILD_ONLY_STEP
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/configA.yaml", name: "configA.yaml" },
+      { path: "/tmp/configB.yaml", name: "configB.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })               // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] }) // select configA
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] }); // select configB
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // When: select configA
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configA.yaml");
+
+    // Then: configA's steps appear with "build" checked by default
+    expect(await screen.findByRole("checkbox", { name: "build" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "review-pass" })).toBeInTheDocument();
+
+    // When: switch to configB
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configB.yaml");
+
+    // Then: only configB's steps are shown — "review-pass" is gone, "build" is unchecked
+    await waitFor(() => {
+      expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
+    expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
+      baseDir: ".",
+      configPath: "/tmp/configB.yaml",
+    });
+  });
+
+  it("updates Skip Steps when switching from auto mode to an explicit config", async () => {
+    // Given: auto mode resolves BUILD_AND_REVIEW_STEPS; explicit config resolves BUILD_ONLY_STEP
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/custom.yaml", name: "custom.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] }) // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] });               // select explicit
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // And: auto-mode steps are shown initially
+    await screen.findByRole("checkbox", { name: "build" });
+    expect(screen.getByRole("checkbox", { name: "review-pass" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "build" })).toBeChecked();
+
+    // When: user selects the explicit config
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
+
+    // Then: explicit config's steps replace the auto ones — "review-pass" gone, "build" unchecked
+    await waitFor(() => {
+      expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
+    expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
+      baseDir: ".",
+      configPath: "/tmp/custom.yaml",
+    });
+  });
+
+  it("restores auto-resolved Skip Steps when deselecting an explicit config back to Auto", async () => {
+    // Given: explicit config has BUILD_ONLY_STEP; auto mode has BUILD_AND_REVIEW_STEPS
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/custom.yaml", name: "custom.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })                              // initial auto (no steps)
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] })                  // select explicit
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] });   // back to auto
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Select explicit config
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
+    await screen.findByRole("checkbox", { name: "build" });
+    expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
+
+    // When: switch back to Auto
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "");
+
+    // Then: auto-mode steps appear — "review-pass" is back and "build" is checked by default
+    await screen.findByRole("checkbox", { name: "review-pass" });
+    expect(screen.getByRole("checkbox", { name: "build" })).toBeChecked();
+    expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
+      baseDir: ".",
+      configPath: undefined,
+    });
+  });
+
+  it("does not carry over user-checked steps from the previous config when switching configs", async () => {
+    // Given: configA has BUILD_AND_REVIEW_STEPS (no defaults); configB has BUILD_ONLY_STEP (no defaults)
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/configA.yaml", name: "configA.yaml" },
+      { path: "/tmp/configB.yaml", name: "configB.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionConfigDefaults)
+      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })                  // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: [] }) // select configA
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] });       // select configB
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Select configA and manually check "build"
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configA.yaml");
+    const buildCheckbox = await screen.findByRole("checkbox", { name: "build" });
+    await userEvent.click(buildCheckbox);
+    expect(buildCheckbox).toBeChecked();
+
+    // When: switch to configB
+    await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configB.yaml");
+
+    // Then: configB's default (unchecked) is applied — the manual check is not carried over
+    await waitFor(() => {
+      expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
+  });
+});
+
 // --- Non-blocking session creation -------------------------------------------
 
 /**
@@ -388,16 +512,7 @@ function setupTwoPhaseCreateSession(sessionId = "new-sess-id") {
 }
 
 describe("App: Non-blocking session creation", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(commands.listSessions).mockResolvedValue([]);
-    vi.mocked(commands.listConfigs).mockResolvedValue([]);
-    vi.mocked(commands.getSessionLog).mockResolvedValue("");
-    vi.mocked(commands.getSessionPlan).mockResolvedValue("");
-    vi.mocked(commands.listDirectory).mockResolvedValue([]);
-    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
-    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
-  });
+  beforeEach(setupNewSessionMocks);
 
   afterEach(() => {
     cleanup();
