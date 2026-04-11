@@ -169,6 +169,46 @@ describe("App: Run All parallel state", () => {
     });
   });
 
+  it("updates denominator when late-added session starts beyond initial total", async () => {
+    // Given: Run All starts with total=3, representing the initial snapshot
+    const channel = await navigateToRunAll([
+      makeSession({ id: "s1", input: "task one" }),
+      makeSession({ id: "s2", input: "task two" }),
+      makeSession({ id: "s3", input: "task three" }),
+    ]);
+
+    // When: batch starts with total=3, then all 3 initially-known sessions start
+    await act(async () => {
+      channel.onmessage?.({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
+      channel.onmessage?.({
+        event: "runAllSessionStarted",
+        data: { sessionId: "s1", input: "task one" },
+      });
+      channel.onmessage?.({
+        event: "runAllSessionStarted",
+        data: { sessionId: "s2", input: "task two" },
+      });
+      channel.onmessage?.({
+        event: "runAllSessionStarted",
+        data: { sessionId: "s3", input: "task three" },
+      });
+    });
+
+    // And: a 4th session is picked up late (beyond the initial total of 3)
+    await act(async () => {
+      channel.onmessage?.({
+        event: "runAllSessionStarted",
+        data: { sessionId: "s4", input: "task four" },
+      });
+    });
+
+    // Then: progress shows 4 / 4 sessions, not the broken 4 / 3 sessions
+    await waitFor(() => {
+      expect(screen.getByText(/4 \/ 4 sessions/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/4 \/ 3 sessions/)).not.toBeInTheDocument();
+  });
+
   it("preserves overlapping option prompts so both requests can be answered", async () => {
     // Given: Run All is active and two sessions ask for input before either response is sent
     const channel = await navigateToRunAll([
