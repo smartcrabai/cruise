@@ -36,8 +36,11 @@ import { notifyDesktop } from "./lib/desktopNotifications";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
+import { SessionConfigEditor } from "./components/SessionConfigEditor";
 import { SessionSidebar } from "./components/SessionSidebar";
+import { Spinner } from "./components/Spinner";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
+import { collectExpandedStepIds } from "./lib/stepUtils";
 import {
   formatLocalTime,
   workflowEventLogLine,
@@ -417,6 +420,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const [askError, setAskError] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
   // Load saved log from file when tab is opened or after run finishes
@@ -465,6 +469,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setAskError("");
     setShowDeleteConfirm(false);
     setDeleting(false);
+    setIsConfigRegenerating(false);
   }, [session.id]);
 
   // Clear the ephemeral fixingSessionIds entry from App when this runner unmounts.
@@ -661,8 +666,8 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   // isApprovalReady() already checks !session.fixInProgress, so only the local
   // ephemeral flag needs to be forwarded to suppress buttons while the request
   // is in flight within this component instance.
-  const actions = getSessionActions(session, status, replanPhase === "generating");
-  const notBusy = replanPhase === "idle" && askPhase === "idle";
+  const actions = getSessionActions(session, status, replanPhase === "generating" || isConfigRegenerating);
+  const notBusy = replanPhase === "idle" && askPhase === "idle" && !isConfigRegenerating;
   const canShowFix = actions.showFix && notBusy;
   const canShowAsk = actions.showAsk && notBusy;
 
@@ -787,6 +792,23 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
           )}
         </div>
 
+        {(session.phase === "Awaiting Approval" || session.phase === "Planned") && (
+          <div className="border-b border-gray-800 pb-4">
+            <h3 className="text-xs text-gray-500 uppercase tracking-wide mb-3">Session Settings</h3>
+            <SessionConfigEditor
+              sessionId={session.id}
+              baseDir={session.baseDir}
+              configPath={session.configPath}
+              skippedSteps={session.skippedSteps}
+              onSessionUpdated={onSessionUpdated}
+              onPlanRegenerated={(content) => setPlanContent(content)}
+              onRegeneratingChange={setIsConfigRegenerating}
+              onError={(error) => onToast({ kind: "failed", sessionInput: session.input, detail: error })}
+              disabled={replanPhase === "generating"}
+            />
+          </div>
+        )}
+
         {/* Replan / Fix feedback */}
         {replanPhase === "editing" && (
           <div className="space-y-2">
@@ -826,7 +848,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
         )}
         {replanPhase === "generating" && (
           <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
+            <Spinner />
             Regenerating plan...
           </div>
         )}
@@ -1031,25 +1053,6 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     isGenerating: false,
     error: null,
   };
-}
-
-function collectExpandedStepIds(nodes: SkippableStepDto[]): Set<string> {
-  const ids = new Set<string>();
-
-  function visit(node: SkippableStepDto) {
-    for (const id of node.expandedStepIds) {
-      ids.add(id);
-    }
-    for (const child of node.children) {
-      visit(child);
-    }
-  }
-
-  for (const node of nodes) {
-    visit(node);
-  }
-
-  return ids;
 }
 
 interface NewSessionFormProps {
@@ -1350,7 +1353,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         >
           {isGenerating ? (
             <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+              <Spinner color="border-white" />
               Creating session...
             </>
           ) : (
@@ -1700,6 +1703,7 @@ export default function App() {
         setRunAllState((prev) => {
           if (!prev) return prev;
           const { sessionId, input, phase, error } = event.data;
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const { [sessionId]: _finishedSession, ...remainingSessions } = prev.runningSessions;
           return {
             ...prev,
