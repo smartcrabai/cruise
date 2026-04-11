@@ -1,7 +1,6 @@
 //! Bounded-concurrency batch scheduler for `run --all`.
 //!
-//! This module is shared between the CLI (`src/run_cmd.rs`) and the GUI
-//! (`src-tauri/src/commands.rs`) so neither duplicates the scheduling loop.
+//! Used by the GUI (`src-tauri/src/commands.rs`) for parallel session execution.
 //!
 //! ## Scheduling rules
 //! 1. Seed from [`SessionManager::run_all_remaining`] to get the initial candidate list.
@@ -58,26 +57,12 @@ pub struct BatchSessionResult {
     pub outcome: Result<()>,
 }
 
-/// Run all pending sessions with bounded parallelism.
+/// Convenience wrapper for tests: run all pending sessions with a fixed concurrency limit.
 ///
-/// # Arguments
-///
-/// * `manager`      - Provides candidate enumeration via [`SessionManager::run_all_remaining`].
-/// * `parallelism`  - Maximum number of sessions running concurrently (must be >= 1).
-/// * `cancel_token` - When cancelled, no new sessions are scheduled; in-flight sessions
-///   receive the *same* token clone so they can observe cancellation.
-/// * `run_fn`       - Called once per session; receives the session state and a
-///   cancellation token clone. Must return a `Send` future.
-///
-/// # Returns
-///
-/// A `Vec<BatchSessionResult>` **sorted by `batch_index`** (scheduling order).
-///
-/// # Errors
-///
-/// Returns an error only if the session list cannot be read from disk, or `parallelism` is 0.
-/// Individual session failures are captured inside [`BatchSessionResult::outcome`].
-pub async fn run_all_with_parallelism<F, Fut>(
+/// Delegates to [`run_all_with_dynamic_parallelism`] with a constant `parallelism_fn`.
+/// Only compiled in test builds; production callers use the dynamic variant directly.
+#[cfg(test)]
+pub(crate) async fn run_all_with_parallelism<F, Fut>(
     manager: &SessionManager,
     parallelism: usize,
     cancel_token: CancellationToken,
@@ -92,7 +77,39 @@ where
             "run_all_with_parallelism: parallelism must be >= 1 (got 0)".to_string(),
         ));
     }
+    run_all_with_dynamic_parallelism(manager, move || parallelism, cancel_token, run_fn).await
+}
 
+/// Run all pending sessions with bounded concurrency where the parallelism limit can change
+/// at runtime.
+///
+/// # Arguments
+///
+/// * `manager`        - Provides candidate enumeration via [`SessionManager::run_all_remaining`].
+/// * `parallelism_fn` - Called at each scheduling boundary to get the current concurrency limit.
+///   Must return >= 1; returns an error immediately if it ever returns 0.
+/// * `cancel_token`   - When cancelled, no new sessions are scheduled.
+/// * `run_fn`         - Called once per session with its state and a cancellation token clone.
+///
+/// # Returns
+///
+/// A `Vec<BatchSessionResult>` sorted by scheduling order.
+///
+/// # Errors
+///
+/// Returns an error if `parallelism_fn` ever returns 0, or if the session list
+/// cannot be read from disk. Individual session failures are captured inside results.
+pub async fn run_all_with_dynamic_parallelism<F, Fut, G>(
+    manager: &SessionManager,
+    parallelism_fn: G,
+    cancel_token: CancellationToken,
+    run_fn: F,
+) -> Result<Vec<BatchSessionResult>>
+where
+    F: Fn(SessionState, CancellationToken) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+    G: Fn() -> usize + Send + 'static,
+{
     if cancel_token.is_cancelled() {
         return Ok(Vec::new());
     }
@@ -116,6 +133,13 @@ where
     enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
 
     loop {
+        let parallelism = parallelism_fn();
+        if parallelism == 0 {
+            return Err(crate::error::CruiseError::Other(
+                "run_all_with_dynamic_parallelism: parallelism_fn returned 0".to_string(),
+            ));
+        }
+
         // Fill up to `parallelism` concurrent workers.
         while join_set.len() < parallelism && !cancel_token.is_cancelled() {
             let Some(session) = candidates.pop_front() else {
@@ -139,29 +163,20 @@ where
             });
         }
 
-        // If no workers are running and no candidates remain, we're done.
         if join_set.is_empty() {
             break;
         }
 
-        // When there are idle worker slots and no candidates queued, use a periodic
-        // re-scan so that newly-added Planned sessions are picked up without waiting
-        // for an in-flight worker to finish first.
-        let has_idle_slot =
-            candidates.is_empty() && join_set.len() < parallelism && !cancel_token.is_cancelled();
-        let task_result_opt = if has_idle_slot {
-            tokio::select! {
-                result = join_set.join_next() => result,
-                () = tokio::time::sleep(PERIODIC_SCAN_INTERVAL) => {
-                    // Skip if already cancelled so no new sessions are scheduled.
-                    if !cancel_token.is_cancelled() {
-                        enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
-                    }
-                    continue;
+        // Always use a periodic re-scan in the dynamic version so that parallelism
+        // increases are detected without waiting for an in-flight session to complete.
+        let task_result_opt = tokio::select! {
+            result = join_set.join_next() => result,
+            () = tokio::time::sleep(PERIODIC_SCAN_INTERVAL) => {
+                if !cancel_token.is_cancelled() {
+                    enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
                 }
+                continue;
             }
-        } else {
-            join_set.join_next().await
         };
 
         let Some(task_result) = task_result_opt else {
@@ -194,7 +209,6 @@ where
         enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
     }
 
-    // Sort by scheduling order before returning.
     completed.sort_by_key(|r| r.batch_index);
     Ok(completed)
 }
@@ -925,6 +939,244 @@ mod tests {
         assert!(
             results[0].outcome.is_err(),
             "failed session outcome must be captured inside BatchSessionResult"
+        );
+    }
+
+    // -- Dynamic parallelism --------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dynamic_parallelism_fn_returning_zero_returns_error() {
+        // Given: a dynamic getter that always returns 0 (invalid)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+        let cancel = CancellationToken::new();
+
+        // When: run with parallelism_fn that returns 0
+        let result = run_all_with_dynamic_parallelism(
+            &manager,
+            || 0usize,
+            cancel,
+            instant_completer(Arc::clone(&manager)),
+        )
+        .await;
+
+        // Then: returns an error immediately
+        assert!(
+            result.is_err(),
+            "parallelism_fn returning 0 must cause an immediate error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_parallelism_increase_fills_new_slot_via_periodic_scan() {
+        // Given: 2 sessions; scheduler starts at parallelism=1 so only session 1 is launched.
+        // When parallelism is bumped to 2 (after session 1 starts), the scheduler must fill
+        // the new idle slot via periodic re-scan -- without waiting for session 1 to complete.
+        // The test proves this by having session 1 block until session 2 has started; if no
+        // periodic scan fires the batch deadlocks and the outer timeout catches it.
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+        make_planned_session(&manager, "20260101000002", tmp.path());
+
+        // Shared parallelism: starts at 1, bumped to 2 once session 1 starts.
+        let current_parallelism = Arc::new(Mutex::new(1usize));
+        let par_for_fn = Arc::clone(&current_parallelism);
+        let parallelism_fn = move || {
+            *par_for_fn
+                .lock()
+                .unwrap_or_else(|e| panic!("parallelism lock: {e}"))
+        };
+
+        // Synchronization: session 1 signals it is running; it then waits for session 2 to start.
+        let s1_started = Arc::new(tokio::sync::Notify::new());
+        let s2_started = Arc::new(tokio::sync::Notify::new());
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let s1 = Arc::clone(&s1_started);
+            let s2 = Arc::clone(&s2_started);
+            move |session: SessionState, _cancel: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let s1 = Arc::clone(&s1);
+                let s2 = Arc::clone(&s2);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    if id == "20260101000001" {
+                        s1.notify_one(); // notify the increaser that session 1 is running
+                        s2.notified().await; // wait for session 2 to start before completing
+                    } else {
+                        s2.notify_one(); // unblock session 1
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        // Increaser task: once session 1 is running, bump parallelism to 2 so an idle slot opens.
+        let increaser = tokio::spawn({
+            let par = Arc::clone(&current_parallelism);
+            let s1 = Arc::clone(&s1_started);
+            async move {
+                s1.notified().await;
+                *par.lock().unwrap_or_else(|e| panic!("{e}")) = 2;
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        // Timeout: if the periodic scan never fires, session 1 waits forever for session 2.
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_all_with_dynamic_parallelism(&manager, parallelism_fn, cancel, run_fn),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out: after parallelism increases from 1 to 2, the scheduler must \
+                 fill the new idle slot via periodic re-scan without waiting for session 1 \
+                 to complete"
+            )
+        })
+        .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+
+        increaser.await.unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: both sessions complete
+        assert_eq!(results.len(), 2, "both sessions must complete");
+        let ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.session_id.as_str()).collect();
+        assert!(ids.contains("20260101000001"));
+        assert!(ids.contains("20260101000002"));
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_parallelism_decrease_holds_back_new_session_while_slots_full() {
+        // Given: 3 sessions; start with parallelism=2 so sessions 1 and 2 run concurrently.
+        // When parallelism drops to 1 while both are in-flight:
+        //   - session 1 completes (in-flight=1, limit=1 → 1 < 1 = false → no new session)
+        //   - session 2 completes (in-flight=0, limit=1 → 0 < 1 = true  → session 3 starts)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        for id in ["20260101000001", "20260101000002", "20260101000003"] {
+            make_planned_session(&manager, id, tmp.path());
+        }
+
+        let current_parallelism = Arc::new(Mutex::new(2usize));
+        let par_for_fn = Arc::clone(&current_parallelism);
+        let parallelism_fn = move || {
+            *par_for_fn
+                .lock()
+                .unwrap_or_else(|e| panic!("parallelism lock: {e}"))
+        };
+
+        // Both sessions 1 and 2 rendezvous with the test thread to confirm they are running.
+        let both_running = Arc::new(tokio::sync::Barrier::new(3));
+        // Session 1 waits for this release so the test can decrease parallelism *before*
+        // session 1 completes, preventing a race where the scheduler reads the old
+        // parallelism value (2) after session 1 finishes.
+        let release_s1 = Arc::new(tokio::sync::Notify::new());
+        // Session 2 waits for this extra release.
+        let release_s2 = Arc::new(tokio::sync::Notify::new());
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let run_fn = {
+            let manager = Arc::clone(&manager);
+            let log = Arc::clone(&log);
+            let barrier = Arc::clone(&both_running);
+            let rel1 = Arc::clone(&release_s1);
+            let rel2 = Arc::clone(&release_s2);
+            move |session: SessionState, _cancel: CancellationToken| {
+                let manager = Arc::clone(&manager);
+                let log = Arc::clone(&log);
+                let barrier = Arc::clone(&barrier);
+                let rel1 = Arc::clone(&rel1);
+                let rel2 = Arc::clone(&rel2);
+                let id = session.id.clone();
+                Box::pin(async move {
+                    log.lock()
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .push(id.clone());
+                    match id.as_str() {
+                        "20260101000001" => {
+                            barrier.wait().await;
+                            rel1.notified().await; // held until test sets parallelism=1
+                        }
+                        "20260101000002" => {
+                            barrier.wait().await;
+                            rel2.notified().await; // held until the test releases it
+                        }
+                        _ => {} // session 3 runs without waiting
+                    }
+                    let mut state = manager
+                        .load(&id)
+                        .unwrap_or_else(|e| panic!("load {id}: {e}"));
+                    state.phase = SessionPhase::Completed;
+                    manager
+                        .save(&state)
+                        .unwrap_or_else(|e| panic!("save {id}: {e}"));
+                    Ok(())
+                }) as std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        let cancel = CancellationToken::new();
+        let manager_for_task = Arc::clone(&manager);
+        let handle = tokio::spawn(async move {
+            run_all_with_dynamic_parallelism(&manager_for_task, parallelism_fn, cancel, run_fn)
+                .await
+        });
+
+        // Wait until both sessions 1 and 2 are in-flight.
+        both_running.wait().await;
+
+        // Decrease parallelism from 2 to 1 while both slots are occupied.
+        *current_parallelism.lock().unwrap_or_else(|e| panic!("{e}")) = 1;
+
+        // Now release session 1. Because current_parallelism is already 1, the scheduler
+        // will see in-flight=1 and limit=1 (1 < 1 = false) and must NOT schedule session 3.
+        release_s1.notify_one();
+
+        // Give the scheduler enough time to process session 1's completion and, if buggy,
+        // incorrectly start session 3 (join_set.len()=1 == limit=1, so it must NOT).
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(PERIODIC_SCAN_INTERVAL * 3).await;
+
+        // Then: session 3 must NOT have started yet.
+        {
+            let snapshot = log.lock().unwrap_or_else(|e| panic!("{e}")).clone();
+            assert!(
+                !snapshot.contains(&"20260101000003".to_string()),
+                "session 3 must not start while in-flight count (1) equals the new \
+                 parallelism limit (1); log: {snapshot:?}"
+            );
+        }
+
+        // Release session 2; in-flight drops to 0, so session 3 must now start.
+        release_s2.notify_one();
+
+        let results = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .unwrap_or_else(|_| panic!("batch timed out"))
+            .unwrap_or_else(|e| panic!("join failed: {e}"))
+            .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+
+        // All three sessions must eventually complete.
+        assert_eq!(results.len(), 3, "all 3 sessions must complete");
+        assert!(
+            log.lock()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .contains(&"20260101000003".to_string()),
+            "session 3 must run after session 2 completes"
         );
     }
 }

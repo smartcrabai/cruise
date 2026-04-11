@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session, WorkflowEvent } from "../types";
 import * as commands from "../lib/commands";
+import { openSettingsModal } from "./helpers";
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("0.0.0"),
@@ -254,5 +255,39 @@ describe("App: Run All parallel state", () => {
     });
     expect(vi.mocked(commands.respondToOption).mock.calls[0][0]).toBe("req-1");
     expect(vi.mocked(commands.respondToOption).mock.calls[1][0]).toBe("req-2");
+  });
+
+  it("updates parallelism denominator to new value after settings are saved while running", async () => {
+    // Given: Run All is active with parallelism=2 and one session is in flight
+    const channel = await navigateToRunAll([
+      makeSession({ id: "s1", input: "task one" }),
+      makeSession({ id: "s2", input: "task two" }),
+    ]);
+
+    await act(async () => {
+      channel.onmessage?.({ event: "runAllStarted", data: { total: 2, parallelism: 2 } });
+      channel.onmessage?.({
+        event: "runAllSessionStarted",
+        data: { sessionId: "s1", input: "task one" },
+      });
+    });
+
+    // Confirm the initial denominator is 2
+    await waitFor(() => {
+      expect(screen.getByText(/Running 1\s*\/\s*2/)).toBeInTheDocument();
+    });
+
+    // When: open settings and save parallelism=4
+    await openSettingsModal();
+    const input = screen.getByRole("spinbutton");
+    await userEvent.clear(input);
+    await userEvent.type(input, "4");
+    vi.mocked(commands.getAppConfig).mockResolvedValue({ runAllParallelism: 4 });
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // Then: the denominator in "Running n / parallelism" switches to 4
+    await waitFor(() => {
+      expect(screen.getByText(/Running 1\s*\/\s*4/)).toBeInTheDocument();
+    });
   });
 });

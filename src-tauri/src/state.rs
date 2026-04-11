@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use cruise::cancellation::CancellationToken;
@@ -59,6 +62,8 @@ pub struct AppState {
     /// survive an app restart.  A fix that was interrupted by a crash will
     /// therefore show up as `fix_in_progress: false` on the next launch.
     pub fixing_sessions: Arc<Mutex<HashSet<String>>>,
+    /// Runtime concurrency limit for Run All batches.
+    run_all_parallelism: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -69,7 +74,21 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             batch_cancel_token: Arc::new(Mutex::new(None)),
             fixing_sessions: Arc::new(Mutex::new(HashSet::new())),
+            run_all_parallelism: Arc::new(AtomicUsize::new(1)),
         }
+    }
+
+    /// Return the current runtime concurrency limit for Run All batches.
+    pub fn get_run_all_parallelism(&self) -> usize {
+        self.run_all_parallelism.load(Ordering::Relaxed)
+    }
+
+    /// Update the runtime concurrency limit for Run All batches.
+    ///
+    /// Values less than 1 are clamped to 1 to avoid semaphore exhaustion.
+    pub fn set_run_all_parallelism(&self, parallelism: usize) {
+        self.run_all_parallelism
+            .store(parallelism.max(1), Ordering::Relaxed);
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, PerSessionState>> {
@@ -447,5 +466,35 @@ mod tests {
         state.cancel_session("nonexistent");
         // Then: still 0 sessions
         assert_eq!(state.active_session_count(), 0);
+    }
+
+    // -- Run All parallelism runtime state ------------------------------------
+
+    #[test]
+    fn test_run_all_parallelism_initial_value_is_one() {
+        // Given/When: a fresh AppState
+        let state = AppState::new();
+        // Then: the default runtime parallelism is 1
+        assert_eq!(state.get_run_all_parallelism(), 1);
+    }
+
+    #[test]
+    fn test_set_run_all_parallelism_stores_and_returns_new_value() {
+        // Given: a fresh AppState
+        let state = AppState::new();
+        // When: parallelism is updated to 4
+        state.set_run_all_parallelism(4);
+        // Then: the getter reflects the new value
+        assert_eq!(state.get_run_all_parallelism(), 4);
+    }
+
+    #[test]
+    fn test_set_run_all_parallelism_clamps_zero_to_one() {
+        // Given: a fresh AppState
+        let state = AppState::new();
+        // When: parallelism is set to 0 (invalid)
+        state.set_run_all_parallelism(0);
+        // Then: the value is clamped to 1 to avoid semaphore exhaustion
+        assert_eq!(state.get_run_all_parallelism(), 1);
     }
 }
