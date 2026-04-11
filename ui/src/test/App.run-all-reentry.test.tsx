@@ -74,6 +74,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     input: "test task",
     createdAt: "2026-01-01T00:00:00Z",
     workspaceMode: "Worktree",
+    skippedSteps: [],
     ...overrides,
   };
 }

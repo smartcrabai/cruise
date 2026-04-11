@@ -27,7 +27,7 @@
   },
   "pnpm": {
     "overrides": {
-      "@asamuzakjp/css-color": "5.1.6",
+      "@asamuzakjp/css-color": "5.1.8",
       "lru-cache": "11.3.2"
     }
   },
@@ -49,8 +49,8 @@
     "jsdom": "29.0.2",
     "tailwindcss": "4.2.2",
     "typescript": "6.0.2",
-    "typescript-eslint": "8.58.0",
-    "vite": "8.0.5",
-    "vitest": "4.1.2"
+    "typescript-eslint": "8.58.1",
+    "vite": "8.0.7",
+    "vitest": "4.1.3"
   }
 }
