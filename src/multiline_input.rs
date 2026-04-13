@@ -121,6 +121,7 @@ fn map_signal(signal: Signal) -> Option<InputResult> {
         Signal::Success(text) if text.trim().is_empty() => None,
         Signal::Success(text) => Some(InputResult::Submitted(text)),
         Signal::CtrlC | Signal::CtrlD => Some(InputResult::Cancelled),
+        _ => None,
     }
 }
 
