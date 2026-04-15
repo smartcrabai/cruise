@@ -41,6 +41,7 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { Spinner } from "./components/Spinner";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
 import { collectExpandedStepIds } from "./lib/stepUtils";
+import { useSplitPane } from "./lib/useSplitPane";
 import {
   formatLocalTime,
   workflowEventLogLine,
@@ -1561,6 +1562,17 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsParallelism, setSettingsParallelism] = useState<number>(1);
 
+  const {
+    width: sidebarWidth,
+    handleMouseDown: handleSidebarMouseDown,
+    handleKeyDown: handleSidebarKeyDown,
+  } = useSplitPane(
+    "cruise-sidebar-width",
+    288,
+    180,
+    480,
+  );
+
   async function handleOpenSettings() {
     try {
       const config = await getAppConfig();
@@ -1815,7 +1827,10 @@ export default function App() {
         />
       )}
       {/* Sidebar */}
-      <aside className="w-72 flex-shrink-0 border-r border-gray-800 flex flex-col">
+      <aside
+        style={{ width: sidebarWidth, flexShrink: 0 }}
+        className="border-r border-gray-800 flex flex-col"
+      >
         <SessionSidebar
           selectedId={selectedSession?.id ?? null}
           onSelect={(s) => { setSelectedSession(s); setView("session"); }}
@@ -1829,8 +1844,20 @@ export default function App() {
           onSettings={() => void handleOpenSettings()}
         />
       </aside>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuenow={sidebarWidth}
+        aria-valuemin={180}
+        aria-valuemax={480}
+        tabIndex={0}
+        className="w-1 cursor-col-resize bg-transparent hover:bg-blue-500/50 active:bg-blue-500/70 focus-visible:bg-blue-500/70 flex-shrink-0 transition-colors outline-none"
+        onMouseDown={handleSidebarMouseDown}
+        onKeyDown={handleSidebarKeyDown}
+      />
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-auto min-w-0">
         {view === "runAll" && runAllState ? (
           <RunAllView
             state={runAllState}
