@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@asamuzakjp/css-color': 5.1.10
-  lru-cache: 11.3.3
+  lru-cache: 11.3.5
 
 importers:
 
@@ -1217,8 +1217,8 @@ packages:
   longest-streak@3.1.0:
     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
 
-  lru-cache@11.3.3:
-    resolution: {integrity: sha512-JvNw9Y81y33E+BEYPr0U7omo+U9AySnsMsEiXgwT6yqd31VQWTLNQqmT4ou5eqPFUrTfIDFta2wKhB1hyohtAQ==}
+  lru-cache@11.3.5:
+    resolution: {integrity: sha512-NxVFwLAnrd9i7KUBxC4DrUhmgjzOs+1Qm50D3oF1/oL+r1NpZ4gA7xvG0/zJ8evR7zIKn4vLf7qTNduWFtCrRw==}
     engines: {node: 20 || >=22}
 
   lz-string@1.5.0:
@@ -1855,7 +1855,7 @@ snapshots:
       '@babel/compat-data': 7.29.0
       '@babel/helper-validator-option': 7.27.1
       browserslist: 4.28.2
-      lru-cache: 11.3.3
+      lru-cache: 11.3.5
       semver: 6.3.1
 
   '@babel/helper-globals@7.28.0': {}
@@ -2759,7 +2759,7 @@ snapshots:
       decimal.js: 10.6.0
       html-encoding-sniffer: 6.0.0
       is-potential-custom-element-name: 1.0.1
-      lru-cache: 11.3.3
+      lru-cache: 11.3.5
       parse5: 8.0.0
       saxes: 6.0.0
       symbol-tree: 3.2.4
@@ -2847,7 +2847,7 @@ snapshots:
 
   longest-streak@3.1.0: {}
 
-  lru-cache@11.3.3: {}
+  lru-cache@11.3.5: {}
 
   lz-string@1.5.0: {}
 
