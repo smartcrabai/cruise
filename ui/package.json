@@ -28,7 +28,7 @@
   "pnpm": {
     "overrides": {
       "@asamuzakjp/css-color": "5.1.10",
-      "lru-cache": "11.3.3"
+      "lru-cache": "11.3.5"
     }
   },
   "devDependencies": {
