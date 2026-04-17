@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(calculate_backoff(3), Duration::from_secs(8));
         assert_eq!(calculate_backoff(4), Duration::from_secs(16));
         assert_eq!(calculate_backoff(5), Duration::from_secs(32));
-        // capped at 60 seconds
+        // capped at 1 minute
         assert_eq!(calculate_backoff(10), Duration::from_mins(1));
     }
 
