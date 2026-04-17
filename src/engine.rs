@@ -446,7 +446,7 @@ async fn step_loop_iteration(
                 .iter()
                 .map(|((f, t), &c)| (f.clone(), t.clone(), c))
                 .collect();
-            all_edges.sort_by(|a, b| b.2.cmp(&a.2));
+            all_edges.sort_by_key(|b| std::cmp::Reverse(b.2));
             return Err(CruiseError::LoopProtection {
                 from: current_step.to_string(),
                 to: next.clone(),
@@ -2036,7 +2036,7 @@ steps:
     #[test]
     fn test_format_duration_exactly_one_minute() {
         assert_eq!(
-            format_duration(std::time::Duration::from_secs(60)),
+            format_duration(std::time::Duration::from_mins(1)),
             "1m 0.0s"
         );
     }
