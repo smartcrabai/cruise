@@ -1023,6 +1023,12 @@ async fn execute_single_session(
                     session_id: sid_for_pr.clone(),
                     step: step.to_string(),
                 });
+                if let Ok(mgr) = new_session_manager() {
+                    if let Ok(mut s) = mgr.load(&sid_for_pr) {
+                        s.current_step = Some(step.to_string());
+                        let _ = mgr.save(&s);
+                    }
+                }
                 Ok(())
             };
 
@@ -2396,6 +2402,38 @@ mod tests {
         let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(updated.config_source, format!("config: {external_config}"));
         assert!(updated.config_path.is_some());
+    }
+
+    #[test]
+    fn test_on_step_start_persists_current_step_to_state_json() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guard = cruise::test_support::set_fake_home(tmp.path());
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+
+        let session_id = "20260418000001";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let sid = session_id.to_string();
+        let on_step_start = move |step: &str| -> cruise::error::Result<()> {
+            if let Ok(mgr) = new_session_manager() {
+                if let Ok(mut s) = mgr.load(&sid) {
+                    s.current_step = Some(step.to_string());
+                    let _ = mgr.save(&s);
+                }
+            }
+            Ok(())
+        };
+
+        on_step_start("implement").unwrap_or_else(|e| panic!("{e:?}"));
+
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved.current_step, Some("implement".to_string()));
     }
 
     #[test]
