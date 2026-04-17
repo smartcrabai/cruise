@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(calculate_backoff(4), Duration::from_secs(16));
         assert_eq!(calculate_backoff(5), Duration::from_secs(32));
         // capped at 60 seconds
-        assert_eq!(calculate_backoff(10), Duration::from_secs(60));
+        assert_eq!(calculate_backoff(10), Duration::from_mins(1));
     }
 
     #[tokio::test]
