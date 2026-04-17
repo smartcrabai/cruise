@@ -86,8 +86,7 @@ pub fn ensure_gh_available() -> Result<()> {
     let ok = std::process::Command::new("gh")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     if ok {
         Ok(())

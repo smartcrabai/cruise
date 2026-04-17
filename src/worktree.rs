@@ -195,8 +195,7 @@ fn copy_worktree_includes(original_dir: &Path, worktree_dir: &Path) -> Result<()
 
         if source
             .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             continue;
         }

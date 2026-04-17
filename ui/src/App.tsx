@@ -1296,7 +1296,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         {configSteps.length > 0 && (
           <div className="space-y-1.5">
             <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
-            <div className="space-y-1 max-h-40 overflow-y-auto">
+            <div className="space-y-1">
               {configSteps.map((node) => renderStepNode(node, false))}
             </div>
           </div>
