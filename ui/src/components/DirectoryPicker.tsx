@@ -62,6 +62,7 @@ export function DirectoryPicker({
       if (queryPath === cacheRef.current.dir) {
         const filtered = filterByPrefix(cacheRef.current.entries, prefix);
         setEntries(filtered);
+        setHighlighted(-1);
         setIsOpen(filtered.length > 0);
         return;
       }
@@ -174,7 +175,6 @@ export function DirectoryPicker({
           value={value}
           onChange={(e) => {
             onChange(e.target.value);
-            cacheRef.current = { dir: null, entries: [] };
           }}
           onFocus={() => {
             if (value.length > 0) fetchEntries(value);
