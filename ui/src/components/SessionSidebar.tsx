@@ -32,9 +32,11 @@ interface SessionSidebarProps {
   onSessionsChanged?: (sessions: Session[]) => void;
   /** Called when the user clicks the Settings button. */
   onSettings?: () => void;
+  /** Wired to a function that immediately filters a session out of the local list (optimistic delete). */
+  onOptimisticRemoveRef?: MutableRefObject<((id: string) => void) | null>;
 }
 
-export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds, onSettings }: SessionSidebarProps) {
+export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds, onSettings, onOptimisticRemoveRef }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
   onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
@@ -121,6 +123,14 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
       return () => { onRefreshRef.current = null; };
     }
   }, [load, onRefreshRef]);
+
+  useEffect(() => {
+    if (onOptimisticRemoveRef) {
+      onOptimisticRemoveRef.current = (id: string) =>
+        setSessions((prev) => prev.filter((s) => s.id !== id));
+      return () => { onOptimisticRemoveRef.current = null; };
+    }
+  }, [onOptimisticRemoveRef]);
 
   useEffect(() => {
     let updateIntervalId: ReturnType<typeof setInterval>;

@@ -382,7 +382,7 @@ interface WorkflowRunnerProps {
   activeTab: ActiveTab;
   onActiveTabChange: (tab: ActiveTab) => void;
   onSessionUpdated: (session: Session) => void;
-  onSessionDeleted: () => void;
+  onDeleteConfirmed: (sessionId: string) => void;
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
   onFixingChange: (sessionId: string, fixing: boolean) => void;
 }
@@ -395,7 +395,7 @@ interface PendingOption {
 
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onSessionDeleted, onToast, onFixingChange }: WorkflowRunnerProps) {
+function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabPlanId = `${uid}-tab-plan`;
@@ -420,7 +420,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const [askResponse, setAskResponse] = useState("");
   const [askError, setAskError] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
 
@@ -469,7 +468,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setAskResponse("");
     setAskError("");
     setShowDeleteConfirm(false);
-    setDeleting(false);
     setIsConfigRegenerating(false);
   }, [session.id]);
 
@@ -580,17 +578,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }
 
-  async function handleDelete() {
-    setDeleting(true);
-    try {
-      await deleteSession(session.id);
-      onSessionDeleted();
-    } catch (e) {
-      setLiveLog((prev) => [...prev, `Delete error: ${e}`]);
-      setShowDeleteConfirm(false);
-    } finally {
-      setDeleting(false);
-    }
+  function handleDelete() {
+    setShowDeleteConfirm(false);
+    onDeleteConfirmed(session.id);
   }
 
   async function handleOptionRespond(result: {
@@ -1016,9 +1006,8 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
         <ConfirmDialog
           title="Delete Session"
           message={`Delete session "${session.id}" and its worktree? This cannot be undone.`}
-          confirmLabel={deleting ? "Deleting..." : "Delete"}
-          disabled={deleting}
-          onConfirm={() => void handleDelete()}
+          confirmLabel="Delete"
+          onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}
         />
       )}
@@ -1551,6 +1540,9 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
+  const sidebarRemoveSessionRef = useRef<((id: string) => void) | null>(null);
+  const selectedSessionRef = useRef<Session | null>(null);
+  const sessionTabMapRef = useRef<Record<string, ActiveTab>>({});
   const [toasts, setToasts] = useState<WorkflowToast[]>([]);
   const [newSessionDraft, setNewSessionDraft] = useState<NewSessionDraft>(createInitialNewSessionDraft);
   const [sessionTabMap, setSessionTabMap] = useState<Record<string, ActiveTab>>({});
@@ -1617,6 +1609,28 @@ export default function App() {
     }, TOAST_DURATION_MS[toast.kind]);
     toastTimersRef.current.set(id, timer);
   }, []);
+
+  selectedSessionRef.current = selectedSession;
+  sessionTabMapRef.current = sessionTabMap;
+
+  const handleDeleteConfirmed = useCallback((sessionId: string) => {
+    const prevSession = selectedSessionRef.current;
+    const prevTab = sessionTabMapRef.current[sessionId];
+    sidebarRemoveSessionRef.current?.(sessionId);
+    setSessionTabMap((prev) => {
+      if (!(sessionId in prev)) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setSelectedSession(null);
+    deleteSession(sessionId).catch((e) => {
+      sidebarRefreshRef.current?.();
+      setSelectedSession(prevSession);
+      if (prevTab !== undefined) setSessionTabMap((prev) => ({ ...prev, [sessionId]: prevTab }));
+      addToast({ kind: "failed", sessionInput: prevSession?.input ?? sessionId, detail: `Delete failed: ${e}` });
+    });
+  }, [addToast]);
 
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimersRef.current.get(id);
@@ -1842,6 +1856,7 @@ export default function App() {
           fixingSessionIds={fixingSessionIds}
           onSessionsChanged={handleSessionsChanged}
           onSettings={() => void handleOpenSettings()}
+          onOptimisticRemoveRef={sidebarRemoveSessionRef}
         />
       </aside>
       <div
@@ -1883,15 +1898,7 @@ export default function App() {
               setSelectedSession(updated);
               sidebarRefreshRef.current?.();
             }}
-            onSessionDeleted={() => {
-              setSessionTabMap((prev) => {
-                const next = { ...prev };
-                delete next[selectedSession.id];
-                return next;
-              });
-              setSelectedSession(null);
-              sidebarRefreshRef.current?.();
-            }}
+            onDeleteConfirmed={handleDeleteConfirmed}
             onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
             onFixingChange={handleFixingChange}
           />
