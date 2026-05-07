@@ -28,7 +28,7 @@
   "pnpm": {
     "overrides": {
       "@asamuzakjp/css-color": "6.0.1",
-      "lru-cache": "11.3.5"
+      "lru-cache": "11.3.6"
     }
   },
   "devDependencies": {
@@ -49,7 +49,7 @@
     "jsdom": "29.1.1",
     "tailwindcss": "4.2.4",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.59.1",
+    "typescript-eslint": "8.59.2",
     "vite": "8.0.10",
     "vitest": "4.1.5"
   }
