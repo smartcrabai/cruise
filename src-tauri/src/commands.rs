@@ -393,6 +393,34 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 
 // --- Plan generation helpers ---------------------------------------------------
 
+/// Build stdout/stderr callbacks that stream LLM output lines as [`PlanEvent::PlanChunk`]
+/// events over the given IPC channel.
+fn plan_chunk_callbacks(
+    session_id: String,
+    channel: tauri::ipc::Channel<PlanEvent>,
+) -> (
+    impl Fn(&str) + Send + Sync,
+    impl Fn(&str) + Send + Sync,
+) {
+    let sid_o = session_id.clone();
+    let ch_o = channel.clone();
+    let on_stdout = move |line: &str| {
+        let _ = ch_o.send(PlanEvent::PlanChunk {
+            session_id: sid_o.clone(),
+            stream: "stdout".to_string(),
+            line: line.to_string(),
+        });
+    };
+    let on_stderr = move |line: &str| {
+        let _ = channel.send(PlanEvent::PlanChunk {
+            session_id: session_id.clone(),
+            stream: "stderr".to_string(),
+            line: line.to_string(),
+        });
+    };
+    (on_stdout, on_stderr)
+}
+
 /// Plan generation prompt templates, embedded at compile-time.
 const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
 const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
@@ -515,6 +543,8 @@ pub async fn create_session(
 
     let _ = channel.send(PlanEvent::PlanGenerating);
 
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+
     match cruise::planning::run_plan_prompt_template(
         &config,
         &mut vars,
@@ -522,6 +552,8 @@ pub async fn create_session(
         "[plan] creating plan...",
         5,
         Some(&base),
+        Some(&on_stdout),
+        Some(&on_stderr),
     )
     .await
     .map_err(|e| e.to_string())
@@ -732,6 +764,8 @@ async fn regenerate_plan(
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.to_string(), channel.clone());
+
     match cruise::planning::run_plan_prompt_template(
         &config,
         &mut vars,
@@ -739,6 +773,8 @@ async fn regenerate_plan(
         "[plan] regenerating plan...",
         5,
         Some(&session.base_dir),
+        Some(&on_stdout),
+        Some(&on_stderr),
     )
     .await
     .map_err(|e| e.to_string())
@@ -833,6 +869,8 @@ pub async fn fix_session(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+
     match cruise::planning::run_plan_prompt_template(
         &config,
         &mut vars,
@@ -840,6 +878,8 @@ pub async fn fix_session(
         "[fix-plan] applying fixes...",
         5,
         Some(&session.base_dir),
+        Some(&on_stdout),
+        Some(&on_stderr),
     )
     .await
     .map_err(|e| e.to_string())
@@ -904,6 +944,8 @@ pub(crate) async fn do_ask_session(
         "[ask-plan] answering question...",
         5,
         Some(&session.base_dir),
+        None::<&fn(&str)>,
+        None::<&fn(&str)>,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -999,6 +1041,7 @@ async fn execute_single_session(
     let token_for_task = cancel_token.clone();
     let channel_for_step = channel.clone();
     let channel_for_emitter = channel.clone();
+    let channel_for_log = channel.clone();
     let sid_for_cleanup = sid_for_pr.clone();
     let log_path = manager.run_log_path(session_id);
 
@@ -1008,7 +1051,7 @@ async fn execute_single_session(
             use cruise::file_tracker::FileTracker;
             use cruise::variable::VariableStore;
 
-            let logger = SessionLogger::new(log_path);
+            let logger = std::sync::Arc::new(SessionLogger::new(log_path));
             logger.write("--- run started ---");
 
             // Temporarily change the working directory for command steps.
@@ -1017,8 +1060,9 @@ async fn execute_single_session(
                 cruise::error::CruiseError::Other(format!("failed to set working dir: {e}"))
             })?;
 
+            let logger_for_start = logger.clone();
             let on_step_start = |step: &str| -> cruise::error::Result<()> {
-                logger.write(step);
+                logger_for_start.write(step);
                 let _ = channel_for_step.send(WorkflowEvent::StepStarted {
                     session_id: sid_for_pr.clone(),
                     step: step.to_string(),
@@ -1030,6 +1074,16 @@ async fn execute_single_session(
                     }
                 }
                 Ok(())
+            };
+
+            let logger_for_log = logger.clone();
+            let on_step_log = |stream: &str, line: &str| {
+                logger_for_log.write(line);
+                let _ = channel_for_log.send(WorkflowEvent::LogChunk {
+                    session_id: sid_for_pr.clone(),
+                    stream: stream.to_string(),
+                    line: line.to_string(),
+                });
             };
 
             let emitter = Arc::new(StateSavingEmitter::new(
@@ -1048,6 +1102,7 @@ async fn execute_single_session(
                 max_retries: 10,
                 rate_limit_retries: 5,
                 on_step_start: &on_step_start,
+                on_step_log: Some(&on_step_log),
                 cancel_token: Some(&token_for_task),
                 option_handler: &handler,
                 config_reloader: None,

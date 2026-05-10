@@ -15,13 +15,16 @@ use crate::variable::VariableStore;
 ///
 /// Returns an error if variable resolution fails, the LLM command fails, or a rate limit is hit
 /// and retries are exhausted.
-pub async fn run_plan_prompt_template(
+#[expect(clippy::too_many_arguments)]
+pub async fn run_plan_prompt_template<G: Fn(&str) + Send + Sync, H: Fn(&str) + Send + Sync>(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
     template: &str,
     label: &str,
     rate_limit_retries: usize,
     working_dir: Option<&Path>,
+    on_stdout: Option<&G>,
+    on_stderr: Option<&H>,
 ) -> Result<PromptResult> {
     let prompt = vars.resolve(template)?;
     let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
@@ -50,6 +53,8 @@ pub async fn run_plan_prompt_template(
             Some(&on_retry),
             None,
             working_dir,
+            on_stdout,
+            on_stderr,
         )
         .await
     };
