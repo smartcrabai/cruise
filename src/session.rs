@@ -102,6 +102,12 @@ pub struct SessionState {
     /// Steps selected by the user to be skipped before execution.
     #[serde(default)]
     pub skipped_steps: Vec<String>,
+    /// PID of the process that is (or was) executing this session's workflow.
+    #[serde(default)]
+    pub runner_pid: Option<u32>,
+    /// Unix epoch seconds of when the runner process started (PID reuse guard).
+    #[serde(default)]
+    pub runner_started_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +167,8 @@ impl SessionState {
             awaiting_input: false,
             plan_error: None,
             skipped_steps: vec![],
+            runner_pid: None,
+            runner_started_at: None,
         }
     }
 
@@ -196,7 +204,7 @@ impl SessionState {
 
     /// Resets this session back to `Planned` state so it can be re-executed from scratch.
     ///
-    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`.
+    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`, `runner_pid`, `runner_started_at`.
     /// Preserves: `worktree_path`, `worktree_branch` (reused on next run).
     pub fn reset_to_planned(&mut self) {
         self.phase = SessionPhase::Planned;
@@ -204,6 +212,8 @@ impl SessionState {
         self.completed_at = None;
         self.pr_url = None;
         self.plan_error = None;
+        self.runner_pid = None;
+        self.runner_started_at = None;
     }
 
     /// Returns a `WorktreeContext` if the session has a valid, existing worktree.
@@ -219,6 +229,40 @@ impl SessionState {
             branch: branch.clone(),
             original_dir: self.base_dir.clone(),
         })
+    }
+
+    /// Record the current process as the runner for this session.
+    ///
+    /// Sets `runner_pid` from `std::process::id()` and `runner_started_at`
+    /// from `sysinfo`.
+    pub fn set_runner_to_current_process(&mut self) {
+        let pid = std::process::id();
+        self.runner_pid = Some(pid);
+        let mut system = sysinfo::System::new();
+        let sys_pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+        self.runner_started_at = system.process(sys_pid).map(sysinfo::Process::start_time);
+    }
+
+    /// Clear runner tracking fields (called when the session transitions away from Running).
+    pub fn clear_runner(&mut self) {
+        self.runner_pid = None;
+        self.runner_started_at = None;
+    }
+
+    /// Returns `true` if the recorded runner process is still alive with the
+    /// same start time (PID reuse guard).
+    #[must_use]
+    pub fn is_runner_alive(&self) -> bool {
+        let (Some(pid), Some(ts)) = (self.runner_pid, self.runner_started_at) else {
+            return false;
+        };
+        let mut system = sysinfo::System::new();
+        let sys_pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+        system
+            .process(sys_pid)
+            .is_some_and(|p| p.start_time() == ts)
     }
 }
 
@@ -457,6 +501,38 @@ impl SessionManager {
         })?;
         crate::config::WorkflowConfig::from_yaml(&yaml)
             .map_err(|e| CruiseError::ConfigParseError(e.to_string()))
+    }
+
+    /// If `state` is in `Running` phase but the runner process is no longer
+    /// alive, transition it to `Suspended` and persist the change.
+    ///
+    /// `in_memory_active` should be `true` when the current Tauri process
+    /// itself is executing this session (via `AppState::is_session_active`).
+    /// In that case the session is considered alive regardless of PID checks.
+    ///
+    /// Returns `true` if the phase was changed (stale detection → Suspended).
+    pub fn reconcile_running_phase(
+        &self,
+        state: &mut SessionState,
+        in_memory_active: bool,
+    ) -> bool {
+        if !matches!(state.phase, SessionPhase::Running) {
+            return false;
+        }
+        // First layer: in-memory active takes priority over PID check.
+        if in_memory_active {
+            return false;
+        }
+        // Second layer: PID + start_time check via sysinfo.
+        if state.is_runner_alive() {
+            return false;
+        }
+        // Stale: transition to Suspended and persist.
+        state.phase = SessionPhase::Suspended;
+        state.clear_runner();
+        // Save automatically sets updated_at.
+        let _ = self.save(state);
+        true
     }
 
     /// Delete a session directory.
@@ -2266,5 +2342,381 @@ mod tests {
             loaded.skipped_steps.is_empty(),
             "empty skipped_steps should round-trip as empty"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // runner_pid / runner_started_at -- field defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_runner_pid_defaults_to_none_on_new() {
+        // Given: a newly created session
+        let state = SessionState::new(
+            "20260511000000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        // Then: runner_pid is None
+        assert!(state.runner_pid.is_none());
+        assert!(state.runner_started_at.is_none());
+    }
+
+    #[test]
+    fn test_runner_fields_backward_compat_json() {
+        // Given: JSON without runner_pid or runner_started_at (old format)
+        let json = r#"{
+            "id": "20260511000001",
+            "base_dir": "/repo",
+            "phase": "Running",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-05-11T00:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        }"#;
+        // When: deserializing
+        let state: SessionState =
+            serde_json::from_str(json).unwrap_or_else(|e| panic!("failed to parse: {e:?}"));
+        // Then: runner_pid and runner_started_at default to None via #[serde(default)]
+        assert!(state.runner_pid.is_none());
+        assert!(state.runner_started_at.is_none());
+    }
+
+    #[test]
+    fn test_runner_fields_roundtrip() {
+        // Given: a session with runner_pid and runner_started_at set
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260511000002".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.runner_pid = Some(12345);
+        state.runner_started_at = Some(1700000000);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loading the session back
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: runner fields are preserved
+        assert_eq!(loaded.runner_pid, Some(12345));
+        assert_eq!(loaded.runner_started_at, Some(1700000000));
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionState::clear_runner
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clear_runner_clears_both_fields() {
+        // Given: a session with runner fields set
+        let mut state = SessionState::new(
+            "20260511000003".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.runner_pid = Some(42);
+        state.runner_started_at = Some(1700000001);
+
+        // When
+        state.clear_runner();
+
+        // Then: both fields are cleared
+        assert!(state.runner_pid.is_none());
+        assert!(state.runner_started_at.is_none());
+    }
+
+    #[test]
+    fn test_clear_runner_is_idempotent() {
+        // Given: a session with no runner fields set
+        let mut state = SessionState::new(
+            "20260511000004".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        assert!(state.runner_pid.is_none());
+
+        // When: calling clear_runner on a session with no runner info
+        state.clear_runner();
+
+        // Then: no panic, fields stay None
+        assert!(state.runner_pid.is_none());
+        assert!(state.runner_started_at.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionState::set_runner_to_current_process
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_runner_to_current_process_sets_pid() {
+        // Given: a session with no runner info
+        let mut state = SessionState::new(
+            "20260511000005".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+
+        // When: recording the current process as runner
+        state.set_runner_to_current_process();
+
+        // Then: runner_pid matches std::process::id()
+        assert_eq!(state.runner_pid, Some(std::process::id()));
+        assert!(state.runner_started_at.is_some());
+    }
+
+    #[test]
+    fn test_set_runner_is_runner_alive_roundtrip() {
+        // Given: a session that has recorded the current process
+        let mut state = SessionState::new(
+            "20260511000006".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.set_runner_to_current_process();
+
+        // When/Then: the runner is alive (current process is still running)
+        assert!(state.is_runner_alive());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionState::is_runner_alive
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_runner_alive_false_when_no_runner_info() {
+        // Given: a session with no runner_pid or runner_started_at
+        let state = SessionState::new(
+            "20260511000007".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+
+        // When/Then: is_runner_alive returns false (no runner info to check)
+        assert!(!state.is_runner_alive());
+    }
+
+    #[test]
+    fn test_is_runner_alive_false_when_only_pid_set() {
+        // Given: a session with runner_pid but no runner_started_at
+        let mut state = SessionState::new(
+            "20260511000008".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.runner_pid = Some(std::process::id());
+
+        // When/Then: is_runner_alive returns false (missing start_time for PID reuse guard)
+        assert!(!state.is_runner_alive());
+    }
+
+    #[test]
+    fn test_is_runner_alive_false_when_only_started_at_set() {
+        // Given: a session with runner_started_at but no runner_pid
+        let mut state = SessionState::new(
+            "20260511000009".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.runner_started_at = Some(1700000000);
+
+        // When/Then: is_runner_alive returns false (missing PID)
+        assert!(!state.is_runner_alive());
+    }
+
+    #[test]
+    fn test_is_runner_alive_false_for_nonexistent_pid() {
+        // Given: a session claiming a nonexistent PID
+        let mut state = SessionState::new(
+            "20260511000010".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        // Use a very large PID that won't exist on any reasonable system
+        state.runner_pid = Some(999_999_999);
+        state.runner_started_at = Some(1);
+
+        // When/Then: is_runner_alive returns false (process doesn't exist)
+        assert!(!state.is_runner_alive());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionManager::reconcile_running_phase
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reconcile_running_phase_ignores_non_running() {
+        // Given: a session in Completed phase
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260511000011".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Completed;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let changed = manager.reconcile_running_phase(&mut state, false);
+
+        // Then: no change (session is not Running)
+        assert!(!changed);
+        assert!(matches!(state.phase, SessionPhase::Completed));
+    }
+
+    #[test]
+    fn test_reconcile_running_phase_in_memory_active_skips_check() {
+        // Given: a Running session that will be considered alive by in_memory_active
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260511000012".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Running;
+        state.runner_pid = Some(999_999_999); // dead PID
+        state.runner_started_at = Some(1);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: in_memory_active = true (AppState says it's running here)
+        let changed = manager.reconcile_running_phase(&mut state, true);
+
+        // Then: no change — in-memory active takes priority over stale PID
+        assert!(!changed);
+        assert!(matches!(state.phase, SessionPhase::Running));
+    }
+
+    #[test]
+    fn test_reconcile_running_phase_transitions_stale_to_suspended() {
+        // Given: a Running session with stale runner info (dead PID)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260511000013".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Running;
+        state.runner_pid = Some(999_999_999);
+        state.runner_started_at = Some(1);
+        state.current_step = Some("implement".to_string());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reconcile detects stale runner with in_memory_active = false
+        let changed = manager.reconcile_running_phase(&mut state, false);
+
+        // Then: phase is changed to Suspended, runner fields are cleared
+        assert!(changed);
+        assert!(
+            matches!(state.phase, SessionPhase::Suspended),
+            "expected Suspended, got {:?}",
+            state.phase
+        );
+        assert!(state.runner_pid.is_none());
+        assert!(state.runner_started_at.is_none());
+        // current_step is preserved (allowing resume from same step)
+        assert_eq!(state.current_step, Some("implement".to_string()));
+
+        // And: change is persisted to disk
+        let loaded = manager
+            .load("20260511000013")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(loaded.phase, SessionPhase::Suspended));
+    }
+
+    #[test]
+    fn test_reconcile_running_phase_idempotent_after_transition() {
+        // Given: a session already transitioned to Suspended via reconcile
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260511000014".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Running;
+        state.runner_pid = Some(999_999_999);
+        state.runner_started_at = Some(1);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // First reconcile: stale → Suspended
+        let changed = manager.reconcile_running_phase(&mut state, false);
+        assert!(changed);
+
+        // When: calling reconcile again on the already-Suspended session
+        let changed_again = manager.reconcile_running_phase(&mut state, false);
+
+        // Then: no change (already Suspended, not Running)
+        assert!(!changed_again);
+        assert!(matches!(state.phase, SessionPhase::Suspended));
+    }
+
+    #[test]
+    fn test_reconcile_running_phase_no_runner_info_considered_stale() {
+        // Given: a Running session with no runner info (old format)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260511000015".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Running;
+        // runner_pid and runner_started_at are None (old format)
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let changed = manager.reconcile_running_phase(&mut state, false);
+
+        // Then: stale → Suspended (old sessions without PID info are conservatively stale)
+        assert!(changed);
+        assert!(matches!(state.phase, SessionPhase::Suspended));
+    }
+
+    // -----------------------------------------------------------------------
+    // reset_to_planned clears runner fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reset_to_planned_clears_runner_fields() {
+        // Given: a Running session with runner info set
+        let mut s = SessionState::new(
+            "20260511000016".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        s.phase = SessionPhase::Running;
+        s.runner_pid = Some(12345);
+        s.runner_started_at = Some(1700000000);
+
+        // When
+        s.reset_to_planned();
+
+        // Then: runner fields are cleared, preventing stale PID carry-over on re-run
+        assert!(matches!(s.phase, SessionPhase::Planned));
+        assert!(s.runner_pid.is_none());
+        assert!(s.runner_started_at.is_none());
     }
 }
