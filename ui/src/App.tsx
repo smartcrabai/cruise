@@ -375,6 +375,110 @@ function AskEditor({ question, onQuestionChange, phase, error, onSubmit, onCance
   );
 }
 
+// --- Workflow panel sub-components (shared across layout variants) ----------------
+
+interface WorkflowInfoPanelProps {
+  session: Session;
+  panelInfoId: string;
+  tabInfoId: string;
+  className?: string;
+}
+
+function WorkflowInfoPanel({ session, panelInfoId, tabInfoId, className = "" }: WorkflowInfoPanelProps) {
+  return (
+    <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className={`p-6 space-y-3 text-sm text-gray-400 ${className}`}>
+      <div>
+        <span className="text-gray-600 text-xs uppercase tracking-wide">Config</span>
+        <p className="font-mono text-gray-300 mt-0.5">{session.configSource}</p>
+      </div>
+      <div>
+        <span className="text-gray-600 text-xs uppercase tracking-wide">Base dir</span>
+        <p className="font-mono text-gray-300 mt-0.5">{session.baseDir}</p>
+      </div>
+      {session.worktreeBranch && (
+        <div>
+          <span className="text-gray-600 text-xs uppercase tracking-wide">Branch</span>
+          <p className="font-mono text-gray-300 mt-0.5">{session.worktreeBranch}</p>
+        </div>
+      )}
+      <div>
+        <span className="text-gray-600 text-xs uppercase tracking-wide">Created</span>
+        <p className="text-gray-300 mt-0.5">{formatLocalTime(session.createdAt)}</p>
+      </div>
+      {session.completedAt && (
+        <div>
+          <span className="text-gray-600 text-xs uppercase tracking-wide">Completed</span>
+          <p className="text-gray-300 mt-0.5">{formatLocalTime(session.completedAt)}</p>
+        </div>
+      )}
+      {session.phaseError && (
+        <div>
+          <span className="text-gray-600 text-xs uppercase tracking-wide">Error</span>
+          <p className="text-red-400 mt-0.5 font-mono text-xs">{session.phaseError}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface WorkflowPlanPanelProps {
+  panelPlanId: string;
+  tabPlanId: string;
+  askResponse: string;
+  planLoading: boolean;
+  planContent: string;
+  className?: string;
+}
+
+function WorkflowPlanPanel({ panelPlanId, tabPlanId, askResponse, planLoading, planContent, className = "" }: WorkflowPlanPanelProps) {
+  return (
+    <div id={panelPlanId} role="tabpanel" aria-labelledby={tabPlanId} className={className}>
+      {askResponse && (
+        <div className="border-b border-gray-800 px-6 py-4 bg-gray-900/50">
+          <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Answer</div>
+          <MarkdownViewer content={askResponse} className="" />
+        </div>
+      )}
+      {planLoading ? (
+        <p className="p-4 text-xs text-gray-500">Loading plan...</p>
+      ) : planContent ? (
+        <MarkdownViewer content={planContent} className="p-6" />
+      ) : (
+        <p className="p-4 text-xs text-gray-600">No plan available.</p>
+      )}
+    </div>
+  );
+}
+
+interface WorkflowLogPanelProps {
+  panelLogId: string;
+  tabLogId: string;
+  logLoading: boolean;
+  status: RunStatus;
+  logContent: string;
+  logEndRef: React.RefObject<HTMLSpanElement | null>;
+  className?: string;
+}
+
+function WorkflowLogPanel({ panelLogId, tabLogId, logLoading, status, logContent, logEndRef, className = "" }: WorkflowLogPanelProps) {
+  return (
+    <div id={panelLogId} role="tabpanel" aria-labelledby={tabLogId} className={`h-full flex flex-col ${className}`}>
+      {logLoading && status !== "running" ? (
+        <p className="p-4 text-xs text-gray-500">Loading log...</p>
+      ) : logContent ? (
+        <pre className="flex-1 text-xs font-mono bg-gray-950 text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
+          {logContent}
+          <span ref={logEndRef} />
+        </pre>
+      ) : (
+        <p className="p-4 text-xs text-gray-600">
+          {status === "idle" ? "Run the session to see logs here." : "No log entries yet."}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // --- WorkflowRunner ---------------------------------------------------------------
 
 interface WorkflowRunnerProps {
@@ -489,10 +593,13 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   }, [activeTab, loadSavedLog, status]);
 
   useEffect(() => {
-    if (activeTab === "plan" && !planContent && session.planAvailable) {
-      void loadPlan();
+    if (!planContent && session.planAvailable) {
+      const shouldEagerLoad = session.phase === "Awaiting Approval";
+      if (activeTab === "plan" || shouldEagerLoad) {
+        void loadPlan();
+      }
     }
-  }, [activeTab, loadPlan, planContent, session.planAvailable]);
+  }, [activeTab, loadPlan, planContent, session.planAvailable, session.phase]);
 
 
   useEffect(() => {
@@ -675,8 +782,22 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const showLive = status === "running" || (status !== "idle" && liveLog.length > 0);
   const logContent = showLive ? liveLog.join("\n") : savedLog;
 
+  const isAwaitingApproval = session.phase === "Awaiting Approval";
+
+  const sessionConfigEditorCommonProps = {
+    sessionId: session.id,
+    baseDir: session.baseDir,
+    configPath: session.configPath,
+    skippedSteps: session.skippedSteps,
+    onSessionUpdated,
+    onPlanRegenerated: setPlanContent,
+    onRegeneratingChange: setIsConfigRegenerating,
+    onError: (error: string) => { onToast({ kind: "failed", sessionInput: session.input, detail: error }); },
+    disabled: replanPhase === "generating",
+  } as const;
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="@container h-full flex flex-col">
       {/* Header */}
       <div className="px-6 pt-6 pb-4 border-b border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
@@ -792,20 +913,10 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
           )}
         </div>
 
-        {(session.phase === "Awaiting Approval" || session.phase === "Planned") && (
+        {session.phase === "Planned" && (
           <div className="border-b border-gray-800 pb-4">
             <h3 className="text-xs text-gray-500 uppercase tracking-wide mb-3">Session Settings</h3>
-            <SessionConfigEditor
-              sessionId={session.id}
-              baseDir={session.baseDir}
-              configPath={session.configPath}
-              skippedSteps={session.skippedSteps}
-              onSessionUpdated={onSessionUpdated}
-              onPlanRegenerated={(content) => setPlanContent(content)}
-              onRegeneratingChange={setIsConfigRegenerating}
-              onError={(error) => onToast({ kind: "failed", sessionInput: session.input, detail: error })}
-              disabled={replanPhase === "generating"}
-            />
+            <SessionConfigEditor {...sessionConfigEditorCommonProps} />
           </div>
         )}
 
@@ -881,132 +992,160 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
         )}
       </div>
 
-      {/* Tabs */}
-      <div role="tablist" className="flex border-b border-gray-800">
-        <button
-          type="button"
-          role="tab"
-          id={tabInfoId}
-          aria-selected={activeTab === "info"}
-          aria-controls={panelInfoId}
-          onClick={() => onActiveTabChange("info")}
-          className={`px-4 py-2 text-xs font-medium transition-colors ${
-            activeTab === "info"
-              ? "text-blue-400 border-b-2 border-blue-500"
-              : "text-gray-500 hover:text-gray-300"
-          }`}
-        >
-          Info
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id={tabPlanId}
-          aria-selected={activeTab === "plan"}
-          aria-controls={panelPlanId}
-          onClick={() => onActiveTabChange("plan")}
-          className={`px-4 py-2 text-xs font-medium transition-colors ${
-            activeTab === "plan"
-              ? "text-blue-400 border-b-2 border-blue-500"
-              : "text-gray-500 hover:text-gray-300"
-          }`}
-        >
-          Plan
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id={tabLogId}
-          aria-selected={activeTab === "log"}
-          aria-controls={panelLogId}
-          onClick={() => onActiveTabChange("log")}
-          className={`px-4 py-2 text-xs font-medium transition-colors ${
-            activeTab === "log"
-              ? "text-blue-400 border-b-2 border-blue-500"
-              : "text-gray-500 hover:text-gray-300"
-          }`}
-        >
-          Log
-          {status === "running" && (
-            <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-          )}
-        </button>
-      </div>
+      {isAwaitingApproval ? (
+        <div className="flex-1 flex flex-col @4xl:flex-row min-h-0 overflow-hidden">
+          <aside
+            aria-label="Session settings"
+            className="@4xl:w-[360px] @4xl:flex-shrink-0 @4xl:border-r @4xl:border-gray-800 @4xl:overflow-auto border-b @4xl:border-b-0 border-gray-800 px-6 py-4 flex flex-col gap-3"
+          >
+            <h3 className="text-xs text-gray-500 uppercase tracking-wide">Session Settings</h3>
+            <SessionConfigEditor {...sessionConfigEditorCommonProps} />
+          </aside>
 
-      {/* Tab content */}
-      <div className="flex-1 overflow-auto">
-        {activeTab === "info" && (
-          <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className="p-6 space-y-3 text-sm text-gray-400">
-            <div>
-              <span className="text-gray-600 text-xs uppercase tracking-wide">Config</span>
-              <p className="font-mono text-gray-300 mt-0.5">{session.configSource}</p>
-            </div>
-            <div>
-              <span className="text-gray-600 text-xs uppercase tracking-wide">Base dir</span>
-              <p className="font-mono text-gray-300 mt-0.5">{session.baseDir}</p>
-            </div>
-            {session.worktreeBranch && (
-              <div>
-                <span className="text-gray-600 text-xs uppercase tracking-wide">Branch</span>
-                <p className="font-mono text-gray-300 mt-0.5">{session.worktreeBranch}</p>
-              </div>
-            )}
-            <div>
-              <span className="text-gray-600 text-xs uppercase tracking-wide">Created</span>
-              <p className="text-gray-300 mt-0.5">{formatLocalTime(session.createdAt)}</p>
-            </div>
-            {session.completedAt && (
-              <div>
-                <span className="text-gray-600 text-xs uppercase tracking-wide">Completed</span>
-                <p className="text-gray-300 mt-0.5">{formatLocalTime(session.completedAt)}</p>
-              </div>
-            )}
-            {session.phaseError && (
-              <div>
-                <span className="text-gray-600 text-xs uppercase tracking-wide">Error</span>
-                <p className="text-red-400 mt-0.5 font-mono text-xs">{session.phaseError}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === "plan" && (
-          <div id={panelPlanId} role="tabpanel" aria-labelledby={tabPlanId} className="h-full overflow-auto">
-            {askResponse && (
-              <div className="border-b border-gray-800 px-6 py-4 bg-gray-900/50">
-                <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Answer</div>
-                <MarkdownViewer content={askResponse} className="" />
-              </div>
-            )}
-            {planLoading ? (
-              <p className="p-4 text-xs text-gray-500">Loading plan...</p>
-            ) : planContent ? (
-              <MarkdownViewer content={planContent} className="p-6" />
-            ) : (
-              <p className="p-4 text-xs text-gray-600">No plan available.</p>
-            )}
-          </div>
-        )}
-
-        {activeTab === "log" && (
-          <div id={panelLogId} role="tabpanel" aria-labelledby={tabLogId} className="h-full flex flex-col">
-            {logLoading && status !== "running" ? (
-              <p className="p-4 text-xs text-gray-500">Loading log...</p>
-            ) : logContent ? (
-              <pre
-                className="flex-1 text-xs font-mono bg-gray-950 text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed"
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <div role="tablist" className="flex border-b border-gray-800">
+              <button
+                type="button"
+                role="tab"
+                id={tabInfoId}
+                aria-selected={activeTab === "info"}
+                aria-controls={panelInfoId}
+                onClick={() => onActiveTabChange("info")}
+                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                  activeTab === "info"
+                    ? "text-blue-400 border-b-2 border-blue-500"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
               >
-                {logContent}
-                <span ref={logEndRef} />
-              </pre>
-            ) : (
-              <p className="p-4 text-xs text-gray-600">
-                {status === "idle" ? "Run the session to see logs here." : "No log entries yet."}
-              </p>
+                Info
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={tabPlanId}
+                aria-selected={activeTab === "plan"}
+                aria-controls={panelPlanId}
+                onClick={() => onActiveTabChange("plan")}
+                className={`@4xl:hidden px-4 py-2 text-xs font-medium transition-colors ${
+                  activeTab === "plan"
+                    ? "text-blue-400 border-b-2 border-blue-500"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Plan
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={tabLogId}
+                aria-selected={activeTab === "log"}
+                aria-controls={panelLogId}
+                onClick={() => onActiveTabChange("log")}
+                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                  activeTab === "log"
+                    ? "text-blue-400 border-b-2 border-blue-500"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Log
+                {status === "running" && (
+                  <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                )}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto">
+              {activeTab === "info" && (
+                <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} className="@4xl:hidden" />
+              )}
+
+              <WorkflowPlanPanel
+                panelPlanId={panelPlanId}
+                tabPlanId={tabPlanId}
+                askResponse={askResponse}
+                planLoading={planLoading}
+                planContent={planContent}
+                className={
+                  activeTab === "plan"
+                    ? "h-full overflow-auto"
+                    : "hidden @4xl:block @4xl:h-full @4xl:overflow-auto"
+                }
+              />
+
+              {activeTab === "log" && (
+                <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} className="@4xl:hidden" />
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div role="tablist" className="flex border-b border-gray-800">
+            <button
+              type="button"
+              role="tab"
+              id={tabInfoId}
+              aria-selected={activeTab === "info"}
+              aria-controls={panelInfoId}
+              onClick={() => onActiveTabChange("info")}
+              className={`px-4 py-2 text-xs font-medium transition-colors ${
+                activeTab === "info"
+                  ? "text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Info
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id={tabPlanId}
+              aria-selected={activeTab === "plan"}
+              aria-controls={panelPlanId}
+              onClick={() => onActiveTabChange("plan")}
+              className={`px-4 py-2 text-xs font-medium transition-colors ${
+                activeTab === "plan"
+                  ? "text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Plan
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id={tabLogId}
+              aria-selected={activeTab === "log"}
+              aria-controls={panelLogId}
+              onClick={() => onActiveTabChange("log")}
+              className={`px-4 py-2 text-xs font-medium transition-colors ${
+                activeTab === "log"
+                  ? "text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Log
+              {status === "running" && (
+                <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+              )}
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-auto">
+            {activeTab === "info" && (
+              <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} />
+            )}
+
+            {activeTab === "plan" && (
+              <WorkflowPlanPanel panelPlanId={panelPlanId} tabPlanId={tabPlanId} askResponse={askResponse} planLoading={planLoading} planContent={planContent} className="h-full overflow-auto" />
+            )}
+
+            {activeTab === "log" && (
+              <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} />
             )}
           </div>
-        )}
-      </div>
+        </>
+      )}
 
       {/* Option dialog */}
       {pendingOption && (

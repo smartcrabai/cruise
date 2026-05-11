@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
@@ -649,5 +649,74 @@ describe("App: Awaiting Approval -- Fix flow", () => {
     await waitFor(() => {
       expect(commands.getSession).toHaveBeenCalledWith("session-1");
     });
+  });
+});
+
+// --- Awaiting Approval: 2-column layout ---
+
+describe("App: Awaiting Approval -- 2-column layout", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("# The plan");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders aside with Session Settings and supports responsive 2-column CSS classes", async () => {
+    // Given: an Awaiting Approval session with a plan
+    const session = makeSession({ planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("pending task"));
+    await userEvent.click(screen.getByRole("button", { name: /pending task/ }));
+    await waitFor(() => screen.getByRole("button", { name: "Approve" }));
+
+    // Then: the session-settings aside is present for Awaiting Approval
+    const aside = screen.getByRole("complementary", { name: "Session settings" });
+    expect(aside).toBeInTheDocument();
+
+    // And: its parent flex container supports responsive 2-column via container queries
+    const flexContainer = aside.parentElement!;
+    expect(flexContainer).toHaveClass("flex-col");
+    expect(flexContainer).toHaveClass("@4xl:flex-row");
+
+    // And: Session Settings heading is inside the aside
+    const heading = within(aside).getByText("Session Settings");
+    expect(heading).toBeInTheDocument();
+
+    // And: the root WorkflowRunner container has @container for CSS container queries
+    const rootContainer = document.querySelector(".\\@container");
+    expect(rootContainer).toBeInTheDocument();
+    expect(rootContainer).toHaveClass("@container");
+
+    // And: the aside has border classes for responsive layout switching
+    expect(aside).toHaveClass("border-b");
+    expect(aside).toHaveClass("@4xl:border-b-0");
+    expect(aside).toHaveClass("@4xl:border-r");
+    expect(aside).toHaveClass("@4xl:w-[360px]");
+  });
+
+  it("falls back to single-column layout when phase is not Awaiting Approval", async () => {
+    // Given: a Planned session (not Awaiting Approval)
+    const session = makeSession({ phase: "Planned", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("pending task"));
+    await userEvent.click(screen.getByRole("button", { name: /pending task/ }));
+
+    // Then: no aside with Session settings aria label exists
+    expect(screen.queryByRole("complementary", { name: "Session settings" })).toBeNull();
+
+    // And: Session Settings heading appears only once (in the header)
+    expect(screen.getAllByText("Session Settings")).toHaveLength(1);
   });
 });
