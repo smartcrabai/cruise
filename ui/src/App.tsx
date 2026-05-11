@@ -518,6 +518,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
   const [replanFeedback, setReplanFeedback] = useState("");
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
+  const [planProgress, setPlanProgress] = useState<string[]>([]);
   const [replanError, setReplanError] = useState("");
   const [askQuestion, setAskQuestion] = useState("");
   const [askPhase, setAskPhase] = useState<"idle" | "editing" | "submitting">("idle");
@@ -567,6 +568,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setReplanFeedback("");
     setReplanPhase("idle");
     setReplanError("");
+    setPlanProgress([]);
     setAskQuestion("");
     setAskPhase("idle");
     setAskResponse("");
@@ -632,6 +634,8 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       if (event.event === "stepStarted") {
         setCurrentStep(event.data.step);
         setLiveLog((prev) => [...prev, event.data.step]);
+      } else if (event.event === "logChunk") {
+        setLiveLog((prev) => [...prev, event.data.line]);
       } else if (event.event === "optionRequired") {
         setPendingOption({
           requestId: event.data.requestId,
@@ -710,6 +714,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     const trimmed = replanFeedback.trim();
     if (!trimmed) return;
     setReplanPhase("generating");
+    setPlanProgress([]);
     onFixingChange(session.id, true);
     setReplanError("");
 
@@ -717,9 +722,12 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     channel.onmessage = (event) => {
       if (event.event === "planGenerating") {
         void refreshSession();
+      } else if (event.event === "planChunk") {
+        setPlanProgress((prev) => [...prev, event.data.line]);
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
+        setPlanProgress([]);
         onFixingChange(session.id, false);
         setReplanFeedback("");
         setAskResponse("");
@@ -728,6 +736,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
       } else if (event.event === "planFailed") {
         setReplanError(event.data.error);
         setReplanPhase("editing");
+        setPlanProgress([]);
         onFixingChange(session.id, false);
       }
     };
@@ -949,9 +958,16 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
           </div>
         )}
         {replanPhase === "generating" && (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Spinner />
-            Regenerating plan...
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <Spinner />
+              Regenerating plan...
+            </div>
+            {planProgress.length > 0 && (
+              <pre className="text-xs text-gray-500 max-h-48 overflow-auto bg-gray-900 rounded p-2">
+                {planProgress.join("\n")}
+              </pre>
+            )}
           </div>
         )}
 
@@ -1365,6 +1381,9 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         }));
         void refreshHistorySummary();
         onRefreshSidebar();
+      } else if (event.event === "planChunk") {
+        // plan generation progress chunks are streamed but not yet displayed
+        // in the new-session form (the sidebar refreshes to show the new session)
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
       }
@@ -1907,6 +1926,14 @@ export default function App() {
               },
             } : prev.runningSessions,
             liveLog: appendLog(prev.liveLog, runAllStepLogLine(event.data.sessionId, event.data.step)),
+          };
+        });
+      } else if (event.event === "logChunk") {
+        setRunAllState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            liveLog: appendLog(prev.liveLog, `[${event.data.sessionId}] ${event.data.line}`),
           };
         });
       } else if (event.event === "optionRequired") {

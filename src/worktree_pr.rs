@@ -206,6 +206,8 @@ async fn generate_pr_description(
             Some(&on_retry),
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         {
@@ -252,6 +254,7 @@ async fn run_after_pr_steps(
         config_reloader: None,
         working_dir: Some(working_dir),
         skipped_steps: &[],
+        on_step_log: None,
     };
     match execute_steps(&ctx, vars, tracker, first_step).await {
         Ok(_) | Err(CruiseError::StepPaused) => {}

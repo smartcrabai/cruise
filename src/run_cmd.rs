@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use console::style;
 use inquire::InquireError;
@@ -319,6 +320,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
     log_execution_workspace(&execution_workspace);
     update_session_workspace(&mut session, &execution_workspace);
+    session.set_runner_to_current_process();
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
         save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
@@ -348,13 +350,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>
         });
     let log_path = manager.run_log_path(&session_id);
-    let logger = SessionLogger::new(log_path);
+    let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");
     let skipped_steps = session.skipped_steps.clone();
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
+    let logger_for_start = logger.clone();
     let on_step_start = |step: &str| {
-        logger.write(step);
+        logger_for_start.write(step);
         let mut s = session_cell.borrow_mut();
         s.current_step = Some(step.to_string());
         let fingerprint =
@@ -362,12 +365,16 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         session_fingerprint.set(fingerprint);
         Ok(())
     };
+    let on_step_log = |stream: &str, line: &str| {
+        logger.write(&format!("[{stream}] {line}"));
+    };
     let cancel_token = CancellationToken::new();
     let ctx = crate::engine::ExecutionContext {
         compiled: &compiled,
         max_retries: args.max_retries,
         rate_limit_retries: args.rate_limit_retries,
         on_step_start: &on_step_start,
+        on_step_log: Some(&on_step_log),
         cancel_token: Some(&cancel_token),
         option_handler: &CliOptionHandler,
         config_reloader: config_reloader.as_deref(),
@@ -390,6 +397,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             "\n{} Interrupted -- session saved as Suspended.",
             style("||").yellow().bold()
         );
+        session.clear_runner();
         session.phase = SessionPhase::Suspended;
         manager.save(session)?;
         return Err(CruiseError::Interrupted);
@@ -445,6 +453,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
     match result {
         Ok(()) => {
+            session.clear_runner();
             session.phase = SessionPhase::Completed;
             session.completed_at = Some(current_iso8601());
         }
@@ -452,6 +461,7 @@ fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) 
             // Keep Running phase so the session can be resumed later.
         }
         Err(e) => {
+            session.clear_runner();
             session.phase = SessionPhase::Failed(e.to_string());
             session.completed_at = Some(current_iso8601());
         }
