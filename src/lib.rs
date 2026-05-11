@@ -9,6 +9,7 @@ pub mod error;
 pub mod file_tracker;
 pub mod llm_api;
 pub mod metadata;
+pub mod new_session_draft;
 pub mod new_session_history;
 pub mod option_handler;
 pub mod planning;
