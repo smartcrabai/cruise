@@ -319,6 +319,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
     log_execution_workspace(&execution_workspace);
     update_session_workspace(&mut session, &execution_workspace);
+    session.set_runner_to_current_process();
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
         save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
@@ -390,6 +391,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             "\n{} Interrupted -- session saved as Suspended.",
             style("||").yellow().bold()
         );
+        session.clear_runner();
         session.phase = SessionPhase::Suspended;
         manager.save(session)?;
         return Err(CruiseError::Interrupted);
@@ -445,6 +447,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
     match result {
         Ok(()) => {
+            session.clear_runner();
             session.phase = SessionPhase::Completed;
             session.completed_at = Some(current_iso8601());
         }
@@ -452,6 +455,7 @@ fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) 
             // Keep Running phase so the session can be resumed later.
         }
         Err(e) => {
+            session.clear_runner();
             session.phase = SessionPhase::Failed(e.to_string());
             session.completed_at = Some(current_iso8601());
         }

@@ -213,6 +213,7 @@ fn prepare_run_session(
     let execution_workspace =
         prepare_execution_workspace(manager, session, effective_workspace_mode)?;
     update_session_workspace(session, &execution_workspace);
+    session.set_runner_to_current_process();
     session.phase = SessionPhase::Running;
     manager.save(session)?;
 
@@ -274,7 +275,11 @@ pub fn list_sessions_impl(manager: &SessionManager, state: &AppState) -> Vec<Ses
         .map(|sessions| {
             sessions
                 .into_iter()
-                .map(|s| {
+                .map(|mut s| {
+                    if matches!(s.phase, SessionPhase::Running) {
+                        let active = state.is_session_active(&s.id);
+                        let _ = manager.reconcile_running_phase(&mut s, active);
+                    }
                     let mut dto = SessionDto::from_state(s, manager);
                     dto.fix_in_progress = fixing.contains(&dto.id);
                     dto
@@ -305,7 +310,11 @@ pub fn get_session(
     let manager = new_session_manager()?;
     manager
         .load(&session_id)
-        .map(|s| {
+        .map(|mut s| {
+            if matches!(s.phase, SessionPhase::Running) {
+                let active = state.is_session_active(&s.id);
+                let _ = manager.reconcile_running_phase(&mut s, active);
+            }
             let mut dto = SessionDto::from_state(s, &manager);
             dto.fix_in_progress = state.is_fixing(&dto.id);
             dto
@@ -1111,6 +1120,7 @@ async fn execute_single_session(
 
     match exec_result {
         Ok(exec) => {
+            final_session.clear_runner();
             final_session.phase = SessionPhase::Completed;
             final_session.completed_at = Some(current_iso8601());
             let _ = channel.send(WorkflowEvent::WorkflowCompleted {
@@ -1123,6 +1133,7 @@ async fn execute_single_session(
             Ok(SessionPhase::Completed)
         }
         Err(cruise::error::CruiseError::Interrupted) => {
+            final_session.clear_runner();
             final_session.phase = SessionPhase::Suspended;
             let _ = channel.send(WorkflowEvent::WorkflowCancelled {
                 session_id: sid_for_cleanup.clone(),
@@ -1132,6 +1143,7 @@ async fn execute_single_session(
         }
         Err(e) => {
             let msg = e.to_string();
+            final_session.clear_runner();
             final_session.phase = SessionPhase::Failed(msg.clone());
             final_session.completed_at = Some(current_iso8601());
             let _ = channel.send(WorkflowEvent::WorkflowFailed {

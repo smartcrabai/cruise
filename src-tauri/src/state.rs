@@ -241,6 +241,13 @@ impl AppState {
         true
     }
 
+    /// Returns `true` if the session is currently registered as active (i.e.,
+    /// the current Tauri process is executing its workflow).
+    #[must_use]
+    pub fn is_session_active(&self, session_id: &str) -> bool {
+        self.lock_sessions().contains_key(session_id)
+    }
+
     /// Unregister a session that has finished executing.
     pub fn unregister_session(&self, session_id: &str) {
         self.lock_sessions().remove(session_id);
@@ -496,5 +503,56 @@ mod tests {
         state.set_run_all_parallelism(0);
         // Then: the value is clamped to 1 to avoid semaphore exhaustion
         assert_eq!(state.get_run_all_parallelism(), 1);
+    }
+
+    // -- is_session_active ---------------------------------------------------
+
+    #[test]
+    fn test_is_session_active_returns_false_for_unregistered_session() {
+        // Given: a fresh AppState with no sessions
+        let state = AppState::new();
+        // When/Then: is_session_active returns false
+        assert!(!state.is_session_active("sess-1"));
+    }
+
+    #[test]
+    fn test_is_session_active_returns_true_for_registered_session() {
+        // Given: a fresh AppState
+        let state = AppState::new();
+        // When: a session is registered
+        state.register_session("sess-1".to_string());
+        // Then: is_session_active returns true
+        assert!(state.is_session_active("sess-1"));
+    }
+
+    #[test]
+    fn test_is_session_active_returns_false_after_unregister() {
+        // Given: a registered session
+        let state = AppState::new();
+        state.register_session("sess-1".to_string());
+        assert!(state.is_session_active("sess-1"));
+
+        // When: unregistered
+        state.unregister_session("sess-1");
+
+        // Then: is_session_active returns false
+        assert!(!state.is_session_active("sess-1"));
+    }
+
+    #[test]
+    fn test_is_session_active_distinguishes_sessions() {
+        // Given: two registered sessions
+        let state = AppState::new();
+        state.register_session("sess-1".to_string());
+        state.register_session("sess-2".to_string());
+
+        // When/Then: each is independently active
+        assert!(state.is_session_active("sess-1"));
+        assert!(state.is_session_active("sess-2"));
+
+        // Unregister one
+        state.unregister_session("sess-1");
+        assert!(!state.is_session_active("sess-1"));
+        assert!(state.is_session_active("sess-2"));
     }
 }
