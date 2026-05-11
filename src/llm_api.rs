@@ -403,7 +403,10 @@ async fn call_api_with_retry(
         }
 
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("(failed to read response body: {e})"));
             return Err(CruiseError::Other(format!(
                 "LLM API error {status}: {body}"
             )));
