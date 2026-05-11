@@ -398,10 +398,7 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 fn plan_chunk_callbacks(
     session_id: String,
     channel: tauri::ipc::Channel<PlanEvent>,
-) -> (
-    impl Fn(&str) + Send + Sync,
-    impl Fn(&str) + Send + Sync,
-) {
+) -> (impl Fn(&str) + Send + Sync, impl Fn(&str) + Send + Sync) {
     let sid_o = session_id.clone();
     let ch_o = channel.clone();
     let on_stdout = move |line: &str| {
