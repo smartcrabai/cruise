@@ -54,26 +54,53 @@ export function DirectoryPicker({
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  function tryDrillIn(sourceEntries: DirEntry[], pref: string) {
+    if (!pref) return;
+    const lower = pref.toLowerCase();
+    const exactMatch = sourceEntries.find(
+      (e) => e.name.toLowerCase() === lower
+    );
+    if (!exactMatch) return;
+
+    listDirectory(exactMatch.path)
+      .then((childResult) => {
+        const cacheKey = exactMatch.path.endsWith("/")
+          ? exactMatch.path
+          : exactMatch.path + "/";
+        cacheRef.current = { dir: cacheKey, entries: childResult };
+        if (childResult.length > 0) {
+          setEntries(childResult);
+          setHighlighted(-1);
+          setIsOpen(true);
+        }
+      })
+      .catch((err) => {
+        console.debug("DirectoryPicker: drill-in failed", err);
+      });
+  }
+
   const fetchEntries = useCallback(
     (inputValue: string) => {
       const { dir, prefix } = splitPath(inputValue);
       const queryPath = dir || inputValue;
 
-      if (queryPath === cacheRef.current.dir) {
-        const filtered = filterByPrefix(cacheRef.current.entries, prefix);
+      const apply = (sourceEntries: DirEntry[]) => {
+        const filtered = filterByPrefix(sourceEntries, prefix);
         setEntries(filtered);
         setHighlighted(-1);
         setIsOpen(filtered.length > 0);
+        tryDrillIn(sourceEntries, prefix);
+      };
+
+      if (queryPath === cacheRef.current.dir) {
+        apply(cacheRef.current.entries);
         return;
       }
 
       listDirectory(queryPath)
         .then((result) => {
           cacheRef.current = { dir: queryPath, entries: result };
-          const filtered = filterByPrefix(result, prefix);
-          setEntries(filtered);
-          setHighlighted(-1);
-          setIsOpen(filtered.length > 0);
+          apply(result);
         })
         .catch(() => {
           setEntries([]);
