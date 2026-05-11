@@ -43,6 +43,10 @@ pub struct ExecutionContext<'a> {
     /// Step names that the user selected to skip before execution.
     /// Applied in addition to YAML-configured `skip` conditions.
     pub skipped_steps: &'a [String],
+    /// Optional callback invoked for each streamed stdout/stderr line from prompt steps.
+    /// First argument is `"stdout"` or `"stderr"`, second is the line (trailing newline removed).
+    #[expect(clippy::type_complexity)]
+    pub on_step_log: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
 }
 
 /// Mutable counters threaded through the execution loop.
@@ -241,6 +245,7 @@ pub async fn execute_steps(
             config_reloader: None,
             working_dir: ctx.working_dir,
             skipped_steps: ctx.skipped_steps,
+            on_step_log: ctx.on_step_log,
         };
         let outcome =
             step_loop_iteration(&active_ctx, vars, tracker, &current_step, &mut state).await?;
@@ -470,7 +475,7 @@ async fn execute_step_kind(
 ) -> Result<Option<String>> {
     match kind {
         StepKind::Prompt(step) => {
-            let output = run_prompt_step(
+            let _output = run_prompt_step(
                 vars,
                 ctx.compiled,
                 step,
@@ -478,12 +483,10 @@ async fn execute_step_kind(
                 merged_env,
                 ctx.cancel_token,
                 ctx.working_dir,
+                ctx.on_step_log,
             )
             .await?;
             let elapsed = step_start.elapsed();
-            if !output.is_empty() {
-                eprint!("{output}");
-            }
             log_step_result(elapsed, true);
             Ok(None)
         }
@@ -610,6 +613,7 @@ pub fn resolve_command_with_model(
 }
 
 /// Execute a prompt step, updating variable state and returning the LLM output.
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
     compiled: &CompiledWorkflow,
@@ -618,6 +622,7 @@ pub(crate) async fn run_prompt_step(
     env: &HashMap<String, String>,
     cancel_token: Option<&CancellationToken>,
     working_dir: Option<&std::path::Path>,
+    on_step_log: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
 ) -> Result<String> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -648,6 +653,18 @@ pub(crate) async fn run_prompt_step(
     };
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
+    let on_stdout = |line: &str| {
+        spinner.suspend(|| eprintln!("  {line}"));
+        if let Some(cb) = on_step_log {
+            cb("stdout", line);
+        }
+    };
+    let on_stderr = |line: &str| {
+        spinner.suspend(|| eprintln!("  {} {}", style("stderr:").dim(), line));
+        if let Some(cb) = on_step_log {
+            cb("stderr", line);
+        }
+    };
     let result = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
         run_prompt(
@@ -659,17 +676,13 @@ pub(crate) async fn run_prompt_step(
             Some(&on_retry),
             cancel_token,
             working_dir,
+            Some(&on_stdout),
+            Some(&on_stderr),
         )
         .await
     };
     drop(spinner);
     let result = result?;
-
-    if !result.stderr.is_empty() {
-        for line in result.stderr.trim_end().lines() {
-            eprintln!("  {} {}", style("stderr:").dim(), line);
-        }
-    }
 
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));
@@ -913,6 +926,7 @@ mod tests {
             config_reloader,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps,
+            on_step_log: None,
         };
         execute_steps(&ctx, &mut vars, &mut tracker, &step).await
     }
@@ -1534,6 +1548,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            on_step_log: None,
         };
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
 
@@ -2317,6 +2332,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            on_step_log: None,
         };
         // When: execute_steps runs; step2's on_step_start triggers cancellation
         let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;

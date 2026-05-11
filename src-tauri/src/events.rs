@@ -29,6 +29,15 @@ pub enum PlanEvent {
         session_id: String,
         error: String,
     },
+    /// A chunk of stdout or stderr from plan generation, streamed in real time.
+    PlanChunk {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// "stdout" or "stderr"
+        stream: String,
+        /// A single line (trailing newline removed)
+        line: String,
+    },
 }
 
 /// A single choice in an option step, serialized for IPC transport to the frontend.
@@ -115,6 +124,16 @@ pub enum WorkflowEvent {
     },
     RunAllCompleted {
         cancelled: usize,
+    },
+    /// A chunk of stdout or stderr from a prompt step, streamed in real time.
+    LogChunk {
+        /// The session this chunk belongs to.
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// "stdout" or "stderr"
+        stream: String,
+        /// A single line (trailing newline removed)
+        line: String,
     },
 }
 
@@ -437,5 +456,77 @@ mod tests {
         // Then: kind is "textInput" (camelCase)
         assert_eq!(json["kind"], "textInput");
         assert_eq!(json["next"], Value::Null);
+    }
+
+    // --- LogChunk ---
+
+    #[test]
+    fn test_log_chunk_serializes_session_id_and_stream_and_line() {
+        // Given: a LogChunk event with stdout content
+        let event = WorkflowEvent::LogChunk {
+            session_id: "sess-1".to_string(),
+            stream: "stdout".to_string(),
+            line: "hello world".to_string(),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: sessionId, stream, and line are all camelCase
+        assert_eq!(json["event"], "logChunk");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
+        assert_eq!(json["data"]["stream"], "stdout");
+        assert_eq!(json["data"]["line"], "hello world");
+    }
+
+    #[test]
+    fn test_log_chunk_stderr_serializes_stream_field_correctly() {
+        // Given: a LogChunk event with stderr content
+        let event = WorkflowEvent::LogChunk {
+            session_id: "sess-2".to_string(),
+            stream: "stderr".to_string(),
+            line: "some error".to_string(),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: stream field reflects stderr source
+        assert_eq!(json["event"], "logChunk");
+        assert_eq!(json["data"]["sessionId"], "sess-2");
+        assert_eq!(json["data"]["stream"], "stderr");
+        assert_eq!(json["data"]["line"], "some error");
+    }
+
+    // --- PlanChunk ---
+
+    #[test]
+    fn test_plan_chunk_serializes_session_id_and_stream_and_line() {
+        // Given: a PlanChunk event with plan generation output
+        let event = PlanEvent::PlanChunk {
+            session_id: "sess-1".to_string(),
+            stream: "stdout".to_string(),
+            line: "thinking about the plan".to_string(),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: sessionId is camelCase, stream and line are present
+        assert_eq!(json["event"], "planChunk");
+        assert_eq!(json["data"]["sessionId"], "sess-1");
+        assert_eq!(json["data"]["stream"], "stdout");
+        assert_eq!(json["data"]["line"], "thinking about the plan");
+    }
+
+    #[test]
+    fn test_plan_chunk_stderr_serializes_stream_field_correctly() {
+        // Given: a PlanChunk event with plan generation stderr
+        let event = PlanEvent::PlanChunk {
+            session_id: "sess-2".to_string(),
+            stream: "stderr".to_string(),
+            line: "warning: deprecated option".to_string(),
+        };
+        // When: serialized
+        let json = to_json(&event);
+        // Then: stream field reflects stderr
+        assert_eq!(json["event"], "planChunk");
+        assert_eq!(json["data"]["sessionId"], "sess-2");
+        assert_eq!(json["data"]["stream"], "stderr");
+        assert_eq!(json["data"]["line"], "warning: deprecated option");
     }
 }

@@ -99,6 +99,11 @@ export interface RunAllCompletedEvent {
   data: { cancelled: number };
 }
 
+export interface LogChunkEvent {
+  event: "logChunk";
+  data: { sessionId: string; stream: "stdout" | "stderr"; line: string };
+}
+
 export type WorkflowEvent =
   | StepStartedEvent
   | StepCompletedEvent
@@ -106,6 +111,7 @@ export type WorkflowEvent =
   | WorkflowCompletedEvent
   | WorkflowFailedEvent
   | WorkflowCancelledEvent
+  | LogChunkEvent
   | RunAllStartedEvent
   | RunAllSessionStartedEvent
   | RunAllSessionFinishedEvent
@@ -146,6 +152,7 @@ export interface NewSessionConfigDefaults {
 export type PlanEvent =
   | { event: "sessionCreated"; data: { sessionId: string } }
   | { event: "planGenerating"; data: Record<string, never> }
+  | { event: "planChunk"; data: { sessionId: string; stream: "stdout" | "stderr"; line: string } }
   | { event: "planGenerated"; data: { sessionId: string; content: string } }
   | { event: "planFailed"; data: { sessionId: string; error: string } };
 

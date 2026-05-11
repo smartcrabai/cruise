@@ -284,6 +284,8 @@ async fn generate_plan_markdown(
         "[plan] creating plan...",
         rate_limit_retries,
         working_dir,
+        None::<&fn(&str)>,
+        None::<&fn(&str)>,
     )
     .await?;
     crate::metadata::resolve_plan_content(plan_path, &prompt_result.output, &prompt_result.stderr)
@@ -582,6 +584,8 @@ pub async fn generate_plan(
         "[plan] creating plan...",
         rate_limit_retries,
         None,
+        None::<&fn(&str)>,
+        None::<&fn(&str)>,
     )
     .await?;
     Ok(())
@@ -668,6 +672,8 @@ async fn run_plan_prompt(
         label,
         rate_limit_retries,
         working_dir,
+        None::<&fn(&str)>,
+        None::<&fn(&str)>,
     )
     .await?;
     vars.set_prev_output(Some(result.output));

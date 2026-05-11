@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::cancellation::CancellationToken;
@@ -20,7 +20,12 @@ pub struct PromptResult {
 ///
 /// Returns an error if the LLM process fails to spawn or returns a fatal error.
 #[expect(clippy::too_many_arguments)]
-pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
+pub async fn run_prompt<
+    S: std::hash::BuildHasher,
+    F: Fn(&str),
+    G: Fn(&str) + Send + Sync,
+    H: Fn(&str) + Send + Sync,
+>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
@@ -29,11 +34,23 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     on_retry: Option<&F>,
     cancel_token: Option<&CancellationToken>,
     cwd: Option<&std::path::Path>,
+    on_stdout: Option<&G>,
+    on_stderr: Option<&H>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_prompt(command, model, prompt, env, cancel_token, cwd).await;
+        let result = execute_prompt(
+            command,
+            model,
+            prompt,
+            env,
+            cancel_token,
+            cwd,
+            on_stdout,
+            on_stderr,
+        )
+        .await;
 
         match result {
             Ok((output, stderr)) => return Ok(PromptResult { output, stderr }),
@@ -71,13 +88,20 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-async fn execute_prompt<S: std::hash::BuildHasher>(
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_prompt<
+    S: std::hash::BuildHasher,
+    G: Fn(&str) + Send + Sync,
+    H: Fn(&str) + Send + Sync,
+>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
     env: &HashMap<String, String, S>,
     cancel_token: Option<&CancellationToken>,
     cwd: Option<&std::path::Path>,
+    on_stdout: Option<&G>,
+    on_stderr: Option<&H>,
 ) -> Result<(String, String)> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
@@ -115,51 +139,96 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         drop(stdin);
     }
 
-    // Collect stdout/stderr concurrently with waiting to avoid pipe-buffer deadlocks.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(ref mut s) = stdout_pipe {
-            let _ = s.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(ref mut s) = stderr_pipe {
-            let _ = s.read_to_end(&mut buf).await;
-        }
-        buf
-    });
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
 
-    let status = tokio::select! {
-        result = child.wait() => {
-            result.map_err(|e| CruiseError::CommandError(e.to_string()))?
+    let drain_stdout = async {
+        let mut buf = String::new();
+        if let Some(pipe) = stdout_pipe {
+            let mut reader = BufReader::new(pipe);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let has_newline = line.ends_with('\n');
+                        let trimmed = line.trim_end_matches('\n');
+                        if let Some(cb) = on_stdout {
+                            cb(trimmed);
+                        }
+                        buf.push_str(trimmed);
+                        if has_newline {
+                            buf.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+        buf
+    };
+
+    let drain_stderr = async {
+        let mut buf = String::new();
+        if let Some(pipe) = stderr_pipe {
+            let mut reader = BufReader::new(pipe);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let has_newline = line.ends_with('\n');
+                        let trimmed = line.trim_end_matches('\n');
+                        if let Some(cb) = on_stderr {
+                            cb(trimmed);
+                        }
+                        buf.push_str(trimmed);
+                        if has_newline {
+                            buf.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+        buf
+    };
+
+    let status;
+    let stdout_buf;
+    let stderr_buf;
+
+    tokio::select! {
+        (s, (o, e)) = async {
+            tokio::join!(
+                child.wait(),
+                async { tokio::join!(drain_stdout, drain_stderr) },
+            )
+        } => {
+            status = s;
+            stdout_buf = o;
+            stderr_buf = e;
         }
         () = maybe_cancelled(cancel_token) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            stdout_task.abort();
-            stderr_task.abort();
             return Err(CruiseError::Interrupted);
         }
-    };
+    }
 
-    let stdout_bytes = stdout_task.await.unwrap_or_default();
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let status = status.map_err(|e| CruiseError::CommandError(e.to_string()))?;
 
     if !status.success() {
-        let error_msg = if stderr.is_empty() {
+        let stderr_for_err = stderr_buf.clone();
+        let error_msg = if stderr_for_err.is_empty() {
             format!("command failed (exit code: {:?})", status.code())
         } else {
-            stderr
+            stderr_for_err
         };
         return Err(CruiseError::CommandError(error_msg));
     }
 
-    Ok((String::from_utf8_lossy(&stdout_bytes).to_string(), stderr))
+    Ok((stdout_buf, stderr_buf))
 }
 
 /// Build the full argument list for the LLM command (test helper).
@@ -176,6 +245,7 @@ pub(crate) fn build_command_args(command: &[String], model: Option<&str>) -> Vec
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -208,10 +278,12 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result.output, "test prompt");
+        assert_eq!(result.output.trim_end(), "test prompt");
     }
 
     #[tokio::test]
@@ -225,6 +297,8 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await;
         assert!(result.is_err());
@@ -247,10 +321,12 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result.output, "prompt text");
+        assert_eq!(result.output.trim_end(), "prompt text");
     }
 
     #[cfg(unix)]
@@ -268,10 +344,12 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result.output, "hello model");
+        assert_eq!(result.output.trim_end(), "hello model");
     }
 
     #[cfg(unix)]
@@ -294,6 +372,8 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -318,11 +398,83 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
+            None::<&fn(&str)>,
+            None::<&fn(&str)>,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
         // Then: stderr field is empty, output contains stdin content
-        assert_eq!(result.output, "only stdout");
+        assert_eq!(result.output.trim_end(), "only stdout");
         assert_eq!(result.stderr, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_prompt_invokes_on_stdout_per_line() {
+        let _guard = crate::test_support::lock_process();
+        // Given: a command that writes two lines to stdout
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo line1; echo line2".to_string(),
+        ];
+        let lines: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let on_stdout = |line: &str| {
+            lines.lock().expect("lock poisoned").push(line.to_string());
+        };
+        // When: run_prompt is called with on_stdout callback
+        let result = run_prompt(
+            &command,
+            None,
+            "",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+            None,
+            Some(&on_stdout),
+            None::<&fn(&str)>,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: callback received lines in order and output contains both lines
+        let collected = lines.lock().expect("lock poisoned");
+        assert_eq!(*collected, vec!["line1".to_string(), "line2".to_string()]);
+        assert_eq!(result.output.trim_end(), "line1\nline2");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_prompt_invokes_on_stderr_per_line() {
+        let _guard = crate::test_support::lock_process();
+        // Given: a command that writes two lines to stderr
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo err1 >&2; echo err2 >&2".to_string(),
+        ];
+        let lines: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let on_stderr = |line: &str| {
+            lines.lock().expect("lock poisoned").push(line.to_string());
+        };
+        // When: run_prompt is called with on_stderr callback
+        let result = run_prompt(
+            &command,
+            None,
+            "",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+            None,
+            None::<&fn(&str)>,
+            Some(&on_stderr),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: callback received stderr lines in order
+        let collected = lines.lock().expect("lock poisoned");
+        assert_eq!(*collected, vec!["err1".to_string(), "err2".to_string()]);
+        assert_eq!(result.stderr.trim_end(), "err1\nerr2");
     }
 }
