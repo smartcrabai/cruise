@@ -121,7 +121,10 @@ pub async fn run(args: ListArgs) -> Result<()> {
     let manager = SessionManager::new(get_cruise_home()?);
 
     if args.json {
-        let sessions = manager.list()?;
+        let mut sessions = manager.list()?;
+        for s in &mut sessions {
+            let _ = manager.reconcile_running_phase(s, false);
+        }
         write_sessions_json_with_manager(
             std::io::BufWriter::new(std::io::stdout()),
             sessions,

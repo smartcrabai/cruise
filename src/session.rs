@@ -2398,7 +2398,7 @@ mod tests {
             "task".to_string(),
         );
         state.runner_pid = Some(12345);
-        state.runner_started_at = Some(1700000000);
+        state.runner_started_at = Some(1_700_000_000);
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: loading the session back
@@ -2406,7 +2406,7 @@ mod tests {
 
         // Then: runner fields are preserved
         assert_eq!(loaded.runner_pid, Some(12345));
-        assert_eq!(loaded.runner_started_at, Some(1700000000));
+        assert_eq!(loaded.runner_started_at, Some(1_700_000_000));
     }
 
     // -----------------------------------------------------------------------
@@ -2423,7 +2423,7 @@ mod tests {
             "task".to_string(),
         );
         state.runner_pid = Some(42);
-        state.runner_started_at = Some(1700000001);
+        state.runner_started_at = Some(1_700_000_001);
 
         // When
         state.clear_runner();
@@ -2531,7 +2531,7 @@ mod tests {
             "cruise.yaml".to_string(),
             "task".to_string(),
         );
-        state.runner_started_at = Some(1700000000);
+        state.runner_started_at = Some(1_700_000_000);
 
         // When/Then: is_runner_alive returns false (missing PID)
         assert!(!state.is_runner_alive());
@@ -2709,7 +2709,7 @@ mod tests {
         );
         s.phase = SessionPhase::Running;
         s.runner_pid = Some(12345);
-        s.runner_started_at = Some(1700000000);
+        s.runner_started_at = Some(1_700_000_000);
 
         // When
         s.reset_to_planned();
