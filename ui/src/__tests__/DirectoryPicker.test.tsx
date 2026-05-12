@@ -179,6 +179,111 @@ describe("DirectoryPicker", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Drill-in behaviour (exact match on typed prefix)
+  // ---------------------------------------------------------------------------
+
+  describe("drill-in behaviour", () => {
+    it("drills into subdirectories when the typed prefix exactly matches an entry name", async () => {
+      // Given: parent directory /Users/takumi/ has apps and projects
+      const parentEntries = makeEntries(["apps", "projects"], "/Users/takumi/");
+      const childEntries = makeEntries(["cruise", "worktrees"], "/Users/takumi/apps/");
+      vi.mocked(commands.listDirectory)
+        .mockResolvedValueOnce(parentEntries)
+        .mockResolvedValueOnce(childEntries);
+
+      render(<Controlled initialValue="/Users/takumi/" />);
+      await flushAll();
+      expect(commands.listDirectory).toHaveBeenCalledTimes(1);
+
+      // When: user types "/Users/takumi/apps" (exact match, no trailing slash)
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "/Users/takumi/apps" } });
+      await flushAll();
+
+      // Then: second IPC call was made for the drill-in directory
+      expect(commands.listDirectory).toHaveBeenCalledTimes(2);
+      expect(commands.listDirectory).toHaveBeenNthCalledWith(2, "/Users/takumi/apps");
+
+      // Then: dropdown shows children of apps/ (not the parent entries)
+      expect(screen.getByText("cruise/")).toBeInTheDocument();
+      expect(screen.getByText("worktrees/")).toBeInTheDocument();
+      expect(screen.queryByText("apps/")).not.toBeInTheDocument();
+      expect(screen.queryByText("projects/")).not.toBeInTheDocument();
+    });
+
+    it("does NOT drill into subdirectories when the typed prefix is only a partial match", async () => {
+      // Given: parent directory /Users/takumi/ has apps and projects
+      const parentEntries = makeEntries(["apps", "projects"], "/Users/takumi/");
+      vi.mocked(commands.listDirectory).mockResolvedValue(parentEntries);
+
+      render(<Controlled initialValue="/Users/takumi/" />);
+      await flushAll();
+      expect(commands.listDirectory).toHaveBeenCalledTimes(1);
+
+      // When: user types "/Users/takumi/app" (partial match, not exact)
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "/Users/takumi/app" } });
+      await flushAll();
+
+      // Then: no additional IPC call — drill-in is not triggered
+      expect(commands.listDirectory).toHaveBeenCalledTimes(1);
+
+      // Then: dropdown shows the prefix-filtered result (only apps/)
+      expect(screen.getByText("apps/")).toBeInTheDocument();
+      expect(screen.queryByText("projects/")).not.toBeInTheDocument();
+    });
+
+    it("shows the matched entry itself when drill-in target has no subdirectories", async () => {
+      // Given: parent has apps, but apps/ is empty
+      const parentEntries = makeEntries(["apps", "projects"], "/Users/takumi/");
+      vi.mocked(commands.listDirectory)
+        .mockResolvedValueOnce(parentEntries)
+        .mockResolvedValueOnce([]);
+
+      render(<Controlled initialValue="/Users/takumi/" />);
+      await flushAll();
+
+      // When: user types exact match that leads to empty directory
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "/Users/takumi/apps" } });
+      await flushAll();
+
+      // Then: second IPC call was made for the drill-in
+      expect(commands.listDirectory).toHaveBeenCalledTimes(2);
+      expect(commands.listDirectory).toHaveBeenNthCalledWith(2, "/Users/takumi/apps");
+
+      // Then: fallback shows the matched entry itself (empty dir, dropdown stays open)
+      expect(screen.getByText("apps/")).toBeInTheDocument();
+      expect(screen.queryByText("projects/")).not.toBeInTheDocument();
+    });
+
+    it("caches the drill-in result so subsequent typing within that directory uses the cache", async () => {
+      // Given: drill-in happened, cache is set to /Users/takumi/apps/
+      const parentEntries = makeEntries(["apps"], "/Users/takumi/");
+      const childEntries = makeEntries(["cruise"], "/Users/takumi/apps/");
+      vi.mocked(commands.listDirectory)
+        .mockResolvedValueOnce(parentEntries)
+        .mockResolvedValueOnce(childEntries);
+
+      render(<Controlled initialValue="/Users/takumi/" />);
+      await flushAll();
+
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "/Users/takumi/apps" } });
+      await flushAll();
+      expect(commands.listDirectory).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("cruise/")).toBeInTheDocument();
+
+      // When: user types more characters within the drilled directory
+      fireEvent.change(input, { target: { value: "/Users/takumi/apps/x" } });
+      await flushAll();
+
+      // Then: no additional IPC call — cache was preserved with normalized key
+      expect(commands.listDirectory).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Keyboard navigation
   // ---------------------------------------------------------------------------
 
