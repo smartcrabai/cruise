@@ -388,7 +388,9 @@ mod tests {
             "best_effort should return Some for valid file"
         );
         assert_eq!(
-            loaded.unwrap_or_else(|| panic!("expected Some, got None")).input,
+            loaded
+                .unwrap_or_else(|| panic!("expected Some, got None"))
+                .input,
             "test task"
         );
     }
