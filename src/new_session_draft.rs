@@ -294,8 +294,10 @@ mod tests {
     fn test_save_to_overwrites_existing_file() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let path = tmp.path().join("new_session_draft.json");
-        let mut old_draft = NewSessionDraft::default();
-        old_draft.input = "old task".to_string();
+        let old_draft = NewSessionDraft {
+            input: "old task".to_string(),
+            ..Default::default()
+        };
         old_draft.save_to(&path).unwrap_or_else(|e| panic!("{e}"));
 
         let new_draft = make_draft();
@@ -385,7 +387,10 @@ mod tests {
             loaded.is_some(),
             "best_effort should return Some for valid file"
         );
-        assert_eq!(loaded.unwrap().input, "test task");
+        assert_eq!(
+            loaded.unwrap_or_else(|| panic!("expected Some, got None")).input,
+            "test task"
+        );
     }
 
     #[test]
