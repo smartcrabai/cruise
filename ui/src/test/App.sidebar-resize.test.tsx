@@ -49,6 +49,10 @@ vi.mock("../lib/commands", () => ({
   askSession: vi.fn(),
   getAppConfig: vi.fn().mockResolvedValue({ runAllParallelism: 1 }),
   updateAppConfig: vi.fn(),
+  getNewSessionDraft: vi.fn().mockResolvedValue(null),
+  saveNewSessionDraft: vi.fn().mockResolvedValue(undefined),
+  clearNewSessionDraft: vi.fn().mockResolvedValue(undefined),
+  listNewSessionHistory: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../lib/updater", () => ({

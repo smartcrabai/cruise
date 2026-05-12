@@ -206,8 +206,7 @@ async fn generate_pr_description(
             Some(&on_retry),
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         {

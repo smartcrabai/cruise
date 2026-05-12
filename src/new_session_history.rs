@@ -17,6 +17,9 @@ pub struct NewSessionHistoryEntry {
     /// When the selection was recorded.
     #[serde(default)]
     pub selected_at: String,
+    /// User-typed task description. Empty string for legacy entries.
+    #[serde(default)]
+    pub input: String,
     /// The raw config selection shown in the GUI dropdown.
     ///
     /// `None` means "auto resolve".
@@ -191,6 +194,7 @@ impl NewSessionHistory {
 
         self.record_selection(NewSessionHistoryEntry {
             selected_at: String::new(),
+            input: String::new(),
             requested_config_path: None,
             working_dir: String::new(),
             resolved_config_key: resolved_config_key.to_string(),
@@ -300,6 +304,7 @@ mod tests {
     fn make_entry(resolved_config_key: &str, skipped_steps: Vec<&str>) -> NewSessionHistoryEntry {
         NewSessionHistoryEntry {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
+            input: String::new(),
             requested_config_path: None,
             working_dir: "/tmp/project".to_string(),
             resolved_config_key: resolved_config_key.to_string(),
@@ -487,6 +492,7 @@ mod tests {
         let mut history = NewSessionHistory::default();
         history.record_selection(NewSessionHistoryEntry {
             selected_at: String::new(),
+            input: String::new(),
             requested_config_path: Some(String::new()),
             working_dir: "/tmp/project/".to_string(),
             resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
@@ -506,6 +512,7 @@ mod tests {
         let mut history = NewSessionHistory::default();
         history.record_selection(NewSessionHistoryEntry {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
+            input: String::new(),
             requested_config_path: Some("/config/a.yaml".to_string()),
             working_dir: "/tmp/project".to_string(),
             resolved_config_key: "/config/a.yaml".to_string(),

@@ -6,7 +6,7 @@ use console::style;
 use crate::config::WorkflowConfig;
 use crate::engine::resolve_command_with_model;
 use crate::error::Result;
-use crate::step::prompt::{PromptResult, run_prompt};
+use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
 use crate::variable::VariableStore;
 
 /// Resolve and execute a plan-related prompt template with the workflow's LLM command.
@@ -15,16 +15,14 @@ use crate::variable::VariableStore;
 ///
 /// Returns an error if variable resolution fails, the LLM command fails, or a rate limit is hit
 /// and retries are exhausted.
-#[expect(clippy::too_many_arguments)]
-pub async fn run_plan_prompt_template<G: Fn(&str) + Send + Sync, H: Fn(&str) + Send + Sync>(
+pub async fn run_plan_prompt_template(
     config: &WorkflowConfig,
     vars: &mut VariableStore,
     template: &str,
     label: &str,
     rate_limit_retries: usize,
     working_dir: Option<&Path>,
-    on_stdout: Option<&G>,
-    on_stderr: Option<&H>,
+    stream_callbacks: Option<&StreamCallbacks<'_>>,
 ) -> Result<PromptResult> {
     let prompt = vars.resolve(template)?;
     let plan_model = config.plan_model.clone().or_else(|| config.model.clone());
@@ -53,8 +51,7 @@ pub async fn run_plan_prompt_template<G: Fn(&str) + Send + Sync, H: Fn(&str) + S
             Some(&on_retry),
             None,
             working_dir,
-            on_stdout,
-            on_stderr,
+            stream_callbacks,
         )
         .await
     };

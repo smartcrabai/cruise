@@ -284,8 +284,7 @@ async fn generate_plan_markdown(
         "[plan] creating plan...",
         rate_limit_retries,
         working_dir,
-        None::<&fn(&str)>,
-        None::<&fn(&str)>,
+        None,
     )
     .await?;
     crate::metadata::resolve_plan_content(plan_path, &prompt_result.output, &prompt_result.stderr)
@@ -584,8 +583,7 @@ pub async fn generate_plan(
         "[plan] creating plan...",
         rate_limit_retries,
         None,
-        None::<&fn(&str)>,
-        None::<&fn(&str)>,
+        None,
     )
     .await?;
     Ok(())
@@ -672,8 +670,7 @@ async fn run_plan_prompt(
         label,
         rate_limit_retries,
         working_dir,
-        None::<&fn(&str)>,
-        None::<&fn(&str)>,
+        None,
     )
     .await?;
     vars.set_prev_output(Some(result.output));
@@ -810,6 +807,7 @@ mod tests {
             history.entries[0],
             NewSessionHistoryEntry {
                 selected_at: history.entries[0].selected_at.clone(),
+                input: String::new(),
                 requested_config_path: None,
                 working_dir: String::new(),
                 resolved_config_key: "/config/a.yaml".to_string(),
@@ -823,6 +821,7 @@ mod tests {
         let mut history = NewSessionHistory::default();
         history.record_selection(NewSessionHistoryEntry {
             selected_at: String::new(),
+            input: String::new(),
             requested_config_path: None,
             working_dir: String::new(),
             resolved_config_key: "/config/a.yaml".to_string(),
@@ -843,6 +842,7 @@ mod tests {
         let mut history = NewSessionHistory::default();
         history.record_selection(NewSessionHistoryEntry {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
+            input: String::new(),
             requested_config_path: Some("/config/a.yaml".to_string()),
             working_dir: "/tmp/project".to_string(),
             resolved_config_key: "/config/a.yaml".to_string(),

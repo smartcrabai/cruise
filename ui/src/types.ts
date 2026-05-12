@@ -175,3 +175,22 @@ export interface SkippableStepDto {
   expandedStepIds: string[];
   children: SkippableStepDto[];
 }
+
+// --- New Session Draft persistence --------------------------------------------
+
+export interface NewSessionDraftPersisted {
+  input: string;
+  configPath?: string;
+  baseDir: string;
+  skippedSteps: string[];
+  updatedAt?: string;
+}
+
+export interface NewSessionHistoryItem {
+  selectedAt: string;
+  input: string;
+  requestedConfigPath?: string;
+  workingDir: string;
+  resolvedConfigKey: string;
+  skippedSteps: string[];
+}
