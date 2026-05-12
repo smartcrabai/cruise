@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cruise::batch_run::run_all_with_dynamic_parallelism;
+use cruise::new_session_draft::NewSessionDraft;
 use cruise::new_session_history::{
     NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
 };
@@ -407,24 +408,22 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 fn plan_chunk_callbacks(
     session_id: String,
     channel: tauri::ipc::Channel<PlanEvent>,
-) -> (impl Fn(&str) + Send + Sync, impl Fn(&str) + Send + Sync) {
-    let sid_o = session_id.clone();
-    let ch_o = channel.clone();
-    let on_stdout = move |line: &str| {
-        let _ = ch_o.send(PlanEvent::PlanChunk {
-            session_id: sid_o.clone(),
-            stream: "stdout".to_string(),
-            line: line.to_string(),
-        });
+) -> (
+    Box<dyn Fn(&str) + Send + Sync>,
+    Box<dyn Fn(&str) + Send + Sync>,
+) {
+    let make_callback = move |stream: &'static str| {
+        let ch = channel.clone();
+        let sid = session_id.clone();
+        Box::new(move |line: &str| {
+            let _ = ch.send(PlanEvent::PlanChunk {
+                session_id: sid.clone(),
+                stream: stream.to_string(),
+                line: line.to_string(),
+            });
+        }) as Box<dyn Fn(&str) + Send + Sync>
     };
-    let on_stderr = move |line: &str| {
-        let _ = channel.send(PlanEvent::PlanChunk {
-            session_id: session_id.clone(),
-            stream: "stderr".to_string(),
-            line: line.to_string(),
-        });
-    };
-    (on_stdout, on_stderr)
+    (make_callback("stdout"), make_callback("stderr"))
 }
 
 /// Plan generation prompt templates, embedded at compile-time.
@@ -456,6 +455,29 @@ pub struct NewSessionHistorySummaryDto {
 pub struct NewSessionConfigDefaultsDto {
     pub steps: Vec<cruise::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
+}
+
+/// Serializable draft of the New Session form, sent over IPC.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSessionDraftDto {
+    pub input: String,
+    pub config_path: Option<String>,
+    pub base_dir: String,
+    pub skipped_steps: Vec<String>,
+    pub updated_at: Option<String>,
+}
+
+/// A history entry returned for the Recent Sessions list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSessionHistoryItemDto {
+    pub selected_at: String,
+    pub input: String,
+    pub requested_config_path: Option<String>,
+    pub working_dir: String,
+    pub resolved_config_key: String,
+    pub skipped_steps: Vec<String>,
 }
 
 /// List available workflow config files in `~/.cruise/` (excluding sessions/ and worktrees/).
@@ -526,6 +548,7 @@ pub async fn create_session(
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
+        input: session.input.clone(),
         requested_config_path: config_path,
         working_dir: base.to_string_lossy().into_owned(),
         resolved_config_key: resolved_config_key_for_session(source.path()),
@@ -550,6 +573,10 @@ pub async fn create_session(
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+    let stream_callbacks = cruise::step::prompt::StreamCallbacks {
+        on_stdout: Some(on_stdout.as_ref()),
+        on_stderr: Some(on_stderr.as_ref()),
+    };
 
     match cruise::planning::run_plan_prompt_template(
         &config,
@@ -558,8 +585,7 @@ pub async fn create_session(
         "[plan] creating plan...",
         5,
         Some(&base),
-        Some(&on_stdout),
-        Some(&on_stderr),
+        Some(&stream_callbacks),
     )
     .await
     .map_err(|e| e.to_string())
@@ -699,6 +725,7 @@ pub fn update_session_settings(
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
+        input: session.input.clone(),
         requested_config_path: config_path,
         working_dir: base.to_string_lossy().into_owned(),
         resolved_config_key,
@@ -771,6 +798,10 @@ async fn regenerate_plan(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.to_string(), channel.clone());
+    let stream_callbacks = cruise::step::prompt::StreamCallbacks {
+        on_stdout: Some(on_stdout.as_ref()),
+        on_stderr: Some(on_stderr.as_ref()),
+    };
 
     match cruise::planning::run_plan_prompt_template(
         &config,
@@ -779,8 +810,7 @@ async fn regenerate_plan(
         "[plan] regenerating plan...",
         5,
         Some(&session.base_dir),
-        Some(&on_stdout),
-        Some(&on_stderr),
+        Some(&stream_callbacks),
     )
     .await
     .map_err(|e| e.to_string())
@@ -876,6 +906,10 @@ pub async fn fix_session(
     vars.set_prev_input(Some(feedback));
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+    let stream_callbacks = cruise::step::prompt::StreamCallbacks {
+        on_stdout: Some(on_stdout.as_ref()),
+        on_stderr: Some(on_stderr.as_ref()),
+    };
 
     match cruise::planning::run_plan_prompt_template(
         &config,
@@ -884,8 +918,7 @@ pub async fn fix_session(
         "[fix-plan] applying fixes...",
         5,
         Some(&session.base_dir),
-        Some(&on_stdout),
-        Some(&on_stderr),
+        Some(&stream_callbacks),
     )
     .await
     .map_err(|e| e.to_string())
@@ -950,8 +983,7 @@ pub(crate) async fn do_ask_session(
         "[ask-plan] answering question...",
         5,
         Some(&session.base_dir),
-        None::<&fn(&str)>,
-        None::<&fn(&str)>,
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -1454,6 +1486,66 @@ pub fn get_update_readiness() -> UpdateReadinessDto {
     }
 }
 
+/// Return the latest New Session form draft, or `None` if no draft exists.
+#[tauri::command]
+pub fn get_new_session_draft() -> std::result::Result<Option<NewSessionDraftDto>, String> {
+    Ok(
+        NewSessionDraft::load_best_effort().map(|draft| NewSessionDraftDto {
+            input: draft.input,
+            config_path: draft.requested_config_path,
+            base_dir: draft.working_dir,
+            skipped_steps: draft.skipped_steps,
+            updated_at: Some(draft.updated_at),
+        }),
+    )
+}
+
+/// Persist the current New Session form state so it survives restarts.
+#[tauri::command]
+pub fn save_new_session_draft(draft: NewSessionDraftDto) -> std::result::Result<(), String> {
+    let entry = NewSessionDraft {
+        input: draft.input,
+        requested_config_path: draft.config_path,
+        working_dir: draft.base_dir,
+        skipped_steps: draft.skipped_steps,
+        updated_at: cruise::session::current_iso8601(),
+    };
+    entry
+        .save()
+        .map_err(|e| format!("failed to save new session draft: {e}"))
+}
+
+/// Delete the New Session form draft.
+#[tauri::command]
+pub fn clear_new_session_draft() -> std::result::Result<(), String> {
+    NewSessionDraft::clear().map_err(|e| format!("failed to clear new session draft: {e}"))
+}
+
+/// Return recent New Session history entries (most-recent-first).
+///
+/// `limit` defaults to 10 and is capped at 50.
+#[tauri::command]
+pub fn list_new_session_history(
+    limit: Option<usize>,
+) -> std::result::Result<Vec<NewSessionHistoryItemDto>, String> {
+    let limit = limit.unwrap_or(10).min(NewSessionHistory::MAX_ENTRIES);
+    let history = NewSessionHistory::load_best_effort();
+    let entries: Vec<NewSessionHistoryItemDto> = history
+        .entries
+        .iter()
+        .take(limit)
+        .map(|e| NewSessionHistoryItemDto {
+            selected_at: e.selected_at.clone(),
+            input: e.input.clone(),
+            requested_config_path: e.requested_config_path.clone(),
+            working_dir: e.working_dir.clone(),
+            resolved_config_key: e.resolved_config_key.clone(),
+            skipped_steps: e.skipped_steps.clone(),
+        })
+        .collect();
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1546,6 +1638,7 @@ mod tests {
         let mut history = NewSessionHistory::default();
         history.record_selection(NewSessionHistoryEntry {
             selected_at: String::new(),
+            input: String::new(),
             requested_config_path: Some("/Users/takumi/.cruise/team.yaml".to_string()),
             working_dir: "/Users/takumi/projects/demo".to_string(),
             resolved_config_key: "/Users/takumi/.cruise/team.yaml".to_string(),
@@ -1553,6 +1646,7 @@ mod tests {
         });
         history.record_selection(NewSessionHistoryEntry {
             selected_at: String::new(),
+            input: String::new(),
             requested_config_path: None,
             working_dir: "/Users/takumi/projects/another-repo".to_string(),
             resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
@@ -2537,5 +2631,133 @@ mod tests {
         let sessions = list_sessions_impl(&manager, &AppState::new());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].skipped_steps, vec!["test"]);
+    }
+
+    #[test]
+    fn test_new_session_draft_save_and_get_round_trip() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let draft_dto = NewSessionDraftDto {
+            input: "test task".to_string(),
+            config_path: Some("/tmp/cruise.yaml".to_string()),
+            base_dir: "/tmp/project".to_string(),
+            skipped_steps: vec!["review".to_string()],
+            updated_at: None,
+        };
+        save_new_session_draft(draft_dto).unwrap_or_else(|e| panic!("save failed: {e}"));
+
+        let loaded = get_new_session_draft()
+            .unwrap_or_else(|e| panic!("get failed: {e}"))
+            .unwrap_or_else(|| panic!("expected Some, got None"));
+        assert_eq!(loaded.input, "test task");
+        assert_eq!(loaded.config_path.as_deref(), Some("/tmp/cruise.yaml"));
+        assert_eq!(loaded.base_dir, "/tmp/project");
+        assert_eq!(loaded.skipped_steps, vec!["review"]);
+    }
+
+    #[test]
+    fn test_new_session_draft_get_returns_none_when_no_draft() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let draft = get_new_session_draft().unwrap_or_else(|e| panic!("get failed: {e}"));
+        assert!(draft.is_none(), "expected None when no draft exists");
+    }
+
+    #[test]
+    fn test_new_session_draft_clear_removes_draft() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        save_new_session_draft(NewSessionDraftDto {
+            input: "temp".to_string(),
+            config_path: None,
+            base_dir: "/tmp".to_string(),
+            skipped_steps: vec![],
+            updated_at: None,
+        })
+        .unwrap_or_else(|e| panic!("save failed: {e}"));
+
+        clear_new_session_draft().unwrap_or_else(|e| panic!("clear failed: {e}"));
+
+        let draft = get_new_session_draft().unwrap_or_else(|e| panic!("get failed: {e}"));
+        assert!(draft.is_none(), "draft should be cleared");
+    }
+
+    #[test]
+    fn test_list_new_session_history_returns_most_recent_first_with_input() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: "first task".to_string(),
+            requested_config_path: None,
+            working_dir: "/tmp/project".to_string(),
+            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            skipped_steps: vec![],
+        });
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: "second task".to_string(),
+            requested_config_path: None,
+            working_dir: "/tmp/project".to_string(),
+            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            skipped_steps: vec!["review".to_string()],
+        });
+        history
+            .save()
+            .unwrap_or_else(|e| panic!("save failed: {e}"));
+
+        let entries =
+            list_new_session_history(Some(10)).unwrap_or_else(|e| panic!("list failed: {e}"));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].input, "second task");
+        assert_eq!(entries[0].skipped_steps, vec!["review"]);
+        assert_eq!(entries[1].input, "first task");
+    }
+
+    #[test]
+    fn test_list_new_session_history_respects_limit() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let mut history = NewSessionHistory::default();
+        for i in 0..5 {
+            history.record_selection(NewSessionHistoryEntry {
+                selected_at: String::new(),
+                input: format!("task {i}"),
+                requested_config_path: None,
+                working_dir: "/tmp/project".to_string(),
+                resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+                skipped_steps: vec![],
+            });
+        }
+        history
+            .save()
+            .unwrap_or_else(|e| panic!("save failed: {e}"));
+
+        let entries =
+            list_new_session_history(Some(3)).unwrap_or_else(|e| panic!("list failed: {e}"));
+
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_list_new_session_history_returns_empty_for_empty_history() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let entries = list_new_session_history(None).unwrap_or_else(|e| panic!("list failed: {e}"));
+        assert!(entries.is_empty());
     }
 }

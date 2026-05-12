@@ -21,6 +21,8 @@ interface MockSession {
 }
 
 interface HistoryEntry {
+  selectedAt: string;
+  input: string;
   requestedConfigPath?: string;
   workingDir: string;
   resolvedConfigKey: string;
@@ -60,12 +62,16 @@ const sessionPlans = new Map<string, string>([
 
 const historyEntries: HistoryEntry[] = [
   {
+    selectedAt: "2026-04-07T10:00:00Z",
+    input: "fix login bug",
     requestedConfigPath: TEAM_CONFIG_PATH,
     workingDir: "/Users/takumi/projects/demo",
     resolvedConfigKey: TEAM_CONFIG_PATH,
     skippedSteps: ["review"],
   },
   {
+    selectedAt: "2026-04-06T10:00:00Z",
+    input: "add dark mode",
     workingDir: "/Users/takumi/projects/another-repo",
     resolvedConfigKey: AUTO_CONFIG_PATH,
     skippedSteps: ["verify"],
@@ -188,6 +194,19 @@ mockIPC((cmd, payload?: unknown) => {
         defaultSkippedSteps: defaultSkippedSteps(baseDir, configPath),
       };
     }
+    case "get_new_session_draft":
+      return null;
+    case "save_new_session_draft":
+      return null;
+    case "clear_new_session_draft":
+      return null;
+    case "list_new_session_history": {
+      let limit = Number(getField(payload, "limit") ?? 10);
+      if (!Number.isFinite(limit) || limit < 0) {
+        limit = 10;
+      }
+      return historyEntries.slice(0, limit);
+    }
     case "list_directory": {
       const path = String(getField(payload, "path") ?? "");
       if (path.includes("/Users/takumi/projects")) {
@@ -211,6 +230,8 @@ mockIPC((cmd, payload?: unknown) => {
       const createdAt = new Date().toISOString();
 
       historyEntries.unshift({
+        selectedAt: createdAt,
+        input: String(getField(payload, "input") ?? ""),
         requestedConfigPath: configPath,
         workingDir: baseDir,
         resolvedConfigKey,

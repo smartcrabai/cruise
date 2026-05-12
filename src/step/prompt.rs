@@ -14,18 +14,19 @@ pub struct PromptResult {
     pub stderr: String,
 }
 
+/// Grouped callbacks for streaming LLM stdout/stderr output line by line.
+pub struct StreamCallbacks<'a> {
+    pub on_stdout: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    pub on_stderr: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+}
+
 /// Invoke the LLM command with optional rate-limit retry.
 ///
 /// # Errors
 ///
 /// Returns an error if the LLM process fails to spawn or returns a fatal error.
 #[expect(clippy::too_many_arguments)]
-pub async fn run_prompt<
-    S: std::hash::BuildHasher,
-    F: Fn(&str),
-    G: Fn(&str) + Send + Sync,
-    H: Fn(&str) + Send + Sync,
->(
+pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
@@ -34,8 +35,7 @@ pub async fn run_prompt<
     on_retry: Option<&F>,
     cancel_token: Option<&CancellationToken>,
     cwd: Option<&std::path::Path>,
-    on_stdout: Option<&G>,
-    on_stderr: Option<&H>,
+    stream_callbacks: Option<&StreamCallbacks<'_>>,
 ) -> Result<PromptResult> {
     let mut attempts = 0;
 
@@ -47,8 +47,7 @@ pub async fn run_prompt<
             env,
             cancel_token,
             cwd,
-            on_stdout,
-            on_stderr,
+            stream_callbacks,
         )
         .await;
 
@@ -88,20 +87,15 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn execute_prompt<
-    S: std::hash::BuildHasher,
-    G: Fn(&str) + Send + Sync,
-    H: Fn(&str) + Send + Sync,
->(
+#[expect(clippy::too_many_lines)]
+async fn execute_prompt<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
     prompt: &str,
     env: &HashMap<String, String, S>,
     cancel_token: Option<&CancellationToken>,
     cwd: Option<&std::path::Path>,
-    on_stdout: Option<&G>,
-    on_stderr: Option<&H>,
+    stream_callbacks: Option<&StreamCallbacks<'_>>,
 ) -> Result<(String, String)> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
@@ -147,6 +141,8 @@ async fn execute_prompt<
         if let Some(pipe) = stdout_pipe {
             let mut reader = BufReader::new(pipe);
             let mut line = String::new();
+            // Extract callback once before loop to avoid per-line overhead
+            let on_stdout = stream_callbacks.and_then(|s| s.on_stdout);
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
@@ -173,6 +169,8 @@ async fn execute_prompt<
         if let Some(pipe) = stderr_pipe {
             let mut reader = BufReader::new(pipe);
             let mut line = String::new();
+            // Extract callback once before loop to avoid per-line overhead
+            let on_stderr = stream_callbacks.and_then(|s| s.on_stderr);
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
@@ -278,8 +276,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -297,8 +294,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -321,8 +317,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -344,8 +339,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -372,8 +366,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -398,8 +391,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            None::<&fn(&str)>,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -423,6 +415,10 @@ mod tests {
             lines.lock().expect("lock poisoned").push(line.to_string());
         };
         // When: run_prompt is called with on_stdout callback
+        let stream_callbacks = StreamCallbacks {
+            on_stdout: Some(&on_stdout as &(dyn Fn(&str) + Send + Sync)),
+            on_stderr: None,
+        };
         let result = run_prompt(
             &command,
             None,
@@ -432,8 +428,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            Some(&on_stdout),
-            None::<&fn(&str)>,
+            Some(&stream_callbacks),
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -458,6 +453,10 @@ mod tests {
             lines.lock().expect("lock poisoned").push(line.to_string());
         };
         // When: run_prompt is called with on_stderr callback
+        let stream_callbacks = StreamCallbacks {
+            on_stdout: None,
+            on_stderr: Some(&on_stderr as &(dyn Fn(&str) + Send + Sync)),
+        };
         let result = run_prompt(
             &command,
             None,
@@ -467,8 +466,7 @@ mod tests {
             None::<&fn(&str)>,
             None,
             None,
-            None::<&fn(&str)>,
-            Some(&on_stderr),
+            Some(&stream_callbacks),
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));

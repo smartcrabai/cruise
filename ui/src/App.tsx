@@ -5,6 +5,7 @@ import type {
   AppConfig,
   ChoiceDto,
   ConfigEntry,
+  NewSessionHistoryItem,
   PlanEvent,
   Session,
   SessionPhase,
@@ -16,20 +17,24 @@ import {
   approveSession,
   askSession,
   cancelSession,
+  clearNewSessionDraft,
   createSession,
   deleteSession,
   fixSession,
   getAppConfig,
   getNewSessionConfigDefaults,
+  getNewSessionDraft,
   getNewSessionHistorySummary,
   getSession,
   getSessionLog,
   getSessionPlan,
   listConfigs,
+  listNewSessionHistory,
   resetSession,
   respondToOption,
   runAllSessions,
   runSession,
+  saveNewSessionDraft,
   updateAppConfig,
 } from "./lib/commands";
 import { notifyDesktop } from "./lib/desktopNotifications";
@@ -594,8 +599,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
 
   useEffect(() => {
     if (!planContent && session.planAvailable) {
-      const shouldEagerLoad = session.phase === "Awaiting Approval";
-      if (activeTab === "plan" || shouldEagerLoad) {
+      if (activeTab === "plan" || session.phase === "Awaiting Approval") {
         void loadPlan();
       }
     }
@@ -794,7 +798,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     onRegeneratingChange: setIsConfigRegenerating,
     onError: (error: string) => { onToast({ kind: "failed", sessionInput: session.input, detail: error }); },
     disabled: replanPhase === "generating",
-  } as const;
+  };
 
   return (
     <div className="@container h-full flex flex-col">
@@ -992,8 +996,8 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
         )}
       </div>
 
-      {isAwaitingApproval ? (
-        <div className="flex-1 flex flex-col @4xl:flex-row min-h-0 overflow-hidden">
+      <div className={isAwaitingApproval ? "flex-1 flex flex-col @4xl:flex-row min-h-0 overflow-hidden" : "flex-1"}>
+        {isAwaitingApproval && (
           <aside
             aria-label="Session settings"
             className="@4xl:w-[360px] @4xl:flex-shrink-0 @4xl:border-r @4xl:border-gray-800 @4xl:overflow-auto border-b @4xl:border-b-0 border-gray-800 px-6 py-4 flex flex-col gap-3"
@@ -1001,85 +1005,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
             <h3 className="text-xs text-gray-500 uppercase tracking-wide">Session Settings</h3>
             <SessionConfigEditor {...sessionConfigEditorCommonProps} />
           </aside>
+        )}
 
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            <div role="tablist" className="flex border-b border-gray-800">
-              <button
-                type="button"
-                role="tab"
-                id={tabInfoId}
-                aria-selected={activeTab === "info"}
-                aria-controls={panelInfoId}
-                onClick={() => onActiveTabChange("info")}
-                className={`px-4 py-2 text-xs font-medium transition-colors ${
-                  activeTab === "info"
-                    ? "text-blue-400 border-b-2 border-blue-500"
-                    : "text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Info
-              </button>
-              <button
-                type="button"
-                role="tab"
-                id={tabPlanId}
-                aria-selected={activeTab === "plan"}
-                aria-controls={panelPlanId}
-                onClick={() => onActiveTabChange("plan")}
-                className={`@4xl:hidden px-4 py-2 text-xs font-medium transition-colors ${
-                  activeTab === "plan"
-                    ? "text-blue-400 border-b-2 border-blue-500"
-                    : "text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Plan
-              </button>
-              <button
-                type="button"
-                role="tab"
-                id={tabLogId}
-                aria-selected={activeTab === "log"}
-                aria-controls={panelLogId}
-                onClick={() => onActiveTabChange("log")}
-                className={`px-4 py-2 text-xs font-medium transition-colors ${
-                  activeTab === "log"
-                    ? "text-blue-400 border-b-2 border-blue-500"
-                    : "text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Log
-                {status === "running" && (
-                  <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                )}
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-auto">
-              {activeTab === "info" && (
-                <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} className="@4xl:hidden" />
-              )}
-
-              <WorkflowPlanPanel
-                panelPlanId={panelPlanId}
-                tabPlanId={tabPlanId}
-                askResponse={askResponse}
-                planLoading={planLoading}
-                planContent={planContent}
-                className={
-                  activeTab === "plan"
-                    ? "h-full overflow-auto"
-                    : "hidden @4xl:block @4xl:h-full @4xl:overflow-auto"
-                }
-              />
-
-              {activeTab === "log" && (
-                <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} className="@4xl:hidden" />
-              )}
-            </div>
-          </div>
-        </div>
-      ) : (
-        <>
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <div role="tablist" className="flex border-b border-gray-800">
             <button
               type="button"
@@ -1103,7 +1031,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
               aria-selected={activeTab === "plan"}
               aria-controls={panelPlanId}
               onClick={() => onActiveTabChange("plan")}
-              className={`px-4 py-2 text-xs font-medium transition-colors ${
+              className={`${isAwaitingApproval ? "@4xl:hidden " : ""}px-4 py-2 text-xs font-medium transition-colors ${
                 activeTab === "plan"
                   ? "text-blue-400 border-b-2 border-blue-500"
                   : "text-gray-500 hover:text-gray-300"
@@ -1133,19 +1061,30 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
 
           <div className="flex-1 overflow-auto">
             {activeTab === "info" && (
-              <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} />
+              <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
             )}
 
-            {activeTab === "plan" && (
-              <WorkflowPlanPanel panelPlanId={panelPlanId} tabPlanId={tabPlanId} askResponse={askResponse} planLoading={planLoading} planContent={planContent} className="h-full overflow-auto" />
-            )}
+            <WorkflowPlanPanel
+              panelPlanId={panelPlanId}
+              tabPlanId={tabPlanId}
+              askResponse={askResponse}
+              planLoading={planLoading}
+              planContent={planContent}
+              className={
+                activeTab === "plan"
+                  ? "h-full overflow-auto"
+                  : isAwaitingApproval
+                    ? "hidden @4xl:block @4xl:h-full @4xl:overflow-auto"
+                    : "hidden"
+              }
+            />
 
             {activeTab === "log" && (
-              <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} />
+              <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
             )}
           </div>
-        </>
-      )}
+        </div>
+      </div>
 
       {/* Option dialog */}
       {pendingOption && (
@@ -1211,6 +1150,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
+  const [recentHistory, setRecentHistory] = useState<NewSessionHistoryItem[]>([]);
   const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
@@ -1239,6 +1179,16 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         setRecentWorkingDirs([]);
       }
       return null;
+    } finally {
+      if (isMountedRef.current) {
+        void listNewSessionHistory()
+          .then((history) => {
+            if (isMountedRef.current) {
+              setRecentHistory(history);
+            }
+          })
+          .catch(() => {});
+      }
     }
   }, []);
 
@@ -1265,6 +1215,29 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
       });
     return () => { active = false; };
   }, [configLookupBaseDir, configPath]);
+
+  useEffect(() => {
+    if (isGenerating) return;
+    const timer = setTimeout(() => {
+      void saveNewSessionDraft({
+        input: draft.input,
+        configPath: draft.configPath || undefined,
+        baseDir: draft.baseDir,
+        skippedSteps: Array.from(skippedSteps),
+      });
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [draft.input, draft.configPath, draft.baseDir, skippedSteps, isGenerating]);
+
+  function applyHistoryEntry(entry: NewSessionHistoryItem) {
+    onDraftChange((prev) => ({
+      ...prev,
+      input: entry.input,
+      configPath: entry.requestedConfigPath ?? "",
+      baseDir: entry.workingDir,
+    }));
+    setSkippedSteps(new Set(entry.skippedSteps));
+  }
 
   function isParentChecked(node: SkippableStepDto): boolean {
     return node.expandedStepIds.every((id) => skippedSteps.has(id));
@@ -1379,11 +1352,9 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           baseDir: prev.baseDir,
           configPath: prev.configPath,
         }));
+        void clearNewSessionDraft();
         void refreshHistorySummary();
         onRefreshSidebar();
-      } else if (event.event === "planChunk") {
-        // plan generation progress chunks are streamed but not yet displayed
-        // in the new-session form (the sidebar refreshes to show the new session)
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
       }
@@ -1475,6 +1446,30 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             </div>
           )}
         </div>
+
+        {/* Recent Sessions */}
+        {recentHistory.length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-xs text-gray-500 uppercase tracking-wide">Recent Sessions</label>
+            <ul className="space-y-1">
+              {recentHistory.map((entry) => (
+                <li key={entry.selectedAt}>
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryEntry(entry)}
+                    disabled={isGenerating}
+                    className="w-full text-left px-3 py-2 rounded border border-gray-700 bg-gray-900 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <div className="truncate text-sm text-gray-200">{entry.input || "(empty)"}</div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {entry.workingDir}{entry.requestedConfigPath ? ` - ${entry.requestedConfigPath}` : " - auto"}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Task input */}
         <div className="space-y-1.5">
@@ -1722,6 +1717,20 @@ export default function App() {
     180,
     480,
   );
+
+  useEffect(() => {
+    let active = true;
+    void getNewSessionDraft().then((d) => {
+      if (!active || !d) return;
+      setNewSessionDraft((prev) => ({
+        ...prev,
+        input: d.input,
+        configPath: d.configPath ?? "",
+        baseDir: d.baseDir,
+      }));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   async function handleOpenSettings() {
     try {

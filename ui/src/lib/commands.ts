@@ -5,6 +5,8 @@ import type {
   ConfigEntry,
   DirEntry,
   NewSessionConfigDefaults,
+  NewSessionDraftPersisted,
+  NewSessionHistoryItem,
   NewSessionHistorySummary,
   PlanEvent,
   Session,
@@ -169,6 +171,32 @@ export function getNewSessionConfigDefaults(
   return invoke<NewSessionConfigDefaults>("get_new_session_config_defaults", {
     baseDir: params.baseDir,
     configPath: params.configPath ?? null,
+  });
+}
+
+// ─── New Session Draft persistence ─────────────────────────────────────────────
+
+/** Get the latest New Session form draft, or null if no draft exists. */
+export function getNewSessionDraft(): Promise<NewSessionDraftPersisted | null> {
+  return invoke<NewSessionDraftPersisted | null>("get_new_session_draft");
+}
+
+/** Persist the current New Session form state. */
+export function saveNewSessionDraft(draft: NewSessionDraftPersisted): Promise<void> {
+  return invoke<void>("save_new_session_draft", { draft });
+}
+
+/** Delete the New Session form draft. */
+export function clearNewSessionDraft(): Promise<void> {
+  return invoke<void>("clear_new_session_draft");
+}
+
+/** Return recent New Session history entries, most-recent-first. */
+export function listNewSessionHistory(
+  limit?: number
+): Promise<NewSessionHistoryItem[]> {
+  return invoke<NewSessionHistoryItem[]>("list_new_session_history", {
+    limit: limit ?? null,
   });
 }
 

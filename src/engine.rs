@@ -10,7 +10,7 @@ use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::OptionHandler;
 use crate::step::command::run_commands;
-use crate::step::prompt::run_prompt;
+use crate::step::prompt::{StreamCallbacks, run_prompt};
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -475,7 +475,7 @@ async fn execute_step_kind(
 ) -> Result<Option<String>> {
     match kind {
         StepKind::Prompt(step) => {
-            let _output = run_prompt_step(
+            run_prompt_step(
                 vars,
                 ctx.compiled,
                 step,
@@ -623,7 +623,7 @@ pub(crate) async fn run_prompt_step(
     cancel_token: Option<&CancellationToken>,
     working_dir: Option<&std::path::Path>,
     on_step_log: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
-) -> Result<String> {
+) -> Result<()> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
@@ -653,17 +653,21 @@ pub(crate) async fn run_prompt_step(
     };
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
-    let on_stdout = |line: &str| {
+    let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
         spinner.suspend(|| eprintln!("  {line}"));
         if let Some(cb) = on_step_log {
             cb("stdout", line);
         }
     };
-    let on_stderr = |line: &str| {
+    let on_stderr: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
         spinner.suspend(|| eprintln!("  {} {}", style("stderr:").dim(), line));
         if let Some(cb) = on_step_log {
             cb("stderr", line);
         }
+    };
+    let stream_callbacks = StreamCallbacks {
+        on_stdout: Some(on_stdout),
+        on_stderr: Some(on_stderr),
     };
     let result = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
@@ -676,8 +680,7 @@ pub(crate) async fn run_prompt_step(
             Some(&on_retry),
             cancel_token,
             working_dir,
-            Some(&on_stdout),
-            Some(&on_stderr),
+            Some(&stream_callbacks),
         )
         .await
     };
@@ -689,7 +692,7 @@ pub(crate) async fn run_prompt_step(
     vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_input(None);
 
-    Ok(output)
+    Ok(())
 }
 
 /// Execute a command step, updating variable state and returning whether it succeeded.

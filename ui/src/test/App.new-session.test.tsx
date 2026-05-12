@@ -3,6 +3,7 @@ import { render, screen, waitFor, cleanup, act, fireEvent } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
+import type { NewSessionHistoryItem } from "../types";
 import * as commands from "../lib/commands";
 import * as desktopNotifications from "../lib/desktopNotifications";
 
@@ -39,6 +40,10 @@ vi.mock("../lib/commands", () => ({
     steps: [],
     defaultSkippedSteps: [],
   }),
+  getNewSessionDraft: vi.fn().mockResolvedValue(null),
+  saveNewSessionDraft: vi.fn().mockResolvedValue(undefined),
+  clearNewSessionDraft: vi.fn().mockResolvedValue(undefined),
+  listNewSessionHistory: vi.fn().mockResolvedValue([]),
   listDirectory: vi.fn(),
   getUpdateReadiness: vi.fn(),
   cleanSessions: vi.fn(),
@@ -74,6 +79,10 @@ function setupNewSessionMocks() {
     steps: [],
     defaultSkippedSteps: [],
   });
+  vi.mocked(commands.getNewSessionDraft).mockResolvedValue(null);
+  vi.mocked(commands.saveNewSessionDraft).mockResolvedValue(undefined);
+  vi.mocked(commands.clearNewSessionDraft).mockResolvedValue(undefined);
+  vi.mocked(commands.listNewSessionHistory).mockResolvedValue([]);
   vi.mocked(commands.listDirectory).mockResolvedValue([]);
   vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
   vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
@@ -259,6 +268,264 @@ describe("App: New Session draft state persistence", () => {
     expect(implement).not.toBeChecked();
   });
 
+});
+
+describe("App: New Session draft persistence via IPC", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("restores draft input, configPath, and baseDir from persisted draft on first mount", async () => {
+    vi.mocked(commands.getNewSessionDraft).mockResolvedValue({
+      input: "my stored task",
+      configPath: "/tmp/config.yaml",
+      baseDir: "/tmp/project",
+      skippedSteps: [],
+    });
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/config.yaml", name: "config.yaml" },
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("my stored task");
+    });
+    expect(screen.getByLabelText("Config")).toHaveValue("/tmp/config.yaml");
+    expect(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+    ).toHaveValue("/tmp/project");
+  });
+
+  it("does not overwrite already-filled draft with persisted values on navigation back", async () => {
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-1", input: "existing task" }),
+    ]);
+    vi.mocked(commands.getNewSessionDraft).mockResolvedValue({
+      input: "stored task",
+      configPath: "/tmp/config.yaml",
+      baseDir: "/tmp/stored",
+      skippedSteps: [],
+    });
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/config.yaml", name: "config.yaml" },
+    ]);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("existing task"));
+
+    // Navigate to New Session — draft is loaded from persistence
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Describe what you want to implement...")
+      ).toHaveValue("stored task");
+    });
+
+    // User types a new task and working dir
+    await userEvent.clear(screen.getByPlaceholderText("Describe what you want to implement..."));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "my typed task"
+    );
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    await userEvent.clear(baseDirInput);
+    await userEvent.type(baseDirInput, "/my/typed/dir");
+
+    // Navigate away and back
+    await userEvent.click(screen.getByRole("button", { name: /existing task/ }));
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Then: user-typed values preserved, persisted draft is NOT reapplied
+    expect(
+      screen.getByPlaceholderText("Describe what you want to implement...")
+    ).toHaveValue("my typed task");
+    expect(baseDirInput).toHaveValue("/my/typed/dir");
+  });
+});
+
+describe("App: New Session draft save on value changes", () => {
+  beforeEach(() => {
+    setupNewSessionMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("calls saveNewSessionDraft with debounce after task input changes", async () => {
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      recentWorkingDirs: [],
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const taskTextarea = screen.getByPlaceholderText("Describe what you want to implement...");
+    fireEvent.change(taskTextarea, { target: { value: "debounced save" } });
+
+    // Not yet called because of 500ms debounce
+    expect(commands.saveNewSessionDraft).not.toHaveBeenCalled();
+
+    // Wait for debounce
+    vi.advanceTimersByTime(500);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(commands.saveNewSessionDraft).toHaveBeenCalled();
+  });
+
+  it("calls saveNewSessionDraft after baseDir changes", async () => {
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      recentWorkingDirs: [],
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    fireEvent.change(baseDirInput, { target: { value: "/new/dir" } });
+
+    vi.advanceTimersByTime(500);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(commands.saveNewSessionDraft).toHaveBeenCalled();
+  });
+
+  it("calls clearNewSessionDraft after sessionCreated event", async () => {
+    vi.mocked(commands.saveNewSessionDraft).mockResolvedValue(undefined);
+
+    // Given: createSession emits sessionCreated
+    const control = setupTwoPhaseCreateSession("sess-draft-clear");
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    fireEvent.change(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      { target: { value: "task to generate" } }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: sessionCreated fires
+    await act(async () => {
+      control.emitSessionCreated();
+    });
+
+    // Then: clearNewSessionDraft is called
+    expect(commands.clearNewSessionDraft).toHaveBeenCalled();
+
+    // Cleanup
+    await act(async () => {
+      control.emitPlanGenerated();
+    });
+  });
+});
+
+describe("App: New Session history list", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("shows recent session history entries when available", async () => {
+    const historyEntries: NewSessionHistoryItem[] = [
+      {
+        selectedAt: "2026-04-07T00:00:00Z",
+        input: "fix login bug",
+        requestedConfigPath: "/tmp/team.yaml",
+        workingDir: "/repos/app",
+        resolvedConfigKey: "/tmp/team.yaml",
+        skippedSteps: ["build"],
+      },
+      {
+        selectedAt: "2026-04-06T00:00:00Z",
+        input: "add dark mode",
+        workingDir: "/repos/app",
+        resolvedConfigKey: "__builtin__",
+        skippedSteps: [],
+      },
+    ];
+    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Recent Sessions")).toBeInTheDocument();
+    });
+    expect(screen.getByText("fix login bug")).toBeInTheDocument();
+    expect(screen.getByText("add dark mode")).toBeInTheDocument();
+    expect(screen.getAllByText("/repos/app", { exact: false }).length).toBeGreaterThan(0);
+  });
+
+  it("does not show Recent Sessions section when history is empty", async () => {
+    vi.mocked(commands.listNewSessionHistory).mockResolvedValue([]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await act(async () => { await new Promise<void>((r) => setTimeout(r, 50)); });
+    expect(screen.queryByText("Recent Sessions")).not.toBeInTheDocument();
+  });
+
+  it("restores form fields when a history entry is clicked", async () => {
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/team.yaml", name: "team.yaml" },
+    ]);
+    const historyEntries: NewSessionHistoryItem[] = [
+      {
+        selectedAt: "2026-04-07T00:00:00Z",
+        input: "fix login bug",
+        requestedConfigPath: "/tmp/team.yaml",
+        workingDir: "/repos/app",
+        resolvedConfigKey: "/tmp/team.yaml",
+        skippedSteps: ["build"],
+      },
+    ];
+    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await waitFor(() => screen.getByText("Recent Sessions"));
+    const entryButton = screen.getByText("fix login bug").closest("button")!;
+    await userEvent.click(entryButton);
+
+    // Then: all form fields are restored
+    expect(
+      screen.getByPlaceholderText("Describe what you want to implement...")
+    ).toHaveValue("fix login bug");
+    expect(screen.getByLabelText("Config")).toHaveValue("/tmp/team.yaml");
+    expect(
+      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
+    ).toHaveValue("/repos/app");
+  });
+
+  it("shows (empty) for history entries with no task input", async () => {
+    const historyEntries: NewSessionHistoryItem[] = [
+      {
+        selectedAt: "2026-04-07T00:00:00Z",
+        input: "",
+        workingDir: "/repos/app",
+        resolvedConfigKey: "__builtin__",
+        skippedSteps: [],
+      },
+    ];
+    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    await waitFor(() => screen.getByText("Recent Sessions"));
+    expect(screen.getByText("(empty)")).toBeInTheDocument();
+  });
 });
 
 describe("App: New Session skip-step selection", () => {
@@ -528,7 +795,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "my task"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // When: sessionCreated fires (session is persisted, plan not yet ready)
     await act(async () => {
@@ -558,7 +825,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "another task"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // When: sessionCreated fires and the form is released (input cleared)
     await act(async () => {
@@ -600,7 +867,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "first task"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // When: sessionCreated fires
     await act(async () => {
@@ -644,7 +911,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "history refresh",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
       control.emitSessionCreated();
@@ -670,7 +937,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "task that will fail"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
       control.emitSessionCreated();
@@ -705,7 +972,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "task that will fail"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
       control.emitSessionCreated();
@@ -741,7 +1008,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "async task"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // sessionCreated: form resets
     await act(async () => {
@@ -783,7 +1050,7 @@ describe("App: Non-blocking session creation", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "refresh test task"
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     const callsBeforeSessionCreated = vi.mocked(commands.listSessions).mock.calls.length;
 
@@ -945,7 +1212,7 @@ describe("App: Approval-ready notification transitions", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "needs approval",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // sessionCreated: session appears in sidebar but plan not yet ready (Planning in UI)
     vi.mocked(commands.listSessions).mockResolvedValue([
@@ -978,7 +1245,7 @@ describe("App: Approval-ready notification transitions", () => {
       screen.getByPlaceholderText("Describe what you want to implement..."),
       "planning task",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     // When: sessionCreated fires → session has planAvailable: false (Planning in UI)
     vi.mocked(commands.listSessions).mockResolvedValue([
