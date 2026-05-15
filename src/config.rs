@@ -1505,7 +1505,7 @@ steps:
             .unwrap_or_else(|| panic!("fail not set"))
         {
             FailAction::Goto(name) => assert_eq!(name, "rollback"),
-            _ => panic!("Expected FailAction::Goto"),
+            FailAction::Detailed(_) => panic!("Expected FailAction::Goto"),
         }
     }
 
@@ -1537,7 +1537,7 @@ steps:
             FailAction::Detailed(d) => {
                 assert!(d.retry, "retry should be true");
             }
-            _ => panic!("Expected FailAction::Detailed"),
+            FailAction::Goto(_) => panic!("Expected FailAction::Detailed"),
         }
     }
 

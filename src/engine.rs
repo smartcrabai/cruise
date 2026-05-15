@@ -523,6 +523,7 @@ async fn step_loop_iteration(
 }
 
 /// Execute a single step kind and return execution outcome.
+#[expect(clippy::too_many_arguments)]
 async fn execute_step_kind(
     ctx: &ExecutionContext<'_>,
     kind: &StepKind,
@@ -2986,7 +2987,9 @@ steps:
             &[],
         )
         .await;
-        let err = result.unwrap_err();
+        let Err(err) = result else {
+            panic!("expected loop protection error")
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("loop protection"),
@@ -3071,7 +3074,9 @@ steps:
             &[],
         )
         .await;
-        let err = result.unwrap_err();
+        let Err(err) = result else {
+            panic!("expected loop protection error")
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("loop protection"),

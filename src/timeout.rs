@@ -2,6 +2,12 @@ use std::time::Duration;
 
 use crate::error::{CruiseError, Result};
 
+/// Parse a timeout string like `"30"`, `"5m"`, `"1h"` into a [`Duration`].
+///
+/// # Errors
+///
+/// Returns [`CruiseError::InvalidStepConfig`] if the string is empty, zero, or
+/// contains non-numeric/garbage characters.
 pub fn parse_timeout(s: &str) -> Result<Duration> {
     if s.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
@@ -42,13 +48,13 @@ mod tests {
     #[test]
     fn parse_timeout_minutes() {
         let result = parse_timeout("5m").unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result, Duration::from_secs(5 * 60));
+        assert_eq!(result, Duration::from_mins(5));
     }
 
     #[test]
     fn parse_timeout_hours() {
         let result = parse_timeout("1h").unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result, Duration::from_secs(3600));
+        assert_eq!(result, Duration::from_hours(1));
     }
 
     #[test]
@@ -94,12 +100,12 @@ mod tests {
     #[test]
     fn parse_timeout_large_value() {
         let result = parse_timeout("24h").unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result, Duration::from_secs(24 * 3600));
+        assert_eq!(result, Duration::from_hours(24));
     }
 
     #[test]
     fn parse_timeout_single_minute() {
         let result = parse_timeout("1m").unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result, Duration::from_secs(60));
+        assert_eq!(result, Duration::from_mins(1));
     }
 }
