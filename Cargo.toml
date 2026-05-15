@@ -4,6 +4,7 @@ edition = "2024"
 license = "MIT"
 name = "cruise"
 repository = "https://github.com/smartcrabai/cruise"
+rust-version = "1.94"
 version.workspace = true
 
 [workspace]
