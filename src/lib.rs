@@ -16,6 +16,7 @@ pub mod planning;
 pub mod resolver;
 pub mod session;
 pub mod step;
+pub mod timeout;
 pub mod variable;
 pub mod workflow;
 pub mod workspace;

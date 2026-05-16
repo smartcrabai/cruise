@@ -334,7 +334,7 @@ mod tests {
             command: Some(StringOrVec::Single("git commit".to_string())),
             if_condition: Some(IfCondition {
                 file_changed: Some("implement".to_string()),
-                no_file_changes: None,
+                ..Default::default()
             }),
             ..Default::default()
         };

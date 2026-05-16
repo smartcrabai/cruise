@@ -27,6 +27,7 @@ mod step;
 mod test_binary_support;
 #[cfg(test)]
 mod test_support;
+mod timeout;
 mod variable;
 mod workflow;
 mod workspace;

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use console::style;
 
 use crate::cancellation::CancellationToken;
 use crate::condition::should_skip;
-use crate::config::{SkipCondition, WorkflowConfig};
+use crate::config::{FailAction, SkipCondition, WorkflowConfig};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::OptionHandler;
@@ -62,6 +62,14 @@ enum StepOutcome {
     Next(String),
     /// The workflow is complete.
     Done,
+}
+
+/// Outcome of executing a single step kind.
+pub(crate) struct StepExecOutcome {
+    /// Next step chosen by an option step (if any).
+    pub option_next: Option<String>,
+    /// True if the step failed (non-zero exit, prompt error, or timeout).
+    pub failed: bool,
 }
 
 /// Check whether the group containing `current_step` has exhausted its retry budget.
@@ -358,6 +366,13 @@ async fn step_loop_iteration(
     let if_cond = step_config.if_condition.as_ref();
     let step_if_file_changed = if_cond.and_then(|c| c.file_changed.as_deref());
     let nfc_cond = if_cond.and_then(|c| c.no_file_changes.as_ref());
+    let if_fail = if_cond.and_then(|c| c.fail.as_ref());
+
+    let timeout_duration: Option<Duration> = step_config
+        .timeout
+        .as_deref()
+        .map(crate::timeout::parse_timeout)
+        .transpose()?;
 
     let (nochange_key, nfc_key) = take_pre_snapshots(
         ctx.compiled,
@@ -368,67 +383,110 @@ async fn step_loop_iteration(
         step_config.fail_if_no_file_changes,
         nfc_cond.is_some(),
     )?;
-    let option_next = execute_step_kind(
+
+    let has_if_fail = if_fail.is_some();
+    let outcome = execute_step_kind(
         ctx,
         &kind,
         vars,
         &merged_env,
         step_start,
         &mut state.counters.failed,
+        timeout_duration,
+        has_if_fail,
+        current_step,
     )
     .await?;
     state.counters.run += 1;
 
-    if let Some(ref key) = nochange_key
-        && !tracker.has_files_changed(key)?
-    {
-        return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
-    }
-
-    let nfc_retry = if let Some(ref key) = nfc_key
-        && let Some(nfc) = nfc_cond
-        && !tracker.has_files_changed(key)?
-    {
-        if nfc.fail {
-            return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
-        }
-        if nfc.retry {
-            eprintln!(
-                "  {} no file changes, will retry (if.no-file-changes.retry)",
-                style("R").cyan()
-            );
-        }
-        nfc.retry
+    let nochange_failed = if let Some(ref key) = nochange_key {
+        !tracker.has_files_changed(key)?
     } else {
         false
     };
 
-    let if_next = resolve_if_next(
-        ctx.compiled,
-        tracker,
-        current_step,
-        step_call_site,
-        if nfc_cond.is_none() {
-            step_if_file_changed
+    let (nfc_failed, nfc_retry) = if let Some(ref key) = nfc_key
+        && let Some(nfc) = nfc_cond
+        && !tracker.has_files_changed(key)?
+    {
+        if nfc.fail {
+            (true, false)
+        } else if nfc.retry {
+            eprintln!(
+                "  {} no file changes, will retry (if.no-file-changes.retry)",
+                style("R").cyan()
+            );
+            (false, true)
         } else {
-            None
-        },
-        &mut state.group_retry_counts,
-    )?;
-    let transition_reason = if if_next.is_some() {
+            (false, false)
+        }
+    } else {
+        (false, false)
+    };
+
+    let step_failed = outcome.failed || nochange_failed || nfc_failed;
+
+    let mut if_fail_next: Option<String> = None;
+    let mut if_fail_retry = false;
+
+    if step_failed {
+        match if_fail {
+            Some(FailAction::Goto(name)) => {
+                eprintln!("  {} step failed, jumping to: {}", style("R").cyan(), name);
+                if_fail_next = Some(name.clone());
+            }
+            Some(FailAction::Detailed(d)) if d.retry => {
+                eprintln!(
+                    "  {} step failed, will retry (if.fail.retry)",
+                    style("R").cyan()
+                );
+                if_fail_retry = true;
+            }
+            _ => {
+                if nochange_failed || nfc_failed {
+                    return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
+                }
+            }
+        }
+    }
+
+    let if_next = if if_fail_next.is_none() && !if_fail_retry {
+        resolve_if_next(
+            ctx.compiled,
+            tracker,
+            current_step,
+            step_call_site,
+            if nfc_cond.is_none() {
+                step_if_file_changed
+            } else {
+                None
+            },
+            &mut state.group_retry_counts,
+        )?
+    } else {
+        None
+    };
+
+    let transition_reason = if if_fail_next.is_some() {
+        "if.fail"
+    } else if if_fail_retry {
+        "if.fail.retry"
+    } else if if_next.is_some() {
         "if.file-changed"
     } else if nfc_retry {
         "if.no-file-changes.retry"
-    } else if option_next.is_some() {
+    } else if outcome.option_next.is_some() {
         "option"
     } else if step_next.is_some() {
         "next"
     } else {
         "sequential"
     };
-    let effective_next = if_next
+    let effective_next = if_fail_next
+        .or(if_fail_retry.then(|| current_step.to_string()))
+        .or(if_next)
         .or(nfc_retry.then(|| current_step.to_string()))
-        .or(option_next)
+        .or(outcome.option_next)
         .or(step_next);
     let next_step = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
 
@@ -464,7 +522,8 @@ async fn step_loop_iteration(
     Ok(next_step.map_or(StepOutcome::Done, StepOutcome::Next))
 }
 
-/// Execute a single step kind and return the option-selected next step (if any).
+/// Execute a single step kind and return execution outcome.
+#[expect(clippy::too_many_arguments)]
 async fn execute_step_kind(
     ctx: &ExecutionContext<'_>,
     kind: &StepKind,
@@ -472,10 +531,13 @@ async fn execute_step_kind(
     merged_env: &HashMap<String, String>,
     step_start: Instant,
     failed: &mut usize,
-) -> Result<Option<String>> {
+    timeout: Option<Duration>,
+    has_if_fail: bool,
+    current_step: &str,
+) -> Result<StepExecOutcome> {
     match kind {
         StepKind::Prompt(step) => {
-            run_prompt_step(
+            let result = run_prompt_step(
                 vars,
                 ctx.compiled,
                 step,
@@ -484,33 +546,88 @@ async fn execute_step_kind(
                 ctx.cancel_token,
                 ctx.working_dir,
                 ctx.on_step_log,
+                timeout,
+                current_step,
             )
-            .await?;
+            .await;
             let elapsed = step_start.elapsed();
-            log_step_result(elapsed, true);
-            Ok(None)
+            match result {
+                Ok(()) => {
+                    log_step_result(elapsed, true);
+                    Ok(StepExecOutcome {
+                        option_next: None,
+                        failed: false,
+                    })
+                }
+                Err(CruiseError::StepTimeout { .. }) => {
+                    eprintln!(
+                        "  {} timed out",
+                        style(format!("x {}", format_duration(elapsed))).red()
+                    );
+                    *failed += 1;
+                    Ok(StepExecOutcome {
+                        option_next: None,
+                        failed: true,
+                    })
+                }
+                Err(e) if has_if_fail => {
+                    eprintln!(
+                        "  {} prompt error: {e}",
+                        style(format!("x {}", format_duration(elapsed))).red()
+                    );
+                    *failed += 1;
+                    Ok(StepExecOutcome {
+                        option_next: None,
+                        failed: true,
+                    })
+                }
+                Err(e) => Err(e),
+            }
         }
         StepKind::Command(step) => {
-            let success = run_command_step(
+            let result = run_command_step(
                 vars,
                 step,
                 ctx.rate_limit_retries,
                 merged_env,
                 ctx.working_dir,
+                timeout,
             )
-            .await?;
+            .await;
             let elapsed = step_start.elapsed();
-            if !success {
-                *failed += 1;
+            match result {
+                Ok(success) => {
+                    if !success {
+                        *failed += 1;
+                    }
+                    log_step_result(elapsed, success);
+                    Ok(StepExecOutcome {
+                        option_next: None,
+                        failed: !success,
+                    })
+                }
+                Err(CruiseError::StepTimeout { .. }) => {
+                    eprintln!(
+                        "  {} timed out",
+                        style(format!("x {}", format_duration(elapsed))).red()
+                    );
+                    *failed += 1;
+                    Ok(StepExecOutcome {
+                        option_next: None,
+                        failed: true,
+                    })
+                }
+                Err(e) => Err(e),
             }
-            log_step_result(elapsed, success);
-            Ok(None)
         }
         StepKind::Option(step) => {
             let result = run_option_step(vars, step, ctx.option_handler)?;
             let elapsed = step_start.elapsed();
             log_step_result(elapsed, true);
-            Ok(result)
+            Ok(StepExecOutcome {
+                option_next: result,
+                failed: false,
+            })
         }
     }
 }
@@ -623,6 +740,8 @@ pub(crate) async fn run_prompt_step(
     cancel_token: Option<&CancellationToken>,
     working_dir: Option<&std::path::Path>,
     on_step_log: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
+    timeout: Option<Duration>,
+    timeout_step_name: &str,
 ) -> Result<()> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -671,7 +790,7 @@ pub(crate) async fn run_prompt_step(
     };
     let result = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
-        run_prompt(
+        let prompt_future = run_prompt(
             &resolved_command,
             model_arg.as_deref(),
             &prompt,
@@ -681,8 +800,22 @@ pub(crate) async fn run_prompt_step(
             cancel_token,
             working_dir,
             Some(&stream_callbacks),
-        )
-        .await
+        );
+
+        if let Some(duration) = timeout {
+            match tokio::time::timeout(duration, prompt_future).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    drop(spinner);
+                    return Err(CruiseError::StepTimeout {
+                        step: timeout_step_name.to_string(),
+                        after_secs: duration.as_secs(),
+                    });
+                }
+            }
+        } else {
+            prompt_future.await
+        }
     };
     drop(spinner);
     let result = result?;
@@ -702,6 +835,7 @@ pub(crate) async fn run_command_step(
     rate_limit_retries: usize,
     env: &HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<bool> {
     let cmds: Vec<String> = step
         .command
@@ -713,7 +847,7 @@ pub(crate) async fn run_command_step(
         eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
     }
 
-    let result = run_commands(&cmds, rate_limit_retries, env, working_dir).await?;
+    let result = run_commands(&cmds, rate_limit_retries, env, working_dir, timeout).await?;
 
     let success = result.success;
     vars.set_prev_success(Some(success));
@@ -2798,6 +2932,176 @@ steps:
         assert_eq!(
             result.skipped, 3,
             "expected the initial skipped first step plus one skipped group retry"
+        );
+    }
+
+    // --- timeout and if.fail integration tests ---
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_step_timeout_marks_step_failed() {
+        let yaml = r#"
+command: [echo]
+steps:
+  slow_step:
+    command: "sleep 1"
+    timeout: "1"
+  next_step:
+    command: "echo continued"
+"#;
+        let result = run_config_with_retries(yaml, "", None, 10, 0).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert!(
+            result.failed >= 1,
+            "expected timeout to mark step as failed"
+        );
+        assert!(result.run >= 2, "expected at least 2 steps to run");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_step_timeout_with_if_fail_retry() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  flaky_step:
+    command: "sleep 2"
+    timeout: "1"
+    if:
+      fail:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            dir.path().to_path_buf(),
+            3,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("expected loop protection error")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("loop protection"),
+            "expected loop protection after retries, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_step_timeout_with_if_fail_goto() {
+        let yaml = r#"
+command: [echo]
+steps:
+  timed_out:
+    command: "sleep 1"
+    timeout: "1"
+    if:
+      fail: recover
+  recover:
+    command: "echo recovered"
+  done:
+    command: "echo done"
+"#;
+        let result = run_config_with_retries(yaml, "", None, 10, 0).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        // recover and done should both run
+        assert!(
+            result.run >= 2,
+            "expected recover and done to run, but only {} steps ran",
+            result.run
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_command_failure_with_if_fail_goto() {
+        let yaml = r#"
+command: [echo]
+steps:
+  failing:
+    command: "exit 1"
+    if:
+      fail: recover
+  recover:
+    command: "echo recovered"
+  done:
+    command: "echo done"
+"#;
+        let result = run_config_with_retries(yaml, "", None, 10, 0).await;
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        // recover and done should both run
+        assert!(
+            result.run >= 2,
+            "expected recover and done to run, but only {} steps ran",
+            result.run
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_command_failure_with_if_fail_retry_hits_loop_protection() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  failing:
+    command: "exit 1"
+    if:
+      fail:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            dir.path().to_path_buf(),
+            3,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("expected loop protection error")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("loop protection"),
+            "expected loop protection after retries, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_prompt_error_with_if_fail_does_not_abort() {
+        let yaml = r#"
+command: [nonexistent-command-that-will-fail]
+steps:
+  bad_prompt:
+    prompt: "this will fail because the command does not exist"
+    if:
+      fail:
+        retry: true
+  done:
+    command: "echo should not reach here because retry loops"
+"#;
+        let result = run_config_with_retries(yaml, "", None, 3, 0).await;
+        let err_detail = format!("{result:?}");
+        assert!(
+            result.is_err(),
+            "prompt error with if.fail should eventually fail via loop protection, got: {err_detail}"
         );
     }
 }

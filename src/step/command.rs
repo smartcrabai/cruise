@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{CruiseError, Result};
@@ -17,12 +18,13 @@ pub struct CommandResult {
 ///
 /// # Errors
 ///
-/// Returns an error if a command fails to spawn or encounters a fatal I/O error.
+/// Returns an error if a command fails to spawn, times out, or encounters a fatal I/O error.
 pub async fn run_commands<S: std::hash::BuildHasher>(
     cmds: &[String],
     max_retries: usize,
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<CommandResult> {
     let mut last_result = CommandResult {
         success: true,
@@ -30,7 +32,7 @@ pub async fn run_commands<S: std::hash::BuildHasher>(
     };
 
     for cmd in cmds {
-        last_result = run_command(cmd, max_retries, env, cwd).await?;
+        last_result = run_command(cmd, max_retries, env, cwd, timeout).await?;
         if !last_result.success {
             return Ok(last_result);
         }
@@ -43,17 +45,18 @@ pub async fn run_commands<S: std::hash::BuildHasher>(
 ///
 /// # Errors
 ///
-/// Returns an error if the command fails to spawn or encounters a fatal I/O error.
+/// Returns an error if the command fails to spawn, times out, or encounters a fatal I/O error.
 pub async fn run_command<S: std::hash::BuildHasher>(
     cmd: &str,
     max_retries: usize,
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<CommandResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_command(cmd, env, cwd).await?;
+        let result = execute_command(cmd, env, cwd, timeout).await?;
 
         if result.success {
             return Ok(result);
@@ -81,6 +84,7 @@ async fn execute_command<S: std::hash::BuildHasher>(
     cmd: &str,
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<CommandResult> {
     let (shell, flag) = crate::platform::shell_command();
     let mut cmd_builder = Command::new(shell);
@@ -93,20 +97,55 @@ async fn execute_command<S: std::hash::BuildHasher>(
     if let Some(dir) = cwd {
         cmd_builder.current_dir(dir);
     }
-    let output = cmd_builder
+    let mut child = cmd_builder
         .spawn()
-        .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?
-        .wait_with_output()
-        .await
-        .map_err(|e| CruiseError::CommandError(e.to_string()))?;
+        .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
+    let stderr_pipe = child.stderr.take();
+
+    let drain_stderr = async {
+        let mut buf = String::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = tokio::io::BufReader::new(&mut pipe)
+                .read_to_string(&mut buf)
+                .await;
+        }
+        buf
+    };
+
+    let stderr_task = tokio::spawn(drain_stderr);
+
+    let timeout_secs = timeout.map(|d| d.as_secs());
+    let status_result = if let Some(duration) = timeout {
+        tokio::time::timeout(duration, child.wait()).await
+    } else {
+        Ok(child.wait().await)
+    };
+
+    match status_result {
+        Ok(Ok(status)) => {
+            let stderr = stderr_task.await.unwrap_or_default();
+            if !stderr.is_empty() {
+                eprint!("{stderr}");
+            }
+            Ok(CommandResult {
+                success: status.success(),
+                stderr,
+            })
+        }
+        Ok(Err(e)) => Err(CruiseError::CommandError(e.to_string())),
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _stderr = stderr_task.await.unwrap_or_default();
+            let secs = timeout_secs.unwrap_or(0);
+            eprintln!("  step timed out after {secs}s");
+            Err(CruiseError::StepTimeout {
+                step: cmd.to_string(),
+                after_secs: secs,
+            })
+        }
     }
-    let success = output.status.success();
-
-    Ok(CommandResult { success, stderr })
 }
 
 /// Return true if `stderr` indicates a rate-limit error.
@@ -173,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_successful_command() {
-        let result = run_command("echo hello", 0, &HashMap::new(), None)
+        let result = run_command("echo hello", 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -181,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_failing_command() {
-        let result = run_command("exit 1", 0, &HashMap::new(), None)
+        let result = run_command("exit 1", 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -190,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_commands_sequential() {
         let cmds = vec!["echo a".to_string(), "echo b".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new(), None)
+        let result = run_commands(&cmds, 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -200,7 +239,7 @@ mod tests {
     async fn test_run_commands_stops_on_failure() {
         // Second command would succeed but shouldn't run because first fails.
         let cmds = vec!["exit 1".to_string(), "echo ok".to_string()];
-        let result = run_commands(&cmds, 0, &HashMap::new(), None)
+        let result = run_commands(&cmds, 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -208,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_commands_empty() {
-        let result = run_commands(&[], 0, &HashMap::new(), None)
+        let result = run_commands(&[], 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -217,9 +256,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_command_captures_stderr() {
-        let result = run_command("echo 'error msg' >&2; exit 1", 0, &HashMap::new(), None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_command(
+            "echo 'error msg' >&2; exit 1",
+            0,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
         assert!(result.stderr.contains("error msg"));
     }
@@ -230,7 +275,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("CRUISE_TEST_VAR".to_string(), "hello_env".to_string());
         // The command echoes the env var; success means env was passed correctly.
-        let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env, None)
+        let result = run_command("test \"$CRUISE_TEST_VAR\" = hello_env", 0, &env, None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
@@ -244,7 +289,7 @@ mod tests {
             "echo step1".to_string(),
             "echo 'err_msg' >&2; exit 1".to_string(),
         ];
-        let result = run_commands(&cmds, 0, &HashMap::new(), None)
+        let result = run_commands(&cmds, 0, &HashMap::new(), None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!result.success);
@@ -262,6 +307,7 @@ mod tests {
             0,
             &env,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -274,7 +320,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("GREETING".to_string(), "hello".to_string());
         // stdout is inherited (not captured), but success means the command ran.
-        let result = run_command("echo $GREETING", 0, &env, None)
+        let result = run_command("echo $GREETING", 0, &env, None, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);

@@ -129,6 +129,11 @@
         "fail-if-no-file-changes": {
           "type": "boolean",
           "description": "Fail the step if no files were changed"
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[mh]?$",
+          "description": "Step timeout. Plain digits = seconds, suffix 'm' = minutes, 'h' = hours. Example: 30, 5m, 1h."
         }
       }
     },
@@ -138,6 +143,30 @@
         "file-changed": {
           "type": "string",
           "description": "Step name to jump to if files were changed during this step's execution"
+        },
+        "no-file-changes": {
+          "type": "object",
+          "properties": {
+            "fail": { "type": "boolean" },
+            "retry": { "type": "boolean" }
+          },
+          "description": "Action to take when no workspace file changes are detected after this step"
+        },
+        "fail": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Step name to jump to on failure"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "retry": { "type": "boolean" }
+              },
+              "description": "Retry the step on failure"
+            }
+          ],
+          "description": "Action to take when the step fails (including timeout, non-zero exit, prompt error)."
         }
       }
     },
