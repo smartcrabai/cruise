@@ -28,6 +28,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: taplo fmt --check --option reorder_keys=true Cargo.toml
 
+      - name: Update Rust toolchain
+        run: rustup update stable
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
@@ -64,6 +67,9 @@ jobs:
 
       - name: Build frontend
         run: pnpm --dir ui run build
+
+      - name: Update Rust toolchain
+        run: rustup update stable
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

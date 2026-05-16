@@ -55,6 +55,9 @@ pub enum CruiseError {
     #[error("step '{0}' made no workspace file changes (fail-if-no-file-changes)")]
     StepMadeNoFileChanges(String),
 
+    #[error("step '{step}' timed out after {after_secs}s")]
+    StepTimeout { step: String, after_secs: u64 },
+
     #[error("interrupted by user (Ctrl+C)")]
     Interrupted,
 

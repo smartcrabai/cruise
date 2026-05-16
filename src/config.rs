@@ -105,6 +105,11 @@ pub struct StepConfig {
     #[serde(rename = "if")]
     pub if_condition: Option<IfCondition>,
 
+    /// Per-step timeout. Plain digits = seconds, "Nm" = minutes, "Nh" = hours.
+    /// Example: "30", "5m", "1h".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+
     /// Environment variables applied to this step (overrides top-level env).
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -145,8 +150,24 @@ pub struct NoFileChangesCondition {
     pub retry: bool,
 }
 
-/// Conditional execution rule.
+/// Action to take when the step fails (including timeout, non-zero exit, prompt error).
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum FailAction {
+    /// `if.fail: step-name` -- jump to the named step.
+    Goto(String),
+    /// `if.fail: { retry: true }` -- retry the current step.
+    Detailed(FailDetailed),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct FailDetailed {
+    #[serde(default)]
+    pub retry: bool,
+}
+
+/// Conditional execution rule.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct IfCondition {
     /// Only execute this step if the given step's snapshot differs from the current state.
     #[serde(rename = "file-changed")]
@@ -155,6 +176,10 @@ pub struct IfCondition {
     /// Action to take when no workspace file changes are detected after this step.
     #[serde(rename = "no-file-changes")]
     pub no_file_changes: Option<NoFileChangesCondition>,
+
+    /// Failure handler. Either a step name (jump) or `{ retry: true }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail: Option<FailAction>,
 }
 
 /// Group configuration for grouping related steps.
@@ -263,6 +288,17 @@ pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error
 pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
+    // Reject if.fail at group level.
+    for (group_name, group) in &config.groups {
+        if let Some(ref if_cond) = group.if_condition
+            && if_cond.fail.is_some()
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "group '{group_name}' uses if.fail, which is not supported at the group level",
+            )));
+        }
+    }
+
     // Reject no-file-changes at group level.
     for (group_name, group) in &config.groups {
         if let Some(ref if_cond) = group.if_condition
@@ -270,6 +306,17 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "group '{group_name}' uses if.no-file-changes, which is not supported at the group level",
+            )));
+        }
+    }
+
+    // Reject if.fail in after-pr steps.
+    for (name, step) in &config.after_pr {
+        if let Some(ref if_cond) = step.if_condition
+            && if_cond.fail.is_some()
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' in after-pr uses if.fail, which is not supported in after-pr steps",
             )));
         }
     }
@@ -318,7 +365,7 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
     Ok(())
 }
 
-/// Run all config validations (groups, fail-if-no-file-changes, if-conditions).
+/// Run all config validations (groups, fail-if-no-file-changes, if-conditions, timeouts).
 ///
 /// # Errors
 ///
@@ -327,6 +374,46 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_groups(config)?;
     validate_fail_if_no_file_changes(config)?;
     validate_if_conditions(config)?;
+    validate_timeouts(config)?;
+    Ok(())
+}
+
+/// Validate all timeout strings across steps, after-pr steps, and group inner steps.
+///
+/// # Errors
+///
+/// Returns an error if any timeout string fails to parse.
+pub fn validate_timeouts(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    for (name, step) in &config.steps {
+        if let Some(ref timeout_str) = step.timeout {
+            crate::timeout::parse_timeout(timeout_str).map_err(|_| {
+                CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' has invalid timeout: '{timeout_str}'"
+                ))
+            })?;
+        }
+    }
+    for (name, step) in &config.after_pr {
+        if let Some(ref timeout_str) = step.timeout {
+            crate::timeout::parse_timeout(timeout_str).map_err(|_| {
+                CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' in after-pr has invalid timeout: '{timeout_str}'"
+                ))
+            })?;
+        }
+    }
+    for group in config.groups.values() {
+        for (sub_name, sub_step) in &group.steps {
+            if let Some(ref timeout_str) = sub_step.timeout {
+                crate::timeout::parse_timeout(timeout_str).map_err(|_| {
+                    CruiseError::InvalidStepConfig(format!(
+                        "step '{sub_name}' has invalid timeout: '{timeout_str}'"
+                    ))
+                })?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -703,6 +790,75 @@ steps:
             .get("step1")
             .unwrap_or_else(|| panic!("unexpected None"));
         assert!(step.env.is_empty());
+    }
+
+    // --- timeout deserialization tests ---
+
+    #[test]
+    fn test_step_timeout_parses_plain_digits() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: '30'
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        assert_eq!(step.timeout.as_deref(), Some("30"));
+    }
+
+    #[test]
+    fn test_step_timeout_parses_minutes() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: 5m
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        assert_eq!(step.timeout.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn test_step_timeout_parses_hours() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: 1h
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        assert_eq!(step.timeout.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn test_step_timeout_defaults_none() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        assert!(step.timeout.is_none(), "timeout should default to None");
     }
 
     #[test]
@@ -1322,6 +1478,91 @@ steps:
         );
     }
 
+    // --- if.fail deserialization tests ---
+
+    #[test]
+    fn test_if_fail_string_form_parses() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    if:
+      fail: rollback
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = step
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        match if_cond
+            .fail
+            .as_ref()
+            .unwrap_or_else(|| panic!("fail not set"))
+        {
+            FailAction::Goto(name) => assert_eq!(name, "rollback"),
+            FailAction::Detailed(_) => panic!("Expected FailAction::Goto"),
+        }
+    }
+
+    #[test]
+    fn test_if_fail_retry_object_form_parses() {
+        let yaml = r"
+command: [echo]
+steps:
+  flaky:
+    command: ./flaky-test.sh
+    if:
+      fail:
+        retry: true
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("flaky")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = step
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        match if_cond
+            .fail
+            .as_ref()
+            .unwrap_or_else(|| panic!("fail not set"))
+        {
+            FailAction::Detailed(d) => {
+                assert!(d.retry, "retry should be true");
+            }
+            FailAction::Goto(_) => panic!("Expected FailAction::Detailed"),
+        }
+    }
+
+    #[test]
+    fn test_if_fail_defaults_none() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    if:
+      file-changed: implement
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        let if_cond = step
+            .if_condition
+            .as_ref()
+            .unwrap_or_else(|| panic!("if_condition not set"));
+        assert!(if_cond.fail.is_none(), "fail should default to None");
+    }
+
     // --- if.no-file-changes validation tests ---
 
     #[test]
@@ -1514,6 +1755,165 @@ steps:
         );
     }
 
+    // --- timeout validation tests ---
+
+    #[test]
+    fn test_validate_rejects_invalid_timeout_string() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: abc
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_timeouts(&config);
+        assert!(result.is_err(), "expected Err for invalid timeout 'abc'");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("timeout"),
+            "error should mention timeout, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_timeout() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: '0'
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_timeouts(&config);
+        assert!(result.is_err(), "expected Err for zero timeout");
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_timeout() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: '30'
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_timeouts(&config);
+        assert!(
+            result.is_ok(),
+            "expected Ok for valid timeout, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_timeout_with_suffix() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    timeout: 5m
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_timeouts(&config);
+        assert!(result.is_ok(), "expected Ok for '5m', got: {result:?}");
+    }
+
+    // --- if.fail validation tests ---
+
+    #[test]
+    fn test_validate_rejects_if_fail_in_after_pr() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+after-pr:
+  notify:
+    command: echo done
+    if:
+      fail: rollback
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        assert!(result.is_err(), "expected Err for if.fail in after-pr");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("after-pr") || msg.contains("notify"),
+            "error should mention after-pr step, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_if_fail_at_group_level() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    if:
+      fail: rollback
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        assert!(result.is_err(), "expected Err for if.fail at group level");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("group"),
+            "error should mention group, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_if_fail_retry_only() {
+        let yaml = r"
+command: [echo]
+steps:
+  flaky:
+    command: ./test.sh
+    if:
+      fail:
+        retry: true
+  done:
+    command: echo done
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        assert!(
+            result.is_ok(),
+            "expected Ok for valid if.fail.retry, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_if_fail_goto_only() {
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+    if:
+      fail: rollback
+  rollback:
+    command: echo rolled back
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_if_conditions(&config);
+        assert!(
+            result.is_ok(),
+            "expected Ok for valid if.fail string, got: {result:?}"
+        );
+    }
+
     // --- JSON Schema tests ---
 
     fn load_schema() -> &'static serde_json::Value {
@@ -1686,6 +2086,7 @@ steps:
                 "env",
                 "group",
                 "fail-if-no-file-changes",
+                "timeout",
             ],
             "StepConfig",
         );
@@ -1706,10 +2107,14 @@ steps:
     }
 
     #[test]
-    fn test_schema_if_condition_has_file_changed() {
+    fn test_schema_if_condition_has_expected_properties() {
         let schema = load_schema();
         let if_props = def_properties(schema, "IfCondition");
-        assert_has_fields(if_props, &["file-changed"], "IfCondition");
+        assert_has_fields(
+            if_props,
+            &["file-changed", "no-file-changes", "fail"],
+            "IfCondition",
+        );
     }
 
     #[test]
