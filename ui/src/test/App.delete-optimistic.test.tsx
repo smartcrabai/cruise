@@ -120,7 +120,7 @@ describe("App: Optimistic Delete", () => {
     cleanup();
   });
 
-  it("removes the session from the sidebar immediately — before the API call resolves", async () => {
+  it("removes the session from the sidebar immediately -- before the API call resolves", async () => {
     // Given: deleteSession is pending (never resolves during this test)
     let resolveDelete!: () => void;
     vi.mocked(commands.deleteSession).mockReturnValueOnce(
@@ -160,7 +160,7 @@ describe("App: Optimistic Delete", () => {
     });
   });
 
-  it("closes the confirmation dialog immediately upon confirm — does not wait for the API", async () => {
+  it("closes the confirmation dialog immediately upon confirm -- does not wait for the API", async () => {
     // Given: a slow deleteSession that does not resolve during the assertion
     let resolveDelete!: () => void;
     vi.mocked(commands.deleteSession).mockReturnValueOnce(
@@ -223,7 +223,7 @@ describe("App: Optimistic Delete", () => {
   });
 
   describe("when deleteSession API call succeeds", () => {
-    it("shows no error toast — success is silent", async () => {
+    it("shows no error toast -- success is silent", async () => {
       // Given: deleteSession resolves immediately
       vi.mocked(commands.deleteSession).mockResolvedValue(undefined);
       await navigateToSession(makeSession({ input: "success task" }));
