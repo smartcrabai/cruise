@@ -139,6 +139,21 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Ensure Rust toolchain satisfies MSRV
+        shell: bash
+        run: |
+          if ! command -v rustup > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain stable --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup update stable
+          rustup default stable
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            rustup target add "$t" || true
+          done
+          rustc --version
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
