@@ -1703,7 +1703,7 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager = SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260522090000";
 
         // Pre-create a plan-stage worktree (simulating what `setup_planning_worktree` would do)
