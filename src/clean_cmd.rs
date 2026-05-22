@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::session::SessionManager;
 
 pub fn run(_args: CleanArgs) -> Result<()> {
-    let manager = SessionManager::new(crate::session::get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
 
     let report = manager.cleanup_by_pr_status()?;
 

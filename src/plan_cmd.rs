@@ -15,7 +15,7 @@ use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{NewSessionHistory, resolved_config_key_for_session};
 use crate::resolver::ConfigSource;
-use crate::session::{PLAN_VAR, SessionManager, SessionState, get_cruise_home};
+use crate::session::{PLAN_VAR, SessionManager, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
@@ -46,7 +46,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
     validate_config(&config)?;
 
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut session = create_planning_session(&manager, &source, &yaml, input.trim().to_string())?;
     setup_planning_worktree(&manager, &mut session)?;
 
@@ -98,7 +98,7 @@ pub fn launch_background_plan(plan_input: &str) -> Result<()> {
     validate_config(&config)?;
 
     let input = read_background_plan_input(plan_input)?;
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut session = create_planning_session(&manager, &source, &yaml, input)?;
     setup_planning_worktree(&manager, &mut session)?;
 
@@ -118,7 +118,7 @@ pub fn launch_background_plan(plan_input: &str) -> Result<()> {
 }
 
 pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut session = match manager.load(&args.session) {
         Ok(session) => session,
         Err(CruiseError::SessionError(_)) => return Ok(()),

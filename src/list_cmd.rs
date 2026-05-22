@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode, get_cruise_home};
+use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 
 /// CLI-only DTO for JSON output. Stable machine-readable form of `SessionState`.
 /// `phase` is always a plain string; `phase_error` carries the failure message for Failed sessions.
@@ -118,7 +118,7 @@ fn write_sessions_json_with_manager<W: Write>(
     reason = "interactive session picker with multiple action branches"
 )]
 pub async fn run(args: ListArgs) -> Result<()> {
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
 
     if args.json {
         let mut sessions = manager.list()?;
