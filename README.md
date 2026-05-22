@@ -136,7 +136,19 @@ Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is
 
 ## Session Management
 
-Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
+Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`).
+
+### Runtime File Layout
+
+Cruise follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/) and splits its runtime files across three directories:
+
+| Kind | Path |
+|------|------|
+| User YAML configs and application settings | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
+| Sessions and worktrees | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
+| State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+
+> **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
 
 ### Session Lifecycle
 
@@ -147,9 +159,9 @@ Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
    - **Fix** -- Provide feedback; the plan step reruns with your input.
    - **Ask** -- Ask a question; the answer is shown before the menu reappears.
    - **Execute now** -- Skip approval and run immediately.
-4. **`cruise run`** -- Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
+4. **`cruise run`** -- Picks up the approved session, creates a git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
-Sessions remain in `~/.cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
+Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
 ### `cruise list` Actions
 
@@ -183,7 +195,7 @@ When `-c` is not specified, cruise searches for a config in this order:
 1. `-c/--config` flag -- the specified file must exist or cruise exits with an error.
 2. `CRUISE_CONFIG` environment variable -- error if file does not exist.
 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` -- in the current directory.
-4. `~/.cruise/*.yaml` / `*.yml` -- auto-selected if exactly one file exists, or prompted if multiple.
+4. `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`) -- auto-selected if exactly one file exists, or prompted if multiple.
 5. Built-in default -- a 2-step test-first workflow (`write-tests` -> `implement`); no config file required.
 
 ## Config File Reference
@@ -529,7 +541,7 @@ When `cruise run` starts a new session, it prompts you to choose a workspace mod
 
 | Mode | Description |
 |------|-------------|
-| **Worktree** (default) | Creates an isolated git worktree at `~/.cruise/worktrees/<session-id>/`. A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation. |
+| **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation. |
 | **Current branch** | Executes directly in the current repository on the active branch. No worktree is created, and no PR is created automatically. |
 
 In non-interactive environments (piped stdin) and with `--all`, worktree mode is used automatically.
