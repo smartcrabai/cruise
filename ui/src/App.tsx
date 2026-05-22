@@ -42,6 +42,7 @@ import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionConfigEditor } from "./components/SessionConfigEditor";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { Spinner } from "./components/Spinner";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
@@ -205,52 +206,6 @@ export function WorkflowToastStack({
           </button>
         </div>
       ))}
-    </div>
-  );
-}
-
-// --- ConfirmDialog ----------------------------------------------------------------
-
-interface ConfirmDialogProps {
-  title: string;
-  message: string;
-  confirmLabel: string;
-  disabled?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-function ConfirmDialog({ title, message, confirmLabel, disabled, onConfirm, onCancel }: ConfirmDialogProps) {
-  const titleId = useId();
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-sm w-full space-y-4"
-      >
-        <h2 id={titleId} className="text-lg font-semibold text-gray-100">{title}</h2>
-        <p className="text-sm text-gray-400">{message}</p>
-        <div className="flex gap-2 justify-end">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={disabled}
-            className="px-4 py-2 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800 disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={disabled}
-            className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50"
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

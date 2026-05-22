@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
@@ -175,6 +175,7 @@ describe("App: Run All re-entry and state persistence", () => {
 
     // Start Run All
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(2);
     });
@@ -217,6 +218,7 @@ describe("App: Run All re-entry and state persistence", () => {
 
     // Start Run All
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
       control.emitSessionStarted("s1", "task one");
@@ -243,6 +245,7 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(2);
       control.emitSessionStarted("s1", "task one");
@@ -277,6 +280,7 @@ describe("App: Run All re-entry and state persistence", () => {
 
     // When: Run All is started
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
     });
@@ -300,6 +304,7 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
     });
@@ -327,6 +332,7 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
       control.emitSessionStarted("s1", "task one");
@@ -340,7 +346,7 @@ describe("App: Run All re-entry and state persistence", () => {
       expect(screen.queryByText("Done")).toBeNull();
     });
 
-    // When: click Run All to return to results
+    // When: click Run All to return to results (runAllState still set, no dialog)
     await userEvent.click(screen.getByText("Run All"));
 
     // Then: completed results are shown and Done button is available
@@ -360,6 +366,7 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
       control.emitSessionStarted("s1", "task one");
@@ -375,9 +382,10 @@ describe("App: Run All re-entry and state persistence", () => {
       expect(screen.queryByText("Done")).toBeNull();
     });
 
-    // When: click Run All again -- should start a new execution
+    // When: click Run All again -- should start a new execution (runAllState is null, dialog appears)
     setupRunAllMock();
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
     // Then: runAllSessions is called again (second time)
     await waitFor(() => {
@@ -400,13 +408,14 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
     // Then: error is shown
     await waitFor(() => {
       expect(screen.getByText("Error")).toBeInTheDocument();
     });
 
-    // Navigate away and come back
+    // Navigate away and come back (runAllState is set with error, no dialog)
     await userEvent.click(screen.getByRole("button", { name: /task one/ }));
     await userEvent.click(screen.getByText("Run All"));
 
@@ -429,6 +438,7 @@ describe("App: Run All re-entry and state persistence", () => {
     await waitFor(() => screen.getByText("task one"));
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(2);
       control.emitSessionStarted("s1", "task one");
@@ -442,7 +452,7 @@ describe("App: Run All re-entry and state persistence", () => {
       expect(screen.getByText("Cancelled")).toBeInTheDocument();
     });
 
-    // Navigate away and back
+    // Navigate away and back (runAllState still set, no dialog)
     await userEvent.click(screen.getByRole("button", { name: /task one/ }));
     await userEvent.click(screen.getByText("Run All"));
 
@@ -468,6 +478,7 @@ describe("App: Run All re-entry and state persistence", () => {
     const callsBefore = vi.mocked(commands.listSessions).mock.calls.length;
 
     await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => {
       control.emitStarted(1);
       control.emitSessionStarted("s1", "task one");

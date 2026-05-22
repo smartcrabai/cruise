@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session, SessionPhase } from "../types";
@@ -157,7 +157,8 @@ describe("App: RunAll — sidebar refreshes immediately on session finish", () =
     await waitFor(() => screen.getByText("task A"));
 
     // Navigate to Run All view
-    await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
     // RunAll starts; session A begins
     await act(async () => { control.emitRunAllStarted(2); });
@@ -210,7 +211,8 @@ describe("App: RunAll — completed notification on session finish", () => {
     await waitFor(() => screen.getByText("task run"));
 
     // Navigate to Run All
-    await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
     await act(async () => { control.emitRunAllStarted(1); });
     await act(async () => { control.emitSessionStarted("sess-run", "task run"); });
@@ -246,7 +248,8 @@ describe("App: RunAll — completed notification on session finish", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
     await act(async () => { control.emitRunAllStarted(2); });
 
     // Session A finishes
@@ -306,7 +309,8 @@ describe("App: RunAll — completed notification on session finish", () => {
     await waitFor(() => screen.getByText("task run"));
 
     // Navigate to Run All
-    await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
     await act(async () => { control.emitRunAllStarted(1); });
     await act(async () => { control.emitSessionStarted("sess-run", "task run"); });

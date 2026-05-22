@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session, WorkflowEvent } from "../types";
@@ -83,8 +83,9 @@ async function navigateToRunAll(
   vi.mocked(commands.listSessions).mockResolvedValue(sessions);
 
   render(<App />);
-  await waitFor(() => screen.getByRole("button", { name: /run all/i }));
-  await userEvent.click(screen.getByRole("button", { name: /run all/i }));
+  await waitFor(() => screen.getByRole("button", { name: "Run all pending sessions" }));
+  await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Run All" }));
 
   await waitFor(() => {
     expect(commands.runAllSessions).toHaveBeenCalledTimes(1);

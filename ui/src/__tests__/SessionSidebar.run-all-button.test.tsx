@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, within, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionSidebar } from "../components/SessionSidebar";
 import type { Session } from "../types";
@@ -120,7 +120,42 @@ describe("SessionSidebar: Run All button — active state and enablement", () =>
     expect(screen.getByText("Run All")).not.toBeDisabled();
   });
 
-  it("calls onRunAll when clicked", async () => {
+  it("calls onRunAll after confirming the dialog", async () => {
+    // Given
+    const onRunAll = vi.fn();
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "s1", phase: "Planned" }),
+    ]);
+
+    render(
+      <SessionSidebar
+        selectedId={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onRunAll={onRunAll}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledOnce(),
+    );
+
+    // When: click the Run All button in the sidebar
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+
+    // Then: confirmation dialog appears, but onRunAll not yet called
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onRunAll).not.toHaveBeenCalled();
+
+    // When: click the confirm button inside the dialog
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Run All" }));
+
+    // Then: onRunAll is called
+    expect(onRunAll).toHaveBeenCalledOnce();
+  });
+
+  it("shows confirmation dialog before running without calling onRunAll immediately", async () => {
     // Given
     const onRunAll = vi.fn();
     vi.mocked(commands.listSessions).mockResolvedValue([
@@ -141,9 +176,71 @@ describe("SessionSidebar: Run All button — active state and enablement", () =>
     );
 
     // When
-    await userEvent.click(screen.getByText("Run All"));
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
 
-    // Then
+    // Then: dialog is shown
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("Run All Sessions")).toBeInTheDocument();
+    // And onRunAll has NOT been called yet
+    expect(onRunAll).not.toHaveBeenCalled();
+  });
+
+  it("cancels without calling onRunAll when Cancel is clicked in dialog", async () => {
+    // Given
+    const onRunAll = vi.fn();
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "s1", phase: "Planned" }),
+    ]);
+
+    render(
+      <SessionSidebar
+        selectedId={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onRunAll={onRunAll}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledOnce(),
+    );
+
+    // When: open dialog then cancel
+    await userEvent.click(screen.getByRole("button", { name: "Run all pending sessions" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    // Then: dialog is dismissed and onRunAll is never called
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onRunAll).not.toHaveBeenCalled();
+  });
+
+  it("skips confirmation dialog and calls onRunAll immediately when runAllActive is true", async () => {
+    // Given: Run All is already active (execution in progress)
+    const onRunAll = vi.fn();
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "s1", phase: "Completed" }),
+    ]);
+
+    render(
+      <SessionSidebar
+        selectedId={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onRunAll={onRunAll}
+        runAllActive
+      />,
+    );
+
+    await waitFor(() =>
+      expect(commands.listSessions).toHaveBeenCalledOnce(),
+    );
+
+    // When: click the button while Run All is active
+    await userEvent.click(screen.getByRole("button", { name: "View running sessions" }));
+
+    // Then: no dialog appears, onRunAll called immediately (navigates to run-all view)
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onRunAll).toHaveBeenCalledOnce();
   });
 
