@@ -300,17 +300,17 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         }
     };
     session.workspace_mode = effective_workspace_mode;
-    if effective_workspace_mode == WorkspaceMode::CurrentBranch {
-        if let Some(ctx) = session.worktree_context() {
-            eprintln!(
-                "{} cleaning up planning worktree: {}",
-                style("->").cyan(),
-                ctx.path.display()
-            );
-            let _ = crate::worktree::cleanup_worktree(&ctx);
-            session.worktree_path = None;
-            session.worktree_branch = None;
-        }
+    if effective_workspace_mode == WorkspaceMode::CurrentBranch
+        && let Some(ctx) = session.worktree_context()
+    {
+        eprintln!(
+            "{} cleaning up planning worktree: {}",
+            style("->").cyan(),
+            ctx.path.display()
+        );
+        let _ = crate::worktree::cleanup_worktree(&ctx);
+        session.worktree_path = None;
+        session.worktree_branch = None;
     }
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;

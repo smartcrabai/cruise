@@ -263,10 +263,10 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
 /// Clean up the planning worktree if one was created.  Failures are logged as
 /// warnings and do not propagate — cleanup is best-effort.
 fn cleanup_planning_worktree(session: &SessionState) {
-    if let Some(ctx) = session.worktree_context() {
-        if let Err(e) = crate::worktree::cleanup_worktree(&ctx) {
-            eprintln!("warning: failed to clean up planning worktree: {e}");
-        }
+    if let Some(ctx) = session.worktree_context()
+        && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
+    {
+        eprintln!("warning: failed to clean up planning worktree: {e}");
     }
 }
 
@@ -800,7 +800,10 @@ mod tests {
             session.worktree_path.is_some(),
             "worktree_path should be set after setup_planning_worktree"
         );
-        let wt_path = session.worktree_path.as_ref().unwrap();
+        let wt_path = session
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("worktree_path should be set"));
         assert!(wt_path.exists(), "worktree directory should exist on disk");
         assert!(
             session.worktree_branch.is_some(),
