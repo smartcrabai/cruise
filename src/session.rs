@@ -621,22 +621,6 @@ pub struct CleanupReport {
     pub skipped: usize,
 }
 
-/// Get the cruise home directory: `~/.cruise/`
-#[must_use]
-pub fn cruise_home() -> Option<PathBuf> {
-    home::home_dir().map(|h| h.join(".cruise"))
-}
-
-/// Get the cruise home directory or return an error.
-///
-/// # Errors
-///
-/// Returns an error if the home directory cannot be determined.
-pub fn get_cruise_home() -> crate::error::Result<PathBuf> {
-    cruise_home()
-        .ok_or_else(|| crate::error::CruiseError::Other("home directory not found".to_string()))
-}
-
 /// Generate a session ID from current UTC time: `YYYYMMDDHHmmss`.
 #[must_use]
 pub fn current_timestamp_id() -> String {

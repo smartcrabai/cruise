@@ -7,7 +7,7 @@ use crate::session::current_iso8601;
 
 /// Persistent draft of the New Session form.
 ///
-/// Stored at `~/.cruise/new_session_draft.json`. Missing file means no draft.
+/// Stored at `~/.local/state/cruise/new_session_draft.json`. Missing file means no draft.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NewSessionDraft {
     /// User-typed task description.
@@ -28,13 +28,13 @@ pub struct NewSessionDraft {
 }
 
 impl NewSessionDraft {
-    /// Return the canonical path to the draft file: `~/.cruise/new_session_draft.json`.
+    /// Return the canonical path to the draft file: `~/.local/state/cruise/new_session_draft.json`.
     ///
     /// # Errors
     ///
     /// Returns an error if the home directory cannot be determined.
     fn draft_path() -> Result<PathBuf> {
-        crate::session::get_cruise_home().map(|h| h.join("new_session_draft.json"))
+        crate::paths::state_dir().map(|h| h.join("new_session_draft.json"))
     }
 
     /// Load the draft from the canonical [`Self::draft_path`].
@@ -193,14 +193,17 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_path_ends_with_cruise_new_session_draft_json() {
+    fn test_draft_path_ends_with_state_cruise_new_session_draft_json() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = crate::test_support::set_fake_home(tmp.path());
         let path =
             NewSessionDraft::draft_path().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
         let path_str = path.to_string_lossy();
         assert!(
-            path_str.ends_with(".cruise/new_session_draft.json")
-                || path_str.ends_with(".cruise\\new_session_draft.json"),
-            "expected path to end with .cruise/new_session_draft.json, got: {path_str}"
+            path_str.ends_with(".local/state/cruise/new_session_draft.json")
+                || path_str.ends_with(".local\\state\\cruise\\new_session_draft.json"),
+            "expected path to end with .local/state/cruise/new_session_draft.json, got: {path_str}"
         );
     }
 
@@ -223,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_load_round_trip_through_default_cruise_home() {
+    fn test_save_and_load_round_trip_through_default_state_dir() {
         let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guards = crate::test_support::set_fake_home(tmp.path());
@@ -243,10 +246,12 @@ mod tests {
         assert_eq!(loaded.skipped_steps, vec!["review", "write-tests"]);
         assert!(
             tmp.path()
-                .join(".cruise")
+                .join(".local")
+                .join("state")
+                .join("cruise")
                 .join("new_session_draft.json")
                 .exists(),
-            "new_session_draft.json should be written under the fake cruise home"
+            "new_session_draft.json should be written under the fake state dir"
         );
     }
 
@@ -319,7 +324,9 @@ mod tests {
         draft.save().unwrap_or_else(|e| panic!("save failed: {e}"));
         assert!(
             tmp.path()
-                .join(".cruise")
+                .join(".local")
+                .join("state")
+                .join("cruise")
                 .join("new_session_draft.json")
                 .exists()
         );
@@ -327,7 +334,9 @@ mod tests {
         NewSessionDraft::clear().unwrap_or_else(|e| panic!("clear failed: {e}"));
         assert!(
             !tmp.path()
-                .join(".cruise")
+                .join(".local")
+                .join("state")
+                .join("cruise")
                 .join("new_session_draft.json")
                 .exists()
         );
@@ -359,12 +368,10 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guards = crate::test_support::set_fake_home(tmp.path());
 
-        std::fs::create_dir_all(tmp.path().join(".cruise")).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(
-            tmp.path().join(".cruise").join("new_session_draft.json"),
-            "bad json",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
+        let state_dir = tmp.path().join(".local").join("state").join("cruise");
+        std::fs::create_dir_all(&state_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(state_dir.join("new_session_draft.json"), "bad json")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         let draft = NewSessionDraft::load_best_effort();
         assert!(

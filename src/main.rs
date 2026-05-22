@@ -15,6 +15,7 @@ mod metadata;
 mod multiline_input;
 mod new_session_history;
 mod option_handler;
+mod paths;
 mod plan_cmd;
 mod planning;
 mod platform;

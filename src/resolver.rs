@@ -12,7 +12,7 @@ pub enum ConfigSource {
     EnvVar(PathBuf),
     /// Found `cruise.yaml` / `cruise.yml` in the current directory.
     Local(PathBuf),
-    /// Selected from `~/.cruise/`.
+    /// Selected from `~/.config/cruise/`.
     UserDir(PathBuf),
     /// No file found; using built-in default.
     Builtin,
@@ -116,10 +116,9 @@ pub fn resolve_config_in_dir(
         }
     }
 
-    // 4. ~/.cruise/*.yaml / *.yml
-    if let Some(home) = home::home_dir() {
-        let cruise_dir = home.join(".cruise");
-        let mut files = collect_yaml_files(&cruise_dir);
+    // 4. $XDG_CONFIG_HOME/cruise/*.yaml / *.yml (defaults to ~/.config/cruise/)
+    if let Ok(config_dir) = crate::paths::config_dir() {
+        let mut files = collect_yaml_files(&config_dir);
         if !files.is_empty() {
             let path = if files.len() == 1 {
                 files.remove(0)
@@ -266,9 +265,10 @@ mod tests {
         let _dir_guard = DirGuard::new();
         std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Point HOME to a dir without .cruise to avoid ~/.cruise interference.
+        // Point HOME to an empty dir; also clear XDG_CONFIG_HOME to avoid host config interference.
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
         let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
@@ -487,16 +487,17 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = fake_home.path().join(".cruise");
-        std::fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        let config_cruise = fake_home.path().join(".config").join("cruise");
+        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            cruise_home.join("default.yaml"),
+            config_cruise.join("default.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
         let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
         // When: resolved against the repo directory
@@ -625,10 +626,10 @@ mod tests {
         // Given: repo dir has no local config; home has exactly one ~/.cruise/*.yaml
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = fake_home.path().join(".cruise");
-        std::fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        let config_cruise = fake_home.path().join(".config").join("cruise");
+        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            cruise_home.join("myconf.yaml"),
+            config_cruise.join("myconf.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -637,6 +638,7 @@ mod tests {
         // `home` crate 0.5.x uses USERPROFILE on Windows, HOME on Unix.
         let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         let _home_guard = EnvGuard::set(home_var, fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
         // When: resolved against the empty repo dir

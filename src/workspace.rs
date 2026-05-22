@@ -154,11 +154,11 @@ mod tests {
         let _lock = lock_process();
         // Given: a planned session in a clean git repository
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = tmp.path().join(".cruise");
+        let data_dir = tmp.path().join(".local").join("share").join("cruise");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
-        let manager = SessionManager::new(cruise_home);
+        let manager = SessionManager::new(data_dir);
         let mut session = make_session("20260321120000", &repo);
 
         // When: preparing a worktree execution workspace
@@ -194,11 +194,11 @@ mod tests {
         let _lock = lock_process();
         // Given: a fresh session targeting the current branch
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = tmp.path().join(".cruise");
+        let data_dir = tmp.path().join(".local").join("share").join("cruise");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
-        let manager = SessionManager::new(cruise_home);
+        let manager = SessionManager::new(data_dir);
         let mut session = make_session("20260321120001", &repo);
 
         // When: preparing a current-branch execution workspace
@@ -230,7 +230,7 @@ mod tests {
         let _lock = lock_process();
         // Given: a fresh current-branch session with uncommitted changes in the base repo
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = tmp.path().join(".cruise");
+        let cruise_home = tmp.path().join(".local").join("share").join("cruise");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
@@ -255,7 +255,7 @@ mod tests {
         let _lock = lock_process();
         // Given: a fresh current-branch session on a detached HEAD
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = tmp.path().join(".cruise");
+        let cruise_home = tmp.path().join(".local").join("share").join("cruise");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
