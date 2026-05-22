@@ -319,7 +319,7 @@ describe("App: New Session draft persistence via IPC", () => {
     render(<App />);
     await waitFor(() => screen.getByText("existing task"));
 
-    // Navigate to New Session — draft is loaded from persistence
+    // Navigate to New Session -- draft is loaded from persistence
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
     await waitFor(() => {
       expect(
@@ -600,7 +600,7 @@ describe("App: New Session skip-step selection", () => {
 
 // --- Skip Steps following Config selector changes ----------------------------
 
-describe("App: New Session skip-step selection — Config change", () => {
+describe("App: New Session skip-step selection -- Config change", () => {
   beforeEach(setupNewSessionMocks);
 
   afterEach(() => {
@@ -608,7 +608,7 @@ describe("App: New Session skip-step selection — Config change", () => {
   });
 
   it("replaces Skip Steps candidates with the new config's steps when switching explicit configs", async () => {
-    // Given: two explicit configs — configA has BUILD_AND_REVIEW_STEPS, configB has BUILD_ONLY_STEP
+    // Given: two explicit configs -- configA has BUILD_AND_REVIEW_STEPS, configB has BUILD_ONLY_STEP
     vi.mocked(commands.listConfigs).mockResolvedValue([
       { path: "/tmp/configA.yaml", name: "configA.yaml" },
       { path: "/tmp/configB.yaml", name: "configB.yaml" },
@@ -631,7 +631,7 @@ describe("App: New Session skip-step selection — Config change", () => {
     // When: switch to configB
     await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configB.yaml");
 
-    // Then: only configB's steps are shown — "review-pass" is gone, "build" is unchecked
+    // Then: only configB's steps are shown -- "review-pass" is gone, "build" is unchecked
     await waitFor(() => {
       expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
     });
@@ -662,7 +662,7 @@ describe("App: New Session skip-step selection — Config change", () => {
     // When: user selects the explicit config
     await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/custom.yaml");
 
-    // Then: explicit config's steps replace the auto ones — "review-pass" gone, "build" unchecked
+    // Then: explicit config's steps replace the auto ones -- "review-pass" gone, "build" unchecked
     await waitFor(() => {
       expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
     });
@@ -694,7 +694,7 @@ describe("App: New Session skip-step selection — Config change", () => {
     // When: switch back to Auto
     await userEvent.selectOptions(screen.getByLabelText("Config"), "");
 
-    // Then: auto-mode steps appear — "review-pass" is back and "build" is checked by default
+    // Then: auto-mode steps appear -- "review-pass" is back and "build" is checked by default
     await screen.findByRole("checkbox", { name: "review-pass" });
     expect(screen.getByRole("checkbox", { name: "build" })).toBeChecked();
     expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith({
@@ -726,7 +726,7 @@ describe("App: New Session skip-step selection — Config change", () => {
     // When: switch to configB
     await userEvent.selectOptions(screen.getByLabelText("Config"), "/tmp/configB.yaml");
 
-    // Then: configB's default (unchecked) is applied — the manual check is not carried over
+    // Then: configB's default (unchecked) is applied -- the manual check is not carried over
     await waitFor(() => {
       expect(screen.queryByRole("checkbox", { name: "review-pass" })).not.toBeInTheDocument();
     });
@@ -1100,7 +1100,7 @@ describe("App: WorkflowRunner tab selection persistence", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    // Select Session A — Plan tab is the default
+    // Select Session A -- Plan tab is the default
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
 
     // Verify Plan tab is active: Info tab's "Base dir" label is not shown
@@ -1163,7 +1163,7 @@ describe("App: WorkflowRunner tab selection persistence", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    // Select Session A — Plan tab is the default and triggers initial loadPlan
+    // Select Session A -- Plan tab is the default and triggers initial loadPlan
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
     await waitFor(() => expect(commands.getSessionPlan).toHaveBeenCalledWith("sess-a"));
 
@@ -1223,7 +1223,7 @@ describe("App: Approval-ready notification transitions", () => {
       expect(screen.getByPlaceholderText("Describe what you want to implement...")).toHaveValue("");
     });
 
-    // When: planGenerated fires → session becomes approval-ready (planAvailable: true)
+    // When: planGenerated fires -> session becomes approval-ready (planAvailable: true)
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-plan-ready", phase: "Awaiting Approval", planAvailable: true }),
     ]);
@@ -1247,7 +1247,7 @@ describe("App: Approval-ready notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // When: sessionCreated fires → session has planAvailable: false (Planning in UI)
+    // When: sessionCreated fires -> session has planAvailable: false (Planning in UI)
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-planning", phase: "Awaiting Approval", planAvailable: false }),
     ]);
@@ -1313,7 +1313,7 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     // When: open the session for the first time (no remembered tab)
     await userEvent.click(screen.getByRole("button", { name: /test task/ }));
 
-    // Then: Plan tab is active by default — Info tab's "Base dir" label is not visible
+    // Then: Plan tab is active by default -- Info tab's "Base dir" label is not visible
     await waitFor(() => {
       expect(screen.queryByText("Base dir")).toBeNull();
     });
@@ -1341,7 +1341,7 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     await waitFor(() => {
       expect(screen.getByText("No plan available.")).toBeInTheDocument();
     });
-    // And: getSessionPlan was NOT called — plan is not available yet
+    // And: getSessionPlan was NOT called -- plan is not available yet
     expect(commands.getSessionPlan).not.toHaveBeenCalled();
   });
 
@@ -1354,7 +1354,7 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     render(<App />);
     await waitFor(() => screen.getByText("test task"));
 
-    // Select the session — Plan tab is shown but plan is not loaded
+    // Select the session -- Plan tab is shown but plan is not loaded
     await userEvent.click(screen.getByRole("button", { name: /test task/ }));
     await waitFor(() => screen.getByText("No plan available."));
 
@@ -1385,7 +1385,7 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
 
-    // Open session A — Plan tab is the default
+    // Open session A -- Plan tab is the default
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
     await waitFor(() => screen.getByRole("tab", { name: "Plan" }));
 
@@ -1399,7 +1399,7 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     await userEvent.click(screen.getByRole("button", { name: /task B/ }));
     await userEvent.click(screen.getByRole("button", { name: /task A/ }));
 
-    // Then: Log tab is still active for session A — the remembered tab wins over the default
+    // Then: Log tab is still active for session A -- the remembered tab wins over the default
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
     });

@@ -5,7 +5,7 @@ import App from "../App";
 import type { Session } from "../types";
 import * as commands from "../lib/commands";
 
-// ─── Module mocks ──────────────────────────────────────────────────────────────
+// --- Module mocks --------------------------------------------------------------
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("0.0.0"),
@@ -67,7 +67,7 @@ vi.mock("../lib/desktopNotifications", () => ({
   notifyDesktop: vi.fn(),
 }));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -141,7 +141,7 @@ function setupRunAllMock() {
   };
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// --- Tests --------------------------------------------------------------------
 
 describe("App: Run All re-entry and state persistence", () => {
   beforeEach(() => {
@@ -375,7 +375,7 @@ describe("App: Run All re-entry and state persistence", () => {
       expect(screen.queryByText("Done")).toBeNull();
     });
 
-    // When: click Run All again — should start a new execution
+    // When: click Run All again -- should start a new execution
     setupRunAllMock();
     await userEvent.click(screen.getByText("Run All"));
 

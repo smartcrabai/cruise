@@ -2,13 +2,13 @@
 
 A CLI tool that orchestrates coding agent workflows defined in a YAML config file.
 
-Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan → approve → write tests → implement → test → review → open PR → post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
+Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan -> approve -> write tests -> implement -> test -> review -> open PR -> post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
 
 > **Note:** This project has been developed and tested on macOS only. It has not been verified on Linux or Windows.
 
 ## Prerequisites
 
-- [`gh` CLI](https://cli.github.com/) — required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
+- [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
 
 ## Installation
 
@@ -47,7 +47,7 @@ This removes the Gatekeeper quarantine attribute, allowing the app to launch.
 ## Usage
 
 ```sh
-# Create a session (plan → approve)
+# Create a session (plan -> approve)
 cruise plan "implement the feature"
 
 # Create a session and generate the plan in the background
@@ -140,14 +140,14 @@ Cruise uses a session-based workflow stored in `~/.cruise/sessions/`.
 
 ### Session Lifecycle
 
-1. **`cruise plan "task"`** — Runs the built-in plan step to generate an implementation plan, then presents an approve-plan menu.
-2. **`cruise --plan "task"`** — Creates the session immediately and generates the plan in the background. Review it later from `cruise list`.
-3. **Approve-plan menu** — Choose one of:
-   - **Approve** — Mark the session as ready to run.
-   - **Fix** — Provide feedback; the plan step reruns with your input.
-   - **Ask** — Ask a question; the answer is shown before the menu reappears.
-   - **Execute now** — Skip approval and run immediately.
-4. **`cruise run`** — Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
+1. **`cruise plan "task"`** -- Runs the built-in plan step to generate an implementation plan, then presents an approve-plan menu.
+2. **`cruise --plan "task"`** -- Creates the session immediately and generates the plan in the background. Review it later from `cruise list`.
+3. **Approve-plan menu** -- Choose one of:
+   - **Approve** -- Mark the session as ready to run.
+   - **Fix** -- Provide feedback; the plan step reruns with your input.
+   - **Ask** -- Ask a question; the answer is shown before the menu reappears.
+   - **Execute now** -- Skip approval and run immediately.
+4. **`cruise run`** -- Picks up the approved session, creates a git worktree under `~/.cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
 Sessions remain in `~/.cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
@@ -168,23 +168,23 @@ The interactive session list shows a menu of actions depending on the session's 
 
 `cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` appears only after a non-empty `plan.md` is available.
 
-- **Approve** — Approve the plan and transition the session to the Planned phase.
-- **Run / Resume** — Execute (or continue) the session.
-- **Replan** — Provide feedback to re-generate the plan; the session stays in the Planned phase.
-- **Open PR** — Open the session's pull request in the browser via `gh pr view --web`.
-- **Reset to Planned** — Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
-- **Delete** — Permanently remove the session.
-- **Back** — Return to the session list.
+- **Approve** -- Approve the plan and transition the session to the Planned phase.
+- **Run / Resume** -- Execute (or continue) the session.
+- **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
+- **Open PR** -- Open the session's pull request in the browser via `gh pr view --web`.
+- **Reset to Planned** -- Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
+- **Delete** -- Permanently remove the session.
+- **Back** -- Return to the session list.
 
 ## Config File Resolution
 
 When `-c` is not specified, cruise searches for a config in this order:
 
-1. `-c/--config` flag — the specified file must exist or cruise exits with an error.
-2. `CRUISE_CONFIG` environment variable — error if file does not exist.
-3. `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml` — in the current directory.
-4. `~/.cruise/*.yaml` / `*.yml` — auto-selected if exactly one file exists, or prompted if multiple.
-5. Built-in default — a 2-step test-first workflow (`write-tests` → `implement`); no config file required.
+1. `-c/--config` flag -- the specified file must exist or cruise exits with an error.
+2. `CRUISE_CONFIG` environment variable -- error if file does not exist.
+3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` -- in the current directory.
+4. `~/.cruise/*.yaml` / `*.yml` -- auto-selected if exactly one file exists, or prompted if multiple.
+5. Built-in default -- a 2-step test-first workflow (`write-tests` -> `implement`); no config file required.
 
 ## Config File Reference
 
@@ -410,7 +410,7 @@ The `skip` field accepts a static boolean (`true`/`false`) or a variable referen
 
 When a step has `if: file-changed: <target>`, a snapshot of the working directory is taken **before** the step runs. After the step executes, if any files changed during its execution, the workflow jumps to `<target>`. If no files changed, the workflow continues to the next step normally.
 
-This is designed for loop-back patterns — for example, re-running tests whenever a review step modifies code:
+This is designed for loop-back patterns -- for example, re-running tests whenever a review step modifies code:
 
 ```yaml
 steps:
@@ -429,8 +429,8 @@ steps:
 
 When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
 
-- **`fail: true`** — Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
-- **`retry: true`** — Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
+- **`fail: true`** -- Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
+- **`retry: true`** -- Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
 
 ```yaml
 steps:
@@ -448,7 +448,7 @@ steps:
 ```
 
 **Constraints:**
-- `fail` and `retry` are mutually exclusive — exactly one must be true.
+- `fail` and `retry` are mutually exclusive -- exactly one must be true.
 - Cannot be used in `after-pr` steps (rejected at validation time).
 - Cannot be used at the group level (`if` in group definitions).
 - Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
@@ -498,7 +498,7 @@ steps:
 ```
 
 **Constraints:**
-- Steps inside a group definition cannot have nested `group:` references or individual `if:` conditions — the group-level `if:` applies to the entire group.
+- Steps inside a group definition cannot have nested `group:` references or individual `if:` conditions -- the group-level `if:` applies to the entire group.
 - When the group's `if: file-changed` condition triggers, execution jumps back to the **first step of the group** and all group steps re-run.
 - A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
 
@@ -515,7 +515,7 @@ steps:
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
 
-> **Note:** `{model}` is **not** a template variable — it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
+> **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
 ## Workspace Mode
 
@@ -677,7 +677,7 @@ steps:
 
 ## Config Hot-Reload
 
-During `cruise run`, the config file is checked for changes between each step. If the file has been modified (detected via mtime), the updated config is reloaded automatically — no restart required. This allows you to adjust prompts, add steps, or tweak settings while a session is running.
+During `cruise run`, the config file is checked for changes between each step. If the file has been modified (detected via mtime), the updated config is reloaded automatically -- no restart required. This allows you to adjust prompts, add steps, or tweak settings while a session is running.
 
 > **Note:** Hot-reload only applies when the session was started from an external config file (not the built-in default). The current step must still exist in the new config for the reload to take effect.
 
