@@ -19,7 +19,7 @@ export interface SessionActions {
   showCreateWorktree: boolean;
   /** Show the Resume / Retry run button. */
   showRun: boolean;
-  /** Label for the run button: "Resume" (Running/Suspended) or "Retry" (Failed). */
+  /** Label for the run button: "Resume" (Suspended) or "Retry" (Failed). */
   runLabel: string;
   /** Show the "Reset to Planned" button. */
   showReset: boolean;
@@ -27,7 +27,7 @@ export interface SessionActions {
   showReplan: boolean;
   /** Show the "Delete" button (`phase !== "Running"`). */
   showDelete: boolean;
-  /** Show the "Cancel" button (only while the local process is running). */
+  /** Show the "Cancel" button (while the session is actively running, locally or per backend phase). */
   showCancel: boolean;
 }
 
@@ -44,43 +44,46 @@ export interface SessionActions {
 export function getSessionActions(session: Session, status: RunStatus, isFixing?: boolean): SessionActions {
   const { phase } = session;
 
-  const isRunning = status === "running";
-  const showCancel = isRunning;
+  const isLocallyRunning = status === "running";
+  const isPhaseRunning = phase === "Running";
 
   // Local execution finished but refreshSession() hasn't updated session.phase yet.
   const isAwaitingRefresh =
-    !isRunning && status !== "idle" && phase === "Running";
+    !isLocallyRunning && status !== "idle" && isPhaseRunning;
+
+  // "Actively running" = local run in progress OR backend reports Running (excluding refresh-wait transient state).
+  const isActiveRun = isLocallyRunning || (isPhaseRunning && !isAwaitingRefresh);
+
+  const showCancel = isActiveRun;
 
   const awaitingApprovalWithPlan =
-    !isRunning && !isFixing && isApprovalReady(session);
+    !isLocallyRunning && !isFixing && isApprovalReady(session);
 
   const showApprove = awaitingApprovalWithPlan;
   const showFix = awaitingApprovalWithPlan;
   const showAsk = awaitingApprovalWithPlan;
 
-  const showCreateWorktree = !isRunning && phase === "Planned";
+  const showCreateWorktree = !isLocallyRunning && phase === "Planned";
 
   const showRun =
-    !isRunning &&
+    !isActiveRun &&
     !isAwaitingRefresh &&
-    (phase === "Running" ||
-    phase === "Suspended" ||
+    (phase === "Suspended" ||
     phase === "Failed");
 
   const runLabel =
     phase === "Failed" ? "Retry" : "Resume";
 
   const showReset =
-    !isRunning &&
+    !isActiveRun &&
     !isAwaitingRefresh &&
-    (phase === "Running" ||
-    phase === "Suspended" ||
+    (phase === "Suspended" ||
     phase === "Failed" ||
     phase === "Completed");
 
-  const showReplan = !isRunning && phase === "Planned";
+  const showReplan = !isLocallyRunning && phase === "Planned";
 
-  const showDelete = !isRunning && phase !== "Running";
+  const showDelete = !isLocallyRunning && phase !== "Running";
 
   return {
     showApprove,
