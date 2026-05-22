@@ -30,15 +30,14 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Return the canonical path to the app config file: `$HOME/.config/cruise/config.json`.
+    /// Return the canonical path to the app config file: `$XDG_CONFIG_HOME/cruise/config.json`
+    /// (defaulting to `$HOME/.config/cruise/config.json`).
     ///
     /// # Errors
     ///
     /// Returns an error if the home directory cannot be determined.
     pub fn config_path() -> Result<PathBuf> {
-        let home = home::home_dir()
-            .ok_or_else(|| CruiseError::Other("cannot determine home directory".to_string()))?;
-        Ok(home.join(".config").join("cruise").join("config.json"))
+        crate::paths::config_dir().map(|d| d.join("config.json"))
     }
 
     /// Load the app config using the canonical [`Self::config_path`].

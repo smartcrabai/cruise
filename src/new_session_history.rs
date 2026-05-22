@@ -40,7 +40,7 @@ pub struct NewSessionHistoryEntry {
 
 /// Persistent ring-buffer of per-config skip-step selections.
 ///
-/// Stored at `~/.cruise/history.json`. Missing file is treated as empty history.
+/// Stored at `~/.local/state/cruise/history.json`. Missing file is treated as empty history.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NewSessionHistory {
     /// Entries in most-recent-first order.
@@ -51,13 +51,13 @@ impl NewSessionHistory {
     /// Maximum number of history entries to retain.
     pub const MAX_ENTRIES: usize = 50;
 
-    /// Return the canonical path to the history file: `~/.cruise/history.json`.
+    /// Return the canonical path to the history file: `~/.local/state/cruise/history.json`.
     ///
     /// # Errors
     ///
     /// Returns an error if the home directory cannot be determined.
     fn history_path() -> Result<PathBuf> {
-        crate::session::get_cruise_home().map(|h| h.join("history.json"))
+        crate::paths::state_dir().map(|h| h.join("history.json"))
     }
 
     /// Load history from the canonical [`Self::history_path`].
@@ -313,14 +313,17 @@ mod tests {
     }
 
     #[test]
-    fn test_history_path_ends_with_cruise_history_json() {
+    fn test_history_path_ends_with_state_cruise_history_json() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = crate::test_support::set_fake_home(tmp.path());
         let path =
             NewSessionHistory::history_path().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
         let path_str = path.to_string_lossy();
         assert!(
-            path_str.ends_with(".cruise/history.json")
-                || path_str.ends_with(".cruise\\history.json"),
-            "expected path to end with .cruise/history.json, got: {path_str}"
+            path_str.ends_with(".local/state/cruise/history.json")
+                || path_str.ends_with(".local\\state\\cruise\\history.json"),
+            "expected path to end with .local/state/cruise/history.json, got: {path_str}"
         );
     }
 
@@ -346,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_load_round_trip_through_default_cruise_home() {
+    fn test_save_and_load_round_trip_through_default_state_dir() {
         let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guards = crate::test_support::set_fake_home(tmp.path());
@@ -360,8 +363,13 @@ mod tests {
         let loaded = NewSessionHistory::load().unwrap_or_else(|e| panic!("load failed: {e}"));
         assert_eq!(loaded.entries, history.entries);
         assert!(
-            tmp.path().join(".cruise").join("history.json").exists(),
-            "history.json should be written under the fake cruise home"
+            tmp.path()
+                .join(".local")
+                .join("state")
+                .join("cruise")
+                .join("history.json")
+                .exists(),
+            "history.json should be written under the fake state dir"
         );
     }
 

@@ -17,7 +17,7 @@ use crate::option_handler::CliOptionHandler;
 use crate::session::PLAN_VAR;
 use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
-    SessionStateFingerprint, WorkspaceMode, current_iso8601, get_cruise_home,
+    SessionStateFingerprint, WorkspaceMode, current_iso8601,
 };
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -265,7 +265,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 #[expect(clippy::too_many_lines)]
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
     let _current_dir_guard = CurrentDirGuard::capture()?;
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = args
         .session
         .map_or_else(|| select_pending_session(&manager), Ok)?;
@@ -507,7 +507,7 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
 }
 
 async fn run_all(args: RunArgs) -> Result<()> {
-    let manager = SessionManager::new(get_cruise_home()?);
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut seen: HashSet<String> = HashSet::new();
     let mut results: Vec<SessionState> = Vec::new();
 
@@ -978,7 +978,8 @@ steps:
         let repo = create_repo_with_origin(tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session = make_current_branch_session(session_id, &repo, input, "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         write_config(&manager, session_id, &blocking_conflict_config());
@@ -1578,8 +1579,8 @@ Previously, emojis were used as user icons."#;
     async fn test_run_all_returns_ok_when_no_planned_sessions() {
         // Given: empty cruise home with no planned sessions
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = tmp.path().join(".cruise");
-        std::fs::create_dir_all(cruise_home.join("sessions")).unwrap_or_else(|e| panic!("{e:?}"));
+        let data_dir = tmp.path().join(".local").join("share").join("cruise");
+        std::fs::create_dir_all(data_dir.join("sessions")).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Hold the lock in a narrow scope so it is dropped before the await.
         let orig_home = {
@@ -1626,7 +1627,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309120000";
         let session = make_current_branch_session(session_id, &repo, "edit in place", "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1689,7 +1691,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309121000";
         let session =
             make_current_branch_session(session_id, &repo, "stay on planned branch", "main");
@@ -1730,7 +1733,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309122000";
         let session = make_current_branch_session(session_id, &repo, "edit dirty tree", "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1765,7 +1769,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309123000";
         let session = make_current_branch_session(session_id, &repo, "edit detached head", "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1800,7 +1805,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309124000";
         let mut session = make_current_branch_session(session_id, &repo, "resume in place", "main");
         session.phase = SessionPhase::Running;
@@ -2076,7 +2082,8 @@ steps:
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260309125000";
         let session = make_current_branch_session(session_id, &repo, "batch run", "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2146,7 +2153,8 @@ steps:
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260310140005";
         let mut session = SessionState::new(
             session_id.to_string(),
@@ -2656,7 +2664,8 @@ steps:
         process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
         process.set_env(TEST_WORKSPACE_MODE_ENV, "current_branch");
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260321091000";
         let mut session = SessionState::new(
             session_id.to_string(),
@@ -2710,7 +2719,8 @@ steps:
         process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
         process.set_env(TEST_WORKSPACE_MODE_ENV, "current_branch");
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260321091001";
         let mut session = SessionState::new(
             session_id.to_string(),
@@ -2761,7 +2771,8 @@ steps:
         process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
         process.remove_env(TEST_WORKSPACE_MODE_ENV);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260321091002";
         let session =
             make_current_branch_session(session_id, &repo, "already current branch", "main");
@@ -2802,7 +2813,8 @@ steps:
         process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
         process.remove_env(TEST_WORKSPACE_MODE_ENV);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260321091003";
         let mut session =
             make_current_branch_session(session_id, &repo, "resume no prompt", "main");
@@ -2857,7 +2869,8 @@ steps:
         process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
         process.remove_env(TEST_WORKSPACE_MODE_ENV);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260321091004";
         let mut session = SessionState::new(
             session_id.to_string(),
@@ -2914,7 +2927,8 @@ steps:
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let session_id_1 = "20260403400000";
         let session_id_2 = "20260403400001"; // added mid-run -- newer ID
