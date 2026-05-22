@@ -7,9 +7,10 @@ use cruise::new_session_draft::NewSessionDraft;
 use cruise::new_session_history::{
     NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
 };
+use cruise::paths;
 use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
-    current_iso8601, get_cruise_home,
+    current_iso8601,
 };
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
@@ -189,8 +190,8 @@ impl Drop for FixingGuard<'_> {
 }
 
 fn new_session_manager() -> std::result::Result<SessionManager, String> {
-    let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
-    Ok(SessionManager::new(cruise_home))
+    let data_dir = paths::data_dir().map_err(|e| e.to_string())?;
+    Ok(SessionManager::new(data_dir))
 }
 
 fn prepare_run_session(
@@ -480,23 +481,18 @@ pub struct NewSessionHistoryItemDto {
     pub skipped_steps: Vec<String>,
 }
 
-/// List available workflow config files in `~/.cruise/` (excluding sessions/ and worktrees/).
+/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
+/// (defaulting to `~/.config/cruise/`).
 #[tauri::command]
 pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let cruise_home = get_cruise_home().map_err(|e| e.to_string())?;
-    let Ok(entries) = std::fs::read_dir(&cruise_home) else {
+    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
+    let Ok(entries) = std::fs::read_dir(&config_dir) else {
         return Ok(vec![]);
     };
     let mut configs: Vec<ConfigEntryDto> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name == "sessions" || name == "worktrees" {
-                    return false;
-                }
-            }
             p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
         })
         .map(|p| ConfigEntryDto {
@@ -2567,7 +2563,8 @@ mod tests {
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guard = cruise::test_support::set_fake_home(tmp.path());
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let manager =
+            SessionManager::new(cruise::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
