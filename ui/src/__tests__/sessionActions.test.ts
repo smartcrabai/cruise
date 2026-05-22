@@ -20,17 +20,18 @@ describe("getSessionActions", () => {
   // --- Running phase ---------------------------------------------------------
 
   describe("Running phase", () => {
-    it("shows Resume instead of workspace selection even when currentStep is null", () => {
+    it("shows Cancel instead of Resume when phase is Running but status is idle", () => {
       // Given: a Running session with no currentStep (as happens in GUI-started runs)
+      // and the local WorkflowRunner state was reset (e.g. component remount)
       const session = makeSession({ phase: "Running", currentStep: undefined });
 
       // When
       const actions = getSessionActions(session, "idle");
 
-      // Then: workspace selection buttons are absent; resume is shown
+      // Then: backend phase="Running" is authoritative — show Cancel, not Resume
       expect(actions.showCreateWorktree).toBe(false);
-      expect(actions.showRun).toBe(true);
-      expect(actions.runLabel).toBe("Resume");
+      expect(actions.showCancel).toBe(true);
+      expect(actions.showRun).toBe(false);
     });
 
     it("shows Cancel when the session is being run locally", () => {
@@ -44,17 +45,6 @@ describe("getSessionActions", () => {
       expect(actions.showCancel).toBe(true);
     });
 
-    it("hides Cancel when status is idle", () => {
-      // Given: Running phase but no local execution in progress
-      const session = makeSession({ phase: "Running" });
-
-      // When
-      const actions = getSessionActions(session, "idle");
-
-      // Then: Cancel is absent
-      expect(actions.showCancel).toBe(false);
-    });
-
     it("hides Delete while phase is Running", () => {
       // Given: Running session
       const session = makeSession({ phase: "Running" });
@@ -64,6 +54,20 @@ describe("getSessionActions", () => {
 
       // Then: cannot delete a running session
       expect(actions.showDelete).toBe(false);
+    });
+
+    it("shows Cancel and hides Resume when phase is Running and status is idle", () => {
+      // Given: backend phase="Running" (reconcile_running_phase guarantees it is active),
+      // but the local WorkflowRunner was remounted and reset status to "idle"
+      const session = makeSession({ phase: "Running" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: treat as actively running — show Cancel, not Resume
+      expect(actions.showCancel).toBe(true);
+      expect(actions.showRun).toBe(false);
+      expect(actions.showReset).toBe(false);
     });
   });
 
@@ -469,7 +473,7 @@ describe("getSessionActions", () => {
   // --- Cancel button ---------------------------------------------------------
 
   describe("Cancel button", () => {
-    it("shows Cancel only when status is 'running'", () => {
+    it("shows Cancel when status is 'running'", () => {
       // Given: any phase with local execution in progress
       const session = makeSession({ phase: "Running" });
 
@@ -480,14 +484,25 @@ describe("getSessionActions", () => {
       expect(actions.showCancel).toBe(true);
     });
 
-    it("hides Cancel when status is 'idle' regardless of phase", () => {
-      // Given: Running session but no local execution
+    it("shows Cancel when phase is 'Running' and status is 'idle' (backend phase overrides local state)", () => {
+      // Given: backend reports phase="Running", but the local runner state was reset to idle
       const session = makeSession({ phase: "Running" });
 
       // When
       const actions = getSessionActions(session, "idle");
 
-      // Then
+      // Then: backend phase="Running" is authoritative; Cancel is shown
+      expect(actions.showCancel).toBe(true);
+    });
+
+    it("hides Cancel when phase is non-Running and status is 'idle'", () => {
+      // Given: session is Planned (not executing), no local execution either
+      const session = makeSession({ phase: "Planned" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: nothing is running — Cancel is absent
       expect(actions.showCancel).toBe(false);
     });
   });
