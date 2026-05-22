@@ -300,6 +300,18 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         }
     };
     session.workspace_mode = effective_workspace_mode;
+    if effective_workspace_mode == WorkspaceMode::CurrentBranch {
+        if let Some(ctx) = session.worktree_context() {
+            eprintln!(
+                "{} cleaning up planning worktree: {}",
+                style("->").cyan(),
+                ctx.path.display()
+            );
+            let _ = crate::worktree::cleanup_worktree(&ctx);
+            session.worktree_path = None;
+            session.worktree_branch = None;
+        }
+    }
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;
     }
@@ -1679,6 +1691,65 @@ Previously, emojis were used as user icons."#;
         assert!(
             !gh_log.exists(),
             "current-branch mode should not invoke gh at all"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_current_branch_mode_cleans_up_plan_stage_worktree() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager = SessionManager::new(get_cruise_home().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260522090000";
+
+        // Pre-create a plan-stage worktree (simulating what `setup_planning_worktree` would do)
+        let worktrees_dir = manager.worktrees_dir();
+        let (plan_ctx, _) = crate::worktree::setup_session_worktree(
+            &repo,
+            session_id,
+            "edit in place",
+            &worktrees_dir,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("failed to create plan-stage worktree: {e:?}"));
+        let worktree_path = plan_ctx.path.clone();
+
+        // Build session with CurrentBranch workspace mode AND plan-stage worktree recorded
+        let mut session =
+            make_current_branch_session(session_id, &repo, "edit in place", "main");
+        session.worktree_path = Some(worktree_path.clone());
+        session.worktree_branch = Some(plan_ctx.branch.clone());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf direct > current-branch.txt"),
+        );
+
+        // When: running in CurrentBranch mode (already set on session, no prompt needed)
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_ok(),
+            "current-branch run should succeed even with pre-existing plan worktree: {result:?}"
+        );
+
+        // Then: the plan-stage worktree is removed from disk
+        assert!(
+            !worktree_path.exists(),
+            "plan-stage worktree should be removed when CurrentBranch mode runs"
+        );
+
+        // And: the session no longer references the worktree
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            loaded.worktree_path.is_none(),
+            "session worktree_path should be cleared after CurrentBranch run"
+        );
+        assert!(
+            loaded.worktree_branch.is_none(),
+            "session worktree_branch should be cleared after CurrentBranch run"
         );
     }
 
