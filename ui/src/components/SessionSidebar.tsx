@@ -9,6 +9,7 @@ import { PhaseBadge } from "./PhaseBadge";
 import { Spinner } from "./Spinner";
 import { formatLocalTime } from "../lib/format";
 import { isApprovalReady } from "../lib/sessionActions";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 type UpdateState = "available" | "downloading" | "error";
 
@@ -55,6 +56,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
   const [updateReadiness, setUpdateReadiness] = useState<UpdateReadiness | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [manualCheck, setManualCheck] = useState<"idle" | "checking" | "upToDate" | { error: string }>("idle");
+  const [runAllConfirmCount, setRunAllConfirmCount] = useState<number | null>(null);
   const lastFingerprintRef = useRef("");
   const inflightRef = useRef(false);
 
@@ -203,6 +205,9 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
 
   const showAutoUpdate = update && updateState === "available" && updateReadiness?.canAutoUpdate;
   const updateGuidance = updateReadiness && !updateReadiness.canAutoUpdate ? updateReadiness.guidance : null;
+  const runnableCount = sessions.filter(
+    (s) => s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s),
+  ).length;
 
   return (
     <div className="h-full flex flex-col">
@@ -228,8 +233,14 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
             </button>
             <button
               type="button"
-              onClick={onRunAll}
-              disabled={!runAllActive && !sessions.some((s) => s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s))}
+              onClick={() => {
+                if (runAllActive) {
+                  onRunAll();
+                } else {
+                  setRunAllConfirmCount(runnableCount);
+                }
+              }}
+              disabled={!runAllActive && runnableCount === 0}
               className={`px-2 py-1 text-xs rounded ${
                 runAllActive
                   ? "bg-blue-600 text-white hover:bg-blue-700"
@@ -364,6 +375,19 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           )}
         </div>
       </div>
+      {runAllConfirmCount !== null && (
+        <ConfirmDialog
+          title="Run All Sessions"
+          message={`Run ${runAllConfirmCount} pending session(s) in parallel? Already-completed sessions will be skipped.`}
+          confirmLabel="Run All"
+          variant="primary"
+          onConfirm={() => {
+            setRunAllConfirmCount(null);
+            onRunAll();
+          }}
+          onCancel={() => setRunAllConfirmCount(null)}
+        />
+      )}
     </div>
   );
 }
