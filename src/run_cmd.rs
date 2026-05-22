@@ -1703,7 +1703,8 @@ Previously, emojis were used as user icons."#;
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
 
-        let manager = SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let session_id = "20260522090000";
 
         // Pre-create a plan-stage worktree (simulating what `setup_planning_worktree` would do)
@@ -1719,8 +1720,7 @@ Previously, emojis were used as user icons."#;
         let worktree_path = plan_ctx.path.clone();
 
         // Build session with CurrentBranch workspace mode AND plan-stage worktree recorded
-        let mut session =
-            make_current_branch_session(session_id, &repo, "edit in place", "main");
+        let mut session = make_current_branch_session(session_id, &repo, "edit in place", "main");
         session.worktree_path = Some(worktree_path.clone());
         session.worktree_branch = Some(plan_ctx.branch.clone());
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
