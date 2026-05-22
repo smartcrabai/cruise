@@ -455,23 +455,22 @@ function WorkflowPlanPanel({ panelPlanId, tabPlanId, askResponse, planLoading, p
   );
 }
 
-interface WorkflowLogPanelProps {
+export interface WorkflowLogPanelProps {
   panelLogId: string;
   tabLogId: string;
-  logLoading: boolean;
   status: RunStatus;
   logContent: string;
   logEndRef: React.RefObject<HTMLSpanElement | null>;
+  preRef: React.RefObject<HTMLPreElement | null>;
+  onScroll: () => void;
   className?: string;
 }
 
-function WorkflowLogPanel({ panelLogId, tabLogId, logLoading, status, logContent, logEndRef, className = "" }: WorkflowLogPanelProps) {
+export function WorkflowLogPanel({ panelLogId, tabLogId, status, logContent, logEndRef, preRef, onScroll, className = "" }: WorkflowLogPanelProps) {
   return (
     <div id={panelLogId} role="tabpanel" aria-labelledby={tabLogId} className={`h-full flex flex-col ${className}`}>
-      {logLoading && status !== "running" ? (
-        <p className="p-4 text-xs text-gray-500">Loading log...</p>
-      ) : logContent ? (
-        <pre className="flex-1 text-xs font-mono bg-gray-950 text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
+      {logContent ? (
+        <pre ref={preRef} onScroll={onScroll} className="flex-1 text-xs font-mono bg-gray-950 text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
           {logContent}
           <span ref={logEndRef} />
         </pre>
@@ -504,7 +503,7 @@ interface PendingOption {
 
 type ActiveTab = "info" | "plan" | "log";
 
-function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
+export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabPlanId = `${uid}-tab-plan`;
@@ -517,7 +516,6 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
   const [savedLog, setSavedLog] = useState<string>("");
-  const [logLoading, setLogLoading] = useState(false);
   const [planContent, setPlanContent] = useState<string>("");
   const [planLoading, setPlanLoading] = useState(false);
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
@@ -532,21 +530,24 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const stickToBottomRef = useRef(true);
 
-  // Load saved log from file when tab is opened or after run finishes
   const loadSavedLog = useCallback(async () => {
-    setLogLoading(true);
     try {
       const content = await getSessionLog(session.id);
       setSavedLog(content);
     } catch (e) {
       setSavedLog(`(failed to load log: ${e})`);
-    } finally {
-      setLogLoading(false);
     }
   }, [session.id]);
 
-  // Load plan content from file when plan tab is opened
+  const handleLogScroll = useCallback(() => {
+    const el = preRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }, []);
+
   const loadPlan = useCallback(async () => {
     setPlanLoading(true);
     try {
@@ -567,9 +568,9 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     setCurrentStep(null);
     setLiveLog([]);
     setSavedLog("");
+    stickToBottomRef.current = true;
     setPlanContent("");
     setPendingOption(null);
-    setLogLoading(false);
     setReplanFeedback("");
     setReplanPhase("idle");
     setReplanError("");
@@ -592,9 +593,12 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
   }, [session.id, onFixingChange]);
 
   useEffect(() => {
-    if (activeTab === "log" && status !== "running") {
+    if (activeTab !== "log" || status === "running") return;
+    void loadSavedLog();
+    const id = setInterval(() => {
       void loadSavedLog();
-    }
+    }, 1000);
+    return () => clearInterval(id);
   }, [activeTab, loadSavedLog, status]);
 
   useEffect(() => {
@@ -605,12 +609,10 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
     }
   }, [activeTab, loadPlan, planContent, session.planAvailable, session.phase]);
 
-
   useEffect(() => {
-    if (status === "running") {
-      logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [liveLog, status]);
+    if ((!savedLog && liveLog.length === 0) || !stickToBottomRef.current) return;
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [savedLog, liveLog]);
 
   async function refreshSession() {
     const updated = await getSession(session.id);
@@ -817,7 +819,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
             className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 hover:underline"
           >
             PR: {session.prUrl.split("/").slice(-2).join(" #")}
-            <span className="text-xs">↗</span>
+            <span className="text-xs">-&gt;</span>
           </button>
         )}
 
@@ -1080,7 +1082,7 @@ function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdate
             />
 
             {activeTab === "log" && (
-              <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} logLoading={logLoading} status={status} logContent={logContent} logEndRef={logEndRef} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
+              <WorkflowLogPanel panelLogId={panelLogId} tabLogId={tabLogId} status={status} logContent={logContent} logEndRef={logEndRef} preRef={preRef} onScroll={handleLogScroll} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
             )}
           </div>
         </div>
@@ -1561,7 +1563,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
 
   useEffect(() => {
     if (status === "running") {
-      logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [liveLog, status]);
 

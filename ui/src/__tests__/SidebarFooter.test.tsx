@@ -156,8 +156,9 @@ describe("SessionSidebar footer - update check", () => {
     await act(() => vi.advanceTimersByTimeAsync(2000));
     expect(vi.mocked(checkForUpdate)).toHaveBeenCalledTimes(1);
 
-    // When:  24 hours elapse
-    await act(() => vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000));
+    // When:  24 hours elapse (synchronous advance to avoid firing 28,800 three-second interval
+    // callbacks via advanceTimersByTimeAsync, which causes test timeout)
+    act(() => { vi.advanceTimersByTime(24 * 60 * 60 * 1000); });
 
     // Then:  checkForUpdate is called again
     expect(vi.mocked(checkForUpdate)).toHaveBeenCalledTimes(2);
