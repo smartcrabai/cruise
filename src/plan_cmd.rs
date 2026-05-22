@@ -48,6 +48,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut session = create_planning_session(&manager, &source, &yaml, input.trim().to_string())?;
+    setup_planning_worktree(&manager, &mut session)?;
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
@@ -59,7 +60,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         &mut vars,
         &plan_path,
         args.rate_limit_retries,
-        Some(session.base_dir.as_path()),
+        Some(plan_working_dir(&session)),
     )
     .await
     {
@@ -68,6 +69,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             style("✗").red().bold(),
             session.id
         );
+        cleanup_planning_worktree(&session);
         if let Err(del_err) = manager.delete(&session.id) {
             eprintln!("warning: failed to clean up session: {del_err}");
         }
@@ -97,7 +99,8 @@ pub fn launch_background_plan(plan_input: &str) -> Result<()> {
 
     let input = read_background_plan_input(plan_input)?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let session = create_planning_session(&manager, &source, &yaml, input)?;
+    let mut session = create_planning_session(&manager, &source, &yaml, input)?;
+    setup_planning_worktree(&manager, &mut session)?;
 
     spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
 
@@ -214,6 +217,59 @@ async fn approve_with_title(
     manager.save(session)
 }
 
+/// Return the directory where plan-related LLM calls should run.
+///
+/// If a planning worktree was created the LLM executes inside it, keeping the
+/// original working copy clean.  Falls back to `base_dir` for non-git repos.
+fn plan_working_dir(session: &SessionState) -> &Path {
+    session
+        .worktree_path
+        .as_deref()
+        .unwrap_or(session.base_dir.as_path())
+}
+
+/// Create a planning worktree for `session` and record its path/branch.
+///
+/// On success the session is saved with `worktree_path` and `worktree_branch`
+/// set.  If `base_dir` is not a git repository the call succeeds silently and
+/// the session keeps `worktree_path = None` (plan runs in `base_dir`).
+fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState) -> Result<()> {
+    let worktrees_dir = manager.worktrees_dir();
+    match crate::worktree::setup_session_worktree(
+        &session.base_dir,
+        &session.id,
+        &session.input,
+        &worktrees_dir,
+        session.worktree_branch.as_deref(),
+    ) {
+        Ok((ctx, _reused)) => {
+            eprintln!(
+                "{} worktree: {} (planning)",
+                style("->").cyan(),
+                ctx.path.display()
+            );
+            session.worktree_path = Some(ctx.path.clone());
+            session.worktree_branch = Some(ctx.branch.clone());
+            manager.save(session)?;
+        }
+        Err(CruiseError::NotGitRepository) => {
+            eprintln!("warning: not a git repository; planning in base directory");
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
+/// Clean up the planning worktree if one was created.  Failures are logged as
+/// warnings and do not propagate — cleanup is best-effort.
+fn cleanup_planning_worktree(session: &SessionState) {
+    if let Some(ctx) = session.worktree_context()
+        && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
+    {
+        eprintln!("warning: failed to clean up planning worktree: {e}");
+    }
+}
+
 fn create_planning_session(
     manager: &SessionManager,
     source: &ConfigSource,
@@ -265,7 +321,7 @@ async fn generate_plan_for_session(
         &mut vars,
         &plan_path,
         rate_limit_retries,
-        Some(session.base_dir.as_path()),
+        Some(plan_working_dir(session)),
     )
     .await
 }
@@ -452,7 +508,10 @@ async fn run_approve_loop(
     noninteractive: bool,
 ) -> Result<()> {
     let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
-    let working_dir = session.base_dir.clone();
+    let working_dir = session
+        .worktree_path
+        .clone()
+        .unwrap_or_else(|| session.base_dir.clone());
 
     // Read the plan once up front; re-read only after Fix modifies it.
     let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
@@ -463,6 +522,7 @@ async fn run_approve_loop(
                 style("x").red().bold(),
                 session.id
             );
+            cleanup_planning_worktree(session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
@@ -492,6 +552,7 @@ async fn run_approve_loop(
             Ok(s) => s,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 eprintln!("\nCancelled. Session {} discarded.", session.id);
+                cleanup_planning_worktree(session);
                 manager.delete(&session.id)?;
                 return Ok(());
             }
@@ -601,7 +662,10 @@ pub async fn replan_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
-    let working_dir = session.base_dir.clone();
+    let working_dir = session
+        .worktree_path
+        .clone()
+        .unwrap_or_else(|| session.base_dir.clone());
     run_fix_plan(
         &config,
         &mut vars,
@@ -710,6 +774,76 @@ fn prompt_for_plan_input() -> Result<String> {
 mod tests {
     use super::*;
     use crate::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
+    use crate::session::SessionManager;
+    use crate::test_support::{init_git_repo, lock_process, make_session};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_setup_planning_worktree_creates_worktree_and_sets_session_fields() {
+        let _lock = lock_process();
+        // Given: a valid git repo and a persisted session
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        let cruise_home = tmp.path().join(".cruise");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let manager = SessionManager::new(cruise_home);
+        let mut session = make_session("20260522080000", &repo);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the planning worktree is set up
+        setup_planning_worktree(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the session has a worktree path and branch recorded
+        assert!(
+            session.worktree_path.is_some(),
+            "worktree_path should be set after setup_planning_worktree"
+        );
+        let wt_path = session
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("worktree_path should be set"));
+        assert!(wt_path.exists(), "worktree directory should exist on disk");
+        assert!(
+            session.worktree_branch.is_some(),
+            "worktree_branch should be set after setup_planning_worktree"
+        );
+
+        // Cleanup
+        let ctx = session
+            .worktree_context()
+            .unwrap_or_else(|| panic!("expected worktree context"));
+        crate::worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn test_setup_planning_worktree_noop_for_non_git_repo() {
+        // Given: a directory that is NOT a git repository
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let non_git_dir = tmp.path().join("not-a-repo");
+        let cruise_home = tmp.path().join(".cruise");
+        fs::create_dir_all(&non_git_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(cruise_home);
+        let mut session = make_session("20260522080001", &non_git_dir);
+
+        // When: the planning worktree is set up for a non-git directory
+        let result = setup_planning_worktree(&manager, &mut session);
+
+        // Then: no error is returned and worktree fields remain unset (graceful fallback)
+        assert!(
+            result.is_ok(),
+            "setup_planning_worktree should not fail for non-git repo: {result:?}"
+        );
+        assert!(
+            session.worktree_path.is_none(),
+            "worktree_path should remain None for non-git repo"
+        );
+        assert!(
+            session.worktree_branch.is_none(),
+            "worktree_branch should remain None for non-git repo"
+        );
+    }
 
     #[test]
     fn test_resolve_input_from_arg() {
