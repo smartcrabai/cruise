@@ -32,6 +32,8 @@ pub enum Commands {
     Plan(PlanArgs),
     #[command(hide = true)]
     PlanWorker(PlanWorkerArgs),
+    /// Save a task description as a draft, without generating a plan.
+    Draft(DraftArgs),
     /// Execute a planned session.
     Run(RunArgs),
     /// List and manage sessions interactively.
@@ -60,6 +62,16 @@ pub struct PlanArgs {
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
+}
+
+#[derive(Parser, Debug)]
+pub struct DraftArgs {
+    /// Task description.
+    pub input: Option<String>,
+
+    /// Path to the workflow config file.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 }
 
 #[derive(Parser, Debug)]

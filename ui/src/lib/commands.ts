@@ -224,6 +224,19 @@ export function approveSession(sessionId: string): Promise<void> {
 }
 
 /**
+ * Generate the initial plan for a Draft session, streaming PlanEvents via `channel`.
+ * Transitions the session to `AwaitingApproval` on success.
+ *
+ * @returns The generated plan markdown.
+ */
+export function generatePlanForDraft(
+  sessionId: string,
+  channel: Channel<PlanEvent>
+): Promise<string> {
+  return invoke<string>("generate_plan_for_draft", { sessionId, channel });
+}
+
+/**
  * Ask a question about a session's plan without modifying it.
  *
  * @returns The LLM answer text (transient; not persisted to plan.md).

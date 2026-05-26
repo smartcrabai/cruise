@@ -33,6 +33,7 @@ pub fn run() {
             commands::reset_session,
             commands::update_session,
             commands::regenerate_session_plan,
+            commands::generate_plan_for_draft,
             commands::fix_session,
             commands::ask_session,
             commands::list_directory,

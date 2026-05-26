@@ -1,6 +1,7 @@
 // --- Session ------------------------------------------------------------------
 
 export type SessionPhase =
+  | "Draft"
   | "Awaiting Approval"
   | "Planned"
   | "Running"
