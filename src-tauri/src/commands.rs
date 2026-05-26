@@ -510,7 +510,7 @@ fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
                 .into_owned();
             let description = std::fs::read_to_string(&p)
                 .ok()
-                .and_then(|yaml| cruise::config::extract_one_line_description(&yaml));
+                .and_then(|yaml| cruise::yaml_metadata::extract_one_line_description(&yaml));
             ConfigEntryDto {
                 name,
                 path: p.to_string_lossy().into_owned(),
