@@ -256,25 +256,6 @@ impl WorkflowConfig {
     }
 }
 
-/// Extract the `description` field from a YAML string and normalize it to a single line.
-///
-/// Returns `None` if the field is absent or the YAML cannot be parsed.
-#[must_use]
-pub fn extract_one_line_description(yaml: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct DescriptionOnly {
-        description: Option<String>,
-    }
-    let parsed: DescriptionOnly = serde_yaml::from_str(yaml).ok()?;
-    let desc = parsed.description?;
-    let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized)
-    }
-}
-
 /// Validate that `fail-if-no-file-changes` is not used in `after-pr` steps.
 ///
 /// `after-pr` steps are executed in a warning-only context: any error is
@@ -2254,64 +2235,5 @@ steps:
             config.description,
             Some("team-shared: parallel implement + auto-PR".to_string())
         );
-    }
-
-    // ---- extract_one_line_description ----
-
-    #[test]
-    fn test_extract_one_line_description_returns_description() {
-        // Given: a YAML with a description
-        let yaml = r"
-command: [claude, -p]
-description: 'team-shared workflow'
-steps:
-  s1:
-    command: echo hi
-";
-        // When: extracting description
-        let desc = extract_one_line_description(yaml);
-
-        // Then: the description value is returned
-        assert_eq!(desc, Some("team-shared workflow".to_string()));
-    }
-
-    #[test]
-    fn test_extract_one_line_description_returns_none_when_absent() {
-        // Given: a YAML without description
-        let yaml = r"
-command: [claude, -p]
-steps:
-  s1:
-    command: echo hi
-";
-        // When: extracting description
-        let desc = extract_one_line_description(yaml);
-
-        // Then: None is returned
-        assert_eq!(desc, None);
-    }
-
-    #[test]
-    fn test_extract_one_line_description_normalizes_multiline() {
-        // Given: a YAML with a YAML block-literal multiline description
-        let yaml = "command: [claude, -p]\ndescription: |\n  line one\n  line two\nsteps:\n  s1:\n    command: echo hi\n";
-
-        // When: extracting description
-        let desc = extract_one_line_description(yaml);
-
-        // Then: newlines are collapsed into spaces (single-line output)
-        assert_eq!(desc, Some("line one line two".to_string()));
-    }
-
-    #[test]
-    fn test_extract_one_line_description_returns_none_for_invalid_yaml() {
-        // Given: malformed YAML
-        let yaml = "not: valid: yaml: [unclosed";
-
-        // When: extracting description
-        let desc = extract_one_line_description(yaml);
-
-        // Then: returns None without panicking (graceful degradation)
-        assert_eq!(desc, None);
     }
 }

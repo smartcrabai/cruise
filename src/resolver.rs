@@ -214,8 +214,7 @@ fn resolve_config_in_dir_with_interactive(
         || matches!(
             candidates.first().map(|c| &c.source),
             Some(CandidateKind::EnvVar(_))
-        )
-    {
+        ) {
         // Non-interactive, or CRUISE_CONFIG is set: take the highest-priority candidate.
         candidates.into_iter().next().ok_or_else(|| {
             CruiseError::Other("internal error: candidate list was empty".to_string())
@@ -233,7 +232,11 @@ fn resolve_config_in_dir_with_interactive(
                 source: CandidateKind::Builtin,
             }
         } else if real.len() == 1 {
-            real.into_iter().next().unwrap()
+            real.into_iter().next().ok_or_else(|| {
+                CruiseError::Other(
+                    "internal error: filtered candidate list became empty".to_string(),
+                )
+            })?
         } else {
             prompt_select_among_candidates(real)?
         }
@@ -1110,5 +1113,4 @@ mod tests {
     }
 
     // ---- builtin roundtrip ----
-
 }

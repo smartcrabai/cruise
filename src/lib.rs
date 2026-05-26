@@ -23,6 +23,7 @@ pub mod workflow;
 pub mod workspace;
 pub mod worktree;
 pub mod worktree_pr;
+pub mod yaml_metadata;
 
 // Display utilities (available to library consumers) and CLI input handling (crate-internal only).
 pub mod display;
