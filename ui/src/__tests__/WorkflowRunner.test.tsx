@@ -39,7 +39,6 @@ vi.mock("../lib/commands", () => ({
   getSessionLog: vi.fn().mockResolvedValue(""),
   getSessionPlan: vi.fn().mockResolvedValue(""),
   listConfigs: vi.fn().mockResolvedValue([]),
-  listNewSessionHistory: vi.fn().mockResolvedValue([]),
   listSessions: vi.fn().mockResolvedValue([]),
   resetSession: vi.fn(),
   respondToOption: vi.fn(),

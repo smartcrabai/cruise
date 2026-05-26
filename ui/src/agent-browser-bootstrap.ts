@@ -204,13 +204,6 @@ mockIPC((cmd, payload?: unknown) => {
       return null;
     case "clear_new_session_draft":
       return null;
-    case "list_new_session_history": {
-      let limit = Number(getField(payload, "limit") ?? 10);
-      if (!Number.isFinite(limit) || limit < 0) {
-        limit = 10;
-      }
-      return historyEntries.slice(0, limit);
-    }
     case "list_directory": {
       const path = String(getField(payload, "path") ?? "");
       if (path.includes("/Users/takumi/projects")) {

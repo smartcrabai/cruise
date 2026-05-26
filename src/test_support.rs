@@ -179,6 +179,7 @@ pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
         EnvGuard::remove("XDG_CONFIG_HOME"),
         EnvGuard::remove("XDG_DATA_HOME"),
         EnvGuard::remove("XDG_STATE_HOME"),
+        EnvGuard::remove("CRUISE_CONFIG"),
     ]
 }
 
@@ -191,5 +192,6 @@ pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
         EnvGuard::remove("XDG_CONFIG_HOME"),
         EnvGuard::remove("XDG_DATA_HOME"),
         EnvGuard::remove("XDG_STATE_HOME"),
+        EnvGuard::remove("CRUISE_CONFIG"),
     ]
 }

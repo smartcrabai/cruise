@@ -3,7 +3,6 @@ import { render, screen, waitFor, cleanup, act, fireEvent } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
-import type { NewSessionHistoryItem } from "../types";
 import * as commands from "../lib/commands";
 import * as desktopNotifications from "../lib/desktopNotifications";
 
@@ -43,7 +42,6 @@ vi.mock("../lib/commands", () => ({
   getNewSessionDraft: vi.fn().mockResolvedValue(null),
   saveNewSessionDraft: vi.fn().mockResolvedValue(undefined),
   clearNewSessionDraft: vi.fn().mockResolvedValue(undefined),
-  listNewSessionHistory: vi.fn().mockResolvedValue([]),
   listDirectory: vi.fn(),
   getUpdateReadiness: vi.fn(),
   cleanSessions: vi.fn(),
@@ -82,7 +80,6 @@ function setupNewSessionMocks() {
   vi.mocked(commands.getNewSessionDraft).mockResolvedValue(null);
   vi.mocked(commands.saveNewSessionDraft).mockResolvedValue(undefined);
   vi.mocked(commands.clearNewSessionDraft).mockResolvedValue(undefined);
-  vi.mocked(commands.listNewSessionHistory).mockResolvedValue([]);
   vi.mocked(commands.listDirectory).mockResolvedValue([]);
   vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
   vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
@@ -427,104 +424,40 @@ describe("App: New Session draft save on value changes", () => {
   });
 });
 
-describe("App: New Session history list", () => {
+describe("App: New Session -- Recent Sessions section is absent", () => {
   beforeEach(setupNewSessionMocks);
 
   afterEach(() => {
     cleanup();
   });
 
-  it("shows recent session history entries when available", async () => {
-    const historyEntries: NewSessionHistoryItem[] = [
-      {
-        selectedAt: "2026-04-07T00:00:00Z",
-        input: "fix login bug",
-        requestedConfigPath: "/tmp/team.yaml",
-        workingDir: "/repos/app",
-        resolvedConfigKey: "/tmp/team.yaml",
-        skippedSteps: ["build"],
-      },
-      {
-        selectedAt: "2026-04-06T00:00:00Z",
-        input: "add dark mode",
-        workingDir: "/repos/app",
-        resolvedConfigKey: "__builtin__",
-        skippedSteps: [],
-      },
-    ];
-    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
-
+  it("does not render 'Recent Sessions' heading", async () => {
+    // When: user opens the New Session form
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Recent Sessions")).toBeInTheDocument();
-    });
-    expect(screen.getByText("fix login bug")).toBeInTheDocument();
-    expect(screen.getByText("add dark mode")).toBeInTheDocument();
-    expect(screen.getAllByText("/repos/app", { exact: false }).length).toBeGreaterThan(0);
-  });
-
-  it("does not show Recent Sessions section when history is empty", async () => {
-    vi.mocked(commands.listNewSessionHistory).mockResolvedValue([]);
-
-    render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-
     await act(async () => { await new Promise<void>((r) => setTimeout(r, 50)); });
+
+    // Then: "Recent Sessions" label is never rendered
     expect(screen.queryByText("Recent Sessions")).not.toBeInTheDocument();
   });
 
-  it("restores form fields when a history entry is clicked", async () => {
-    vi.mocked(commands.listConfigs).mockResolvedValue([
-      { path: "/tmp/team.yaml", name: "team.yaml" },
-    ]);
-    const historyEntries: NewSessionHistoryItem[] = [
-      {
-        selectedAt: "2026-04-07T00:00:00Z",
-        input: "fix login bug",
-        requestedConfigPath: "/tmp/team.yaml",
-        workingDir: "/repos/app",
-        resolvedConfigKey: "/tmp/team.yaml",
-        skippedSteps: ["build"],
-      },
-    ];
-    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
+  it("still shows Working Directory quick-select chips (recentWorkingDirs preserved)", async () => {
+    // Given: history summary provides recent working dirs (separate from Recent Sessions)
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      recentWorkingDirs: ["/repos/alpha", "/repos/beta"],
+    });
 
+    // When: user opens the New Session form
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
 
-    await waitFor(() => screen.getByText("Recent Sessions"));
-    const entryButton = screen.getByText("fix login bug").closest("button")!;
-    await userEvent.click(entryButton);
-
-    // Then: all form fields are restored
-    expect(
-      screen.getByPlaceholderText("Describe what you want to implement...")
-    ).toHaveValue("fix login bug");
-    expect(screen.getByLabelText("Config")).toHaveValue("/tmp/team.yaml");
-    expect(
-      screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
-    ).toHaveValue("/repos/app");
-  });
-
-  it("shows (empty) for history entries with no task input", async () => {
-    const historyEntries: NewSessionHistoryItem[] = [
-      {
-        selectedAt: "2026-04-07T00:00:00Z",
-        input: "",
-        workingDir: "/repos/app",
-        resolvedConfigKey: "__builtin__",
-        skippedSteps: [],
-      },
-    ];
-    vi.mocked(commands.listNewSessionHistory).mockResolvedValue(historyEntries);
-
-    render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
-
-    await waitFor(() => screen.getByText("Recent Sessions"));
-    expect(screen.getByText("(empty)")).toBeInTheDocument();
+    // Then: Working Directory chips are still rendered (not affected by this deletion)
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "/repos/alpha" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "/repos/beta" })).toBeInTheDocument();
+    // And: "Recent Sessions" is still not shown
+    expect(screen.queryByText("Recent Sessions")).not.toBeInTheDocument();
   });
 });
 
