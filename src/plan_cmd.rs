@@ -13,7 +13,9 @@ use crate::cli::{
 use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::new_session_history::{NewSessionHistory, resolved_config_key_for_session};
+use crate::new_session_history::{
+    BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
+};
 use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
@@ -468,10 +470,10 @@ fn select_skipped_steps_with_history(
         return Ok(vec![]);
     }
 
-    let config_path = session.config_path.as_deref().ok_or_else(|| {
-        CruiseError::Other("config_path must be set for new sessions".to_string())
-    })?;
-    let key = resolved_config_key_for_session(config_path);
+    let key = match session.config_path.as_deref() {
+        Some(p) => resolved_config_key_for_session(p),
+        None => BUILTIN_CONFIG_KEY.to_string(),
+    };
     let mut history = NewSessionHistory::load_best_effort();
 
     let previously_skipped = history
