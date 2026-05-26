@@ -60,9 +60,9 @@ const defaultProps = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockListConfigs.mockResolvedValue([]);
-  mockGetDefaults.mockResolvedValue({ steps: [] });
+  mockGetDefaults.mockResolvedValue({ steps: [], defaultSkippedSteps: [] });
   mockUpdateSettings.mockResolvedValue(makeSession());
-  mockRegenerate.mockResolvedValue(undefined);
+  mockRegenerate.mockResolvedValue("");
 });
 
 afterEach(() => cleanup());
@@ -83,7 +83,7 @@ describe("SessionConfigEditor", () => {
     it("'Save' button is shown when skip steps are changed", async () => {
       // Given
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps });
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
       render(<SessionConfigEditor {...defaultProps} />);
       await waitFor(() => screen.getByLabelText("step-a"));
 
@@ -115,7 +115,7 @@ describe("SessionConfigEditor", () => {
       // Given: re-render with disabled=true after changing skip steps,
       // to simulate state where there are changes but disabled=true
       const steps = [makeStep("step-a")];
-      mockGetDefaults.mockResolvedValue({ steps });
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
       const { rerender } = render(
         <SessionConfigEditor {...defaultProps} skippedSteps={["step-a"]} />
       );
@@ -136,7 +136,7 @@ describe("SessionConfigEditor", () => {
     it("updateSessionSettings is called with correct args when Save button is clicked", async () => {
       // Given: skip step-a, then uncheck and save
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps });
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -162,7 +162,7 @@ describe("SessionConfigEditor", () => {
     it("onSessionUpdated is called after save", async () => {
       // Given
       const steps = [makeStep("step-a")];
-      mockGetDefaults.mockResolvedValue({ steps });
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
       const updatedSession = makeSession({ id: "session-1", phase: "Planned" });
       mockUpdateSettings.mockResolvedValue(updatedSession);
       const onSessionUpdated = vi.fn();
@@ -191,7 +191,8 @@ describe("SessionConfigEditor", () => {
       mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
       const onError = vi.fn();
       mockRegenerate.mockImplementation(async (_sessionId, channel) => {
-        channel.onmessage({ event: "planFailed", data: { error: "plan generation failed" } });
+        channel.onmessage({ event: "planFailed", data: { sessionId: "session-1", error: "plan generation failed" } });
+        return "";
       });
       render(<SessionConfigEditor {...defaultProps} onError={onError} />);
       await waitFor(() => screen.getByLabelText("Config"));
@@ -216,7 +217,7 @@ describe("SessionConfigEditor", () => {
       const child2 = makeStep("parent/child2");
       const parent = makeStep("parent", [child1, child2]);
       parent.expandedStepIds = ["parent/child1", "parent/child2"];
-      mockGetDefaults.mockResolvedValue({ steps: [parent] });
+      mockGetDefaults.mockResolvedValue({ steps: [parent], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -239,7 +240,7 @@ describe("SessionConfigEditor", () => {
       const child2 = makeStep("parent/child2");
       const parent = makeStep("parent", [child1, child2]);
       parent.expandedStepIds = ["parent/child1", "parent/child2"];
-      mockGetDefaults.mockResolvedValue({ steps: [parent] });
+      mockGetDefaults.mockResolvedValue({ steps: [parent], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
