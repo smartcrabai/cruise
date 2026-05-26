@@ -47,7 +47,7 @@ pub(crate) fn setup_exec_session(
     let base_dir = std::env::current_dir()?;
     let mut session =
         SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = Some(source.path().clone());
+    session.config_path = source.path().cloned();
     session.workspace_mode = WorkspaceMode::CurrentBranch;
     session.phase = SessionPhase::Planned;
     manager.create(&session)?;

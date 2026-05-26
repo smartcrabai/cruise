@@ -214,6 +214,46 @@ impl WorkflowConfig {
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
     }
+
+    /// Build the built-in default workflow config in code (no YAML file required).
+    #[must_use]
+    pub fn default_builtin() -> Self {
+        let mut steps = IndexMap::new();
+
+        steps.insert(
+            "write-tests".to_string(),
+            StepConfig {
+                prompt: Some(include_str!("../prompts/write-test-first.md").to_string()),
+                ..Default::default()
+            },
+        );
+
+        steps.insert(
+            "implement".to_string(),
+            StepConfig {
+                prompt: Some(include_str!("../prompts/implement-after-tests.md").to_string()),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            command: vec![
+                "claude".to_string(),
+                "--model".to_string(),
+                "{model}".to_string(),
+                "-p".to_string(),
+            ],
+            model: Some("sonnet".to_string()),
+            plan_model: Some("opus".to_string()),
+            pr_language: default_pr_language(),
+            env: HashMap::new(),
+            groups: HashMap::new(),
+            steps,
+            after_pr: IndexMap::new(),
+            llm: None,
+            description: None,
+        }
+    }
 }
 
 /// Extract the `description` field from a YAML string and normalize it to a single line.
