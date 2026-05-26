@@ -6,7 +6,6 @@ import type {
   DirEntry,
   NewSessionConfigDefaults,
   NewSessionDraftPersisted,
-  NewSessionHistoryItem,
   NewSessionHistorySummary,
   PlanEvent,
   Session,
@@ -189,15 +188,6 @@ export function saveNewSessionDraft(draft: NewSessionDraftPersisted): Promise<vo
 /** Delete the New Session form draft. */
 export function clearNewSessionDraft(): Promise<void> {
   return invoke<void>("clear_new_session_draft");
-}
-
-/** Return recent New Session history entries, most-recent-first. */
-export function listNewSessionHistory(
-  limit?: number
-): Promise<NewSessionHistoryItem[]> {
-  return invoke<NewSessionHistoryItem[]>("list_new_session_history", {
-    limit: limit ?? null,
-  });
 }
 
 /**

@@ -20,6 +20,8 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
+const BUILTIN_CONFIG_KEY: &str = "__builtin__";
+
 // --- DTOs ---------------------------------------------------------------------
 
 /// Serializable representation of a session, sent to the frontend.
@@ -478,18 +480,6 @@ pub struct NewSessionDraftDto {
     pub updated_at: Option<String>,
 }
 
-/// A history entry returned for the Recent Sessions list.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewSessionHistoryItemDto {
-    pub selected_at: String,
-    pub input: String,
-    pub requested_config_path: Option<String>,
-    pub working_dir: String,
-    pub resolved_config_key: String,
-    pub skipped_steps: Vec<String>,
-}
-
 /// Enumerate `*.yaml` / `*.yml` files in `dir`, parse each for `description`, and return
 /// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
 fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
@@ -570,7 +560,7 @@ pub async fn create_session(
         requested_config_path: config_path,
         working_dir: base.to_string_lossy().into_owned(),
         resolved_config_key: source.path().map_or_else(
-            || "__builtin__".to_string(),
+            || BUILTIN_CONFIG_KEY.to_string(),
             |p| resolved_config_key_for_session(p),
         ),
         skipped_steps: session.skipped_steps.clone(),
@@ -688,7 +678,7 @@ pub fn get_new_session_config_defaults(
     let steps = cruise::workflow::list_skippable_steps(&config)
         .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
     let resolved_config_key = source.path().map_or_else(
-        || "__builtin__".to_string(),
+        || BUILTIN_CONFIG_KEY.to_string(),
         |p| resolved_config_key_for_session(p),
     );
     let history = NewSessionHistory::load_best_effort();
@@ -746,7 +736,7 @@ pub fn update_session_settings(
     }
 
     let resolved_config_key = source.path().map_or_else(
-        || "__builtin__".to_string(),
+        || BUILTIN_CONFIG_KEY.to_string(),
         |p| resolved_config_key_for_session(p),
     );
     let mut history = NewSessionHistory::load_best_effort();
@@ -1590,38 +1580,12 @@ pub fn clear_new_session_draft() -> std::result::Result<(), String> {
     NewSessionDraft::clear().map_err(|e| format!("failed to clear new session draft: {e}"))
 }
 
-/// Return recent New Session history entries (most-recent-first).
-///
-/// `limit` defaults to 10 and is capped at 50.
-#[tauri::command]
-pub fn list_new_session_history(
-    limit: Option<usize>,
-) -> std::result::Result<Vec<NewSessionHistoryItemDto>, String> {
-    let limit = limit.unwrap_or(10).min(NewSessionHistory::MAX_ENTRIES);
-    let history = NewSessionHistory::load_best_effort();
-    let entries: Vec<NewSessionHistoryItemDto> = history
-        .entries
-        .iter()
-        .take(limit)
-        .map(|e| NewSessionHistoryItemDto {
-            selected_at: e.selected_at.clone(),
-            input: e.input.clone(),
-            requested_config_path: e.requested_config_path.clone(),
-            working_dir: e.working_dir.clone(),
-            resolved_config_key: e.resolved_config_key.clone(),
-            skipped_steps: e.skipped_steps.clone(),
-        })
-        .collect();
-    Ok(entries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cruise::new_session_history::{
-        BUILTIN_CONFIG_KEY, NewSessionHistory, NewSessionHistoryEntry,
-    };
+    use cruise::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
     use cruise::test_support::{init_git_repo, make_session};
+
     use std::fs;
     use std::path::Path;
     use std::sync::Mutex;
@@ -1807,7 +1771,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
-        fs::write(repo.join("dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(repo.join("README.md"), "modified").unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let session_id = "20260321121002";
         let session = make_session(session_id, &repo);
@@ -2758,79 +2722,6 @@ mod tests {
         assert!(draft.is_none(), "draft should be cleared");
     }
 
-    #[test]
-    fn test_list_new_session_history_returns_most_recent_first_with_input() {
-        let _lock = cruise::test_support::lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
-
-        let mut history = NewSessionHistory::default();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: String::new(),
-            input: "first task".to_string(),
-            requested_config_path: None,
-            working_dir: "/tmp/project".to_string(),
-            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
-            skipped_steps: vec![],
-        });
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: String::new(),
-            input: "second task".to_string(),
-            requested_config_path: None,
-            working_dir: "/tmp/project".to_string(),
-            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
-            skipped_steps: vec!["review".to_string()],
-        });
-        history
-            .save()
-            .unwrap_or_else(|e| panic!("save failed: {e}"));
-
-        let entries =
-            list_new_session_history(Some(10)).unwrap_or_else(|e| panic!("list failed: {e}"));
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].input, "second task");
-        assert_eq!(entries[0].skipped_steps, vec!["review"]);
-        assert_eq!(entries[1].input, "first task");
-    }
-
-    #[test]
-    fn test_list_new_session_history_respects_limit() {
-        let _lock = cruise::test_support::lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
-
-        let mut history = NewSessionHistory::default();
-        for i in 0..5 {
-            history.record_selection(NewSessionHistoryEntry {
-                selected_at: String::new(),
-                input: format!("task {i}"),
-                requested_config_path: None,
-                working_dir: "/tmp/project".to_string(),
-                resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
-                skipped_steps: vec![],
-            });
-        }
-        history
-            .save()
-            .unwrap_or_else(|e| panic!("save failed: {e}"));
-
-        let entries =
-            list_new_session_history(Some(3)).unwrap_or_else(|e| panic!("list failed: {e}"));
-
-        assert_eq!(entries.len(), 3);
-    }
-
-    #[test]
-    fn test_list_new_session_history_returns_empty_for_empty_history() {
-        let _lock = cruise::test_support::lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
-
-        let entries = list_new_session_history(None).unwrap_or_else(|e| panic!("list failed: {e}"));
-        assert!(entries.is_empty());
-    }
-
     // ---- read_configs_in ----
 
     #[test]
@@ -2839,7 +2730,7 @@ mod tests {
         let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             dir.path().join("team.yaml"),
-            "command: [claude, -p]\ndescription: チーム共通\nsteps:\n  s1:\n    command: echo\n",
+            "command: [claude, -p]\ndescription: team-shared\nsteps:\n  s1:\n    command: echo\n",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -2849,7 +2740,7 @@ mod tests {
         // Then: description field is populated
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "team.yaml");
-        assert_eq!(configs[0].description, Some("チーム共通".to_string()));
+        assert_eq!(configs[0].description, Some("team-shared".to_string()));
     }
 
     #[test]

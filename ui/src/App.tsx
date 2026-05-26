@@ -5,7 +5,6 @@ import type {
   AppConfig,
   ChoiceDto,
   ConfigEntry,
-  NewSessionHistoryItem,
   PlanEvent,
   Session,
   SessionPhase,
@@ -30,7 +29,6 @@ import {
   getSessionLog,
   getSessionPlan,
   listConfigs,
-  listNewSessionHistory,
   resetSession,
   respondToOption,
   runAllSessions,
@@ -1160,7 +1158,6 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
-  const [recentHistory, setRecentHistory] = useState<NewSessionHistoryItem[]>([]);
   const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, isGenerating, error } = draft;
@@ -1189,16 +1186,6 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         setRecentWorkingDirs([]);
       }
       return null;
-    } finally {
-      if (isMountedRef.current) {
-        void listNewSessionHistory()
-          .then((history) => {
-            if (isMountedRef.current) {
-              setRecentHistory(history);
-            }
-          })
-          .catch(() => {});
-      }
     }
   }, []);
 
@@ -1238,16 +1225,6 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     }, 500);
     return () => clearTimeout(timer);
   }, [draft.input, draft.configPath, draft.baseDir, skippedSteps, isGenerating]);
-
-  function applyHistoryEntry(entry: NewSessionHistoryItem) {
-    onDraftChange((prev) => ({
-      ...prev,
-      input: entry.input,
-      configPath: entry.requestedConfigPath ?? "",
-      baseDir: entry.workingDir,
-    }));
-    setSkippedSteps(new Set(entry.skippedSteps));
-  }
 
   function isParentChecked(node: SkippableStepDto): boolean {
     return node.expandedStepIds.every((id) => skippedSteps.has(id));
@@ -1456,30 +1433,6 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             </div>
           )}
         </div>
-
-        {/* Recent Sessions */}
-        {recentHistory.length > 0 && (
-          <div className="space-y-1.5">
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Recent Sessions</span>
-            <ul className="space-y-1">
-              {recentHistory.map((entry) => (
-                <li key={entry.selectedAt}>
-                  <button
-                    type="button"
-                    onClick={() => applyHistoryEntry(entry)}
-                    disabled={isGenerating}
-                    className="w-full text-left px-3 py-2 rounded border border-gray-700 bg-gray-900 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="truncate text-sm text-gray-200">{entry.input || "(empty)"}</div>
-                    <div className="text-xs text-gray-500 truncate">
-                      {entry.workingDir}{entry.requestedConfigPath ? ` - ${entry.requestedConfigPath}` : " - auto"}
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
 
         {/* Task input */}
         <div className="space-y-1.5">

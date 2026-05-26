@@ -44,7 +44,6 @@ pub fn run() {
             commands::get_new_session_draft,
             commands::save_new_session_draft,
             commands::clear_new_session_draft,
-            commands::list_new_session_history,
             commands::get_app_config,
             commands::update_app_config,
         ])
