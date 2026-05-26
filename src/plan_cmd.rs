@@ -1022,7 +1022,7 @@ mod tests {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
             input: String::new(),
             requested_config_path: Some("/config/a.yaml".to_string()),
-            working_dir: "/tmp/project".to_string(),
+            working_dir: "/Users/test/project".to_string(),
             resolved_config_key: "/config/a.yaml".to_string(),
             skipped_steps: vec!["plan".to_string()],
         });
@@ -1040,7 +1040,7 @@ mod tests {
             history.entries[0].requested_config_path.as_deref(),
             Some("/config/a.yaml")
         );
-        assert_eq!(history.entries[0].working_dir, "/tmp/project");
+        assert_eq!(history.entries[0].working_dir, "/Users/test/project");
         assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
     }
 }
