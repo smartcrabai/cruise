@@ -187,12 +187,3 @@ export interface NewSessionDraftPersisted {
   skippedSteps: string[];
   updatedAt?: string;
 }
-
-export interface NewSessionHistoryItem {
-  selectedAt: string;
-  input: string;
-  requestedConfigPath?: string;
-  workingDir: string;
-  resolvedConfigKey: string;
-  skippedSteps: string[];
-}

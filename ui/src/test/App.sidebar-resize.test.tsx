@@ -52,7 +52,6 @@ vi.mock("../lib/commands", () => ({
   getNewSessionDraft: vi.fn().mockResolvedValue(null),
   saveNewSessionDraft: vi.fn().mockResolvedValue(undefined),
   clearNewSessionDraft: vi.fn().mockResolvedValue(undefined),
-  listNewSessionHistory: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../lib/updater", () => ({
