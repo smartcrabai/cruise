@@ -21,8 +21,6 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
-const BUILTIN_CONFIG_KEY: &str = "__builtin__";
-
 // --- DTOs ---------------------------------------------------------------------
 
 /// Serializable representation of a session, sent to the frontend.
