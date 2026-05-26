@@ -35,8 +35,6 @@ pub struct NewSessionHistoryEntry {
     pub skipped_steps: Vec<String>,
 }
 
-/// The resolved-config key used when a session was created with the built-in default config.
-pub const BUILTIN_CONFIG_KEY: &str = "__builtin__";
 
 /// Persistent ring-buffer of per-config skip-step selections.
 ///
@@ -232,22 +230,6 @@ pub fn resolved_config_key_for_session(config_path: &Path) -> String {
 /// so they never leak into the user-visible recent-working-dirs list.
 #[must_use]
 pub fn is_temp_working_dir(path: &str) -> bool {
-    if path.is_empty() {
-        return false;
-    }
-    // Primary: std::env::temp_dir() — picks up TMPDIR / TMP / TEMP at runtime.
-    if let Ok(temp) = std::env::temp_dir().canonicalize() {
-        if let Ok(p) = std::path::Path::new(path).canonicalize() {
-            if p.starts_with(&temp) {
-                return true;
-            }
-        }
-        // String-comparison fallback when canonicalize fails (e.g. path does not exist).
-        let temp_str = temp.to_string_lossy();
-        if path.starts_with(temp_str.as_ref()) {
-            return true;
-        }
-    }
     // Fallback: well-known temp prefixes (handles paths that do not exist on disk).
     const TEMP_PREFIXES: &[&str] = &[
         "/var/folders/",         // macOS user TMPDIR
@@ -255,6 +237,22 @@ pub fn is_temp_working_dir(path: &str) -> bool {
         "/tmp/",                 // POSIX
         "/private/tmp/",         // canonicalized macOS /tmp
     ];
+    if path.is_empty() {
+        return false;
+    }
+    // Primary: std::env::temp_dir() — picks up TMPDIR / TMP / TEMP at runtime.
+    if let Ok(temp) = std::env::temp_dir().canonicalize() {
+        if let Ok(p) = std::path::Path::new(path).canonicalize()
+            && p.starts_with(&temp)
+        {
+            return true;
+        }
+        // String-comparison fallback when canonicalize fails (e.g. path does not exist).
+        let temp_str = temp.to_string_lossy();
+        if path.starts_with(temp_str.as_ref()) {
+            return true;
+        }
+    }
     for prefix in TEMP_PREFIXES {
         if path.starts_with(prefix) {
             return true;
