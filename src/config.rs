@@ -214,46 +214,6 @@ impl WorkflowConfig {
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
     }
-
-    /// Build the built-in default workflow config in code (no YAML file required).
-    #[must_use]
-    pub fn default_builtin() -> Self {
-        let mut steps = IndexMap::new();
-
-        steps.insert(
-            "write-tests".to_string(),
-            StepConfig {
-                prompt: Some(include_str!("../prompts/write-test-first.md").to_string()),
-                ..Default::default()
-            },
-        );
-
-        steps.insert(
-            "implement".to_string(),
-            StepConfig {
-                prompt: Some(include_str!("../prompts/implement-after-tests.md").to_string()),
-                ..Default::default()
-            },
-        );
-
-        Self {
-            command: vec![
-                "claude".to_string(),
-                "--model".to_string(),
-                "{model}".to_string(),
-                "-p".to_string(),
-            ],
-            model: Some("sonnet".to_string()),
-            plan_model: Some("opus".to_string()),
-            pr_language: default_pr_language(),
-            env: HashMap::new(),
-            groups: HashMap::new(),
-            steps,
-            after_pr: IndexMap::new(),
-            llm: None,
-            description: None,
-        }
-    }
 }
 
 /// Extract the `description` field from a YAML string and normalize it to a single line.
@@ -912,47 +872,6 @@ steps:
         let yaml = "command: [echo]\nsteps: {}";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(config.steps.is_empty());
-    }
-
-    #[test]
-    fn test_default_builtin_config() {
-        let config = WorkflowConfig::default_builtin();
-        assert_eq!(config.command, vec!["claude", "--model", "{model}", "-p"]);
-        assert_eq!(config.model, Some("sonnet".to_string()));
-        assert_eq!(config.plan_model, Some("opus".to_string()));
-        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
-        assert_eq!(config.steps.len(), 2);
-
-        let write_test = config
-            .steps
-            .get("write-tests")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(
-            write_test
-                .prompt
-                .as_deref()
-                .unwrap_or_else(|| panic!("unexpected None"))
-                .contains("{plan}")
-        );
-
-        let implement = config
-            .steps
-            .get("implement")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(
-            implement
-                .prompt
-                .as_deref()
-                .unwrap_or_else(|| panic!("unexpected None"))
-                .contains("{plan}")
-        );
-    }
-
-    #[test]
-    fn test_default_builtin_serializes_pr_language() {
-        let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin())
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(yaml.contains("pr_language: English"));
     }
 
     #[test]
@@ -2294,30 +2213,6 @@ steps:
         assert_eq!(
             config.description,
             Some("team-shared: parallel implement + auto-PR".to_string())
-        );
-    }
-
-    #[test]
-    fn test_default_builtin_description_is_none() {
-        // When: built-in default is created
-        let config = WorkflowConfig::default_builtin();
-
-        // Then: description is None (built-ins carry no user-defined description)
-        assert_eq!(config.description, None);
-    }
-
-    #[test]
-    fn test_default_builtin_description_not_in_serialized_yaml() {
-        // Given: built-in default
-        let config = WorkflowConfig::default_builtin();
-
-        // When: serialized to YAML
-        let yaml = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: description key is absent (skip_serializing_if = "Option::is_none")
-        assert!(
-            !yaml.contains("description:"),
-            "description should not appear in serialized YAML when None: {yaml}"
         );
     }
 

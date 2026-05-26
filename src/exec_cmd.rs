@@ -47,7 +47,7 @@ pub(crate) fn setup_exec_session(
     let base_dir = std::env::current_dir()?;
     let mut session =
         SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = source.path().cloned();
+    session.config_path = Some(source.path().clone());
     session.workspace_mode = WorkspaceMode::CurrentBranch;
     session.phase = SessionPhase::Planned;
     manager.create(&session)?;
@@ -247,7 +247,9 @@ mod tests {
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let yaml = single_command_config("noop", "printf noop");
-        let source = crate::resolver::ConfigSource::Builtin;
+        let config_file = tmp.path().join("cruise.yaml");
+        fs::write(&config_file, &yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let source = crate::resolver::ConfigSource::Explicit(config_file);
 
         // When: setup_exec_session is called
         let session = setup_exec_session(&manager, &source, &yaml, "test task".to_string())
@@ -285,7 +287,9 @@ mod tests {
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let yaml = single_command_config("noop", "printf noop");
-        let source = crate::resolver::ConfigSource::Builtin;
+        let config_file = tmp.path().join("cruise.yaml");
+        fs::write(&config_file, &yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let source = crate::resolver::ConfigSource::Explicit(config_file);
 
         // When: setup_exec_session is called
         let session = setup_exec_session(&manager, &source, &yaml, "placeholder test".to_string())
@@ -301,41 +305,6 @@ mod tests {
         assert!(
             content.is_empty(),
             "placeholder plan.md should be empty, got: {content:?}"
-        );
-    }
-
-    #[test]
-    fn test_exec_writes_session_local_config_yaml_for_builtin() {
-        // Given: a temp home dir, builtin config source
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let process = ProcessStateGuard::new(tmp.path());
-        let repo = create_repo_with_origin(&tmp);
-        process.set_current_dir(&repo);
-
-        let manager =
-            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        let yaml = single_command_config("noop", "printf noop");
-        let source = crate::resolver::ConfigSource::Builtin;
-
-        // When: setup_exec_session is called with builtin (no file path)
-        let session =
-            setup_exec_session(&manager, &source, &yaml, "builtin config test".to_string())
-                .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: session.config_path is None (builtin) and config.yaml is written to session_dir
-        assert!(
-            session.config_path.is_none(),
-            "builtin config must leave config_path as None"
-        );
-        let session_config = manager.sessions_dir().join(&session.id).join("config.yaml");
-        assert!(
-            session_config.exists(),
-            "builtin config must be written to session_dir/config.yaml so load_config can find it"
-        );
-        let written = fs::read_to_string(&session_config).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            written.contains("noop"),
-            "session-local config.yaml should contain the provided yaml, got: {written}"
         );
     }
 
