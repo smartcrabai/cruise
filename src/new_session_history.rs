@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CruiseError, Result};
 use crate::session::current_iso8601;
 
+/// Sentinel key used when the session config comes from the built-in default
+/// rather than a user-supplied file.
+pub const BUILTIN_CONFIG_KEY: &str = "__builtin__";
+
 /// A single recorded New Session selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewSessionHistoryEntry {

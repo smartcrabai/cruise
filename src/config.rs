@@ -105,6 +105,10 @@ pub struct StepConfig {
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
 
+    /// Pre-execution condition: skip the step unless the workspace satisfies the rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<WhenCondition>,
+
     /// Conditional execution rule.
     #[serde(rename = "if")]
     pub if_condition: Option<IfCondition>,
@@ -184,6 +188,15 @@ pub struct IfCondition {
     /// Failure handler. Either a step name (jump) or `{ retry: true }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<FailAction>,
+}
+
+/// Pre-execution condition: skip the step unless the workspace satisfies the rule.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct WhenCondition {
+    /// Skip the step if no file matches the given glob (relative to the workflow working dir).
+    /// Variable references in the glob string are resolved via `VariableStore::resolve()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exists: Option<String>,
 }
 
 /// Group configuration for grouping related steps.
@@ -370,6 +383,41 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
     Ok(())
 }
 
+/// Validate `when` conditions across all steps.
+///
+/// # Errors
+///
+/// Returns an error if any `when.exists` glob is empty or syntactically invalid.
+pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let regular = config.steps.iter();
+    let after_pr = config.after_pr.iter();
+    let group_steps = config.groups.values().flat_map(|g| g.steps.iter());
+
+    for (name, step) in regular.chain(after_pr).chain(group_steps) {
+        if let Some(ref when) = step.when
+            && let Some(ref exists) = when.exists
+        {
+            if exists.is_empty() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' has empty when.exists glob"
+                )));
+            }
+            // Skip static validation for globs containing variable references.
+            if !exists.contains('{') {
+                glob::Pattern::new(exists).map_err(|e| {
+                    CruiseError::InvalidStepConfig(format!(
+                        "step '{name}' has invalid when.exists glob '{exists}': {e}"
+                    ))
+                })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Run all config validations (groups, fail-if-no-file-changes, if-conditions, timeouts).
 ///
 /// # Errors
@@ -380,6 +428,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_fail_if_no_file_changes(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
+    validate_when(config)?;
     Ok(())
 }
 
@@ -2234,6 +2283,112 @@ steps:
         assert_eq!(
             config.description,
             Some("team-shared: parallel implement + auto-PR".to_string())
+        );
+    }
+
+    #[test]
+    fn test_when_exists_parses() {
+        // Given: a step with when.exists
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  format-rust:
+    command: cargo fmt
+    when:
+      exists: "**/*.rs"
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: when.exists is Some with the correct pattern
+        let step = config
+            .steps
+            .get("format-rust")
+            .unwrap_or_else(|| panic!("step not found"));
+        let when = step.when.as_ref().unwrap_or_else(|| panic!("when is None"));
+        assert_eq!(when.exists, Some("**/*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_when_exists_defaults_none() {
+        // Given: a step without a when field
+        let yaml = r"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: when is None
+        let step = config
+            .steps
+            .get("build")
+            .unwrap_or_else(|| panic!("step not found"));
+        assert!(step.when.is_none(), "when should default to None");
+    }
+
+    #[test]
+    fn test_validate_when_empty_glob_rejects() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+    when:
+      exists: ""
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_when(&config);
+        assert!(result.is_err(), "empty when.exists glob should be rejected");
+    }
+
+    #[test]
+    fn test_validate_when_valid_glob_ok() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+    when:
+      exists: "**/*.rs"
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_when(&config);
+        assert!(result.is_ok(), "valid when.exists glob should be accepted");
+    }
+
+    #[test]
+    fn test_validate_when_invalid_glob_syntax_rejects() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+    when:
+      exists: "[invalid"
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_when(&config);
+        assert!(result.is_err(), "invalid glob syntax should be rejected");
+    }
+
+    #[test]
+    fn test_validate_when_glob_with_variable_skips_static_check() {
+        let yaml = r#"
+command: [claude, -p]
+steps:
+  build:
+    command: cargo build
+    when:
+      exists: "{input}/**/*.rs"
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_when(&config);
+        assert!(
+            result.is_ok(),
+            "glob with variable reference should skip static validation"
         );
     }
 }

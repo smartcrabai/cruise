@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use console::style;
 
 use crate::cancellation::CancellationToken;
-use crate::condition::should_skip;
+use crate::condition::{should_skip, should_skip_due_to_when};
 use crate::config::{FailAction, SkipCondition, WorkflowConfig};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -320,12 +320,21 @@ async fn step_loop_iteration(
         return Ok(outcome);
     }
 
-    if should_skip(step_config.skip.as_ref(), vars)?
-        || ctx.skipped_steps.iter().any(|s| s == current_step)
-    {
+    let static_skip = should_skip(step_config.skip.as_ref(), vars)?
+        || ctx.skipped_steps.iter().any(|s| s == current_step);
+    // Only evaluate glob I/O when the step is not already unconditionally skipped.
+    let when_skip =
+        !static_skip && should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+
+    if static_skip || when_skip {
         state.counters.skipped += 1;
+        let skip_label = if when_skip {
+            format!("{current_step} (no files match when.exists)")
+        } else {
+            current_step.to_string()
+        };
         // sakoku-ignore-next-line
-        eprintln!("{} skipping: {}", style("→").yellow(), current_step);
+        eprintln!("{} skipping: {}", style("→").yellow(), skip_label);
         // When the first substep of a group with file-changed is user-skipped,
         // the normal "before" snapshot is never taken (it happens in the
         // non-skip path below). Take it here so the group-level file-changed
@@ -990,6 +999,11 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
         }
         if step.if_condition.is_some() {
             print!(" {}", style("(conditional)").yellow());
+        }
+        if let Some(ref w) = step.when
+            && let Some(ref glob) = w.exists
+        {
+            print!(" {}", style(format!("(when exists: {glob})")).yellow());
         }
         if let Some(next) = &step.next {
             print!(" -> {}", style(next).green());
@@ -3103,5 +3117,114 @@ steps:
             result.is_err(),
             "prompt error with if.fail should eventually fail via loop protection, got: {err_detail}"
         );
+    }
+
+    // when.exists: file present → step runs
+    #[tokio::test]
+    async fn test_run_when_exists_matching_file_runs_step() {
+        // Given: a temp dir with a .rs file, and a step guarded by when.exists: "*.rs"
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: "echo ok"
+    when:
+      exists: "*.rs"
+"#;
+        // When: the workflow runs with tracker rooted at the temp dir
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: the step runs because the glob matches
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 1, "step with matching files should run");
+        assert_eq!(
+            result.skipped, 0,
+            "step with matching files should not be skipped"
+        );
+    }
+
+    // when.exists: no matching file → step skipped
+    #[tokio::test]
+    async fn test_run_when_exists_no_match_skips_step() {
+        // Given: an empty temp dir (no .rs files), and a step guarded by when.exists: "*.rs"
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: "exit 1"
+    when:
+      exists: "*.rs"
+  done:
+    command: "echo done"
+"#;
+        // When: the workflow runs
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: build is skipped (no .rs files); done runs
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(
+            result.skipped, 1,
+            "step without matching files should be skipped"
+        );
+        assert_eq!(result.run, 1, "done step should still run");
+    }
+
+    // skip: true takes priority over when.exists
+    #[tokio::test]
+    async fn test_run_skip_takes_priority_over_when_exists() {
+        // Given: a step with skip:true AND when.exists that would match
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  skipped:
+    command: "exit 1"
+    skip: true
+    when:
+      exists: "*.rs"
+  done:
+    command: "echo done"
+"#;
+        // When: the workflow runs
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: skip:true wins even though when.exists would match → step is skipped
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(
+            result.skipped, 1,
+            "skip:true should skip step even when when.exists matches"
+        );
+        assert_eq!(result.run, 1, "done step should run");
+    }
+
+    // when.exists with glob matching files in subdirectory
+    #[tokio::test]
+    async fn test_run_when_exists_recursive_glob_matches_nested_file() {
+        // Given: a .rs file in a subdirectory
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let subdir = dir.path().join("src");
+        std::fs::create_dir(&subdir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(subdir.join("lib.rs"), "pub fn foo() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: "echo ok"
+    when:
+      exists: "**/*.rs"
+"#;
+        // When: the workflow runs with tracker rooted at the temp dir
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: the step runs because **/*.rs matches src/lib.rs
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(
+            result.run, 1,
+            "recursive glob should match file in subdirectory"
+        );
+        assert_eq!(result.skipped, 0, "step should not be skipped");
     }
 }

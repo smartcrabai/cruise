@@ -5,7 +5,8 @@ use std::sync::Arc;
 use cruise::batch_run::run_all_with_dynamic_parallelism;
 use cruise::new_session_draft::NewSessionDraft;
 use cruise::new_session_history::{
-    NewSessionHistory, NewSessionHistoryEntry, expand_tilde, resolved_config_key_for_session,
+    BUILTIN_CONFIG_KEY, NewSessionHistory, NewSessionHistoryEntry, expand_tilde,
+    resolved_config_key_for_session,
 };
 use cruise::paths;
 use cruise::session::{
@@ -19,8 +20,6 @@ use serde::{Deserialize, Serialize};
 use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
-
-const BUILTIN_CONFIG_KEY: &str = "__builtin__";
 
 // --- DTOs ---------------------------------------------------------------------
 

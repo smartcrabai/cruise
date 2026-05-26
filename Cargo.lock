@@ -801,6 +801,7 @@ dependencies = [
  "anyhow",
  "clap",
  "console",
+ "glob",
  "home",
  "indexmap 2.14.0",
  "inquire",
