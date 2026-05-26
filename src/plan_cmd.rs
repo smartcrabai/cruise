@@ -15,7 +15,7 @@ use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{NewSessionHistory, resolved_config_key_for_session};
 use crate::resolver::ConfigSource;
-use crate::session::{PLAN_VAR, SessionManager, SessionState};
+use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
@@ -768,6 +768,53 @@ where
 /// Prompt interactively for the initial plan input.
 fn prompt_for_plan_input() -> Result<String> {
     prompt_multiline("What would you like to implement?")?.into_result()
+}
+
+/// Drive plan generation for a session currently in `Draft` phase.
+///
+/// On success the session transitions to `AwaitingApproval`.
+pub async fn generate_plan_for_draft_session(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    rate_limit_retries: usize,
+) -> Result<()> {
+    if !matches!(session.phase, SessionPhase::Draft) {
+        return Err(CruiseError::Other(format!(
+            "expected Draft phase, got {}",
+            session.phase.label()
+        )));
+    }
+    let config = manager.load_config(session)?;
+    setup_planning_worktree(manager, session)?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = VariableStore::new(session.input.clone());
+    vars.set_named_file(PLAN_VAR, plan_path.clone());
+
+    generate_plan_markdown(
+        &config,
+        &mut vars,
+        &plan_path,
+        rate_limit_retries,
+        Some(plan_working_dir(session)),
+    )
+    .await
+    .inspect_err(|e| {
+        session.plan_error = Some(e.to_string());
+        cleanup_planning_worktree(session);
+        session.worktree_path = None;
+        session.worktree_branch = None;
+        if let Err(save_err) = manager.save(session) {
+            eprintln!("warning: failed to persist plan error state: {save_err}");
+        }
+    })?;
+
+    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+
+    session.phase = SessionPhase::AwaitingApproval;
+    session.plan_error = None;
+    manager.save(session)?;
+    Ok(())
 }
 
 #[cfg(test)]

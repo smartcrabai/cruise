@@ -6,6 +6,7 @@ mod condition;
 mod config;
 mod config_cmd;
 mod display;
+mod draft_cmd;
 mod engine;
 mod error;
 mod file_tracker;
@@ -52,6 +53,7 @@ async fn run() -> error::Result<()> {
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
         Some(cli::Commands::Plan(args)) => plan_cmd::run(args).await,
+        Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),

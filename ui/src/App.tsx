@@ -21,6 +21,7 @@ import {
   createSession,
   deleteSession,
   fixSession,
+  generatePlanForDraft,
   getAppConfig,
   getNewSessionConfigDefaults,
   getNewSessionDraft,
@@ -756,6 +757,49 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     }
   }
 
+  async function handleGeneratePlan() {
+    setReplanPhase("generating");
+    setPlanProgress([]);
+    onFixingChange(session.id, true);
+
+    let handledFailure = false;
+    const channel = new Channel<PlanEvent>();
+    channel.onmessage = async (event) => {
+      if (event.event === "planGenerating") {
+        void refreshSession();
+      } else if (event.event === "planChunk") {
+        setPlanProgress((prev) => [...prev, event.data.line]);
+      } else if (event.event === "planGenerated") {
+        setPlanContent(event.data.content);
+        setReplanPhase("idle");
+        setPlanProgress([]);
+        onFixingChange(session.id, false);
+        // Await the session refresh so that session.phase is AwaitingApproval
+        // before switching to the plan tab; otherwise the Approve button is
+        // momentarily absent because the phase is still Draft.
+        await refreshSession();
+        onActiveTabChange("plan");
+      } else if (event.event === "planFailed") {
+        handledFailure = true;
+        setReplanPhase("idle");
+        setPlanProgress([]);
+        onFixingChange(session.id, false);
+        onToast({ kind: "failed", sessionInput: session.input, detail: event.data.error });
+        void refreshSession();
+      }
+    };
+
+    try {
+      await generatePlanForDraft(session.id, channel);
+    } catch (e) {
+      if (!handledFailure) {
+        setReplanPhase("idle");
+        onFixingChange(session.id, false);
+        onToast({ kind: "failed", sessionInput: session.input, detail: `Plan generation error: ${String(e)}` });
+      }
+    }
+  }
+
   async function handleAsk() {
     const trimmed = askQuestion.trim();
     if (!trimmed) return;
@@ -827,6 +871,15 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
 
         {/* Controls */}
         <div className="flex gap-2">
+          {actions.showGeneratePlan && (
+            <button
+              type="button"
+              onClick={() => void handleGeneratePlan()}
+              className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+            >
+              Generate Plan
+            </button>
+          )}
           {actions.showApprove && (
             <button
               type="button"
@@ -967,7 +1020,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-sm text-gray-400">
               <Spinner />
-              Regenerating plan...
+              {session.phase === "Draft" ? "Generating plan..." : "Regenerating plan..."}
             </div>
             {planProgress.length > 0 && (
               <pre className="text-xs text-gray-500 max-h-48 overflow-auto bg-gray-900 rounded p-2">
@@ -1415,7 +1468,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         {/* Skip steps */}
         {configSteps.length > 0 && (
           <div className="space-y-1.5">
-            <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
+            <span className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</span>
             <div className="space-y-1">
               {configSteps.map((node) => renderStepNode(node, false))}
             </div>
@@ -1452,7 +1505,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         {/* Recent Sessions */}
         {recentHistory.length > 0 && (
           <div className="space-y-1.5">
-            <label className="text-xs text-gray-500 uppercase tracking-wide">Recent Sessions</label>
+            <span className="text-xs text-gray-500 uppercase tracking-wide">Recent Sessions</span>
             <ul className="space-y-1">
               {recentHistory.map((entry) => (
                 <li key={entry.selectedAt}>

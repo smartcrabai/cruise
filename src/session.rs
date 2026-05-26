@@ -11,6 +11,8 @@ pub const PLAN_VAR: &str = "plan";
 /// Phase of a session's lifecycle.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum SessionPhase {
+    /// User saved the prompt as a draft; planning has not yet been started.
+    Draft,
     /// Plan has been generated but not yet approved by the user.
     AwaitingApproval,
     Planned,
@@ -25,6 +27,7 @@ impl SessionPhase {
     #[must_use]
     pub fn label(&self) -> &str {
         match self {
+            Self::Draft => "Draft",
             Self::AwaitingApproval => "Awaiting Approval",
             Self::Planned => "Planned",
             Self::Running => "Running",
@@ -2702,5 +2705,156 @@ mod tests {
         assert!(matches!(s.phase, SessionPhase::Planned));
         assert!(s.runner_pid.is_none());
         assert!(s.runner_started_at.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionPhase::Draft -- basic properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draft_phase_label() {
+        // Given: Draft phase
+        let phase = SessionPhase::Draft;
+
+        // When
+        let label = phase.label();
+
+        // Then: returns "Draft"
+        assert_eq!(label, "Draft");
+    }
+
+    #[test]
+    fn test_draft_is_not_runnable() {
+        // Given: Draft phase
+        let phase = SessionPhase::Draft;
+
+        // When / Then: Draft is not runnable — planning has not been started
+        assert!(
+            !phase.is_runnable(),
+            "Draft should NOT be runnable (no plan exists yet)"
+        );
+    }
+
+    #[test]
+    fn test_draft_serialize_deserialize_roundtrip() {
+        // Given: save a session with Draft phase
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260523100000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "my draft task".to_string(),
+        );
+        state.phase = SessionPhase::Draft;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reloading from disk
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the phase is correctly restored as Draft
+        assert!(
+            matches!(loaded.phase, SessionPhase::Draft),
+            "loaded phase should be Draft after roundtrip, got {:?}",
+            loaded.phase
+        );
+        assert_eq!(loaded.input, "my draft task");
+    }
+
+    #[test]
+    fn test_pending_excludes_draft() {
+        // Given: sessions in Draft, Planned, and Completed phases
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        let mut draft = SessionState::new(
+            "20260523110000".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "draft-task".to_string(),
+        );
+        draft.phase = SessionPhase::Draft;
+        manager.create(&draft).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut planned = SessionState::new(
+            "20260523110001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "planned-task".to_string(),
+        );
+        planned.phase = SessionPhase::Planned;
+        manager.create(&planned).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut completed = SessionState::new(
+            "20260523110002".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "completed-task".to_string(),
+        );
+        completed.phase = SessionPhase::Completed;
+        manager
+            .create(&completed)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: calling pending()
+        let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: Draft is not in pending; Planned is
+        let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"20260523110000"),
+            "Draft should NOT be in pending: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"20260523110001"),
+            "Planned should be in pending: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"20260523110002"),
+            "Completed should NOT be in pending: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_all_candidates_excludes_draft() {
+        // Given: sessions in Draft, Planned, and Suspended phases
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+
+        for (id, phase) in [
+            ("20260523120000", SessionPhase::Draft),
+            ("20260523120001", SessionPhase::Planned),
+            ("20260523120002", SessionPhase::Suspended),
+        ] {
+            let mut s = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            s.phase = phase;
+            manager.create(&s).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: calling run_all_candidates()
+        let candidates = manager
+            .run_all_candidates()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: Draft is excluded; Planned and Suspended are included
+        let ids: Vec<&str> = candidates.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"20260523120000"),
+            "Draft should NOT be a run_all candidate: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"20260523120001"),
+            "Planned should be a run_all candidate: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"20260523120002"),
+            "Suspended should be a run_all candidate: {ids:?}"
+        );
     }
 }

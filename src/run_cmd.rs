@@ -668,7 +668,10 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                     truncated
                 )
             }
-            SessionPhase::AwaitingApproval | SessionPhase::Planned | SessionPhase::Running => {
+            SessionPhase::Draft
+            | SessionPhase::AwaitingApproval
+            | SessionPhase::Planned
+            | SessionPhase::Running => {
                 format!("[{}] ? {}", i + 1, truncated)
             }
         };
