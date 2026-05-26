@@ -56,8 +56,14 @@ cruise --plan "implement the feature"
 # Background planning from stdin
 echo "implement the feature" | cruise --plan stdin
 
+# Save the task as a draft (no plan yet); generate the plan later from `cruise list`
+cruise draft "implement the feature"
+
 # Execute the approved session
 cruise run
+
+# Execute a config directly in the current directory (no plan, no worktree, no PR)
+cruise exec "do this"
 
 # List and manage sessions interactively
 cruise list
@@ -76,7 +82,9 @@ cruise [OPTIONS] [INPUT] [COMMAND]
 
 Commands:
   plan         Create an implementation plan for a task
+  draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
+  exec         Execute the workflow config directly in the current directory
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   config       Show or update application-level configuration
@@ -99,6 +107,22 @@ Options:
       --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
 ```
 
+`cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning. Non-git directories fall back to running in place with a warning.
+
+#### `cruise draft`
+
+```
+cruise draft [OPTIONS] [INPUT]
+
+Arguments:
+  [INPUT]  Task description (omit to prompt interactively; reads from stdin when piped)
+
+Options:
+  -c, --config <PATH>              Path to the workflow config file
+```
+
+Saves the input as a `Draft` session without invoking the LLM. The plan can be generated later by choosing **Generate Plan** from `cruise list`. Useful when you have an idea you want to capture immediately but don't want to start (or pay for) planning yet.
+
 #### `cruise run`
 
 ```
@@ -115,6 +139,23 @@ Options:
 ```
 
 `--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+
+#### `cruise exec`
+
+```
+cruise exec [OPTIONS] [INPUT]
+
+Arguments:
+  [INPUT]  Task description bound to {input} (optional if your config doesn't reference {input})
+
+Options:
+  -c, --config <PATH>              Path to the workflow config file
+      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
+      --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
+      --dry-run                    Print the workflow flow without executing it
+```
+
+Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. The session is still recorded so progress is visible in `cruise list`. Use this when you want to drive a config against the active branch -- the same constraints as the Current-branch workspace mode apply (clean working tree, attached branch).
 
 #### `cruise --plan`
 
@@ -152,16 +193,19 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 ### Session Lifecycle
 
-1. **`cruise plan "task"`** -- Runs the built-in plan step to generate an implementation plan, then presents an approve-plan menu.
+1. **`cruise plan "task"`** -- Runs the built-in plan step in an isolated planning worktree to generate an implementation plan, then presents an approve-plan menu.
 2. **`cruise --plan "task"`** -- Creates the session immediately and generates the plan in the background. Review it later from `cruise list`.
-3. **Approve-plan menu** -- Choose one of:
+3. **`cruise draft "task"`** -- Records the task as a `Draft` session without running the plan step. Use **Generate Plan** from `cruise list` to start planning when you're ready.
+4. **Approve-plan menu** -- Choose one of:
    - **Approve** -- Mark the session as ready to run.
    - **Fix** -- Provide feedback; the plan step reruns with your input.
    - **Ask** -- Ask a question; the answer is shown before the menu reappears.
    - **Execute now** -- Skip approval and run immediately.
-4. **`cruise run`** -- Picks up the approved session, creates a git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
+5. **`cruise run`** -- Picks up the approved session, reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
+
+> **`cruise exec`** is a separate path that skips this lifecycle entirely: it executes the workflow in the current directory without planning, worktree creation, or PR creation. See [`cruise exec`](#cruise-exec).
 
 ### `cruise list` Actions
 
@@ -169,6 +213,7 @@ The interactive session list shows a menu of actions depending on the session's 
 
 | Phase | Available Actions |
 |-------|-------------------|
+| **Draft** | Generate Plan, Delete, Back |
 | **AwaitingApproval** | Approve, Delete, Back |
 | **Planned** | Run, Replan, Delete, Back |
 | **Running** | Resume, Reset to Planned, Delete, Back |
@@ -180,6 +225,7 @@ The interactive session list shows a menu of actions depending on the session's 
 
 `cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` appears only after a non-empty `plan.md` is available.
 
+- **Generate Plan** -- Start planning for a `Draft` session (transitions it through the normal planning flow).
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Run / Resume** -- Execute (or continue) the session.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
@@ -190,13 +236,18 @@ The interactive session list shows a menu of actions depending on the session's 
 
 ## Config File Resolution
 
-When `-c` is not specified, cruise searches for a config in this order:
+cruise resolves the workflow config as follows:
 
-1. `-c/--config` flag -- the specified file must exist or cruise exits with an error.
-2. `CRUISE_CONFIG` environment variable -- error if file does not exist.
-3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` -- in the current directory.
-4. `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`) -- auto-selected if exactly one file exists, or prompted if multiple.
-5. Built-in default -- a 2-step test-first workflow (`write-tests` -> `implement`); no config file required.
+1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown.
+2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
+3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
+   - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
+   - `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`), sorted by filename
+
+   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. With a single candidate the choice is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+4. **No candidate found** -- cruise falls back to a built-in 2-step workflow (`write-tests` -> `implement`); no config file is required, but you'll usually want one.
+
+The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart.
 
 ## Config File Reference
 
@@ -208,6 +259,9 @@ command:
   - --model
   - "{model}"
   - -p
+
+description: |             # one-line summary shown next to the filename in selectors (optional)
+  Team-shared review-heavy flow with auto-PR.
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
@@ -327,6 +381,7 @@ steps:
     prompt: |                     # prompt body (required)
       Create an implementation plan for:
       {input}
+    timeout: 10m                  # per-step timeout (optional; see Step Timeout)
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
@@ -337,6 +392,7 @@ steps:
 steps:
   run_tests:
     command: cargo test           # single command (required)
+    timeout: 5m                   # per-step timeout (optional; see Step Timeout)
     env:                          # environment variables for this step (optional)
       RUST_LOG: debug
 
@@ -346,6 +402,23 @@ steps:
       - cargo clippy -- -D warnings
       - cargo test
 ```
+
+#### Step Timeout
+
+Any step may set `timeout:` to abort the step if it runs too long. Accepted formats:
+
+| Suffix | Meaning | Example |
+|--------|---------|---------|
+| (none) | Seconds | `timeout: "30"` |
+| `m` | Minutes | `timeout: 5m` |
+| `h` | Hours | `timeout: 1h` |
+
+When a timeout fires:
+
+- **Command steps**: the child process is killed and the step is treated as a failure (non-zero exit). `{prev.success}` is `false` and the workflow follows the normal failure path (see `if.fail` below).
+- **Prompt steps**: the LLM call is aborted and the step is treated as a failure.
+
+Invalid timeout strings are rejected at config validation time. Timeouts are also honoured for steps defined inside groups and `after-pr`.
 
 #### Option Step (interactive selection)
 
@@ -467,6 +540,39 @@ steps:
 - Can be combined with `if: file-changed` on the same step, but when both are present, `no-file-changes` takes priority for change detection.
 
 The legacy `fail-if-no-file-changes: true` syntax is still supported and is equivalent to `if: { no-file-changes: { fail: true } }`.
+
+#### Failure handling (`if.fail`)
+
+`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: fail` trigger.
+
+Two forms are accepted:
+
+- **`fail: <step-name>`** -- Jump to the named step.
+- **`fail: { retry: true }`** -- Re-execute the current step.
+
+```yaml
+steps:
+  flaky_test:
+    command: cargo test --flaky
+    timeout: 2m
+    if:
+      fail:
+        retry: true        # retry on non-zero exit, timeout, or other failure
+
+  deploy:
+    command: ./deploy.sh
+    if:
+      fail: rollback       # jump to the `rollback` step on failure
+
+  rollback:
+    command: ./rollback.sh
+```
+
+`if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`), so a misconfigured retry loop will not run forever.
+
+**Constraints:**
+- `if.fail` is rejected at the group level and in `after-pr` steps.
+- Can be combined with other `if:` keys (`file-changed`, `no-file-changes`) on the same step.
 
 ### Step Groups
 
