@@ -47,7 +47,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     validate_config(&config)?;
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let mut session = create_planning_session(&manager, &source, &yaml, input.trim().to_string())?;
+    let mut session = create_planning_session(&manager, &source, input.trim().to_string())?;
     setup_planning_worktree(&manager, &mut session)?;
 
     // Set up variables with the session plan path.
@@ -99,7 +99,7 @@ pub fn launch_background_plan(plan_input: &str) -> Result<()> {
 
     let input = read_background_plan_input(plan_input)?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let mut session = create_planning_session(&manager, &source, &yaml, input)?;
+    let mut session = create_planning_session(&manager, &source, input)?;
     setup_planning_worktree(&manager, &mut session)?;
 
     spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
@@ -273,20 +273,14 @@ fn cleanup_planning_worktree(session: &SessionState) {
 fn create_planning_session(
     manager: &SessionManager,
     source: &ConfigSource,
-    yaml: &str,
     input: String,
 ) -> Result<SessionState> {
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
     let mut session =
         SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = source.path().cloned();
+    session.config_path = Some(source.path().clone());
     manager.create(&session)?;
-
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(&session_id);
-        std::fs::write(session_dir.join("config.yaml"), yaml)?;
-    }
 
     Ok(session)
 }
@@ -474,7 +468,10 @@ fn select_skipped_steps_with_history(
         return Ok(vec![]);
     }
 
-    let key = resolved_config_key_for_session(session.config_path.as_ref());
+    let config_path = session.config_path.as_deref().ok_or_else(|| {
+        CruiseError::Other("config_path must be set for new sessions".to_string())
+    })?;
+    let key = resolved_config_key_for_session(config_path);
     let mut history = NewSessionHistory::load_best_effort();
 
     let previously_skipped = history
