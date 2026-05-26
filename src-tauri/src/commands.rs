@@ -1583,8 +1583,6 @@ pub fn clear_new_session_draft() -> std::result::Result<(), String> {
     NewSessionDraft::clear().map_err(|e| format!("failed to clear new session draft: {e}"))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

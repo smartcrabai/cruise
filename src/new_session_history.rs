@@ -35,7 +35,6 @@ pub struct NewSessionHistoryEntry {
     pub skipped_steps: Vec<String>,
 }
 
-
 /// Persistent ring-buffer of per-config skip-step selections.
 ///
 /// Stored at `~/.local/state/cruise/history.json`. Missing file is treated as empty history.
