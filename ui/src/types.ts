@@ -136,6 +136,7 @@ export interface DirEntry {
 export interface ConfigEntry {
   path: string;
   name: string;
+  description?: string;
 }
 
 export interface NewSessionHistorySummary {
