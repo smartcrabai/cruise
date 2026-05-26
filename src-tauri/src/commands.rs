@@ -510,7 +510,7 @@ fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
                 .into_owned();
             let description = std::fs::read_to_string(&p)
                 .ok()
-                .and_then(|yaml| cruise::config::extract_one_line_description(&yaml));
+                .and_then(|yaml| cruise::yaml_metadata::extract_one_line_description(&yaml));
             ConfigEntryDto {
                 name,
                 path: p.to_string_lossy().into_owned(),
@@ -569,7 +569,10 @@ pub async fn create_session(
         input: session.input.clone(),
         requested_config_path: config_path,
         working_dir: base.to_string_lossy().into_owned(),
-        resolved_config_key: resolved_config_key_for_session(source.path()),
+        resolved_config_key: source.path().map_or_else(
+            || "__builtin__".to_string(),
+            |p| resolved_config_key_for_session(p),
+        ),
         skipped_steps: session.skipped_steps.clone(),
     });
     history.save_best_effort();
@@ -684,7 +687,10 @@ pub fn get_new_session_config_defaults(
         .map_err(|e| format!("Failed to validate config: {e}"))?;
     let steps = cruise::workflow::list_skippable_steps(&config)
         .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
-    let resolved_config_key = resolved_config_key_for_session(source.path());
+    let resolved_config_key = source.path().map_or_else(
+        || "__builtin__".to_string(),
+        |p| resolved_config_key_for_session(p),
+    );
     let history = NewSessionHistory::load_best_effort();
     let default_skipped_steps = history
         .latest_entry_for_config(&resolved_config_key)
@@ -739,7 +745,10 @@ pub fn update_session_settings(
             .map_err(|e| format!("failed to write session config: {e}"))?;
     }
 
-    let resolved_config_key = resolved_config_key_for_session(source.path());
+    let resolved_config_key = source.path().map_or_else(
+        || "__builtin__".to_string(),
+        |p| resolved_config_key_for_session(p),
+    );
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
