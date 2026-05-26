@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 
 /// Indicates where the resolved config came from.
@@ -14,28 +13,20 @@ pub enum ConfigSource {
     Local(PathBuf),
     /// Selected from `~/.config/cruise/`.
     UserDir(PathBuf),
-    /// No file found; using built-in default.
-    Builtin,
 }
 
 impl ConfigSource {
     #[must_use]
     pub fn display_string(&self) -> String {
-        match self {
-            Self::Builtin => "config: (builtin default)".to_string(),
-            Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => {
-                format!("config: {}", p.display())
-            }
-        }
+        let (Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p)) = self;
+        format!("config: {}", p.display())
     }
 
-    /// Returns the path to the config file, or `None` for the built-in default.
+    /// Returns the path to the config file.
     #[must_use]
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => Some(p),
-            Self::Builtin => None,
-        }
+    pub fn path(&self) -> &PathBuf {
+        let (Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p)) = self;
+        p
     }
 }
 
@@ -45,12 +36,12 @@ impl ConfigSource {
 /// 1. `explicit` (`-c` flag) -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
-/// 4. `~/.cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
-/// 5. Built-in default.
+/// 4. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
 ///
 /// # Errors
 ///
-/// Returns an error if an explicitly specified config file is not found or cannot be read.
+/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
+/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
     let cwd = std::env::current_dir()
         .map_err(|e| CruiseError::Other(format!("failed to get current directory: {e}")))?;
@@ -65,12 +56,12 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// 1. `explicit` -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
-/// 4. `~/.cruise/*.yaml` / `*.yml`.
-/// 5. Built-in default.
+/// 4. `~/.config/cruise/*.yaml` / `*.yml`.
 ///
 /// # Errors
 ///
-/// Returns an error if an explicitly specified config file is not found or cannot be read.
+/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
+/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
 pub fn resolve_config_in_dir(
     explicit: Option<&str>,
     cwd: &std::path::Path,
@@ -132,10 +123,12 @@ pub fn resolve_config_in_dir(
         }
     }
 
-    // 5. Built-in default.
-    let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin())
-        .map_err(|e| CruiseError::Other(format!("failed to serialize built-in config: {e}")))?;
-    Ok((yaml, ConfigSource::Builtin))
+    // No config found — require the user to specify one explicitly.
+    Err(CruiseError::ConfigNotFound(
+        "no config found: checked cruise.yaml/.yml in the given directory and ~/.config/cruise/. \
+         Specify one with -c or CRUISE_CONFIG."
+            .to_string(),
+    ))
 }
 
 /// Convert a path to absolute by joining with the current working directory.
@@ -254,26 +247,6 @@ mod tests {
     fn test_resolve_explicit_missing() {
         let result = resolve_config(Some("/nonexistent/path/cruise.yaml"));
         assert!(result.is_err());
-    }
-
-    // ---- builtin fallback ----
-
-    #[test]
-    fn test_resolve_builtin_fallback() {
-        // Run in a temp dir that has no cruise.yaml and no HOME/.cruise.
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Point HOME to an empty dir; also clear XDG_CONFIG_HOME to avoid host config interference.
-        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
-        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
-
-        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(yaml.contains("steps"));
-        assert!(matches!(source, ConfigSource::Builtin));
     }
 
     // ---- local cruise.yaml ----
@@ -531,16 +504,16 @@ mod tests {
 
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
         // When: resolved against a different directory (not the process cwd)
-        let (_yaml, source) =
-            resolve_config_in_dir(None, other_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = resolve_config_in_dir(None, other_dir.path());
 
-        // Then: the process cwd's cruise.yaml is NOT picked up; falls back to builtin
+        // Then: the process cwd's cruise.yaml is NOT picked up; returns error (no builtin fallback)
         assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin (process cwd should be ignored), got: {source:?}"
+            result.is_err(),
+            "expected Err (process cwd must not be used), got Ok"
         );
     }
 
@@ -656,42 +629,108 @@ mod tests {
         );
     }
 
+    // ---- no config available → error (builtin removed) ----
+
     #[test]
-    fn test_resolve_in_dir_falls_back_to_builtin() {
-        // Given: repo dir has no local config and home has no ~/.cruise files
+    fn test_no_config_returns_config_not_found_error() {
+        // Given: no config file exists anywhere (no explicit, no env var, no local file, no user dir)
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _dir_guard = DirGuard::new();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolve_config is called with no explicit path
+        let result = resolve_config(None);
+
+        // Then: returns a ConfigNotFound error (no built-in fallback)
+        let Err(err) = result else {
+            panic!("expected Err when no config is available, got Ok");
+        };
+        assert!(
+            matches!(err, CruiseError::ConfigNotFound(_)),
+            "expected ConfigNotFound error"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_dir_no_config_returns_error() {
+        // Given: an empty directory with no cruise.yaml and no user-dir config
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
         let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        // When: resolved with nothing available
-        let (_yaml, source) =
-            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        // When: resolve_config_in_dir is called with an empty directory
+        let result = resolve_config_in_dir(None, repo_dir.path());
 
-        // Then: falls back to built-in default
+        // Then: returns a ConfigNotFound error (no built-in fallback)
+        let Err(err) = result else {
+            panic!("expected Err when no config found in dir, got Ok");
+        };
         assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin, got: {source:?}"
+            matches!(err, CruiseError::ConfigNotFound(_)),
+            "expected ConfigNotFound error"
         );
     }
 
-    // ---- builtin roundtrip ----
+    #[test]
+    fn test_no_config_error_contains_usage_hint() {
+        // Given: no config anywhere
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolve_config fails
+        let Err(err) = resolve_config(None) else {
+            panic!("expected resolve_config to return Err when no config is available");
+        };
+        let err_str = err.to_string();
+
+        // Then: error message guides the user toward -c or CRUISE_CONFIG
+        assert!(
+            err_str.contains("-c") || err_str.contains("CRUISE_CONFIG"),
+            "error message should suggest -c or CRUISE_CONFIG, got: {err_str}"
+        );
+    }
 
     #[test]
-    fn test_builtin_yaml_roundtrip() {
-        use crate::config::WorkflowConfig;
-        let original = WorkflowConfig::default_builtin();
-        let yaml = serde_yaml::to_string(&original).unwrap_or_else(|e| panic!("{e:?}"));
-        let parsed = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(parsed.steps.len(), original.steps.len());
-        assert_eq!(parsed.model, original.model);
-        assert_eq!(parsed.plan_model, original.plan_model);
-        assert_eq!(parsed.pr_language, original.pr_language);
-        assert_eq!(parsed.command, original.command);
-        for key in original.steps.keys() {
-            assert!(parsed.steps.contains_key(key), "missing step: {key}");
-        }
+    fn test_resolve_in_dir_does_not_fall_back_to_builtin_when_empty() {
+        // Given: process cwd has cruise.yaml, but resolve_config_in_dir targets a different empty dir
+        let process_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            process_dir.path().join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    command: echo",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let other_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _dir_guard = DirGuard::new();
+        std::env::set_current_dir(process_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
+        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved against the empty other directory
+        let result = resolve_config_in_dir(None, other_dir.path());
+
+        // Then: returns Err (no builtin fallback; process cwd config must not leak)
+        assert!(
+            result.is_err(),
+            "expected Err (no builtin fallback, process cwd should not be used), got Ok"
+        );
     }
 }

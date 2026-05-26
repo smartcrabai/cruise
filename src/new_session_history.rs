@@ -8,9 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CruiseError, Result};
 use crate::session::current_iso8601;
 
-/// Sentinel value used when the built-in default config is in effect.
-pub const BUILTIN_CONFIG_KEY: &str = "__builtin__";
-
 /// A single recorded New Session selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewSessionHistoryEntry {
@@ -31,7 +28,7 @@ pub struct NewSessionHistoryEntry {
     /// The effective config key after resolution.
     ///
     /// For file-based configs this is the absolute path string.
-    /// For the built-in default this is [`BUILTIN_CONFIG_KEY`].
+    /// For the built-in default this is [`"__builtin__"`].
     pub resolved_config_key: String,
     /// Step names the user explicitly chose to skip.
     #[serde(default)]
@@ -217,14 +214,10 @@ impl NewSessionHistory {
 
 /// Return the resolved config key for a session.
 ///
-/// File-based configs use their absolute path string; the built-in default
-/// uses [`BUILTIN_CONFIG_KEY`].
+/// Returns the absolute path string of the config file.
 #[must_use]
-pub fn resolved_config_key_for_session(config_path: Option<&PathBuf>) -> String {
-    config_path.map_or_else(
-        || BUILTIN_CONFIG_KEY.to_string(),
-        |path| path.to_string_lossy().into_owned(),
-    )
+pub fn resolved_config_key_for_session(config_path: &Path) -> String {
+    config_path.to_string_lossy().into_owned()
 }
 
 /// Normalize a working-directory string for history storage and deduplication.
@@ -419,10 +412,10 @@ mod tests {
     #[test]
     fn test_latest_entry_for_config_builtin_and_path_do_not_collide() {
         let mut history = NewSessionHistory::default();
-        history.record_selection(make_entry(BUILTIN_CONFIG_KEY, vec!["builtin_step"]));
+        history.record_selection(make_entry("__builtin__", vec!["builtin_step"]));
         history.record_selection(make_entry("/config/a.yaml", vec!["file_step"]));
         let builtin = history
-            .latest_entry_for_config(BUILTIN_CONFIG_KEY)
+            .latest_entry_for_config("__builtin__")
             .unwrap_or_else(|| panic!("expected Some for builtin, got None"));
         let file_based = history
             .latest_entry_for_config("/config/a.yaml")
@@ -437,14 +430,14 @@ mod tests {
         let path = tmp.path().join("history.json");
         let mut history = NewSessionHistory::default();
         history.record_selection(make_entry("/config/a.yaml", vec!["step1"]));
-        history.record_selection(make_entry(BUILTIN_CONFIG_KEY, vec!["step2", "step3"]));
+        history.record_selection(make_entry("__builtin__", vec!["step2", "step3"]));
         history
             .save_to(&path)
             .unwrap_or_else(|e| panic!("save failed: {e}"));
         let loaded =
             NewSessionHistory::load_from(&path).unwrap_or_else(|e| panic!("load failed: {e}"));
         assert_eq!(loaded.entries.len(), 2);
-        assert_eq!(loaded.entries[0].resolved_config_key, BUILTIN_CONFIG_KEY);
+        assert_eq!(loaded.entries[0].resolved_config_key, "__builtin__");
         assert_eq!(loaded.entries[0].skipped_steps, vec!["step2", "step3"]);
         assert_eq!(loaded.entries[1].resolved_config_key, "/config/a.yaml");
     }
@@ -503,7 +496,7 @@ mod tests {
             input: String::new(),
             requested_config_path: Some(String::new()),
             working_dir: "/tmp/project/".to_string(),
-            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            resolved_config_key: "__builtin__".to_string(),
             skipped_steps: vec![],
         });
         let entry = history
@@ -555,17 +548,13 @@ mod tests {
     fn test_builtin_and_path_config_keys_coexist_within_cap() {
         let mut history = NewSessionHistory::default();
         for _ in 0..25 {
-            history.record_selection(make_entry(BUILTIN_CONFIG_KEY, vec![]));
+            history.record_selection(make_entry("__builtin__", vec![]));
         }
         for _ in 0..25 {
             history.record_selection(make_entry("/config/custom.yaml", vec![]));
         }
         assert_eq!(history.entries.len(), NewSessionHistory::MAX_ENTRIES);
-        assert!(
-            history
-                .latest_entry_for_config(BUILTIN_CONFIG_KEY)
-                .is_some()
-        );
+        assert!(history.latest_entry_for_config("__builtin__").is_some());
         assert!(
             history
                 .latest_entry_for_config("/config/custom.yaml")
@@ -622,30 +611,88 @@ mod tests {
     }
 
     #[test]
-    fn test_resolved_config_key_for_session_uses_builtin_for_none() {
-        assert_eq!(resolved_config_key_for_session(None), BUILTIN_CONFIG_KEY);
-    }
-
-    #[test]
     fn test_resolved_config_key_for_session_returns_path_string() {
         let path = PathBuf::from("/tmp/cruise.yaml");
-        assert_eq!(
-            resolved_config_key_for_session(Some(&path)),
-            "/tmp/cruise.yaml"
-        );
+        assert_eq!(resolved_config_key_for_session(&path), "/tmp/cruise.yaml");
     }
 
     #[cfg(unix)]
     #[test]
     fn test_resolved_config_key_for_session_keeps_non_utf8_paths_distinct_from_builtin() {
         let path = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0x80]));
-        let key = resolved_config_key_for_session(Some(&path));
-        assert_ne!(key, BUILTIN_CONFIG_KEY);
+        let key = resolved_config_key_for_session(&path);
+        assert_ne!(key, "__builtin__");
         assert_eq!(key, path.to_string_lossy());
     }
 
     #[test]
     fn test_normalize_working_dir_removes_trailing_slash() {
         assert_eq!(normalize_working_dir("/tmp/project/"), "/tmp/project");
+    }
+
+    // ---- resolved_config_key_for_session: new non-Option API ----
+
+    #[test]
+    fn test_resolved_config_key_for_session_with_path_ref_returns_absolute_path_string() {
+        // Given: a PathBuf representing an absolute config file path
+        let path = PathBuf::from("/home/user/.config/cruise/myconf.yaml");
+
+        // When: resolved_config_key_for_session is called with &path directly (non-Option)
+        let key = resolved_config_key_for_session(&path);
+
+        // Then: returns the path string (same semantics, new mandatory parameter)
+        assert_eq!(key, "/home/user/.config/cruise/myconf.yaml");
+        assert_ne!(key, "__builtin__");
+    }
+
+    #[test]
+    fn test_history_round_trip_without_builtin_entries() {
+        // Given: a history containing only file-based config entries (no builtin)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().join("history.json");
+        let mut history = NewSessionHistory::default();
+        history.record_selection(make_entry("/config/a.yaml", vec!["step1"]));
+        history.record_selection(make_entry("/config/b.yaml", vec![]));
+
+        // When: saved and loaded
+        history.save_to(&path).unwrap_or_else(|e| panic!("{e}"));
+        let loaded =
+            NewSessionHistory::load_from(&path).unwrap_or_else(|e| panic!("load failed: {e}"));
+
+        // Then: all entries are file-path entries with no builtin keys
+        assert_eq!(loaded.entries.len(), 2);
+        for entry in &loaded.entries {
+            assert_ne!(
+                entry.resolved_config_key, "__builtin__",
+                "no new session should produce a builtin key"
+            );
+        }
+    }
+
+    #[test]
+    fn test_latest_entry_for_config_works_with_only_file_based_entries() {
+        // Given: history with only file-based entries (the builtin variant will be removed)
+        let mut history = NewSessionHistory::default();
+        history.record_selection(make_entry("/config/a.yaml", vec!["step-a"]));
+        history.record_selection(make_entry("/config/b.yaml", vec!["step-b"]));
+
+        // When: looking up by file path
+        let entry_a = history.latest_entry_for_config("/config/a.yaml");
+        let entry_b = history.latest_entry_for_config("/config/b.yaml");
+        let entry_missing = history.latest_entry_for_config("__builtin__");
+
+        // Then: file-based lookups work; builtin key is not present (no new sessions produce it)
+        let Some(entry_a) = entry_a else {
+            panic!("entry_a should be Some for /config/a.yaml");
+        };
+        assert_eq!(entry_a.skipped_steps, vec!["step-a"]);
+        let Some(entry_b) = entry_b else {
+            panic!("entry_b should be Some for /config/b.yaml");
+        };
+        assert_eq!(entry_b.skipped_steps, vec!["step-b"]);
+        assert!(
+            entry_missing.is_none(),
+            "builtin key should not exist in a history populated by new sessions"
+        );
     }
 }
