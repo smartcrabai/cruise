@@ -29,6 +29,8 @@ export interface SessionActions {
   showDelete: boolean;
   /** Show the "Cancel" button (while the session is actively running, locally or per backend phase). */
   showCancel: boolean;
+  /** Show the "Generate Plan" button (`phase === "Draft"` only). */
+  showGeneratePlan: boolean;
 }
 
 /**
@@ -85,6 +87,8 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
 
   const showDelete = !isLocallyRunning && phase !== "Running";
 
+  const showGeneratePlan = !isLocallyRunning && !isFixing && !session.fixInProgress && phase === "Draft";
+
   return {
     showApprove,
     showFix,
@@ -96,5 +100,6 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
     showReplan,
     showDelete,
     showCancel,
+    showGeneratePlan,
   };
 }

@@ -181,6 +181,14 @@ impl<'a> FixingGuard<'a> {
         state.start_fixing(&session_id);
         Self { state, session_id }
     }
+
+    fn try_new(state: &'a AppState, session_id: String) -> Option<Self> {
+        if state.try_start_fixing(&session_id) {
+            Some(Self { state, session_id })
+        } else {
+            None
+        }
+    }
 }
 
 impl Drop for FixingGuard<'_> {
@@ -703,10 +711,10 @@ pub fn update_session_settings(
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
 
     match &session.phase {
-        SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
+        SessionPhase::Draft | SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
         other => {
             return Err(format!(
-                "Cannot edit session in '{}' phase. Only 'Awaiting Approval' and 'Planned' sessions are editable.",
+                "Cannot edit session in '{}' phase. Only 'Draft', 'Awaiting Approval' and 'Planned' sessions are editable.",
                 other.label()
             ));
         }
@@ -751,6 +759,9 @@ pub fn update_session_settings(
 pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    if matches!(session.phase, SessionPhase::Draft) {
+        return Err("Cannot approve a Draft session; generate a plan first.".to_string());
+    }
     if let Err(err) = cruise::metadata::refresh_session_title_from_session(&manager, &mut session) {
         eprintln!("warning: failed to refresh session title: {err}");
     }
@@ -764,6 +775,9 @@ pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
 pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    if matches!(session.phase, SessionPhase::Draft) {
+        return Err("Cannot reset a Draft session; it has no plan to reset to.".to_string());
+    }
     session.reset_to_planned();
     manager.save(&session).map_err(|e| e.to_string())?;
     Ok(SessionDto::from_state(session, &manager))
@@ -792,6 +806,32 @@ pub async fn regenerate_session_plan(
     let manager = new_session_manager()?;
 
     let _fixing_guard = FixingGuard::new(&state, session_id.clone());
+    regenerate_plan(&manager, &session_id, &channel).await
+}
+
+/// Generate the initial plan for a session in `Draft` phase,
+/// streaming [`PlanEvent`]s over `channel`.
+/// Transitions the session to `AwaitingApproval` on success.
+#[tauri::command]
+pub async fn generate_plan_for_draft(
+    session_id: String,
+    channel: tauri::ipc::Channel<PlanEvent>,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+    // Claim the fixing slot before the phase check to close the TOCTOU window:
+    // if two requests race, only one gets the guard; the other fails immediately.
+    let _fixing_guard = FixingGuard::try_new(&state, session_id.clone())
+        .ok_or_else(|| "plan generation already in progress for this session".to_string())?;
+    {
+        let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+        if !matches!(session.phase, SessionPhase::Draft) {
+            return Err(format!(
+                "expected Draft phase, got {}",
+                session.phase.label()
+            ));
+        }
+    }
     regenerate_plan(&manager, &session_id, &channel).await
 }
 
@@ -838,10 +878,18 @@ async fn regenerate_plan(
                         session_id: session_id.to_string(),
                         error: msg.clone(),
                     });
+                    session.plan_error = Some(msg.clone());
+                    let _ = manager.save(&session);
                     return Err(msg);
                 }
             };
             cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
+            session.plan_error = None;
+            // Set AwaitingApproval before sending PlanGenerated so that any
+            // immediate refreshSession() call in the UI sees the correct phase.
+            if matches!(session.phase, SessionPhase::Draft) {
+                session.phase = SessionPhase::AwaitingApproval;
+            }
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
@@ -855,6 +903,8 @@ async fn regenerate_plan(
                 session_id: session_id.to_string(),
                 error: msg.clone(),
             });
+            session.plan_error = Some(msg.clone());
+            let _ = manager.save(&session);
             Err(msg)
         }
     }

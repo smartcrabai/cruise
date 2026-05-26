@@ -120,6 +120,33 @@ describe("PhaseBadge", () => {
     });
   });
 
+  describe("Draft phase", () => {
+    it("renders 'Draft' text", () => {
+      // Given / When
+      render(<PhaseBadge phase="Draft" />);
+
+      // Then: displays "Draft" label
+      expect(screen.getByText("Draft")).toBeTruthy();
+    });
+
+    it("does not show blue dot for Draft", () => {
+      // Given / When
+      render(<PhaseBadge phase="Draft" planAvailable={true} />);
+
+      // Then: Draft has no approval-ready indicator (no plan yet)
+      expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
+    });
+
+    it("does not show 'Planning' or 'Awaiting Approval' text for Draft", () => {
+      // Given / When
+      render(<PhaseBadge phase="Draft" />);
+
+      // Then: Draft uses its own label, not re-using Awaiting Approval display logic
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
+      expect(screen.queryByText("Awaiting Approval")).toBeNull();
+    });
+  });
+
   describe("fixing override", () => {
     it("renders 'Fixing' text when fixing is true, overriding the Awaiting Approval label", () => {
       // Given: an Awaiting Approval session with a plan, but fix is currently in progress

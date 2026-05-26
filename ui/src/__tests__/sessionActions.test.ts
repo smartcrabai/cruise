@@ -621,6 +621,84 @@ describe("getSessionActions", () => {
     });
   });
 
+  // --- Draft phase -----------------------------------------------------------
+
+  describe("Draft phase", () => {
+    it("shows Generate Plan button", () => {
+      // Given: Draft session (prompt saved, no plan yet)
+      const session = makeSession({ phase: "Draft" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Generate Plan is shown so the user can start planning
+      expect(actions.showGeneratePlan).toBe(true);
+    });
+
+    it("shows Delete", () => {
+      // Given: Draft session
+      const session = makeSession({ phase: "Draft" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: the user can discard a draft
+      expect(actions.showDelete).toBe(true);
+    });
+
+    it("hides all execution-stage buttons", () => {
+      // Given: Draft session
+      const session = makeSession({ phase: "Draft" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: nothing that requires an approved plan is shown
+      expect(actions.showApprove).toBe(false);
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
+      expect(actions.showCreateWorktree).toBe(false);
+      expect(actions.showRun).toBe(false);
+      expect(actions.showReset).toBe(false);
+      expect(actions.showReplan).toBe(false);
+      expect(actions.showCancel).toBe(false);
+    });
+
+    it("hides Generate Plan when status is 'running'", () => {
+      // Given: Draft session with local run in progress (edge case: shouldn't happen but guard it)
+      const session = makeSession({ phase: "Draft" });
+
+      // When: local runner is active
+      const actions = getSessionActions(session, "running");
+
+      // Then: only Cancel is shown, Generate Plan is suppressed
+      expect(actions.showGeneratePlan).toBe(false);
+      expect(actions.showCancel).toBe(true);
+    });
+
+    it("hides Generate Plan when isFixing is true", () => {
+      // Given: Draft session while a plan-fix is in progress (edge case)
+      const session = makeSession({ phase: "Draft" });
+
+      // When
+      const actions = getSessionActions(session, "idle", true);
+
+      // Then: Generate Plan is suppressed during fix
+      expect(actions.showGeneratePlan).toBe(false);
+    });
+
+    it("hides Generate Plan when session.fixInProgress is true (backend state)", () => {
+      // Given: Draft session where the backend reports a fix is in progress (e.g. after page reload)
+      const session = makeSession({ phase: "Draft", fixInProgress: true });
+
+      // When: local isFixing is false (cleared on reload) but backend still has fixInProgress
+      const actions = getSessionActions(session, "idle", false);
+
+      // Then: Generate Plan is suppressed to respect persisted backend state
+      expect(actions.showGeneratePlan).toBe(false);
+    });
+  });
+
   // --- isApprovalReady function ---------------------------------------------
 
   describe("isApprovalReady", () => {
