@@ -121,7 +121,7 @@ fn current_branch_name(repo_dir: &Path) -> Result<String> {
 fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
     Ok(!git_stdout(
         repo_dir,
-        &["status", "--porcelain"],
+        &["status", "--porcelain", "--untracked-files=no"],
         "git status --porcelain failed",
     )?
     .is_empty())
@@ -228,13 +228,14 @@ mod tests {
     #[test]
     fn test_prepare_execution_workspace_current_branch_mode_rejects_dirty_tree_on_fresh_run() {
         let _lock = lock_process();
-        // Given: a fresh current-branch session with uncommitted changes in the base repo
+        // Given: a fresh current-branch session with uncommitted tracked changes in the base repo
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let cruise_home = tmp.path().join(".local").join("share").join("cruise");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
-        fs::write(repo.join("dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        // Modify the committed README.md so the working tree has tracked changes.
+        fs::write(repo.join("README.md"), "modified").unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(cruise_home);
         let mut session = make_session("20260321120002", &repo);
 

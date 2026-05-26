@@ -439,6 +439,7 @@ const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md")
 pub struct ConfigEntryDto {
     pub path: String,
     pub name: String,
+    pub description: Option<String>,
 }
 
 /// Summary of the latest GUI "New Session" selections.
@@ -481,13 +482,11 @@ pub struct NewSessionHistoryItemDto {
     pub skipped_steps: Vec<String>,
 }
 
-/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
-/// (defaulting to `~/.config/cruise/`).
-#[tauri::command]
-pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
-    let Ok(entries) = std::fs::read_dir(&config_dir) else {
-        return Ok(vec![]);
+/// Enumerate `*.yaml` / `*.yml` files in `dir`, parse each for `description`, and return
+/// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
+fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
     };
     let mut configs: Vec<ConfigEntryDto> = entries
         .flatten()
@@ -495,17 +494,32 @@ pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
         .filter(|p| {
             p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
         })
-        .map(|p| ConfigEntryDto {
-            name: p
+        .map(|p| {
+            let name = p
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned(),
-            path: p.to_string_lossy().into_owned(),
+                .into_owned();
+            let description = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|yaml| cruise::config::extract_one_line_description(&yaml));
+            ConfigEntryDto {
+                name,
+                path: p.to_string_lossy().into_owned(),
+                description,
+            }
         })
         .collect();
     configs.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(configs)
+    configs
+}
+
+/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
+/// (defaulting to `~/.config/cruise/`).
+#[tauri::command]
+pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
+    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
+    Ok(read_configs_in(&config_dir))
 }
 
 /// Create a new session and generate a plan, streaming [`PlanEvent`]s over `channel`.
@@ -2756,5 +2770,118 @@ mod tests {
 
         let entries = list_new_session_history(None).unwrap_or_else(|e| panic!("list failed: {e}"));
         assert!(entries.is_empty());
+    }
+
+    // ---- read_configs_in ----
+
+    #[test]
+    fn test_read_configs_in_with_description() {
+        // Given: a YAML file that includes a description
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("team.yaml"),
+            "command: [claude, -p]\ndescription: チーム共通\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: description field is populated
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "team.yaml");
+        assert_eq!(configs[0].description, Some("チーム共通".to_string()));
+    }
+
+    #[test]
+    fn test_read_configs_in_without_description() {
+        // Given: a YAML file without description
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("simple.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: description is None
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "simple.yaml");
+        assert_eq!(configs[0].description, None);
+    }
+
+    #[test]
+    fn test_read_configs_in_broken_yaml_falls_back_to_none() {
+        // Given: a file with malformed YAML
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("broken.yaml"),
+            "not: valid: yaml: [unclosed",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: entry still appears with description = None (no panic, no missing entry)
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "broken.yaml");
+        assert_eq!(configs[0].description, None);
+    }
+
+    #[test]
+    fn test_read_configs_in_empty_dir() {
+        // Given: an empty directory
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: empty result
+        assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn test_read_configs_in_excludes_non_yaml() {
+        // Given: a directory with YAML and non-YAML files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("config.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(dir.path().join("notes.txt"), "some text").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(dir.path().join("config.json"), "{}").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: only the YAML file is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "config.yaml");
+    }
+
+    #[test]
+    fn test_read_configs_in_sorts_alphabetically() {
+        // Given: multiple YAML files in non-alphabetical order on disk
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        for name in &["zebra.yaml", "alpha.yaml", "middle.yml"] {
+            fs::write(
+                dir.path().join(name),
+                "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: results are sorted alphabetically by name
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].name, "alpha.yaml");
+        assert_eq!(configs[1].name, "middle.yml");
+        assert_eq!(configs[2].name, "zebra.yaml");
     }
 }

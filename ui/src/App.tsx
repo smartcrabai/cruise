@@ -1361,7 +1361,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             <option value="">Auto (repo / ~/.cruise / builtin)</option>
             {configs.map((c) => (
               <option key={c.path} value={c.path}>
-                {c.name}
+                {c.description ? `${c.name} — ${c.description}` : c.name}
               </option>
             ))}
           </select>

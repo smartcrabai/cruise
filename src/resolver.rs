@@ -167,20 +167,40 @@ fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
     files
 }
 
-/// Prompt the user to select one of the given config files using inquire.
-fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
-    let names: Vec<String> = files
+/// Build `(display_label, path)` pairs for each config file.
+///
+/// Reads each file, parses `description`, and formats label as
+/// `"{filename}  —  {description}"` when present or `"{filename}"` when absent.
+/// Files that fail to parse are included with filename-only labels.
+fn build_config_select_items(files: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    files
         .iter()
-        .map(|p| {
-            p.file_name()
+        .map(|path| {
+            let file_name = path
+                .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned()
+                .into_owned();
+            let label = if let Some(desc) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|yaml| crate::config::extract_one_line_description(&yaml))
+            {
+                format!("{file_name}  —  {desc}")
+            } else {
+                file_name
+            };
+            (label, path.clone())
         })
-        .collect();
+        .collect()
+}
 
-    let selected = match inquire::Select::new("Select a workflow config", names.clone()).prompt() {
-        Ok(name) => name,
+/// Prompt the user to select one of the given config files using inquire.
+fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
+    let items = build_config_select_items(files);
+    let labels: Vec<String> = items.iter().map(|(label, _)| label.clone()).collect();
+
+    let selected_idx = match inquire::Select::new("Select a workflow config", labels).raw_prompt() {
+        Ok(opt) => opt.index,
         Err(
             inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
         ) => {
@@ -189,11 +209,11 @@ fn prompt_select_config(files: &[PathBuf]) -> Result<PathBuf> {
         Err(e) => return Err(CruiseError::Other(e.to_string())),
     };
 
-    let selection = names
-        .iter()
-        .position(|n| n == &selected)
-        .ok_or_else(|| CruiseError::Other(format!("selected config not found: {selected}")))?;
-    Ok(files[selection].clone())
+    items
+        .into_iter()
+        .nth(selected_idx)
+        .map(|(_, path)| path)
+        .ok_or_else(|| CruiseError::Other("selected config index out of range".to_string()))
 }
 
 #[cfg(test)]
@@ -732,5 +752,63 @@ mod tests {
             result.is_err(),
             "expected Err (no builtin fallback, process cwd should not be used), got Ok"
         );
+    }
+
+    // ---- build_config_select_items ----
+
+    #[test]
+    fn test_build_config_select_items_with_description() {
+        // Given: a YAML file that includes a description
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = dir.path().join("team.yaml");
+        std::fs::write(
+            &path,
+            "command: [claude, -p]\ndescription: team-shared\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: building select items
+        let items = build_config_select_items(std::slice::from_ref(&path));
+
+        // Then: label is "filename  —  description"
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, "team.yaml  —  team-shared");
+        assert_eq!(items[0].1, path);
+    }
+
+    #[test]
+    fn test_build_config_select_items_without_description() {
+        // Given: a YAML file without description
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = dir.path().join("quick-fix.yml");
+        std::fs::write(
+            &path,
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: building select items
+        let items = build_config_select_items(std::slice::from_ref(&path));
+
+        // Then: label is filename only, no trailing separator
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, "quick-fix.yml");
+        assert_eq!(items[0].1, path);
+    }
+
+    #[test]
+    fn test_build_config_select_items_with_broken_yaml() {
+        // Given: a file containing malformed YAML
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = dir.path().join("broken.yaml");
+        std::fs::write(&path, "not: valid: yaml: [unclosed").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: building select items
+        let items = build_config_select_items(std::slice::from_ref(&path));
+
+        // Then: entry still appears with filename-only label (parse failure -> no description)
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, "broken.yaml");
+        assert_eq!(items[0].1, path);
     }
 }
