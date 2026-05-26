@@ -658,6 +658,9 @@ pub fn get_new_session_history_summary() -> std::result::Result<NewSessionHistor
         if entry.working_dir.is_empty() {
             continue;
         }
+        if cruise::new_session_history::is_temp_working_dir(&entry.working_dir) {
+            continue;
+        }
         if last_working_dir.is_none() {
             last_requested_config_path = entry.requested_config_path.clone();
             last_working_dir = Some(entry.working_dir.clone());
@@ -1602,6 +1605,7 @@ pub fn list_new_session_history(
     let entries: Vec<NewSessionHistoryItemDto> = history
         .entries
         .iter()
+        .filter(|e| !cruise::new_session_history::is_temp_working_dir(&e.working_dir))
         .take(limit)
         .map(|e| NewSessionHistoryItemDto {
             selected_at: e.selected_at.clone(),
@@ -1739,6 +1743,89 @@ mod tests {
     }
 
     #[test]
+    fn test_get_new_session_history_summary_filters_temp_dir_entries() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let mut history = NewSessionHistory::default();
+        // Normal entry should appear
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: "/Users/takumi/projects/cruise".to_string(),
+            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            skipped_steps: vec![],
+        });
+        // Temp dir entry saved directly (bypass record_selection's filter to simulate legacy data)
+        history.entries.insert(
+            0,
+            NewSessionHistoryEntry {
+                selected_at: "2026-01-01T00:00:00Z".to_string(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpXYZ/repo"
+                    .to_string(),
+                resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+                skipped_steps: vec![],
+            },
+        );
+        history.save().unwrap_or_else(|e| panic!("{e}"));
+
+        let summary = get_new_session_history_summary().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            summary.last_working_dir.as_deref(),
+            Some("/Users/takumi/projects/cruise"),
+            "temp dir should be filtered from last_working_dir"
+        );
+        assert_eq!(
+            summary.recent_working_dirs,
+            vec!["/Users/takumi/projects/cruise".to_string()],
+            "temp dir should not appear in recent_working_dirs"
+        );
+    }
+
+    #[test]
+    fn test_list_new_session_history_filters_temp_dir_entries() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: "normal task".to_string(),
+            requested_config_path: None,
+            working_dir: "/Users/takumi/projects/cruise".to_string(),
+            resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+            skipped_steps: vec![],
+        });
+        // Insert a temp dir entry directly to simulate existing polluted history
+        history.entries.insert(
+            0,
+            NewSessionHistoryEntry {
+                selected_at: "2026-01-01T00:00:00Z".to_string(),
+                input: "temp task".to_string(),
+                requested_config_path: None,
+                working_dir: "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpABC/repo"
+                    .to_string(),
+                resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
+                skipped_steps: vec![],
+            },
+        );
+        history.save().unwrap_or_else(|e| panic!("{e}"));
+
+        let entries = list_new_session_history(Some(10)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "temp dir entry should be filtered from list_new_session_history"
+        );
+        assert_eq!(entries[0].input, "normal task");
+    }
+
+    #[test]
     fn test_prepare_run_session_uses_requested_workspace_mode_for_fresh_runs() {
         // Given: a fresh planned session and a current-branch run request from the GUI
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -1807,7 +1894,9 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&repo);
-        fs::write(repo.join("dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        // Modify an already-tracked file to make the working tree dirty
+        // (is_working_tree_dirty uses --untracked-files=no, so new files are ignored)
+        fs::write(repo.join("README.md"), "dirty modification").unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let session_id = "20260321121002";
         let session = make_session(session_id, &repo);
@@ -2413,6 +2502,7 @@ mod tests {
     fn test_update_session_settings_succeeds_for_awaiting_approval_session() {
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
         let home = tmp.path();
         let manager = SessionManager::new(home.join(".cruise"));
         let repo = tmp.path().join("repo");
@@ -2443,6 +2533,7 @@ mod tests {
     fn test_update_session_settings_succeeds_for_planned_session() {
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
         let home = tmp.path();
         let manager = SessionManager::new(home.join(".cruise"));
         let repo = tmp.path().join("repo");
@@ -2601,6 +2692,7 @@ mod tests {
     fn test_update_session_settings_external_config_updates_paths() {
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
         let home = tmp.path();
         let manager = SessionManager::new(home.join(".cruise"));
         let repo = tmp.path().join("repo");
