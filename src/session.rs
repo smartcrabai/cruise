@@ -55,7 +55,7 @@ pub enum WorkspaceMode {
 /// Persisted state for a single session.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SessionState {
-    /// Session ID (format: `YYYYMMDDHHmmss`).
+    /// Session ID (format: `YYYYMMDDHHmmssNNN`, NNN = milliseconds).
     pub id: String,
     /// Path to the original repository (base directory).
     pub base_dir: PathBuf,
@@ -621,15 +621,16 @@ pub struct CleanupReport {
     pub skipped: usize,
 }
 
-/// Generate a session ID from current UTC time: `YYYYMMDDHHmmss`.
+/// Generate a session ID from current UTC time: `YYYYMMDDHHmmssNNN` (NNN = milliseconds).
 #[must_use]
 pub fn current_timestamp_id() -> String {
-    let secs = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let millis = dur.subsec_millis();
     let (year, month, day, h, m, s) = seconds_to_datetime(secs);
-    format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}")
+    format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}{millis:03}")
 }
 
 /// Format current UTC time as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -754,7 +755,8 @@ mod tests {
     #[test]
     fn test_timestamp_id_format() {
         let id = current_timestamp_id();
-        assert_eq!(id.len(), 14);
+        // YYYYMMDDHHmmssNNN (14 date/time digits + 3 milliseconds digits = 17)
+        assert_eq!(id.len(), 17);
         assert!(id.chars().all(|c| c.is_ascii_digit()));
     }
 
