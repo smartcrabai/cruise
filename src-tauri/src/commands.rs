@@ -181,6 +181,14 @@ impl<'a> FixingGuard<'a> {
         state.start_fixing(&session_id);
         Self { state, session_id }
     }
+
+    fn try_new(state: &'a AppState, session_id: String) -> Option<Self> {
+        if state.try_start_fixing(&session_id) {
+            Some(Self { state, session_id })
+        } else {
+            None
+        }
+    }
 }
 
 impl Drop for FixingGuard<'_> {
@@ -439,6 +447,7 @@ const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md")
 pub struct ConfigEntryDto {
     pub path: String,
     pub name: String,
+    pub description: Option<String>,
 }
 
 /// Summary of the latest GUI "New Session" selections.
@@ -481,13 +490,11 @@ pub struct NewSessionHistoryItemDto {
     pub skipped_steps: Vec<String>,
 }
 
-/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
-/// (defaulting to `~/.config/cruise/`).
-#[tauri::command]
-pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
-    let Ok(entries) = std::fs::read_dir(&config_dir) else {
-        return Ok(vec![]);
+/// Enumerate `*.yaml` / `*.yml` files in `dir`, parse each for `description`, and return
+/// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
+fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
     };
     let mut configs: Vec<ConfigEntryDto> = entries
         .flatten()
@@ -495,17 +502,32 @@ pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
         .filter(|p| {
             p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
         })
-        .map(|p| ConfigEntryDto {
-            name: p
+        .map(|p| {
+            let name = p
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned(),
-            path: p.to_string_lossy().into_owned(),
+                .into_owned();
+            let description = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|yaml| cruise::config::extract_one_line_description(&yaml));
+            ConfigEntryDto {
+                name,
+                path: p.to_string_lossy().into_owned(),
+                description,
+            }
         })
         .collect();
     configs.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(configs)
+    configs
+}
+
+/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
+/// (defaulting to `~/.config/cruise/`).
+#[tauri::command]
+pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
+    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
+    Ok(read_configs_in(&config_dir))
 }
 
 /// Create a new session and generate a plan, streaming [`PlanEvent`]s over `channel`.
@@ -689,10 +711,10 @@ pub fn update_session_settings(
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
 
     match &session.phase {
-        SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
+        SessionPhase::Draft | SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
         other => {
             return Err(format!(
-                "Cannot edit session in '{}' phase. Only 'Awaiting Approval' and 'Planned' sessions are editable.",
+                "Cannot edit session in '{}' phase. Only 'Draft', 'Awaiting Approval' and 'Planned' sessions are editable.",
                 other.label()
             ));
         }
@@ -737,6 +759,9 @@ pub fn update_session_settings(
 pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    if matches!(session.phase, SessionPhase::Draft) {
+        return Err("Cannot approve a Draft session; generate a plan first.".to_string());
+    }
     if let Err(err) = cruise::metadata::refresh_session_title_from_session(&manager, &mut session) {
         eprintln!("warning: failed to refresh session title: {err}");
     }
@@ -750,6 +775,9 @@ pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
 pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    if matches!(session.phase, SessionPhase::Draft) {
+        return Err("Cannot reset a Draft session; it has no plan to reset to.".to_string());
+    }
     session.reset_to_planned();
     manager.save(&session).map_err(|e| e.to_string())?;
     Ok(SessionDto::from_state(session, &manager))
@@ -778,6 +806,32 @@ pub async fn regenerate_session_plan(
     let manager = new_session_manager()?;
 
     let _fixing_guard = FixingGuard::new(&state, session_id.clone());
+    regenerate_plan(&manager, &session_id, &channel).await
+}
+
+/// Generate the initial plan for a session in `Draft` phase,
+/// streaming [`PlanEvent`]s over `channel`.
+/// Transitions the session to `AwaitingApproval` on success.
+#[tauri::command]
+pub async fn generate_plan_for_draft(
+    session_id: String,
+    channel: tauri::ipc::Channel<PlanEvent>,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+    // Claim the fixing slot before the phase check to close the TOCTOU window:
+    // if two requests race, only one gets the guard; the other fails immediately.
+    let _fixing_guard = FixingGuard::try_new(&state, session_id.clone())
+        .ok_or_else(|| "plan generation already in progress for this session".to_string())?;
+    {
+        let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+        if !matches!(session.phase, SessionPhase::Draft) {
+            return Err(format!(
+                "expected Draft phase, got {}",
+                session.phase.label()
+            ));
+        }
+    }
     regenerate_plan(&manager, &session_id, &channel).await
 }
 
@@ -824,10 +878,18 @@ async fn regenerate_plan(
                         session_id: session_id.to_string(),
                         error: msg.clone(),
                     });
+                    session.plan_error = Some(msg.clone());
+                    let _ = manager.save(&session);
                     return Err(msg);
                 }
             };
             cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
+            session.plan_error = None;
+            // Set AwaitingApproval before sending PlanGenerated so that any
+            // immediate refreshSession() call in the UI sees the correct phase.
+            if matches!(session.phase, SessionPhase::Draft) {
+                session.phase = SessionPhase::AwaitingApproval;
+            }
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
@@ -841,6 +903,8 @@ async fn regenerate_plan(
                 session_id: session_id.to_string(),
                 error: msg.clone(),
             });
+            session.plan_error = Some(msg.clone());
+            let _ = manager.save(&session);
             Err(msg)
         }
     }
@@ -2756,5 +2820,118 @@ mod tests {
 
         let entries = list_new_session_history(None).unwrap_or_else(|e| panic!("list failed: {e}"));
         assert!(entries.is_empty());
+    }
+
+    // ---- read_configs_in ----
+
+    #[test]
+    fn test_read_configs_in_with_description() {
+        // Given: a YAML file that includes a description
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("team.yaml"),
+            "command: [claude, -p]\ndescription: チーム共通\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: description field is populated
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "team.yaml");
+        assert_eq!(configs[0].description, Some("チーム共通".to_string()));
+    }
+
+    #[test]
+    fn test_read_configs_in_without_description() {
+        // Given: a YAML file without description
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("simple.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: description is None
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "simple.yaml");
+        assert_eq!(configs[0].description, None);
+    }
+
+    #[test]
+    fn test_read_configs_in_broken_yaml_falls_back_to_none() {
+        // Given: a file with malformed YAML
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("broken.yaml"),
+            "not: valid: yaml: [unclosed",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: entry still appears with description = None (no panic, no missing entry)
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "broken.yaml");
+        assert_eq!(configs[0].description, None);
+    }
+
+    #[test]
+    fn test_read_configs_in_empty_dir() {
+        // Given: an empty directory
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: empty result
+        assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn test_read_configs_in_excludes_non_yaml() {
+        // Given: a directory with YAML and non-YAML files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("config.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(dir.path().join("notes.txt"), "some text").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(dir.path().join("config.json"), "{}").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: only the YAML file is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "config.yaml");
+    }
+
+    #[test]
+    fn test_read_configs_in_sorts_alphabetically() {
+        // Given: multiple YAML files in non-alphabetical order on disk
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        for name in &["zebra.yaml", "alpha.yaml", "middle.yml"] {
+            fs::write(
+                dir.path().join(name),
+                "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: reading configs
+        let configs = read_configs_in(dir.path());
+
+        // Then: results are sorted alphabetically by name
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].name, "alpha.yaml");
+        assert_eq!(configs[1].name, "middle.yml");
+        assert_eq!(configs[2].name, "zebra.yaml");
     }
 }

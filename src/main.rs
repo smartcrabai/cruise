@@ -6,8 +6,10 @@ mod condition;
 mod config;
 mod config_cmd;
 mod display;
+mod draft_cmd;
 mod engine;
 mod error;
+mod exec_cmd;
 mod file_tracker;
 mod list_cmd;
 mod llm_api;
@@ -52,10 +54,12 @@ async fn run() -> error::Result<()> {
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
         Some(cli::Commands::Plan(args)) => plan_cmd::run(args).await,
+        Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
+        Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         None if plan.is_some() => plan_cmd::launch_background_plan(&plan.unwrap_or_default()),
         None => {
             // Backward compat: no subcommand -> treat as `plan`.

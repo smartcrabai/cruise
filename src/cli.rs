@@ -32,6 +32,8 @@ pub enum Commands {
     Plan(PlanArgs),
     #[command(hide = true)]
     PlanWorker(PlanWorkerArgs),
+    /// Save a task description as a draft, without generating a plan.
+    Draft(DraftArgs),
     /// Execute a planned session.
     Run(RunArgs),
     /// List and manage sessions interactively.
@@ -40,6 +42,8 @@ pub enum Commands {
     Clean(CleanArgs),
     /// Show or update application-level configuration (`~/.config/cruise/config.json`).
     Config(ConfigArgs),
+    /// Execute the workflow config directly in the current directory (no plan, no worktree, no PR).
+    Exec(ExecArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -58,6 +62,16 @@ pub struct PlanArgs {
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
+}
+
+#[derive(Parser, Debug)]
+pub struct DraftArgs {
+    /// Task description.
+    pub input: Option<String>,
+
+    /// Path to the workflow config file.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -111,6 +125,28 @@ pub struct ConfigArgs {
     /// Must be >= 1. Omit to show the current configuration.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
+}
+
+#[derive(Parser, Debug)]
+pub struct ExecArgs {
+    /// Task description bound to {input}. Optional if your config doesn't reference {input}.
+    pub input: Option<String>,
+
+    /// Path to the workflow config file.
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
+
+    /// Maximum number of times a single loop edge may be traversed.
+    #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
+    pub max_retries: usize,
+
+    /// Maximum number of rate-limit retries per step.
+    #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
+    pub rate_limit_retries: usize,
+
+    /// Print the workflow flow without executing it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub fn parse_cli() -> Cli {
@@ -390,5 +426,73 @@ mod tests {
     fn test_config_subcommand_is_registered_in_cli_verify() {
         // Given/When/Then: clap validates the full command definition including Config
         Cli::command().debug_assert();
+    }
+
+    // -- Exec subcommand -------------------------------------------------------
+
+    #[test]
+    fn test_exec_subcommand_with_input_and_config() {
+        // Given: exec subcommand with explicit config and positional input
+        let cli = Cli::parse_from(["cruise", "exec", "-c", "my.yaml", "task"]);
+        // When/Then: both args are captured
+        match cli.command {
+            Some(Commands::Exec(args)) => {
+                assert_eq!(args.input, Some("task".to_string()));
+                assert_eq!(args.config, Some("my.yaml".to_string()));
+            }
+            _ => panic!("expected Exec subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_exec_subcommand_defaults() {
+        // Given: exec subcommand with no optional flags
+        let cli = Cli::parse_from(["cruise", "exec"]);
+        // When/Then: all fields take their defaults
+        match cli.command {
+            Some(Commands::Exec(args)) => {
+                assert_eq!(args.input, None);
+                assert_eq!(args.config, None);
+                assert_eq!(args.max_retries, DEFAULT_MAX_RETRIES);
+                assert_eq!(args.rate_limit_retries, DEFAULT_RATE_LIMIT_RETRIES);
+                assert!(!args.dry_run);
+            }
+            _ => panic!("expected Exec subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_exec_subcommand_dry_run_flag() {
+        // Given: exec subcommand with --dry-run
+        let cli = Cli::parse_from(["cruise", "exec", "--dry-run"]);
+        // When/Then: dry_run is true
+        match cli.command {
+            Some(Commands::Exec(args)) => {
+                assert!(args.dry_run);
+                assert_eq!(args.input, None);
+            }
+            _ => panic!("expected Exec subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_exec_subcommand_custom_retries() {
+        // Given: exec with explicit retry counts
+        let cli = Cli::parse_from([
+            "cruise",
+            "exec",
+            "--max-retries",
+            "5",
+            "--rate-limit-retries",
+            "2",
+        ]);
+        // When/Then: custom values are parsed
+        match cli.command {
+            Some(Commands::Exec(args)) => {
+                assert_eq!(args.max_retries, 5);
+                assert_eq!(args.rate_limit_retries, 2);
+            }
+            _ => panic!("expected Exec subcommand"),
+        }
     }
 }

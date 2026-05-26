@@ -45,12 +45,12 @@ impl ConfigSource {
 /// 1. `explicit` (`-c` flag) -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
-/// 4. `~/.cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
-/// 5. Built-in default.
+/// 4. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
 ///
 /// # Errors
 ///
-/// Returns an error if an explicitly specified config file is not found or cannot be read.
+/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
+/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
     use std::io::IsTerminal;
     let cwd = std::env::current_dir()
@@ -70,12 +70,12 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// 1. `explicit` -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
-/// 4. `~/.cruise/*.yaml` / `*.yml`.
-/// 5. Built-in default.
+/// 4. `~/.config/cruise/*.yaml` / `*.yml`.
 ///
 /// # Errors
 ///
-/// Returns an error if an explicitly specified config file is not found or cannot be read.
+/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
+/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
 pub fn resolve_config_in_dir(
     explicit: Option<&str>,
     cwd: &std::path::Path,
@@ -380,26 +380,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ---- builtin fallback ----
-
-    #[test]
-    fn test_resolve_builtin_fallback() {
-        // Run in a temp dir that has no cruise.yaml and no HOME/.cruise.
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(tmp_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Point HOME to an empty dir; also clear XDG_CONFIG_HOME to avoid host config interference.
-        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
-        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
-
-        let (yaml, source) = resolve_config(None).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(yaml.contains("steps"));
-        assert!(matches!(source, ConfigSource::Builtin));
-    }
-
     // ---- local cruise.yaml ----
 
     #[test]
@@ -640,35 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_in_dir_does_not_use_process_cwd() {
-        // Given: process cwd has cruise.yaml, but the given dir does not
-        let process_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(
-            process_dir.path().join("cruise.yaml"),
-            "command: [process_cwd]\nsteps:\n  s:\n    command: process_cwd",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let other_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _dir_guard = DirGuard::new();
-        std::env::set_current_dir(process_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
-
-        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
-
-        // When: resolved against a different directory (not the process cwd)
-        let (_yaml, source) =
-            resolve_config_in_dir(None, other_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: the process cwd's cruise.yaml is NOT picked up; falls back to builtin
-        assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin (process cwd should be ignored), got: {source:?}"
-        );
-    }
-
-    #[test]
     fn test_resolve_in_dir_explicit_path_bypasses_dir() {
         // Given: a repo dir with local cruise.yaml, and a separate explicit config file
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
@@ -777,27 +728,6 @@ mod tests {
         assert!(
             matches!(source, ConfigSource::UserDir(_)),
             "expected UserDir, got: {source:?}"
-        );
-    }
-
-    #[test]
-    fn test_resolve_in_dir_falls_back_to_builtin() {
-        // Given: repo dir has no local config and home has no ~/.cruise files
-        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _dir_guard = DirGuard::new();
-        let _home_guard = EnvGuard::set("HOME", fake_home.path().as_os_str());
-        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
-
-        // When: resolved with nothing available
-        let (_yaml, source) =
-            resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: falls back to built-in default
-        assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin, got: {source:?}"
         );
     }
 
@@ -1181,19 +1111,4 @@ mod tests {
 
     // ---- builtin roundtrip ----
 
-    #[test]
-    fn test_builtin_yaml_roundtrip() {
-        use crate::config::WorkflowConfig;
-        let original = WorkflowConfig::default_builtin();
-        let yaml = serde_yaml::to_string(&original).unwrap_or_else(|e| panic!("{e:?}"));
-        let parsed = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(parsed.steps.len(), original.steps.len());
-        assert_eq!(parsed.model, original.model);
-        assert_eq!(parsed.plan_model, original.plan_model);
-        assert_eq!(parsed.pr_language, original.pr_language);
-        assert_eq!(parsed.command, original.command);
-        for key in original.steps.keys() {
-            assert!(parsed.steps.contains_key(key), "missing step: {key}");
-        }
-    }
 }

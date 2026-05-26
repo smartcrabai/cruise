@@ -668,7 +668,10 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                     truncated
                 )
             }
-            SessionPhase::AwaitingApproval | SessionPhase::Planned | SessionPhase::Running => {
+            SessionPhase::Draft
+            | SessionPhase::AwaitingApproval
+            | SessionPhase::Planned
+            | SessionPhase::Running => {
                 format!("[{}] ? {}", i + 1, truncated)
             }
         };
@@ -1815,7 +1818,7 @@ Previously, emojis were used as user icons."#;
             &single_command_config("edit", "printf more > new-file.txt"),
         );
 
-        fs::write(repo.join("already-dirty.txt"), "dirty").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(repo.join("README.md"), "modified").unwrap_or_else(|e| panic!("{e:?}"));
 
         let bin_dir = tmp.path().join("bin");
         let gh_log = tmp.path().join("gh.log");

@@ -7,6 +7,10 @@
       "type": "string",
       "description": "JSON Schema reference for editor support"
     },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description displayed alongside the file name in config selectors"
+    },
     "command": {
       "type": "array",
       "items": {

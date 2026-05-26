@@ -46,6 +46,7 @@ fn session_to_json_with_plan_availability(
     plan_available: bool,
 ) -> ListSessionJson {
     let (phase, phase_error): (&'static str, Option<String>) = match session.phase {
+        SessionPhase::Draft => ("Draft", None),
         SessionPhase::AwaitingApproval => ("AwaitingApproval", None),
         SessionPhase::Planned => ("Planned", None),
         SessionPhase::Running => ("Running", None),
@@ -157,6 +158,25 @@ pub async fn run(args: ListArgs) -> Result<()> {
             };
 
             match action {
+                "Generate Plan" => {
+                    match crate::plan_cmd::generate_plan_for_draft_session(
+                        &manager,
+                        &mut session,
+                        DEFAULT_RATE_LIMIT_RETRIES,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            session = manager.load(&session.id)?;
+                        }
+                        Err(e) => {
+                            eprintln!("{} Plan generation failed: {e}", style("✗").red());
+                            if let Ok(reloaded) = manager.load(&session.id) {
+                                session = reloaded;
+                            }
+                        }
+                    }
+                }
                 "Approve" => {
                     if !plan_available || session.plan_error.is_some() {
                         eprintln!("{} plan is not ready for approval yet", style("!").yellow());
@@ -288,6 +308,9 @@ fn session_actions_with_plan_availability(
 ) -> Vec<&'static str> {
     let mut actions = vec![];
     match &session.phase {
+        SessionPhase::Draft => {
+            actions.push("Generate Plan");
+        }
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
                 actions.push("Approve");
@@ -344,6 +367,7 @@ fn format_session_label(s: &SessionState) -> String {
 
 fn format_session_label_with_plan_availability(s: &SessionState, plan_available: bool) -> String {
     let (icon, phase_str) = match &s.phase {
+        SessionPhase::Draft => (style("○").dim(), style("Draft").dim()),
         SessionPhase::AwaitingApproval if s.plan_error.is_some() => {
             (style("✗").red(), style("Plan Failed").red())
         }
@@ -1527,5 +1551,53 @@ mod tests {
             buf.ends_with(b"\n"),
             "JSON output should end with a newline"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionPhase::Draft -- actions, label, and JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_draft_exact() {
+        // Given: Draft phase session
+        let session = make_session("20260523100000", "my draft", SessionPhase::Draft);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: only Generate Plan, Delete, and Back are offered
+        assert_eq!(actions, vec!["Generate Plan", "Delete", "Back"]);
+    }
+
+    #[test]
+    fn test_format_session_label_draft_contains_draft_text() {
+        // Given: Draft phase session
+        let s = make_session("20260523110000", "my draft task", SessionPhase::Draft);
+
+        // When
+        let label = strip(&format_session_label(&s));
+
+        // Then: the label contains "Draft" and the session input
+        assert!(
+            label.contains("Draft"),
+            "Draft label should contain 'Draft': {label}"
+        );
+        assert!(
+            label.contains("my draft task"),
+            "Draft label should contain input: {label}"
+        );
+    }
+
+    #[test]
+    fn test_session_to_json_draft_phase_string() {
+        // Given: a session in Draft phase
+        let session = make_session("20260523120000", "draft task", SessionPhase::Draft);
+
+        // When
+        let dto = session_to_json(session);
+
+        // Then: phase is "Draft" and phase_error is None
+        assert_eq!(dto.phase, "Draft");
+        assert_eq!(dto.phase_error, None);
     }
 }

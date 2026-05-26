@@ -199,6 +199,9 @@ export function SessionConfigEditor({
       channel.onmessage = (event) => {
         if (event.event === "planGenerated") {
           onPlanRegenerated(event.data.content);
+        } else if (event.event === "planFailed") {
+          setError(event.data.error);
+          onError(event.data.error);
         }
       };
       await regenerateSessionPlan(sessionId, channel);
@@ -252,7 +255,7 @@ export function SessionConfigEditor({
           <option value="">Auto (repo / ~/.cruise / builtin)</option>
           {configs.map((c) => (
             <option key={c.path} value={c.path}>
-              {c.name}
+              {c.description ? `${c.name} — ${c.description}` : c.name}
             </option>
           ))}
         </select>
@@ -260,7 +263,7 @@ export function SessionConfigEditor({
 
       {configSteps.length > 0 && (
         <div className="space-y-1.5">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</label>
+          <div className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</div>
           <div className="space-y-1">
             {configSteps.map((node) => renderStepNode(node, false))}
           </div>

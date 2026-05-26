@@ -7,6 +7,7 @@ export const PLANNING_LABEL = "Planning";
 export const FIXING_LABEL = "Fixing";
 
 const PHASE_COLORS: Record<SessionPhase, string> = {
+  Draft: "bg-gray-800/50 text-gray-400",
   "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
   Planned: "bg-blue-900/50 text-blue-300",
   Running: "bg-green-900/50 text-green-300",

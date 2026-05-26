@@ -111,7 +111,12 @@ impl AppState {
 
     /// Record that a plan-fix request has started for `session_id`.
     pub fn start_fixing(&self, session_id: &str) {
-        self.fixing_set().insert(session_id.to_owned());
+        let _ = self.try_start_fixing(session_id);
+    }
+
+    /// Claim the fixing slot; returns `true` if newly claimed, `false` if already in flight.
+    pub fn try_start_fixing(&self, session_id: &str) -> bool {
+        self.fixing_set().insert(session_id.to_owned())
     }
 
     /// Return a snapshot of session IDs that currently have a fix in flight.

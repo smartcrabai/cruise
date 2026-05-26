@@ -1,6 +1,7 @@
 // --- Session ------------------------------------------------------------------
 
 export type SessionPhase =
+  | "Draft"
   | "Awaiting Approval"
   | "Planned"
   | "Running"
@@ -136,6 +137,7 @@ export interface DirEntry {
 export interface ConfigEntry {
   path: string;
   name: string;
+  description?: string;
 }
 
 export interface NewSessionHistorySummary {
