@@ -35,6 +35,9 @@ pub struct NewSessionHistoryEntry {
     pub skipped_steps: Vec<String>,
 }
 
+/// The resolved-config key used when a session was created with the built-in default config.
+pub const BUILTIN_CONFIG_KEY: &str = "__builtin__";
+
 /// Persistent ring-buffer of per-config skip-step selections.
 ///
 /// Stored at `~/.local/state/cruise/history.json`. Missing file is treated as empty history.
@@ -168,6 +171,9 @@ impl NewSessionHistory {
             entry.requested_config_path = None;
         }
         entry.working_dir = normalize_working_dir(&entry.working_dir);
+        if is_temp_working_dir(&entry.working_dir) {
+            entry.working_dir = String::new();
+        }
         self.entries.insert(0, entry);
         self.entries.truncate(Self::MAX_ENTRIES);
     }
@@ -218,6 +224,47 @@ impl NewSessionHistory {
 #[must_use]
 pub fn resolved_config_key_for_session(config_path: &Path) -> String {
     config_path.to_string_lossy().into_owned()
+}
+
+/// Return `true` if `path` is under a known system temp directory.
+///
+/// Used to filter out paths that come from test fixtures (e.g. `tempfile::TempDir`)
+/// so they never leak into the user-visible recent-working-dirs list.
+#[must_use]
+pub fn is_temp_working_dir(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Primary: std::env::temp_dir() — picks up TMPDIR / TMP / TEMP at runtime.
+    if let Ok(temp) = std::env::temp_dir().canonicalize() {
+        if let Ok(p) = std::path::Path::new(path).canonicalize() {
+            if p.starts_with(&temp) {
+                return true;
+            }
+        }
+        // String-comparison fallback when canonicalize fails (e.g. path does not exist).
+        let temp_str = temp.to_string_lossy();
+        if path.starts_with(temp_str.as_ref()) {
+            return true;
+        }
+    }
+    // Fallback: well-known temp prefixes (handles paths that do not exist on disk).
+    const TEMP_PREFIXES: &[&str] = &[
+        "/var/folders/",         // macOS user TMPDIR
+        "/private/var/folders/", // canonicalized macOS TMPDIR
+        "/tmp/",                 // POSIX
+        "/private/tmp/",         // canonicalized macOS /tmp
+    ];
+    for prefix in TEMP_PREFIXES {
+        if path.starts_with(prefix) {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    if path.contains("\\Temp\\") || path.contains("/Temp/") {
+        return true;
+    }
+    false
 }
 
 /// Normalize a working-directory string for history storage and deduplication.
@@ -299,7 +346,7 @@ mod tests {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
             input: String::new(),
             requested_config_path: None,
-            working_dir: "/tmp/project".to_string(),
+            working_dir: "/Users/test/project".to_string(),
             resolved_config_key: resolved_config_key.to_string(),
             skipped_steps: skipped_steps.into_iter().map(String::from).collect(),
         }
@@ -495,7 +542,7 @@ mod tests {
             selected_at: String::new(),
             input: String::new(),
             requested_config_path: Some(String::new()),
-            working_dir: "/tmp/project/".to_string(),
+            working_dir: "/Users/test/project/".to_string(),
             resolved_config_key: "__builtin__".to_string(),
             skipped_steps: vec![],
         });
@@ -505,7 +552,7 @@ mod tests {
             .unwrap_or_else(|| panic!("expected latest entry"));
         assert!(!entry.selected_at.is_empty());
         assert_eq!(entry.requested_config_path, None);
-        assert_eq!(entry.working_dir, "/tmp/project");
+        assert_eq!(entry.working_dir, "/Users/test/project");
     }
 
     #[test]
@@ -515,7 +562,7 @@ mod tests {
             selected_at: "2026-04-07T00:00:00Z".to_string(),
             input: String::new(),
             requested_config_path: Some("/config/a.yaml".to_string()),
-            working_dir: "/tmp/project".to_string(),
+            working_dir: "/Users/test/project".to_string(),
             resolved_config_key: "/config/a.yaml".to_string(),
             skipped_steps: vec!["plan".to_string()],
         });
@@ -527,7 +574,7 @@ mod tests {
             history.entries[0].requested_config_path.as_deref(),
             Some("/config/a.yaml")
         );
-        assert_eq!(history.entries[0].working_dir, "/tmp/project");
+        assert_eq!(history.entries[0].working_dir, "/Users/test/project");
         assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
     }
 
@@ -694,5 +741,81 @@ mod tests {
             entry_missing.is_none(),
             "builtin key should not exist in a history populated by new sessions"
         );
+    }
+
+    // ---- is_temp_working_dir ----
+
+    #[test]
+    fn test_is_temp_working_dir_returns_false_for_empty_string() {
+        assert!(!is_temp_working_dir(""));
+    }
+
+    #[test]
+    fn test_is_temp_working_dir_returns_false_for_normal_user_dir() {
+        assert!(!is_temp_working_dir("/Users/takumi/apps/cruise"));
+    }
+
+    #[test]
+    fn test_is_temp_working_dir_returns_true_for_var_folders() {
+        assert!(is_temp_working_dir(
+            "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpqR0urI/repo"
+        ));
+    }
+
+    #[test]
+    fn test_is_temp_working_dir_returns_true_for_private_var_folders() {
+        assert!(is_temp_working_dir(
+            "/private/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpD8hIwu/repo"
+        ));
+    }
+
+    #[test]
+    fn test_is_temp_working_dir_returns_true_for_tmp_prefix() {
+        assert!(is_temp_working_dir("/tmp/foo"));
+    }
+
+    #[test]
+    fn test_is_temp_working_dir_returns_true_for_private_tmp_prefix() {
+        assert!(is_temp_working_dir("/private/tmp/some_dir"));
+    }
+
+    #[test]
+    fn test_record_selection_clears_working_dir_for_temp_path() {
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: "task".to_string(),
+            requested_config_path: None,
+            working_dir: "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpXYZ/repo"
+                .to_string(),
+            resolved_config_key: "__builtin__".to_string(),
+            skipped_steps: vec![],
+        });
+        let entry = history
+            .entries
+            .first()
+            .unwrap_or_else(|| panic!("expected an entry"));
+        assert_eq!(
+            entry.working_dir, "",
+            "temp-dir working_dir should be cleared to empty string"
+        );
+    }
+
+    #[test]
+    fn test_record_selection_keeps_working_dir_for_normal_path() {
+        let mut history = NewSessionHistory::default();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: "/Users/takumi/projects/cruise".to_string(),
+            resolved_config_key: "__builtin__".to_string(),
+            skipped_steps: vec![],
+        });
+        let entry = history
+            .entries
+            .first()
+            .unwrap_or_else(|| panic!("expected an entry"));
+        assert_eq!(entry.working_dir, "/Users/takumi/projects/cruise");
     }
 }
