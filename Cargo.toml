@@ -52,6 +52,7 @@ test-utils = []
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 console = "0.16.2"
+glob = "0.3"
 home = "0.5"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
