@@ -180,7 +180,11 @@ mockIPC((cmd, payload?: unknown) => {
       return "";
     case "list_configs":
       return [
-        { name: "team.yaml", path: TEAM_CONFIG_PATH },
+        {
+          name: "team.yaml",
+          path: TEAM_CONFIG_PATH,
+          description: "team-shared: parallel implement + auto-PR",
+        },
         { name: "autoflow.yaml", path: "/Users/takumi/.cruise/autoflow.yaml" },
       ];
     case "get_new_session_history_summary":
