@@ -1339,3 +1339,181 @@ describe("App: Plan tab as default and plan-availability gating", () => {
     expect(screen.getByRole("tab", { name: "Plan" })).toHaveAttribute("aria-selected", "false");
   });
 });
+
+// --- useInputAsPlan checkbox --------------------------------------------------
+
+describe("App: New Session -- useInputAsPlan checkbox", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders 'Use input as plan' checkbox unchecked by default", async () => {
+    // Given: New Session form is opened
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // When: the form renders
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /use input as plan/i,
+    });
+
+    // Then: checkbox is unchecked by default
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("shows 'Generate plan' button label when useInputAsPlan is unchecked (default)", async () => {
+    // Given: New Session form is opened
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // When: checkbox is in unchecked state (default)
+    await screen.findByRole("checkbox", { name: /use input as plan/i });
+
+    // Then: submit button shows "Generate plan"
+    expect(screen.getByRole("button", { name: "Generate plan" })).toBeInTheDocument();
+  });
+
+  it("changes submit button label to 'Create session' when useInputAsPlan is checked", async () => {
+    // Given: New Session form is opened
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+
+    // When: user checks the checkbox
+    await userEvent.click(checkbox);
+
+    // Then: submit button label changes to "Create session"
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Create session" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Generate plan" })).not.toBeInTheDocument();
+  });
+
+  it("reverts submit button label to 'Generate plan' when useInputAsPlan is unchecked again", async () => {
+    // Given: checkbox is checked
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+    await userEvent.click(checkbox);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Create session" })).toBeInTheDocument();
+    });
+
+    // When: user unchecks the checkbox
+    await userEvent.click(checkbox);
+
+    // Then: submit button label reverts to "Generate plan"
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Generate plan" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Create session" })).not.toBeInTheDocument();
+  });
+
+  it("passes useInputAsPlan: true to createSession when checkbox is checked", async () => {
+    // Given: createSession mock that resolves immediately
+    const control = setupTwoPhaseCreateSession("sess-skip-plan");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Type a task
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "my direct plan"
+    );
+
+    // Check the checkbox
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+    await userEvent.click(checkbox);
+
+    // When: submit the form
+    fireEvent.click(screen.getByRole("button", { name: "Create session" }));
+
+    // Then: createSession is called with useInputAsPlan: true
+    expect(commands.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ useInputAsPlan: true }),
+      expect.anything()
+    );
+
+    // Cleanup
+    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
+  it("passes useInputAsPlan: false to createSession when checkbox is unchecked (default)", async () => {
+    // Given: createSession mock
+    const control = setupTwoPhaseCreateSession("sess-with-llm");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Type a task without touching the checkbox
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "my planned task"
+    );
+
+    // When: submit with default unchecked checkbox
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // Then: createSession is called with useInputAsPlan: false
+    expect(commands.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ useInputAsPlan: false }),
+      expect.anything()
+    );
+
+    // Cleanup
+    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
+  it("checkbox is disabled while session creation is in progress", async () => {
+    // Given: createSession is pending (session creation in progress)
+    const control = setupTwoPhaseCreateSession("sess-pending");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "task"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: session creation is in progress (before sessionCreated fires)
+    // Then: the checkbox is disabled
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+    expect(checkbox).toBeDisabled();
+
+    // Cleanup
+    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
+  it("does not persist useInputAsPlan in saveNewSessionDraft", async () => {
+    // Given: form is open
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Check the checkbox (wait with real timers so findByRole can poll)
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+    fireEvent.click(checkbox);
+
+    // Switch to fake timers for debounce testing and clear prior calls
+    vi.useFakeTimers();
+    vi.mocked(commands.saveNewSessionDraft).mockClear();
+
+    // Trigger debounced save via task input change
+    fireEvent.change(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      { target: { value: "my task" } }
+    );
+    vi.advanceTimersByTime(500);
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: saveNewSessionDraft is called WITHOUT a useInputAsPlan field
+    expect(commands.saveNewSessionDraft).toHaveBeenCalledWith(
+      expect.not.objectContaining({ useInputAsPlan: expect.anything() })
+    );
+
+    vi.useRealTimers();
+  });
+});

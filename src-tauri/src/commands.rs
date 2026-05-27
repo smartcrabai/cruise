@@ -21,6 +21,8 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::AppState;
 
+const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
+
 // --- DTOs ---------------------------------------------------------------------
 
 /// Serializable representation of a session, sent to the frontend.
@@ -529,6 +531,7 @@ pub async fn create_session(
     config_path: Option<String>,
     base_dir: String,
     skipped_steps: Vec<String>,
+    use_input_as_plan: bool,
     channel: tauri::ipc::Channel<PlanEvent>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
@@ -566,10 +569,6 @@ pub async fn create_session(
     });
     history.save_best_effort();
 
-    let _ = channel.send(PlanEvent::SessionCreated {
-        session_id: session_id.clone(),
-    });
-
     let session_dir = manager.sessions_dir().join(&session_id);
     if session.config_path.is_none() {
         std::fs::write(session_dir.join("config.yaml"), &yaml)
@@ -580,6 +579,37 @@ pub async fn create_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
+    if use_input_as_plan {
+        // Emit SessionCreated only after successful write so that form error handling
+        // still works if the write fails (formReleased stays false in the frontend).
+        match cruise::planning::write_input_as_plan(&plan_path, &session.input) {
+            Ok(content) => {
+                cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
+                session.plan_error = None;
+                if let Err(e) = manager.save(&session) {
+                    let _ = manager.delete(&session_id);
+                    return Err(e.to_string());
+                }
+                let _ = channel.send(PlanEvent::SessionCreated {
+                    session_id: session_id.clone(),
+                });
+                let _ = channel.send(PlanEvent::PlanGenerating);
+                let _ = channel.send(PlanEvent::PlanGenerated {
+                    session_id: session_id.clone(),
+                    content,
+                });
+                return Ok(session_id);
+            }
+            Err(e) => {
+                let _ = manager.delete(&session_id);
+                return Err(e.to_string());
+            }
+        }
+    }
+
+    let _ = channel.send(PlanEvent::SessionCreated {
+        session_id: session_id.clone(),
+    });
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
@@ -1199,7 +1229,7 @@ async fn execute_single_session(
             let ctx = ExecutionContext {
                 compiled: &compiled,
                 max_retries: 10,
-                rate_limit_retries: 5,
+                rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                 on_step_start: &on_step_start,
                 on_step_log: Some(&on_step_log),
                 cancel_token: Some(&token_for_task),
