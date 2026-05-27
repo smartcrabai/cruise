@@ -1133,6 +1133,7 @@ interface NewSessionDraft {
   input: string;
   configPath: string;
   baseDir: string;
+  useInputAsPlan: boolean;
   isGenerating: boolean;
   error: string | null;
 }
@@ -1142,6 +1143,7 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     input: "",
     configPath: "",
     baseDir: "",
+    useInputAsPlan: false,
     isGenerating: false,
     error: null,
   };
@@ -1160,7 +1162,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, isGenerating, error } = draft;
+  const { input, configPath, baseDir, useInputAsPlan, isGenerating, error } = draft;
   const configLookupBaseDir = configPath ? "." : (baseDir || ".");
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
@@ -1354,6 +1356,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           configPath: configPath || undefined,
           baseDir: baseDir || ".",
           skippedSteps: Array.from(skippedSteps),
+          useInputAsPlan,
         },
         channel,
       );
@@ -1451,6 +1454,17 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           />
         </div>
 
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={useInputAsPlan}
+            onChange={(e) => set("useInputAsPlan", e.target.checked)}
+            disabled={isGenerating}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300">Use input as plan (skip LLM planning)</span>
+        </label>
+
         <button
           type="button"
           onClick={() => void handleGenerate()}
@@ -1463,7 +1477,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
               Creating session...
             </>
           ) : (
-            "Generate plan"
+            useInputAsPlan ? "Create session" : "Generate plan"
           )}
         </button>
       </div>

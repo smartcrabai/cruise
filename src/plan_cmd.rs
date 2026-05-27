@@ -57,7 +57,20 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
-    if let Err(e) = generate_plan_markdown(
+    if args.skip_planning {
+        if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &session.input) {
+            eprintln!(
+                "\n{} Failed to write input as plan. Session {} discarded.",
+                style("✗").red().bold(),
+                session.id
+            );
+            cleanup_planning_worktree(&session);
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
+            }
+            return Err(e);
+        }
+    } else if let Err(e) = generate_plan_markdown(
         &config,
         &mut vars,
         &plan_path,
@@ -91,7 +104,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     .await
 }
 
-pub fn launch_background_plan(plan_input: &str) -> Result<()> {
+pub fn launch_background_plan(plan_input: &str, skip_planning: bool) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(None)?;
     eprintln!("{}", style(source.display_string()).dim());
 
@@ -104,13 +117,42 @@ pub fn launch_background_plan(plan_input: &str) -> Result<()> {
     let mut session = create_planning_session(&manager, &source, input)?;
     setup_planning_worktree(&manager, &mut session)?;
 
-    spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
-
-    eprintln!(
-        "\n{} Session {} created. Planning in background.",
-        style("✓").green().bold(),
-        session.id
-    );
+    if skip_planning {
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let write_result = crate::planning::write_input_as_plan(&plan_path, &session.input);
+        match write_result {
+            Ok(content) => {
+                crate::metadata::refresh_session_title_from_plan(&mut session, &content);
+                session.phase = SessionPhase::AwaitingApproval;
+                if let Err(e) = manager.save(&session) {
+                    cleanup_planning_worktree(&session);
+                    if let Err(del_err) = manager.delete(&session.id) {
+                        eprintln!("warning: failed to clean up session: {del_err}");
+                    }
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                cleanup_planning_worktree(&session);
+                if let Err(del_err) = manager.delete(&session.id) {
+                    eprintln!("warning: failed to clean up session: {del_err}");
+                }
+                return Err(e);
+            }
+        }
+        eprintln!(
+            "\n{} Session {} created (input used as plan).",
+            style("✓").green().bold(),
+            session.id
+        );
+    } else {
+        spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
+        eprintln!(
+            "\n{} Session {} created. Planning in background.",
+            style("✓").green().bold(),
+            session.id
+        );
+    }
     eprintln!("  Check status with: {}", style("cruise list").cyan());
     eprintln!(
         "  Run once ready: {}",

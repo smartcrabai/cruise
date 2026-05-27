@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(long, value_name = "INPUT", conflicts_with = "input")]
     pub plan: Option<String>,
 
+    /// Use the --plan input directly as the plan, skipping LLM generation.
+    #[arg(long, requires = "plan")]
+    pub skip_planning: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -58,6 +62,10 @@ pub struct PlanArgs {
     /// Print the plan step without executing it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Use the input directly as the plan; skip LLM-based planning.
+    #[arg(long)]
+    pub skip_planning: bool,
 
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
@@ -494,5 +502,100 @@ mod tests {
             }
             _ => panic!("expected Exec subcommand"),
         }
+    }
+
+    // -- skip-planning flag on plan subcommand ---------------------------------
+
+    #[test]
+    fn test_plan_skip_planning_defaults_to_false() {
+        // Given: plan subcommand with no --skip-planning flag
+        let cli = Cli::parse_from(["cruise", "plan", "my task"]);
+        // When/Then: skip_planning is false by default
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert!(
+                    !args.skip_planning,
+                    "--skip-planning should default to false"
+                );
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_skip_planning_flag_sets_true() {
+        // Given: --skip-planning flag is present on plan subcommand
+        let cli = Cli::parse_from(["cruise", "plan", "--skip-planning", "my task"]);
+        // When/Then: skip_planning is true
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert!(
+                    args.skip_planning,
+                    "--skip-planning should be true when flag is present"
+                );
+                assert_eq!(args.input, Some("my task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_skip_planning_combined_with_config() {
+        // Given: --skip-planning combined with -c config and positional input
+        let cli = Cli::parse_from([
+            "cruise",
+            "plan",
+            "--skip-planning",
+            "-c",
+            "my.yaml",
+            "do task",
+        ]);
+        // When/Then: all fields captured
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert!(args.skip_planning);
+                assert_eq!(args.config, Some("my.yaml".to_string()));
+                assert_eq!(args.input, Some("do task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    // -- skip-planning flag on root --plan form --------------------------------
+
+    #[test]
+    fn test_root_skip_planning_defaults_to_false() {
+        // Given: --plan flag with no --skip-planning
+        let cli = Cli::try_parse_from(["cruise", "--plan", "task"])
+            .unwrap_or_else(|e| panic!("parse error: {e}"));
+        // When/Then: root-level skip_planning defaults to false
+        assert!(
+            !cli.skip_planning,
+            "root-level --skip-planning should default to false"
+        );
+    }
+
+    #[test]
+    fn test_root_skip_planning_with_plan_flag() {
+        // Given: --plan and --skip-planning at root level
+        let cli = Cli::try_parse_from(["cruise", "--plan", "task text", "--skip-planning"])
+            .unwrap_or_else(|e| panic!("expected --plan --skip-planning to parse: {e}"));
+        // When/Then: both flags are captured on the root struct
+        assert_eq!(cli.plan, Some("task text".to_string()));
+        assert!(
+            cli.skip_planning,
+            "root-level --skip-planning should be true"
+        );
+    }
+
+    #[test]
+    fn test_root_skip_planning_without_plan_flag_is_rejected() {
+        // Given: --skip-planning at root level without --plan
+        let result = Cli::try_parse_from(["cruise", "--skip-planning"]);
+        // When/Then: parsing fails because --skip-planning requires --plan
+        assert!(
+            result.is_err(),
+            "--skip-planning at root level should be rejected when --plan is absent"
+        );
     }
 }
