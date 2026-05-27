@@ -104,10 +104,13 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
+      --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
       --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
 ```
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning. Non-git directories fall back to running in place with a warning.
+
+With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `AwaitingApproval`, ready for `cruise run`. Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
 
 #### `cruise draft`
 
@@ -160,10 +163,34 @@ Runs the workflow steps directly in the current directory: no plan is generated,
 #### `cruise --plan`
 
 ```
-cruise --plan <INPUT|stdin>
+cruise --plan <INPUT|stdin> [--skip-planning]
 ```
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
+
+Adding `--skip-planning` (which requires `--plan`) skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `AwaitingApproval`.
+
+#### `cruise list`
+
+```
+cruise list [OPTIONS]
+
+Options:
+      --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
+```
+
+With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, ...) and exits -- useful for scripting or feeding session state to external tooling.
+
+#### `cruise config`
+
+```
+cruise config [OPTIONS]
+
+Options:
+      --set-parallelism <N>   Set the max number of sessions the desktop GUI runs concurrently in `run --all` mode (must be >= 1)
+```
+
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI `cruise run --all` always runs sessions sequentially regardless of this value.
 
 #### `cruise clean`
 
@@ -490,6 +517,25 @@ steps:
 ```
 
 The `skip` field accepts a static boolean (`true`/`false`) or a variable reference string. When a variable reference is given, the step is skipped if that variable's current value is `"true"`.
+
+#### Conditional execution by file existence (`when.exists`)
+
+`when.exists` is a pre-execution condition that **skips the step unless at least one file matches the given glob**. Use it to run a step only when relevant files are present -- for example, a Rust-specific review step that should be a no-op in a repo with no `.rs` files.
+
+```yaml
+steps:
+  rust-review:
+    when:
+      exists: "**/*.rs"       # run only if a matching file exists; otherwise skip the step
+    prompt: "Review the Rust code and fix any issues."
+```
+
+- The glob is evaluated relative to the workflow's working directory. Absolute patterns are used as-is.
+- Template variables in the pattern are resolved before globbing, so `exists: "{input}/**/*.rs"` works.
+- **No match -> the step is skipped** (shown as `skipping: <step> (no files match when.exists)`). One or more matches -> the step runs normally.
+- An empty or syntactically invalid glob is rejected at config validation time.
+- If some entries cannot be read while scanning (e.g. permission errors), cruise errs on the side of running the step rather than silently skipping it.
+- `when.exists` is independent of `skip`: if `skip` already skips the step, the glob is not evaluated at all.
 
 #### Conditional execution (file-changed detection)
 
