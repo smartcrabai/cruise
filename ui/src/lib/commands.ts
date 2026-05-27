@@ -196,7 +196,13 @@ export function clearNewSessionDraft(): Promise<void> {
  * @returns The new session ID.
  */
 export function createSession(
-  params: { input: string; configPath?: string; baseDir: string; skippedSteps?: string[] },
+  params: {
+    input: string;
+    configPath?: string;
+    baseDir: string;
+    skippedSteps?: string[];
+    useInputAsPlan?: boolean;
+  },
   channel: Channel<PlanEvent>
 ): Promise<string> {
   return invoke<string>("create_session", {
@@ -204,6 +210,7 @@ export function createSession(
     configPath: params.configPath ?? null,
     baseDir: params.baseDir,
     skippedSteps: params.skippedSteps ?? [],
+    useInputAsPlan: params.useInputAsPlan ?? false,
     channel,
   });
 }

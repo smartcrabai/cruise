@@ -222,6 +222,7 @@ mockIPC((cmd, payload?: unknown) => {
       const skippedSteps = Array.isArray(rawSkippedSteps)
         ? rawSkippedSteps.map(String)
         : [];
+      const useInputAsPlan = Boolean(getField(payload, "useInputAsPlan") ?? false);
       const sessionId = `mock-session-${sessions.length + 1}`;
       const resolvedConfigKey = resolveConfigKey(baseDir, configPath);
       const createdAt = new Date().toISOString();
@@ -244,7 +245,7 @@ mockIPC((cmd, payload?: unknown) => {
         createdAt,
         updatedAt: createdAt,
         workspaceMode: "Worktree",
-        planAvailable: false,
+        planAvailable: useInputAsPlan,
       });
 
       sessionPlans.set(
@@ -262,7 +263,7 @@ mockIPC((cmd, payload?: unknown) => {
       ]);
 
       const session = sessions.find((item) => item.id === sessionId);
-      if (session) {
+      if (session && !useInputAsPlan) {
         setTimeout(() => {
           session.planAvailable = true;
         }, 120);

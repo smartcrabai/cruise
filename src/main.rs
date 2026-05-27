@@ -50,6 +50,7 @@ async fn run() -> error::Result<()> {
         plan,
         command,
         input,
+        skip_planning,
     } = cli::parse_cli();
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
@@ -60,13 +61,16 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
-        None if plan.is_some() => plan_cmd::launch_background_plan(&plan.unwrap_or_default()),
+        None if plan.is_some() => {
+            plan_cmd::launch_background_plan(&plan.unwrap_or_default(), skip_planning)
+        }
         None => {
             // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
                 input,
                 config: None,
                 dry_run: false,
+                skip_planning: false,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
             };
             plan_cmd::run(plan_args).await
