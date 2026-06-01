@@ -17,6 +17,7 @@ import {
   askSession,
   cancelSession,
   clearNewSessionDraft,
+  createDraftSession,
   createSession,
   deleteSession,
   fixSession,
@@ -1160,6 +1161,9 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
+  // Distinguishes which button is in flight so each shows its own progress
+  // (both share `isGenerating` for disabling inputs).
+  const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
   const { input, configPath, baseDir, useInputAsPlan, isGenerating, error } = draft;
@@ -1367,6 +1371,33 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     }
   }
 
+  async function handleSaveDraft() {
+    if (!input.trim()) return;
+    setSavingDraft(true);
+    onDraftChange((prev) => ({ ...prev, error: null, isGenerating: true }));
+
+    try {
+      await createDraftSession({
+        input: input.trim(),
+        configPath: configPath || undefined,
+        baseDir: baseDir || ".",
+        skippedSteps: Array.from(skippedSteps),
+      });
+      onDraftChange((prev) => ({
+        ...createInitialNewSessionDraft(),
+        baseDir: prev.baseDir,
+        configPath: prev.configPath,
+      }));
+      void clearNewSessionDraft();
+      void refreshHistorySummary();
+      onRefreshSidebar();
+    } catch (e) {
+      onDraftChange((prev) => ({ ...prev, error: String(e), isGenerating: false }));
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 pt-6 pb-4 border-b border-gray-800">
@@ -1465,21 +1496,39 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <span className="text-sm text-gray-300">Use input as plan (skip LLM planning)</span>
         </label>
 
-        <button
-          type="button"
-          onClick={() => void handleGenerate()}
-          disabled={isGenerating || !input.trim()}
-          className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {isGenerating ? (
-            <>
-              <Spinner color="border-white" />
-              Creating session...
-            </>
-          ) : (
-            useInputAsPlan ? "Create session" : "Generate plan"
-          )}
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => void handleGenerate()}
+            disabled={isGenerating || !input.trim()}
+            className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {isGenerating && !savingDraft ? (
+              <>
+                <Spinner color="border-white" />
+                Creating session...
+              </>
+            ) : (
+              useInputAsPlan ? "Create session" : "Generate plan"
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSaveDraft()}
+            disabled={isGenerating || !input.trim()}
+            title="Save as a draft without generating a plan; generate the plan later."
+            className="px-5 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {savingDraft ? (
+              <>
+                <Spinner />
+                Saving draft...
+              </>
+            ) : (
+              "Save as draft"
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );
