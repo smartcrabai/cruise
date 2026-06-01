@@ -215,6 +215,28 @@ export function createSession(
   });
 }
 
+/**
+ * Create a new session in `Draft` phase without generating a plan.
+ *
+ * The session is left in `Draft` phase; generate a plan later via
+ * {@link generatePlanForDraft}.
+ *
+ * @returns The new session ID.
+ */
+export function createDraftSession(params: {
+  input: string;
+  configPath?: string;
+  baseDir: string;
+  skippedSteps?: string[];
+}): Promise<string> {
+  return invoke<string>("create_draft_session", {
+    input: params.input,
+    configPath: params.configPath ?? null,
+    baseDir: params.baseDir,
+    skippedSteps: params.skippedSteps ?? [],
+  });
+}
+
 /** Approve a session (Awaiting Approval → Planned). */
 export function approveSession(sessionId: string): Promise<void> {
   return invoke<void>("approve_session", { sessionId });

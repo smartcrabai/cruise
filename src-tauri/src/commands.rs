@@ -664,6 +664,81 @@ pub async fn create_session(
     }
 }
 
+/// Create a new session in `Draft` phase without generating a plan
+/// (internal implementation).
+///
+/// Mirrors the CLI `cruise draft` command: the session is persisted with no
+/// `plan.md`, ready for the user to generate a plan later via
+/// [`generate_plan_for_draft`]. Returns the new session ID.
+///
+/// Extracted for unit-testability: callers can supply any [`SessionManager`]
+/// (including one backed by a `TempDir`).
+pub(crate) fn create_draft_session_impl(
+    manager: &SessionManager,
+    input: String,
+    config_path: Option<String>,
+    base_dir: String,
+    skipped_steps: Vec<String>,
+) -> std::result::Result<String, String> {
+    use cruise::config::{WorkflowConfig, validate_config};
+
+    let (base, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
+    let config =
+        WorkflowConfig::from_yaml(&yaml).map_err(|e| format!("config parse error: {e}"))?;
+    validate_config(&config).map_err(|e| e.to_string())?;
+
+    let session_id = SessionManager::new_session_id();
+    let mut session = SessionState::new(
+        session_id.clone(),
+        base.clone(),
+        source.display_string(),
+        input.trim().to_string(),
+    );
+    session.config_path = source.path().cloned();
+    session.skipped_steps = skipped_steps;
+    session.phase = SessionPhase::Draft;
+    manager.create(&session).map_err(|e| e.to_string())?;
+
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        input: session.input.clone(),
+        requested_config_path: config_path,
+        working_dir: base.to_string_lossy().into_owned(),
+        resolved_config_key: source.path().map_or_else(
+            || BUILTIN_CONFIG_KEY.to_string(),
+            |p| resolved_config_key_for_session(p),
+        ),
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
+
+    if session.config_path.is_none() {
+        let session_dir = manager.sessions_dir().join(&session_id);
+        if let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml) {
+            let _ = manager.delete(&session_id);
+            return Err(format!("failed to write session config: {e}"));
+        }
+    }
+
+    Ok(session_id)
+}
+
+/// Create a new session in `Draft` phase without generating a plan.
+///
+/// The session is left in `Draft` phase so the frontend can later generate a
+/// plan via [`generate_plan_for_draft`]. Returns the new session ID.
+#[tauri::command]
+pub fn create_draft_session(
+    input: String,
+    config_path: Option<String>,
+    base_dir: String,
+    skipped_steps: Vec<String>,
+) -> std::result::Result<String, String> {
+    let manager = new_session_manager()?;
+    create_draft_session_impl(&manager, input, config_path, base_dir, skipped_steps)
+}
+
 /// Return the latest persisted New Session selections and recent working directories.
 #[tauri::command]
 pub fn get_new_session_history_summary() -> std::result::Result<NewSessionHistorySummaryDto, String>
@@ -2639,6 +2714,71 @@ mod tests {
             config_yaml_path.exists(),
             "builtin config switch should write config.yaml to session dir"
         );
+    }
+
+    #[test]
+    fn test_create_draft_session_creates_draft_phase_without_plan() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = create_draft_session_impl(
+            &manager,
+            "do the thing".to_string(),
+            None,
+            repo.to_string_lossy().into_owned(),
+            vec!["build".to_string()],
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session = manager
+            .load(&session_id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(session.phase, SessionPhase::Draft));
+        assert_eq!(session.input, "do the thing");
+        assert_eq!(session.skipped_steps, vec!["build".to_string()]);
+
+        // A draft must NOT have a plan.md.
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        assert!(
+            !plan_path.exists(),
+            "draft session should not have a plan.md"
+        );
+        // Built-in config switch writes config.yaml to the session dir.
+        let config_yaml_path = manager.sessions_dir().join(&session_id).join("config.yaml");
+        assert!(
+            config_yaml_path.exists(),
+            "builtin config should write config.yaml to session dir"
+        );
+    }
+
+    #[test]
+    fn test_create_draft_session_trims_input() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = create_draft_session_impl(
+            &manager,
+            "  padded input  ".to_string(),
+            None,
+            repo.to_string_lossy().into_owned(),
+            vec![],
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session = manager
+            .load(&session_id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(session.input, "padded input");
     }
 
     #[test]
