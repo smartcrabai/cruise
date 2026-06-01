@@ -18,8 +18,11 @@ pub struct Cli {
     #[arg(long, value_name = "INPUT", conflicts_with = "input")]
     pub plan: Option<String>,
 
-    /// Use the --plan input directly as the plan, skipping LLM generation.
-    #[arg(long, requires = "plan")]
+    /// Use the input directly as the plan, skipping LLM generation.
+    ///
+    /// Works with either `--plan <INPUT>` (background) or the positional
+    /// `[INPUT]` (foreground); the given text becomes the plan verbatim.
+    #[arg(long)]
     pub skip_planning: bool,
 
     #[command(subcommand)]
@@ -589,13 +592,28 @@ mod tests {
     }
 
     #[test]
-    fn test_root_skip_planning_without_plan_flag_is_rejected() {
-        // Given: --skip-planning at root level without --plan
-        let result = Cli::try_parse_from(["cruise", "--skip-planning"]);
-        // When/Then: parsing fails because --skip-planning requires --plan
+    fn test_root_skip_planning_with_positional_input_parses() {
+        // Given: --skip-planning combined with positional [INPUT] (no --plan)
+        let cli = Cli::try_parse_from(["cruise", "--skip-planning", "task text"])
+            .unwrap_or_else(|e| panic!("expected --skip-planning [INPUT] to parse: {e}"));
+        // When/Then: skip_planning is true and the text lands on the positional input
+        assert!(cli.command.is_none(), "expected no subcommand: {cli:?}");
         assert!(
-            result.is_err(),
-            "--skip-planning at root level should be rejected when --plan is absent"
+            cli.skip_planning,
+            "root-level --skip-planning should be true"
         );
+        assert_eq!(cli.input, Some("task text".to_string()));
+        assert_eq!(cli.plan, None, "--plan should stay empty");
+    }
+
+    #[test]
+    fn test_root_skip_planning_alone_parses() {
+        // Given: --skip-planning with neither --plan nor positional input
+        let cli = Cli::try_parse_from(["cruise", "--skip-planning"])
+            .unwrap_or_else(|e| panic!("expected bare --skip-planning to parse: {e}"));
+        // When/Then: it is accepted (input is resolved later via stdin/prompt)
+        assert!(cli.skip_planning);
+        assert_eq!(cli.input, None);
+        assert_eq!(cli.plan, None);
     }
 }
