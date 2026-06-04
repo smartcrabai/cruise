@@ -4,6 +4,8 @@ command:
   - "{model}"
   - -p
 
+description: Full TDD flow with review loop
+
 model: sonnet
 plan_model: opus
 
