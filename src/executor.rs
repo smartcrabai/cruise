@@ -1,0 +1,735 @@
+//! Prompt-execution backend abstraction.
+//!
+//! Cruise can drive prompts either through an external `command` (the classic
+//! `claude -p` path) or through the in-process **seher SDK**. [`Executor`] hides
+//! that choice behind a single [`Executor::run`] call so that `planning.rs`,
+//! `engine.rs`, and the GUI command layer don't need to branch on the backend.
+//!
+//! In SDK mode the cruise `model` / `plan_model` / per-step `model` fields are
+//! reinterpreted as seher **mode keys** (see [`mode_key_for_step`] /
+//! [`mode_key_for_plan`]).
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use seher::sdk::{
+    CodexBarProbe, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk, poll_for_agent,
+};
+
+use crate::cancellation::CancellationToken;
+use crate::error::{CruiseError, Result};
+use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
+
+/// Default seher mode key for ordinary prompt steps when neither the step nor
+/// the workflow specifies one.
+pub const DEFAULT_STEP_MODE_KEY: &str = "build";
+
+/// Default seher mode key for the built-in planning step.
+pub const DEFAULT_PLAN_MODE_KEY: &str = "plan";
+
+/// Poll interval (ms) used while every seher provider is rate-limited.
+const SDK_POLL_INTERVAL_MS: u64 = 60_000;
+
+/// A single prompt execution request, backend-agnostic.
+///
+/// Built by the caller and handed to [`Executor::run`]. `model_or_mode` carries a
+/// model name in command mode and a seher `mode_key` in SDK mode (compute it with
+/// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]). `tools`
+/// and `resume` are honored only by the SDK backend.
+pub struct PromptRun<'a> {
+    /// The fully-resolved prompt text to send.
+    pub prompt: &'a str,
+    /// Model name (command mode) or `mode_key` (SDK mode).
+    pub model_or_mode: Option<&'a str>,
+    /// Maximum rate-limit retries.
+    pub max_retries: usize,
+    /// Environment variables for the spawned process (command mode).
+    pub env: &'a HashMap<String, String>,
+    /// Callback invoked with a human-readable message on each rate-limit retry.
+    pub on_retry: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    /// Cooperative cancellation token.
+    pub cancel_token: Option<&'a CancellationToken>,
+    /// Working directory for the command / agent.
+    pub working_dir: Option<&'a Path>,
+    /// Streaming stdout/stderr callbacks.
+    pub stream: Option<&'a StreamCallbacks<'a>>,
+    /// Custom tools to inject (SDK mode only).
+    pub tools: Vec<SeherTool>,
+    /// Prior session id to resume (SDK mode only).
+    pub resume: Option<String>,
+}
+
+/// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the seher
+/// session id (for a follow-up `resume`). `session_id` is `None` in command mode.
+#[derive(Debug, Clone)]
+pub struct PromptOutcome {
+    pub result: PromptResult,
+    pub session_id: Option<String>,
+}
+
+/// Prompt-execution backend.
+///
+/// The SDK backend's tools (which capture the [`AskHandler`]) are built by the
+/// caller and passed via [`PromptRun::tools`], so the executor itself holds no
+/// handler.
+pub enum Executor {
+    /// Spawn an external command (the classic `claude -p` path).
+    Command { command: Vec<String> },
+    /// Drive prompts in-process via the seher SDK (pi backend).
+    Sdk,
+}
+
+impl Executor {
+    /// Build an executor from the workflow's backend selection.
+    ///
+    /// `sdk` set -> [`Executor::Sdk`]; otherwise [`Executor::Command`] wrapping
+    /// `command`. (Mutual exclusivity is enforced earlier by
+    /// [`crate::config::validate_sdk`].)
+    #[must_use]
+    pub fn new(sdk: Option<&str>, command: &[String]) -> Self {
+        if sdk.is_some() {
+            Executor::Sdk
+        } else {
+            Executor::Command {
+                command: command.to_vec(),
+            }
+        }
+    }
+
+    /// Whether this executor uses the seher SDK backend.
+    #[must_use]
+    pub fn is_sdk(&self) -> bool {
+        matches!(self, Executor::Sdk)
+    }
+
+    /// Resolve the model name (command mode) or `mode_key` (SDK mode) for an
+    /// ordinary prompt step.
+    #[must_use]
+    pub fn step_model_or_mode(
+        &self,
+        step_model: Option<&str>,
+        global_model: Option<&str>,
+    ) -> Option<String> {
+        match self {
+            Executor::Command { .. } => step_model.or(global_model).map(str::to_string),
+            Executor::Sdk => Some(mode_key_for_step(step_model, global_model)),
+        }
+    }
+
+    /// Resolve the model name (command mode) or `mode_key` (SDK mode) for the
+    /// built-in planning step.
+    #[must_use]
+    pub fn plan_model_or_mode(
+        &self,
+        plan_model: Option<&str>,
+        global_model: Option<&str>,
+    ) -> Option<String> {
+        match self {
+            Executor::Command { .. } => plan_model.or(global_model).map(str::to_string),
+            Executor::Sdk => Some(mode_key_for_plan(plan_model, global_model)),
+        }
+    }
+
+    /// Execute one prompt on the selected backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command fails to spawn / exits non-zero, or if
+    /// seher provider resolution or the SDK run fails.
+    pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+        match self {
+            Executor::Command { command } => run_command(command, req).await,
+            Executor::Sdk => run_sdk(req).await,
+        }
+    }
+}
+
+/// Resolve a non-rate-limited seher provider for `mode_key`.
+///
+/// `poll_for_agent` borrows a `&mut dyn LimitProbe` whose probe future is not
+/// `Send`, which would make the whole `run_sdk` future `!Send` and break the
+/// multi-threaded Tauri runtime. Confine that `!Send` work to a dedicated thread
+/// with its own current-thread runtime and return the `Send` `ResolvedAgent`.
+async fn resolve_provider(
+    mode_key: String,
+    cancel: Arc<AtomicBool>,
+) -> Result<seher::sdk::ResolvedAgent> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| CruiseError::Other(format!("failed to build seher resolver runtime: {e}")))
+            .and_then(|rt| {
+                rt.block_on(async {
+                    let mut probe = CodexBarProbe;
+                    poll_for_agent(
+                        PollOptions {
+                            mode_key,
+                            require_tools: true,
+                            interval_ms: SDK_POLL_INTERVAL_MS,
+                            // Lets the caller abort the (otherwise unbounded)
+                            // all-providers-rate-limited wait.
+                            cancel: Some(cancel),
+                            ..Default::default()
+                        },
+                        &mut probe,
+                    )
+                    .await
+                    .map_err(|e| {
+                        CruiseError::CommandError(format!("seher provider resolution failed: {e}"))
+                    })
+                })
+            });
+        let _ = tx.send(result);
+    });
+    rx.await
+        .map_err(|_| CruiseError::Other("seher resolver thread terminated".to_string()))?
+}
+
+/// Sets an abort flag when dropped, so a detached resolver thread stops polling
+/// if the awaiting future is cancelled or dropped.
+struct AbortOnDrop(Arc<AtomicBool>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Resolves when the token is cancelled, or waits forever if no token is given.
+async fn maybe_cancelled(token: Option<&CancellationToken>) {
+    match token {
+        Some(t) => t.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Command-backend execution: resolve the `{model}` placeholder then delegate to
+/// the existing [`run_prompt`].
+async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let has_placeholder = command.iter().any(|s| s.contains("{model}"));
+    let (resolved_command, model_arg) = if has_placeholder {
+        (
+            crate::engine::resolve_command_with_model(command, req.model_or_mode),
+            None,
+        )
+    } else {
+        (command.to_vec(), req.model_or_mode.map(str::to_string))
+    };
+
+    let retry = |msg: &str| {
+        if let Some(cb) = req.on_retry {
+            cb(msg);
+        }
+    };
+    let result = run_prompt(
+        &resolved_command,
+        model_arg.as_deref(),
+        req.prompt,
+        req.max_retries,
+        req.env,
+        Some(&retry),
+        req.cancel_token,
+        req.working_dir,
+        req.stream,
+    )
+    .await?;
+    Ok(PromptOutcome {
+        result,
+        session_id: None,
+    })
+}
+
+/// SDK-backend execution: resolve a non-limited provider, run pi with the custom
+/// tools, and fold the streamed chunks into a [`PromptOutcome`].
+async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let mode_key = req
+        .model_or_mode
+        .unwrap_or(DEFAULT_STEP_MODE_KEY)
+        .to_string();
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+
+    let mut attempts = 0;
+    loop {
+        // Signal the detached resolver thread to stop polling if this future is
+        // cancelled or dropped (e.g. timeout / Ctrl-C) before resolution finishes.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let abort_guard = AbortOnDrop(Arc::clone(&cancel_flag));
+        let resolved = tokio::select! {
+            biased;
+            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+            out = resolve_provider(mode_key.clone(), cancel_flag) => out,
+        }?;
+        // Resolution finished; the resolver thread has already exited.
+        drop(abort_guard);
+
+        let opts = PiRunnerOptions {
+            provider: Some(resolved.provider.clone()),
+            model: Some(resolved.model_id.clone()),
+            api_key: resolved.api.as_ref().and_then(|a| a.key.clone()),
+            system_prompt: None,
+            working_directory: req.working_dir.map(Path::to_path_buf),
+            tools: req.tools.clone(),
+        };
+        let runner = PiRunner::new(opts);
+        let rx_std = runner.stream(req.prompt.to_string(), req.resume.clone());
+
+        // Bridge the blocking std channel to an async one so we can stream
+        // deltas through the borrowed `on_delta` callback without moving it
+        // onto the pi worker thread.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
+        std::thread::spawn(move || {
+            while let Ok(chunk) = rx_std.recv() {
+                if tx.send(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // pi emits token-level deltas; `StreamCallbacks::on_stdout` is
+        // line-oriented (like the command backend), so buffer into whole lines.
+        let mut line_buf = LineBuffer::new();
+        let mut reducer = ChunkReducer::new();
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+                maybe = rx.recv() => match maybe {
+                    Some(chunk) => {
+                        let mut sink = |d: &str| {
+                            if let Some(cb) = on_delta {
+                                line_buf.push(d, cb);
+                            }
+                        };
+                        if let Some(out) = reducer.step(chunk, &mut sink) {
+                            break out;
+                        }
+                    }
+                    None => break reducer.finish(),
+                }
+            }
+        };
+        if let Some(cb) = on_delta {
+            line_buf.flush(cb);
+        }
+
+        match outcome {
+            ChunkOutcome::Done { output, session } => {
+                return Ok(PromptOutcome {
+                    result: PromptResult {
+                        output,
+                        stderr: String::new(),
+                    },
+                    session_id: session,
+                });
+            }
+            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
+            ChunkOutcome::Limited { message, .. } => {
+                if attempts < req.max_retries {
+                    attempts += 1;
+                    if let Some(cb) = req.on_retry {
+                        cb(&format!(
+                            "Provider rate-limited; re-resolving... ({attempts}/{})",
+                            req.max_retries
+                        ));
+                    }
+                    continue;
+                }
+                return Err(CruiseError::CommandError(message));
+            }
+            ChunkOutcome::Closed { .. } => {
+                return Err(CruiseError::Other(
+                    "seher stream closed before completion".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+/// Buffers streamed token fragments and emits them as complete lines, so a
+/// line-oriented [`StreamCallbacks::on_stdout`] sees the same shape from the SDK
+/// backend as from the command backend.
+pub(crate) struct LineBuffer {
+    pending: String,
+}
+
+impl LineBuffer {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: String::new(),
+        }
+    }
+
+    /// Append `frag`, emitting each newly-completed line (without its trailing
+    /// `\n`/`\r\n`).
+    pub(crate) fn push<F: FnMut(&str)>(&mut self, frag: &str, mut emit: F) {
+        self.pending.push_str(frag);
+        while let Some(idx) = self.pending.find('\n') {
+            let rest = self.pending.split_off(idx + 1);
+            let mut line = std::mem::replace(&mut self.pending, rest);
+            line.pop(); // drop '\n'
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            emit(&line);
+        }
+    }
+
+    /// Emit any buffered partial line (no trailing newline) and clear.
+    pub(crate) fn flush<F: FnMut(&str)>(&mut self, mut emit: F) {
+        if !self.pending.is_empty() {
+            emit(&self.pending);
+            self.pending.clear();
+        }
+    }
+}
+
+/// Terminal (or closed) outcome of folding a stream of [`StreamChunk`]s.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChunkOutcome {
+    /// The run completed with the given full text.
+    Done {
+        output: String,
+        session: Option<String>,
+    },
+    /// The provider reported a rate/usage limit.
+    Limited {
+        message: String,
+        session: Option<String>,
+    },
+    /// The run failed with a non-limit error.
+    Failed {
+        message: String,
+        session: Option<String>,
+    },
+    /// The channel closed before any terminal chunk arrived.
+    Closed {
+        partial: String,
+        session: Option<String>,
+    },
+}
+
+/// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
+/// deltas through an `on_delta` sink as they arrive.
+pub(crate) struct ChunkReducer {
+    buf: String,
+    session: Option<String>,
+}
+
+impl ChunkReducer {
+    pub(crate) fn new() -> Self {
+        Self {
+            buf: String::new(),
+            session: None,
+        }
+    }
+
+    /// Feed one chunk. Returns `Some(outcome)` when a terminal chunk arrives,
+    /// `None` to keep consuming.
+    pub(crate) fn step<F: FnMut(&str)>(
+        &mut self,
+        chunk: StreamChunk,
+        on_delta: &mut F,
+    ) -> Option<ChunkOutcome> {
+        match chunk {
+            StreamChunk::Delta(d) => {
+                on_delta(&d);
+                self.buf.push_str(&d);
+                None
+            }
+            StreamChunk::Session(id) => {
+                self.session = Some(id);
+                None
+            }
+            StreamChunk::Done(text) => {
+                let output = if text.is_empty() {
+                    std::mem::take(&mut self.buf)
+                } else {
+                    text
+                };
+                Some(ChunkOutcome::Done {
+                    output,
+                    session: self.session.take(),
+                })
+            }
+            StreamChunk::Limit(e) => Some(ChunkOutcome::Limited {
+                message: e.to_string(),
+                session: self.session.take(),
+            }),
+            StreamChunk::Error(msg) => Some(ChunkOutcome::Failed {
+                message: msg,
+                session: self.session.take(),
+            }),
+        }
+    }
+
+    /// Produce a [`ChunkOutcome::Closed`] when the stream ends without a terminal
+    /// chunk.
+    pub(crate) fn finish(&mut self) -> ChunkOutcome {
+        ChunkOutcome::Closed {
+            partial: std::mem::take(&mut self.buf),
+            session: self.session.take(),
+        }
+    }
+}
+
+/// Resolve the seher `mode_key` for an ordinary prompt step.
+///
+/// Precedence mirrors the command-mode model resolution
+/// (`step.model.or(global.model)`): a per-step value wins over the workflow
+/// default. When neither is set the step runs under [`DEFAULT_STEP_MODE_KEY`].
+#[must_use]
+pub fn mode_key_for_step(step_model: Option<&str>, global_model: Option<&str>) -> String {
+    step_model
+        .or(global_model)
+        .unwrap_or(DEFAULT_STEP_MODE_KEY)
+        .to_string()
+}
+
+/// Resolve the seher `mode_key` for the built-in planning step.
+///
+/// Precedence mirrors command-mode plan-model resolution
+/// (`plan_model.or(model)`): the dedicated `plan_model` wins, falling back to the
+/// workflow `model`, then to [`DEFAULT_PLAN_MODE_KEY`].
+#[must_use]
+pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -> String {
+    plan_model
+        .or(global_model)
+        .unwrap_or(DEFAULT_PLAN_MODE_KEY)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_mode_key_prefers_step_over_global() {
+        assert_eq!(mode_key_for_step(Some("fast"), Some("build")), "fast");
+    }
+
+    #[test]
+    fn step_mode_key_falls_back_to_global() {
+        assert_eq!(mode_key_for_step(None, Some("build")), "build");
+    }
+
+    #[test]
+    fn step_mode_key_defaults_to_build() {
+        assert_eq!(mode_key_for_step(None, None), DEFAULT_STEP_MODE_KEY);
+        assert_eq!(mode_key_for_step(None, None), "build");
+    }
+
+    #[test]
+    fn plan_mode_key_prefers_plan_model() {
+        assert_eq!(mode_key_for_plan(Some("plan"), Some("build")), "plan");
+    }
+
+    #[test]
+    fn plan_mode_key_falls_back_to_global_model() {
+        assert_eq!(mode_key_for_plan(None, Some("build")), "build");
+    }
+
+    #[test]
+    fn plan_mode_key_defaults_to_plan() {
+        assert_eq!(mode_key_for_plan(None, None), DEFAULT_PLAN_MODE_KEY);
+        assert_eq!(mode_key_for_plan(None, None), "plan");
+    }
+
+    // -- Executor dispatch ----------------------------------------------------
+
+    fn sdk_executor() -> Executor {
+        Executor::Sdk
+    }
+
+    fn command_executor() -> Executor {
+        Executor::Command {
+            command: vec!["claude".to_string(), "-p".to_string()],
+        }
+    }
+
+    #[test]
+    fn new_picks_sdk_when_sdk_set() {
+        let e = Executor::new(Some("seher"), &[]);
+        assert!(e.is_sdk());
+    }
+
+    #[test]
+    fn new_picks_command_when_sdk_unset() {
+        let e = Executor::new(None, &["claude".to_string()]);
+        assert!(!e.is_sdk());
+    }
+
+    #[test]
+    fn command_step_model_passes_through_model_name() {
+        let e = command_executor();
+        assert_eq!(
+            e.step_model_or_mode(Some("sonnet"), Some("opus")),
+            Some("sonnet".to_string())
+        );
+        assert_eq!(e.step_model_or_mode(None, None), None);
+    }
+
+    #[test]
+    fn sdk_step_model_maps_to_mode_key_with_default() {
+        let e = sdk_executor();
+        assert_eq!(
+            e.step_model_or_mode(Some("fast"), None),
+            Some("fast".to_string())
+        );
+        assert_eq!(e.step_model_or_mode(None, None), Some("build".to_string()));
+    }
+
+    #[test]
+    fn sdk_plan_model_maps_to_plan_mode_key_with_default() {
+        let e = sdk_executor();
+        assert_eq!(e.plan_model_or_mode(None, None), Some("plan".to_string()));
+        assert_eq!(
+            e.plan_model_or_mode(None, Some("build")),
+            Some("build".to_string())
+        );
+    }
+
+    // -- ChunkReducer ---------------------------------------------------------
+
+    fn no_sink() -> impl FnMut(&str) {
+        |_: &str| {}
+    }
+
+    #[test]
+    fn reducer_accumulates_deltas_and_captures_session() {
+        let mut r = ChunkReducer::new();
+        let mut collected = String::new();
+        let mut sink = |d: &str| collected.push_str(d);
+        assert_eq!(
+            r.step(StreamChunk::Session("sid-1".to_string()), &mut sink),
+            None
+        );
+        assert_eq!(
+            r.step(StreamChunk::Delta("Hello ".to_string()), &mut sink),
+            None
+        );
+        assert_eq!(
+            r.step(StreamChunk::Delta("world".to_string()), &mut sink),
+            None
+        );
+        let out = r
+            .step(StreamChunk::Done(String::new()), &mut sink)
+            .unwrap_or_else(|| panic!("expected terminal"));
+        assert_eq!(collected, "Hello world");
+        assert_eq!(
+            out,
+            ChunkOutcome::Done {
+                output: "Hello world".to_string(),
+                session: Some("sid-1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn reducer_done_text_overrides_buffered_deltas() {
+        let mut r = ChunkReducer::new();
+        let mut sink = no_sink();
+        r.step(StreamChunk::Delta("partial".to_string()), &mut sink);
+        let out = r
+            .step(StreamChunk::Done("FINAL".to_string()), &mut sink)
+            .unwrap_or_else(|| panic!("expected terminal"));
+        assert_eq!(
+            out,
+            ChunkOutcome::Done {
+                output: "FINAL".to_string(),
+                session: None,
+            }
+        );
+    }
+
+    #[test]
+    fn reducer_surfaces_error_chunk() {
+        let mut r = ChunkReducer::new();
+        let mut sink = no_sink();
+        let out = r
+            .step(StreamChunk::Error("boom".to_string()), &mut sink)
+            .unwrap_or_else(|| panic!("expected terminal"));
+        assert_eq!(
+            out,
+            ChunkOutcome::Failed {
+                message: "boom".to_string(),
+                session: None,
+            }
+        );
+    }
+
+    #[test]
+    fn reducer_surfaces_limit_chunk() {
+        use seher::sdk::errors::LimitError;
+        let mut r = ChunkReducer::new();
+        let mut sink = no_sink();
+        let out = r
+            .step(
+                StreamChunk::Limit(LimitError {
+                    provider: "anthropic".to_string(),
+                    reset_at: None,
+                }),
+                &mut sink,
+            )
+            .unwrap_or_else(|| panic!("expected terminal"));
+        match out {
+            ChunkOutcome::Limited { message, .. } => {
+                assert!(message.contains("anthropic"), "got: {message}");
+            }
+            other => panic!("expected Limited, got {other:?}"),
+        }
+    }
+
+    // -- LineBuffer -----------------------------------------------------------
+
+    fn collect_lines(frags: &[&str]) -> (Vec<String>, Vec<String>) {
+        let mut lb = LineBuffer::new();
+        let mut lines = Vec::new();
+        for f in frags {
+            lb.push(f, |l| lines.push(l.to_string()));
+        }
+        let mut flushed = Vec::new();
+        lb.flush(|l| flushed.push(l.to_string()));
+        (lines, flushed)
+    }
+
+    #[test]
+    fn line_buffer_emits_complete_lines_and_flushes_remainder() {
+        let (lines, flushed) = collect_lines(&["Hel", "lo\nwor", "ld"]);
+        assert_eq!(lines, vec!["Hello".to_string()]);
+        assert_eq!(flushed, vec!["world".to_string()]);
+    }
+
+    #[test]
+    fn line_buffer_handles_multiple_lines_in_one_fragment() {
+        let (lines, flushed) = collect_lines(&["a\nb\nc\n"]);
+        assert_eq!(
+            lines,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(flushed.is_empty(), "no partial line should remain");
+    }
+
+    #[test]
+    fn line_buffer_strips_carriage_return() {
+        let (lines, _) = collect_lines(&["x\r\n"]);
+        assert_eq!(lines, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn reducer_finish_reports_closed_with_partial() {
+        let mut r = ChunkReducer::new();
+        let mut sink = no_sink();
+        r.step(StreamChunk::Delta("half".to_string()), &mut sink);
+        assert_eq!(
+            r.finish(),
+            ChunkOutcome::Closed {
+                partial: "half".to_string(),
+                session: None,
+            }
+        );
+    }
+}

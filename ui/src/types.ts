@@ -156,7 +156,8 @@ export type PlanEvent =
   | { event: "planGenerating"; data: Record<string, never> }
   | { event: "planChunk"; data: { sessionId: string; stream: "stdout" | "stderr"; line: string } }
   | { event: "planGenerated"; data: { sessionId: string; content: string } }
-  | { event: "planFailed"; data: { sessionId: string; error: string } };
+  | { event: "planFailed"; data: { sessionId: string; error: string } }
+  | { event: "askUserRequired"; data: { sessionId: string; question: string } };
 
 // --- Update readiness ---------------------------------------------------------
 

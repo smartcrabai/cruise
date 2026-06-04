@@ -7,6 +7,9 @@ use std::process::Stdio;
 use console::style;
 use inquire::InquireError;
 
+use std::sync::Arc;
+
+use crate::ask_handler::{AskHandler, CliAskHandler, NoninteractiveAskHandler};
 use crate::cli::{
     DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs,
 };
@@ -16,14 +19,37 @@ use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{
     BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
 };
+use crate::planning::{PlanPromptCtx, ask_plan_template, fix_plan_template, plan_template};
 use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
-const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
-const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
-const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
+/// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
+fn cli_plan_ctx<'a>(
+    config: &'a WorkflowConfig,
+    plan_path: &'a Path,
+    working_dir: Option<&'a Path>,
+    interactive: bool,
+    rate_limit_retries: usize,
+) -> PlanPromptCtx<'a> {
+    // Only the interactive approve loop can prompt the user; non-TTY contexts use
+    // a handler that errors rather than blocking on stdin (ask_user is not
+    // registered there anyway).
+    let ask: Arc<dyn AskHandler> = if interactive {
+        Arc::new(CliAskHandler)
+    } else {
+        Arc::new(NoninteractiveAskHandler)
+    };
+    PlanPromptCtx {
+        config,
+        ask,
+        plan_path,
+        interactive,
+        rate_limit_retries,
+        working_dir,
+    }
+}
 
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve config first so the path is visible before prompting for input.
@@ -57,6 +83,11 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
+    // SDK session id, shared across the plan / fix / ask turns so they resume the
+    // same conversation. Stays `None` in command mode.
+    let mut resume: Option<String> = None;
+    let interactive = !noninteractive;
+
     if args.skip_planning {
         if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &session.input) {
             eprintln!(
@@ -70,25 +101,27 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             }
             return Err(e);
         }
-    } else if let Err(e) = generate_plan_markdown(
-        &config,
-        &mut vars,
-        &plan_path,
-        args.rate_limit_retries,
-        Some(plan_working_dir(&session)),
-    )
-    .await
-    {
-        eprintln!(
-            "\n{} Plan generation failed. Session {} discarded.",
-            style("✗").red().bold(),
-            session.id
+    } else {
+        let work_dir = plan_working_dir(&session).to_path_buf();
+        let ctx = cli_plan_ctx(
+            &config,
+            &plan_path,
+            Some(&work_dir),
+            interactive,
+            args.rate_limit_retries,
         );
-        cleanup_planning_worktree(&session);
-        if let Err(del_err) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
+        if let Err(e) = generate_plan_markdown(&ctx, &mut vars, &mut resume).await {
+            eprintln!(
+                "\n{} Plan generation failed. Session {} discarded.",
+                style("✗").red().bold(),
+                session.id
+            );
+            cleanup_planning_worktree(&session);
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
+            }
+            return Err(e);
         }
-        return Err(e);
     }
 
     // Approve-plan loop.
@@ -100,6 +133,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         &mut vars,
         args.rate_limit_retries,
         noninteractive,
+        &mut resume,
     )
     .await
 }
@@ -354,34 +388,39 @@ async fn generate_plan_for_session(
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
-    generate_plan_markdown(
+    // Background worker: no interactive user, so the SDK agent proceeds on
+    // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
+    let mut resume: Option<String> = None;
+    let ctx = cli_plan_ctx(
         &config,
-        &mut vars,
         &plan_path,
-        rate_limit_retries,
         Some(plan_working_dir(session)),
-    )
-    .await
+        false,
+        rate_limit_retries,
+    );
+    generate_plan_markdown(&ctx, &mut vars, &mut resume).await
 }
 
 async fn generate_plan_markdown(
-    config: &WorkflowConfig,
+    ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    plan_path: &Path,
-    rate_limit_retries: usize,
-    working_dir: Option<&Path>,
+    resume: &mut Option<String>,
 ) -> Result<String> {
     let prompt_result = crate::planning::run_plan_prompt_template(
-        config,
+        ctx,
         vars,
-        PLAN_PROMPT_TEMPLATE,
+        plan_template(ctx.config),
         "[plan] creating plan...",
-        rate_limit_retries,
-        working_dir,
         None,
+        resume,
+        true,
     )
     .await?;
-    crate::metadata::resolve_plan_content(plan_path, &prompt_result.output, &prompt_result.stderr)
+    crate::metadata::resolve_plan_content(
+        ctx.plan_path,
+        &prompt_result.output,
+        &prompt_result.stderr,
+    )
 }
 
 #[derive(Clone)]
@@ -539,6 +578,10 @@ fn select_skipped_steps_with_history(
     clippy::too_many_lines,
     reason = "approve/fix/ask/execute loop with multiple action branches"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "approve loop threads session state, config, and the SDK resume id"
+)]
 async fn run_approve_loop(
     config: &WorkflowConfig,
     manager: &SessionManager,
@@ -547,12 +590,22 @@ async fn run_approve_loop(
     vars: &mut VariableStore,
     rate_limit_retries: usize,
     noninteractive: bool,
+    resume: &mut Option<String>,
 ) -> Result<()> {
     let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
     let working_dir = session
         .worktree_path
         .clone()
         .unwrap_or_else(|| session.base_dir.clone());
+    // Fix / Ask turns reuse one planning context. It is only reached on the
+    // interactive path — the noninteractive branch auto-approves below.
+    let ctx = cli_plan_ctx(
+        config,
+        plan_path,
+        Some(working_dir.as_path()),
+        !noninteractive,
+        rate_limit_retries,
+    );
 
     // Read the plan once up front; re-read only after Fix modifies it.
     let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
@@ -621,13 +674,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_fix_plan(
-                    config,
-                    vars,
-                    rate_limit_retries,
-                    Some(working_dir.as_path()),
-                )
-                .await?;
+                run_fix_plan(&ctx, vars, resume).await?;
                 plan_content = crate::metadata::read_plan_markdown(plan_path)?;
             }
             "Ask" => {
@@ -636,13 +683,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_ask_plan(
-                    config,
-                    vars,
-                    rate_limit_retries,
-                    Some(working_dir.as_path()),
-                )
-                .await?;
+                run_ask_plan(&ctx, vars, resume).await?;
             }
             "Execute now" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
@@ -666,31 +707,6 @@ async fn run_approve_loop(
     }
 }
 
-/// Generate a plan for the given session (writes `plan.md`).
-///
-/// Used by the Tauri GUI backend to run the plan-generation step without
-/// the interactive approve loop.  The caller is responsible for creating
-/// the session and wiring up the `VariableStore` (including setting `plan`
-/// to the session's `plan_path`).
-#[expect(dead_code, reason = "Used by Tauri GUI backend")]
-pub async fn generate_plan(
-    config: &crate::config::WorkflowConfig,
-    vars: &mut crate::variable::VariableStore,
-    rate_limit_retries: usize,
-) -> crate::error::Result<()> {
-    crate::planning::run_plan_prompt_template(
-        config,
-        vars,
-        PLAN_PROMPT_TEMPLATE,
-        "[plan] creating plan...",
-        rate_limit_retries,
-        None,
-        None,
-    )
-    .await?;
-    Ok(())
-}
-
 /// Replan an existing session using the built-in fix-plan prompt.
 pub async fn replan_session(
     manager: &SessionManager,
@@ -707,13 +723,15 @@ pub async fn replan_session(
         .worktree_path
         .clone()
         .unwrap_or_else(|| session.base_dir.clone());
-    run_fix_plan(
+    let mut resume: Option<String> = None;
+    let ctx = cli_plan_ctx(
         &config,
-        &mut vars,
-        rate_limit_retries,
+        &plan_path,
         Some(working_dir.as_path()),
-    )
-    .await?;
+        std::io::stdin().is_terminal(),
+        rate_limit_retries,
+    );
+    run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
     let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
     crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
@@ -724,36 +742,36 @@ pub async fn replan_session(
 
 /// Run the built-in fix-plan prompt.
 async fn run_fix_plan(
-    config: &WorkflowConfig,
+    ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    rate_limit_retries: usize,
-    working_dir: Option<&Path>,
+    resume: &mut Option<String>,
 ) -> Result<()> {
     run_plan_prompt(
-        config,
+        ctx,
         vars,
-        rate_limit_retries,
-        FIX_PLAN_PROMPT_TEMPLATE,
+        fix_plan_template(ctx.config),
         "[fix-plan] applying fixes...",
-        working_dir,
+        resume,
+        true,
     )
     .await
 }
 
 /// Run the built-in ask-plan prompt.
 async fn run_ask_plan(
-    config: &WorkflowConfig,
+    ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    rate_limit_retries: usize,
-    working_dir: Option<&Path>,
+    resume: &mut Option<String>,
 ) -> Result<()> {
     run_plan_prompt(
-        config,
+        ctx,
         vars,
-        rate_limit_retries,
-        ASK_PLAN_PROMPT_TEMPLATE,
+        ask_plan_template(ctx.config),
         "[ask-plan] answering question...",
-        working_dir,
+        resume,
+        // Read-only: the Ask flow must never overwrite the saved plan, so no
+        // plan-writing tools are registered.
+        false,
     )
     .await
 }
@@ -761,21 +779,21 @@ async fn run_ask_plan(
 /// Shared implementation for fix-plan and ask-plan: resolve the given
 /// `template`, display `label`, and run it as a prompt step.
 async fn run_plan_prompt(
-    config: &WorkflowConfig,
+    ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    rate_limit_retries: usize,
     template: &str,
     label: &str,
-    working_dir: Option<&Path>,
+    resume: &mut Option<String>,
+    register_plan_tools: bool,
 ) -> Result<()> {
     let result = crate::planning::run_plan_prompt_template(
-        config,
+        ctx,
         vars,
         template,
         label,
-        rate_limit_retries,
-        working_dir,
         None,
+        resume,
+        register_plan_tools,
     )
     .await?;
     vars.set_prev_output(Some(result.output));
@@ -831,23 +849,28 @@ pub async fn generate_plan_for_draft_session(
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
-    generate_plan_markdown(
+    // Own the working dir so `ctx` doesn't borrow `session` across the
+    // mutable `inspect_err` below.
+    let work_dir = plan_working_dir(session).to_path_buf();
+    let mut resume: Option<String> = None;
+    let ctx = cli_plan_ctx(
         &config,
-        &mut vars,
         &plan_path,
+        Some(&work_dir),
+        std::io::stdin().is_terminal(),
         rate_limit_retries,
-        Some(plan_working_dir(session)),
-    )
-    .await
-    .inspect_err(|e| {
-        session.plan_error = Some(e.to_string());
-        cleanup_planning_worktree(session);
-        session.worktree_path = None;
-        session.worktree_branch = None;
-        if let Err(save_err) = manager.save(session) {
-            eprintln!("warning: failed to persist plan error state: {save_err}");
-        }
-    })?;
+    );
+    generate_plan_markdown(&ctx, &mut vars, &mut resume)
+        .await
+        .inspect_err(|e| {
+            session.plan_error = Some(e.to_string());
+            cleanup_planning_worktree(session);
+            session.worktree_path = None;
+            session.worktree_branch = None;
+            if let Err(save_err) = manager.save(session) {
+                eprintln!("warning: failed to persist plan error state: {save_err}");
+            }
+        })?;
 
     let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
     crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);

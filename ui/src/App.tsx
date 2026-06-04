@@ -37,7 +37,9 @@ import {
   saveNewSessionDraft,
   updateAppConfig,
 } from "./lib/commands";
+import { ASK_USER_EVENT } from "./lib/askUser";
 import { notifyDesktop } from "./lib/desktopNotifications";
+import { AskUserDialog } from "./components/AskUserDialog";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
@@ -685,6 +687,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         void refreshSession();
       } else if (event.event === "planChunk") {
         setPlanProgress((prev) => [...prev, event.data.line]);
+      } else if (event.event === "askUserRequired") {
+        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -723,6 +727,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         void refreshSession();
       } else if (event.event === "planChunk") {
         setPlanProgress((prev) => [...prev, event.data.line]);
+      } else if (event.event === "askUserRequired") {
+        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -1348,6 +1354,8 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         void clearNewSessionDraft();
         void refreshHistorySummary();
         onRefreshSidebar();
+      } else if (event.event === "askUserRequired") {
+        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
       }
@@ -2033,6 +2041,7 @@ export default function App() {
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
+      <AskUserDialog />
       <WorkflowToastStack toasts={toasts} onDismiss={dismissToast} />
       {showSettings && (
         <SettingsModal
