@@ -1,13 +1,19 @@
 # Top-level structure
 
 ```yaml
-command:                  # Required: LLM invocation command (array)
+command:                  # LLM invocation command (array). Mutually exclusive with `sdk`.
   - claude
   - --model
   - "{model}"
   - -p
 
+# sdk: seher              # Alternative backend: run prompts via the seher SDK
+                          # instead of an external command (see sdk.md).
+
+description: My workflow  # Optional: shown alongside the file name in config selectors
+
 model: sonnet             # Optional: default model for prompt steps
+                          # (in SDK mode, reinterpreted as a seher mode_key)
 plan_model: opus          # Optional: model for the built-in plan step
 pr_language: English      # Optional: language for auto-generated PR title/body (default: English)
 
@@ -37,7 +43,14 @@ after-pr:                 # Optional: steps that run after PR creation (see refe
     # ...
 ```
 
-Only `command` and `steps` are required. `steps` is held as an `IndexMap`, so declaration order is the execution order.
+`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). `steps` is held as an `IndexMap`, so declaration order is the execution order.
+
+## `command` vs `sdk`
+
+There are two prompt-execution backends:
+
+- `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
+- `sdk: seher` — run prompts in-process via the seher SDK. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
 
@@ -45,6 +58,9 @@ Only `command` and `steps` are required. `steps` is held as an `IndexMap`, so de
 
 - When an effective model is set: `{model}` is replaced with the model name.
 - When no model is set: both `{model}` and its immediately preceding `--model` flag are removed automatically.
+- When the `command` array contains **no** `{model}` placeholder and an effective model is set: `--model <model>` is appended to the command arguments automatically.
+
+The prompt body is passed to the spawned process via **stdin** (avoids ARG_MAX limits), not as an argument.
 
 A step-level `model:` overrides the top-level `model:` for that step only.
 
@@ -65,7 +81,15 @@ steps:
 
 ## `plan_model`
 
-Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset.
+Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is reinterpreted as the planning mode key (see [sdk.md](sdk.md)).
+
+## `description`
+
+Free-form text shown alongside the file name in the CLI/GUI config selectors. Purely informational; no effect on execution.
+
+```yaml
+description: Full TDD flow with review loop
+```
 
 ## `pr_language`
 
