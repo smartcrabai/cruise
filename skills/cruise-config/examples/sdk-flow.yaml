@@ -1,0 +1,40 @@
+# seher SDK backend example: no external command; prompts run in-process.
+sdk: seher
+
+description: SDK-backed TDD flow
+
+# In SDK mode these are seher mode_keys, not model names.
+model: build          # mode_key for ordinary prompt steps (this is also the default)
+plan_model: plan      # mode_key for the built-in plan step (this is also the default)
+
+steps:
+  write-tests:
+    prompt: |
+      Based on {plan}, write the test code first.
+
+  implement:
+    # Per-step model is also a mode_key in SDK mode.
+    model: build
+    prompt: |
+      Tests are written for {plan}. Implement to make them pass.
+    timeout: 30m
+    if:
+      no-file-changes:
+        fail: true
+
+  test:
+    command:
+      - cargo fmt --all
+      - cargo test
+    if:
+      fail: fix-test-error    # jump on non-zero exit / timeout
+
+  fix-test-error:
+    # Reached two ways: via if.fail jump (test failed -> runs) or
+    # sequentially after a passing test (prev.success = "true" -> skipped).
+    skip: prev.success
+    prompt: |
+      The following error occurred. Please correct it:
+      ---
+      {prev.stderr}
+    next: test

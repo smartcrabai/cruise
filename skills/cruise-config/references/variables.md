@@ -1,12 +1,12 @@
 # Variable reference
 
-Variables can be referenced as `{name}` inside `prompt` / `command` / `env` / `plan` / `instruction`. Referencing an undefined variable is an error.
+Variables can be referenced as `{name}` inside `prompt` / `command` / `env` / `plan` / `instruction` / `when.exists`. Referencing an undefined variable is an error.
 
 ## Variable list
 
 | Variable | Description |
 |----------|-------------|
-| `{input}` | Initial input from the CLI argument or stdin |
+| `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here |
 | `{prev.output}` | LLM output of the previous step |
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Stderr captured from the previous command step |

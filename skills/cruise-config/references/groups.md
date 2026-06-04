@@ -65,7 +65,7 @@ steps:
 - The legacy style of writing `prompt` / `command` alongside `group:` on a call-site step is rejected.
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
-- A group-level `if:` cannot contain `no-file-changes` (see [flow-control.md](flow-control.md)).
+- A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.
 
 ## Group execution behavior
 

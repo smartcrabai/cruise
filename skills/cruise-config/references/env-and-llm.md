@@ -22,6 +22,10 @@ steps:
 
 Template variables (e.g. `{input}`) can be used inside `env:` values.
 
+**Secrets caveat**: avoid writing real API keys into `env:` values — config files tend to get committed. Prefer exporting secrets in the shell environment and keeping only non-secret values in `env:`.
+
+**SDK mode caveat**: `env:` values are passed to spawned processes only. In `sdk: seher` mode, prompt steps run in-process and do **not** receive `env:` values; command steps still do (see [sdk.md](sdk.md)).
+
 ## LLM API config (session-title generation)
 
 After plan approval, cruise can call an OpenAI-compatible API to generate a concise session title (up to 80 characters). The title is shown in `cruise list` and the GUI sidebar.
@@ -39,7 +43,7 @@ llm:
 |---------|--------------|----------------------|---------|
 | API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | (required) |
 | Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
-| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o-mini` |
+| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o` |
 
 Environment variables take precedence over the YAML config. To avoid leaking secrets, prefer the `CRUISE_LLM_API_KEY` environment variable.
 
