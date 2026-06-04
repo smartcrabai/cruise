@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod events;
+pub mod gui_ask_handler;
 pub mod gui_option_handler;
 pub mod state;
 
@@ -25,6 +26,7 @@ pub fn run() {
             commands::run_session,
             commands::cancel_session,
             commands::respond_to_option,
+            commands::respond_to_ask,
             commands::clean_sessions,
             commands::list_configs,
             commands::create_session,

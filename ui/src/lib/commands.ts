@@ -72,6 +72,14 @@ export function respondToOption(
   return invoke<void>("respond_to_option", { sessionId, result });
 }
 
+/**
+ * Deliver the user's answer to an SDK `ask_user` question raised during plan
+ * generation, routed to the waiting session by `sessionId`.
+ */
+export function respondToAsk(sessionId: string, answer: string): Promise<void> {
+  return invoke<void>("respond_to_ask", { sessionId, answer });
+}
+
 // ─── App config ───────────────────────────────────────────────────────────────
 
 /**

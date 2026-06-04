@@ -10,7 +10,7 @@ use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::OptionHandler;
 use crate::step::command::run_commands;
-use crate::step::prompt::{StreamCallbacks, run_prompt};
+use crate::step::prompt::StreamCallbacks;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -764,21 +764,11 @@ pub(crate) async fn run_prompt_step(
     }
     let prompt = vars.resolve(&step.prompt)?;
 
-    let effective_model = step.model.as_deref().or(compiled.model.as_deref());
-
-    let has_placeholder = compiled.command.iter().any(|s| s.contains("{model}"));
-
-    let (resolved_command, model_arg) = if has_placeholder {
-        (
-            resolve_command_with_model(&compiled.command, effective_model),
-            None,
-        )
-    } else {
-        (
-            compiled.command.clone(),
-            effective_model.map(str::to_string),
-        )
-    };
+    // Run steps execute autonomously with no custom tools (pi's built-in tools
+    // do the file editing in SDK mode), so no ask handler is needed.
+    let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
+    let model_or_mode =
+        executor.step_model_or_mode(step.model.as_deref(), compiled.model.as_deref());
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
@@ -799,20 +789,21 @@ pub(crate) async fn run_prompt_step(
     };
     let result = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
-        let prompt_future = run_prompt(
-            &resolved_command,
-            model_arg.as_deref(),
-            &prompt,
-            rate_limit_retries,
+        let run_future = executor.run(crate::executor::PromptRun {
+            prompt: &prompt,
+            model_or_mode: model_or_mode.as_deref(),
+            max_retries: rate_limit_retries,
             env,
-            Some(&on_retry),
+            on_retry: Some(&on_retry),
             cancel_token,
             working_dir,
-            Some(&stream_callbacks),
-        );
+            stream: Some(&stream_callbacks),
+            tools: Vec::new(),
+            resume: None,
+        });
 
         if let Some(duration) = timeout {
-            match tokio::time::timeout(duration, prompt_future).await {
+            match tokio::time::timeout(duration, run_future).await {
                 Ok(r) => r,
                 Err(_elapsed) => {
                     drop(spinner);
@@ -823,11 +814,11 @@ pub(crate) async fn run_prompt_step(
                 }
             }
         } else {
-            prompt_future.await
+            run_future.await
         }
     };
     drop(spinner);
-    let result = result?;
+    let result = result?.result;
 
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));

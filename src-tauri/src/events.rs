@@ -38,6 +38,14 @@ pub enum PlanEvent {
         /// A single line (trailing newline removed)
         line: String,
     },
+    /// The SDK planning agent is asking the user a clarifying question. The
+    /// frontend should prompt the user and reply via the `respond_to_ask`
+    /// command with the matching `sessionId`.
+    AskUserRequired {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        question: String,
+    },
 }
 
 /// A single choice in an option step, serialized for IPC transport to the frontend.

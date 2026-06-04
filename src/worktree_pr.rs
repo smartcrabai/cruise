@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use console::style;
 
-use crate::engine::{ExecutionContext, execute_steps, resolve_command_with_model};
+use crate::engine::{ExecutionContext, execute_steps};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
@@ -183,34 +183,30 @@ async fn generate_pr_description(
         }
         Ok(p) => p,
     };
-    let pr_model = compiled.model.as_deref();
-    let has_placeholder = compiled.command.iter().any(|s| s.contains("{model}"));
-    let (resolved_command, model_arg) = if has_placeholder {
-        (
-            resolve_command_with_model(&compiled.command, pr_model),
-            None,
-        )
-    } else {
-        (compiled.command.clone(), pr_model.map(str::to_string))
-    };
+    // PR-description generation is a non-interactive, tool-less prompt; route it
+    // through the executor so it works on both the command and SDK backends.
+    let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
+    let model_or_mode = executor.step_model_or_mode(None, compiled.model.as_deref());
     let spinner = crate::spinner::Spinner::start("Generating PR description...");
     let env = std::collections::HashMap::new();
     let llm_output = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
-        match crate::step::prompt::run_prompt(
-            &resolved_command,
-            model_arg.as_deref(),
-            &pr_prompt,
-            rate_limit_retries,
-            &env,
-            Some(&on_retry),
-            None,
-            None,
-            None,
-        )
-        .await
+        match executor
+            .run(crate::executor::PromptRun {
+                prompt: &pr_prompt,
+                model_or_mode: model_or_mode.as_deref(),
+                max_retries: rate_limit_retries,
+                env: &env,
+                on_retry: Some(&on_retry),
+                cancel_token: None,
+                working_dir: None,
+                stream: None,
+                tools: Vec::new(),
+                resume: None,
+            })
+            .await
         {
-            Ok(r) => r.output,
+            Ok(o) => o.result.output,
             Err(e) => {
                 eprintln!("warning: PR description generation failed: {e}");
                 String::new()
