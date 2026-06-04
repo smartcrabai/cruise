@@ -10,6 +10,9 @@ use cruise::cancellation::CancellationToken;
 use cruise::step::option::OptionResult;
 use tokio::sync::oneshot;
 
+/// Shared slot holding the pending answer channel for an SDK `ask_user` dialog.
+pub type AskResponder = Arc<Mutex<Option<oneshot::Sender<String>>>>;
+
 /// Per-session runtime state held while a single session is executing.
 #[derive(Debug)]
 pub struct PerSessionState {
@@ -62,6 +65,12 @@ pub struct AppState {
     /// survive an app restart.  A fix that was interrupted by a crash will
     /// therefore show up as `fix_in_progress: false` on the next launch.
     pub fixing_sessions: Arc<Mutex<HashSet<String>>>,
+    /// Pending SDK `ask_user` answer channels, keyed by session ID.
+    ///
+    /// Independent of [`Self::sessions`] because plan-phase commands (which is
+    /// where `ask_user` fires) do not register a `PerSessionState`. A slot is
+    /// inserted while a plan command runs and removed when it finishes.
+    pub ask_responders: Arc<Mutex<HashMap<String, AskResponder>>>,
     /// Runtime concurrency limit for Run All batches.
     run_all_parallelism: Arc<AtomicUsize>,
 }
@@ -74,8 +83,60 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             batch_cancel_token: Arc::new(Mutex::new(None)),
             fixing_sessions: Arc::new(Mutex::new(HashSet::new())),
+            ask_responders: Arc::new(Mutex::new(HashMap::new())),
             run_all_parallelism: Arc::new(AtomicUsize::new(1)),
         }
+    }
+
+    fn lock_ask_responders(&self) -> std::sync::MutexGuard<'_, HashMap<String, AskResponder>> {
+        self.ask_responders
+            .lock()
+            .unwrap_or_else(|e| panic!("ask_responders mutex poisoned: {e}"))
+    }
+
+    /// Register a fresh `ask_user` answer slot for `session_id`, returning the
+    /// shared handle to hand to the GUI ask handler. Replaces any existing slot.
+    pub fn register_ask_responder(&self, session_id: &str) -> AskResponder {
+        let responder: AskResponder = Arc::new(Mutex::new(None));
+        self.lock_ask_responders()
+            .insert(session_id.to_owned(), Arc::clone(&responder));
+        responder
+    }
+
+    /// Remove the `ask_user` answer slot for `session_id`, but only if it is
+    /// still the exact slot `responder` registered.
+    ///
+    /// Guards against a concurrent plan command for the same session: if a later
+    /// command replaced the slot, the earlier command's cleanup must not evict
+    /// the newer (still-active) responder. Idempotent.
+    pub fn unregister_ask_responder(&self, session_id: &str, responder: &AskResponder) {
+        let mut map = self.lock_ask_responders();
+        if map
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, responder))
+        {
+            map.remove(session_id);
+        }
+    }
+
+    /// Route an `ask_user` answer to the waiting session by ID.
+    ///
+    /// Returns `true` if a pending dialog was found and the answer delivered.
+    pub fn respond_to_ask(&self, session_id: &str, answer: String) -> bool {
+        let responder = {
+            let map = self.lock_ask_responders();
+            map.get(session_id).map(Arc::clone)
+        };
+        let Some(responder) = responder else {
+            return false;
+        };
+        let mut guard = responder
+            .lock()
+            .unwrap_or_else(|e| panic!("ask_responder mutex poisoned: {e}"));
+        let Some(sender) = guard.take() else {
+            return false;
+        };
+        sender.send(answer).is_ok()
     }
 
     /// Return the current runtime concurrency limit for Run All batches.
@@ -559,5 +620,74 @@ mod tests {
         state.unregister_session("sess-1");
         assert!(!state.is_session_active("sess-1"));
         assert!(state.is_session_active("sess-2"));
+    }
+
+    // -- ask_user responder routing -------------------------------------------
+
+    #[test]
+    fn test_respond_to_ask_routes_to_correct_session() {
+        // Given: two sessions each with a registered ask slot and pending sender
+        let state = AppState::new();
+        let r1 = state.register_ask_responder("sess-1");
+        let r2 = state.register_ask_responder("sess-2");
+        let (tx1, mut rx1) = oneshot::channel::<String>();
+        let (tx2, mut rx2) = oneshot::channel::<String>();
+        *r1.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx1);
+        *r2.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx2);
+
+        // When: answer sess-2 only
+        let sent = state.respond_to_ask("sess-2", "the answer".to_string());
+
+        // Then: sess-2 receives it, sess-1 is untouched
+        assert!(sent);
+        assert_eq!(
+            rx2.try_recv().unwrap_or_else(|e| panic!("{e}")),
+            "the answer"
+        );
+        assert!(rx1.try_recv().is_err(), "sess-1 must not receive anything");
+    }
+
+    #[test]
+    fn test_respond_to_ask_returns_false_for_unknown_session() {
+        let state = AppState::new();
+        assert!(!state.respond_to_ask("nope", "x".to_string()));
+    }
+
+    #[test]
+    fn test_respond_to_ask_returns_false_when_no_pending_sender() {
+        // Registered but the GUI ask handler has not installed a sender yet.
+        let state = AppState::new();
+        state.register_ask_responder("sess-1");
+        assert!(!state.respond_to_ask("sess-1", "x".to_string()));
+    }
+
+    #[test]
+    fn test_unregister_ask_responder_makes_routing_fail() {
+        let state = AppState::new();
+        let r = state.register_ask_responder("sess-1");
+        let (tx, _rx) = oneshot::channel::<String>();
+        *r.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
+
+        state.unregister_ask_responder("sess-1", &r);
+        // After removal the answer has nowhere to go.
+        assert!(!state.respond_to_ask("sess-1", "x".to_string()));
+    }
+
+    #[test]
+    fn test_unregister_ask_responder_does_not_evict_newer_slot() {
+        // A later command for the same session replaces the slot; the earlier
+        // command's cleanup must leave the newer responder intact.
+        let state = AppState::new();
+        let old = state.register_ask_responder("sess-1");
+        let new = state.register_ask_responder("sess-1"); // replaces the slot
+        let (tx, mut rx) = oneshot::channel::<String>();
+        *new.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
+
+        // Old command finishes and tries to clean up its (stale) slot.
+        state.unregister_ask_responder("sess-1", &old);
+
+        // The newer responder is still routable.
+        assert!(state.respond_to_ask("sess-1", "answer".to_string()));
+        assert_eq!(rx.try_recv().unwrap_or_else(|e| panic!("{e}")), "answer");
     }
 }

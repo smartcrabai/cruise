@@ -17,9 +17,11 @@ use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 
+use cruise::planning::{ask_plan_template, fix_plan_template, plan_template};
+
 use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
-use crate::state::AppState;
+use crate::state::{AppState, AskResponder};
 
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 
@@ -382,6 +384,20 @@ pub fn respond_to_option(
     }
 }
 
+/// Deliver the frontend's answer to an SDK `ask_user` dialog to the planning agent.
+#[tauri::command]
+pub fn respond_to_ask(
+    answer: String,
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    if state.respond_to_ask(&session_id, answer) {
+        Ok(())
+    } else {
+        Err(format!("no pending ask_user for session {session_id}"))
+    }
+}
+
 /// Remove Completed sessions whose PR is closed or merged.
 #[tauri::command]
 pub async fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
@@ -438,10 +454,65 @@ fn plan_chunk_callbacks(
     (make_callback("stdout"), make_callback("stderr"))
 }
 
-/// Plan generation prompt templates, embedded at compile-time.
-const PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/plan.md");
-const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/fix-plan.md");
-const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../../prompts/ask-plan.md");
+/// Guard that registers an SDK `ask_user` responder slot for a plan command and
+/// removes it on drop, building the [`PlanPromptCtx`] the command runs with.
+struct GuiPlanCtx {
+    state: AppState,
+    session_id: String,
+    /// The exact responder slot this guard registered, so cleanup only removes
+    /// its own slot (not a newer one a concurrent command may have installed).
+    responder: AskResponder,
+}
+
+impl GuiPlanCtx {
+    /// Register the ask responder and build a planning context whose `ask_user`
+    /// tool routes questions to the frontend over `channel`.
+    ///
+    /// Note: GUI plan/fix/regenerate are independent one-shot commands with no
+    /// in-process approve loop, so each passes `resume: &mut None` and starts a
+    /// fresh seher session. Multi-turn `resume` (sharing one conversation across
+    /// turns) is a CLI-only affordance; persisting the session id across GUI
+    /// commands would require additional `AppState` plumbing.
+    fn build<'a>(
+        state: &AppState,
+        session_id: &str,
+        channel: &tauri::ipc::Channel<PlanEvent>,
+        config: &'a cruise::config::WorkflowConfig,
+        plan_path: &'a std::path::Path,
+        working_dir: &'a std::path::Path,
+    ) -> (Self, cruise::planning::PlanPromptCtx<'a>) {
+        let responder = state.register_ask_responder(session_id);
+        let ask: Arc<dyn cruise::ask_handler::AskHandler> =
+            Arc::new(crate::gui_ask_handler::GuiAskHandler::new(
+                channel.clone(),
+                session_id.to_string(),
+                Arc::clone(&responder),
+            ));
+        let ctx = cruise::planning::PlanPromptCtx {
+            config,
+            ask,
+            plan_path,
+            interactive: true,
+            rate_limit_retries: 5,
+            working_dir: Some(working_dir),
+        };
+        (
+            Self {
+                state: state.clone(),
+                session_id: session_id.to_string(),
+                responder,
+            },
+            ctx,
+        )
+    }
+}
+
+impl Drop for GuiPlanCtx {
+    fn drop(&mut self) {
+        self.state
+            .unregister_ask_responder(&self.session_id, &self.responder);
+    }
+}
 // --- Session creation commands -------------------------------------------------
 
 /// A discovered workflow config file, returned to the frontend.
@@ -533,6 +604,7 @@ pub async fn create_session(
     skipped_steps: Vec<String>,
     use_input_as_plan: bool,
     channel: tauri::ipc::Channel<PlanEvent>,
+    state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
     use cruise::session::{SessionManager, SessionState};
@@ -618,14 +690,16 @@ pub async fn create_session(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
+    let (_ask_guard, ctx) =
+        GuiPlanCtx::build(&state, &session_id, &channel, &config, &plan_path, &base);
     match cruise::planning::run_plan_prompt_template(
-        &config,
+        &ctx,
         &mut vars,
-        PLAN_PROMPT_TEMPLATE,
+        plan_template(&config),
         "[plan] creating plan...",
-        5,
-        Some(&base),
         Some(&stream_callbacks),
+        &mut None,
+        true,
     )
     .await
     .map_err(|e| e.to_string())
@@ -912,7 +986,7 @@ pub async fn regenerate_session_plan(
     let manager = new_session_manager()?;
 
     let _fixing_guard = FixingGuard::new(&state, session_id.clone());
-    regenerate_plan(&manager, &session_id, &channel).await
+    regenerate_plan(&manager, &session_id, &channel, &state).await
 }
 
 /// Generate the initial plan for a session in `Draft` phase,
@@ -938,18 +1012,20 @@ pub async fn generate_plan_for_draft(
             ));
         }
     }
-    regenerate_plan(&manager, &session_id, &channel).await
+    regenerate_plan(&manager, &session_id, &channel, &state).await
 }
 
 async fn regenerate_plan(
     manager: &SessionManager,
     session_id: &str,
     channel: &tauri::ipc::Channel<PlanEvent>,
+    state: &AppState,
 ) -> std::result::Result<String, String> {
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let _ = channel.send(PlanEvent::PlanGenerating);
     let plan_path = session.plan_path(&manager.sessions_dir());
+    let base = session.base_dir.clone();
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
@@ -959,14 +1035,16 @@ async fn regenerate_plan(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
+    let (_ask_guard, ctx) =
+        GuiPlanCtx::build(state, session_id, channel, &config, &plan_path, &base);
     match cruise::planning::run_plan_prompt_template(
-        &config,
+        &ctx,
         &mut vars,
-        PLAN_PROMPT_TEMPLATE,
+        plan_template(&config),
         "[plan] regenerating plan...",
-        5,
-        Some(&session.base_dir),
         Some(&stream_callbacks),
+        &mut None,
+        true,
     )
     .await
     .map_err(|e| e.to_string())
@@ -1067,6 +1145,7 @@ pub async fn fix_session(
 
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
+    let base = session.base_dir.clone();
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
@@ -1077,14 +1156,16 @@ pub async fn fix_session(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
+    let (_ask_guard, ctx) =
+        GuiPlanCtx::build(&state, &session_id, &channel, &config, &plan_path, &base);
     match cruise::planning::run_plan_prompt_template(
-        &config,
+        &ctx,
         &mut vars,
-        FIX_PLAN_PROMPT_TEMPLATE,
+        fix_plan_template(&config),
         "[fix-plan] applying fixes...",
-        5,
-        Some(&session.base_dir),
         Some(&stream_callbacks),
+        &mut None,
+        true,
     )
     .await
     .map_err(|e| e.to_string())
@@ -1139,17 +1220,30 @@ pub(crate) async fn do_ask_session(
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(question));
 
+    // The Ask flow is request/response (no streaming channel), so `ask_user`
+    // cannot surface a question to the user: run non-interactively.
+    let ask: Arc<dyn cruise::ask_handler::AskHandler> =
+        Arc::new(cruise::ask_handler::NoninteractiveAskHandler);
+    let ctx = cruise::planning::PlanPromptCtx {
+        config: &config,
+        ask,
+        plan_path: &plan_path,
+        interactive: false,
+        rate_limit_retries: 5,
+        working_dir: Some(&session.base_dir),
+    };
     let result = cruise::planning::run_plan_prompt_template(
-        &config,
+        &ctx,
         &mut vars,
-        ASK_PLAN_PROMPT_TEMPLATE,
+        ask_plan_template(&config),
         "[ask-plan] answering question...",
-        5,
-        Some(&session.base_dir),
         None,
+        &mut None,
+        // Read-only: never register plan-writing tools for the Ask flow.
+        false,
     )
     .await
     .map_err(|e| e.to_string())?;

@@ -8,7 +8,19 @@ pub const DEFAULT_PR_LANGUAGE: &str = "English";
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
+    ///
+    /// Mutually exclusive with `sdk`. Defaults to empty; exactly one of `command`
+    /// or `sdk` must be set (validated by [`validate_sdk`]).
+    #[serde(default)]
     pub command: Vec<String>,
+
+    /// SDK to drive prompt execution instead of an external `command`
+    /// (currently only `"seher"`). Mutually exclusive with `command`.
+    ///
+    /// In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as
+    /// seher `mode_key`s (default: `model` -> `build`, `plan_model` -> `plan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<String>,
 
     /// Default model for prompt steps (e.g. "sonnet"). Per-step model overrides this.
     pub model: Option<String>,
@@ -256,6 +268,7 @@ impl WorkflowConfig {
                 "{model}".to_string(),
                 "-p".to_string(),
             ],
+            sdk: None,
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
             pr_language: default_pr_language(),
@@ -424,12 +437,40 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 ///
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    validate_sdk(config)?;
     validate_groups(config)?;
     validate_fail_if_no_file_changes(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
     Ok(())
+}
+
+/// Validate the top-level execution backend selection.
+///
+/// Exactly one of `command` or `sdk` must be specified:
+/// - both set -> ambiguous, rejected.
+/// - neither set -> nothing to run prompts with, rejected.
+///
+/// An empty `command` list counts as "not specified" so that `sdk`-only configs
+/// (where `command` defaults to `[]`) are accepted.
+///
+/// # Errors
+///
+/// Returns an error if both or neither of `command` / `sdk` are set.
+pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    let has_command = !config.command.is_empty();
+    let has_sdk = config.sdk.is_some();
+    match (has_command, has_sdk) {
+        (true, true) => Err(CruiseError::InvalidStepConfig(
+            "`sdk` and `command` are mutually exclusive; specify only one".to_string(),
+        )),
+        (false, false) => Err(CruiseError::InvalidStepConfig(
+            "either `command` or `sdk` must be specified".to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Validate all timeout strings across steps, after-pr steps, and group inner steps.
@@ -2013,13 +2054,15 @@ steps:
         let required = schema["required"]
             .as_array()
             .unwrap_or_else(|| panic!("schema must have a 'required' array"));
-        assert!(
-            required.iter().any(|v| v.as_str() == Some("command")),
-            "'command' must be in required"
-        );
+        // `command` is no longer unconditionally required: an `sdk`-backed config
+        // omits it. Only `steps` is always required.
         assert!(
             required.iter().any(|v| v.as_str() == Some("steps")),
             "'steps' must be in required"
+        );
+        assert!(
+            schema["properties"].get("sdk").is_some(),
+            "schema must expose an 'sdk' property"
         );
     }
 
@@ -2389,6 +2432,119 @@ steps:
         assert!(
             result.is_ok(),
             "glob with variable reference should skip static validation"
+        );
+    }
+
+    // ---- sdk field ----
+
+    #[test]
+    fn test_sdk_field_parses_without_command() {
+        // Given: a YAML with `sdk` and no `command`
+        let yaml = r#"
+sdk: seher
+steps:
+  s1:
+    prompt: "Do: {input}"
+"#;
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: sdk is set and command defaults to empty
+        assert_eq!(config.sdk.as_deref(), Some("seher"));
+        assert!(config.command.is_empty(), "command should default to empty");
+    }
+
+    #[test]
+    fn test_sdk_field_defaults_none() {
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(config.sdk.is_none(), "sdk should default to None");
+    }
+
+    #[test]
+    fn test_validate_sdk_rejects_both_sdk_and_command() {
+        // Given: both sdk and command set at the top level
+        let yaml = r"
+sdk: seher
+command: [claude, -p]
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_sdk(&config);
+        assert!(
+            result.is_err(),
+            "expected Err when both sdk and command set"
+        );
+        let msg = err_string(result);
+        assert!(
+            msg.contains("sdk") && msg.contains("command"),
+            "error should mention both sdk and command, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_sdk_rejects_neither() {
+        // Given: neither sdk nor command (command defaults to empty)
+        let yaml = r"
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_sdk(&config);
+        assert!(
+            result.is_err(),
+            "expected Err when neither sdk nor command set"
+        );
+    }
+
+    #[test]
+    fn test_validate_sdk_ok_sdk_only() {
+        let yaml = r"
+sdk: seher
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(validate_sdk(&config).is_ok(), "sdk-only should be valid");
+    }
+
+    #[test]
+    fn test_validate_sdk_ok_command_only() {
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            validate_sdk(&config).is_ok(),
+            "command-only should be valid"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_runs_sdk_check() {
+        // validate_config should surface the sdk/command mutual-exclusion error.
+        let yaml = r"
+sdk: seher
+command: [claude, -p]
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            validate_config(&config).is_err(),
+            "validate_config should reject sdk+command"
         );
     }
 }

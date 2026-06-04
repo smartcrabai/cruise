@@ -118,6 +118,9 @@ pub fn list_skippable_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStep
 #[derive(Debug, Clone)]
 pub struct CompiledWorkflow {
     pub command: Vec<String>,
+    /// SDK backend (e.g. "seher") when prompts run in-process instead of via
+    /// `command`. Mutually exclusive with a non-empty `command`.
+    pub sdk: Option<String>,
     pub model: Option<String>,
     pub plan_model: Option<String>,
     pub env: HashMap<String, String>,
@@ -145,6 +148,7 @@ impl CompiledWorkflow {
     pub fn to_after_pr_compiled(&self) -> Self {
         Self {
             command: self.command.clone(),
+            sdk: self.sdk.clone(),
             model: self.model.clone(),
             plan_model: self.plan_model.clone(),
             env: self.env.clone(),
@@ -180,6 +184,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
 
     Ok(CompiledWorkflow {
         command: config.command,
+        sdk: config.sdk,
         model: config.model,
         plan_model: config.plan_model,
         env: config.env,
