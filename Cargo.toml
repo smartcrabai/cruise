@@ -45,6 +45,13 @@ targets = [
 # Whether to install an updater program
 install-updater = false
 
+# Build Windows ARM64 natively instead of cross-compiling via cargo-xwin.
+# The xwin container breaks ring's build script (clang-cl style /imsvc flags
+# are passed to plain clang, which ring forces for aarch64-pc-windows-msvc).
+[workspace.metadata.dist.github-custom-runners.aarch64-pc-windows-msvc]
+host = "aarch64-pc-windows-msvc"
+runner = "windows-11-arm"
+
 [features]
 test-utils = []
 
