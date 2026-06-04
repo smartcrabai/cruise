@@ -52,16 +52,17 @@ impl AskHandler for CliAskHandler {
 /// A test double that returns scripted answers in order and records the
 /// questions it was asked.
 ///
-/// Available to tests across the crate (and to `test-utils` consumers) so that
-/// `sdk_tools` / `executor` tests can exercise the `ask_user` path without a
-/// terminal.
-#[cfg(any(test, feature = "test-utils"))]
+/// Used by `ask_handler` / `sdk_tools` unit tests to exercise the `ask_user`
+/// path without a terminal. Gated on `cfg(test)` (not `test-utils`) because it
+/// has no out-of-crate consumers and would otherwise be dead in the binary when
+/// `test-utils` is enabled without the test cfg.
+#[cfg(test)]
 pub struct ScriptedAskHandler {
     answers: std::sync::Mutex<std::collections::VecDeque<String>>,
     pub asked: std::sync::Mutex<Vec<String>>,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 impl ScriptedAskHandler {
     /// Build a handler that returns `answers` in order, one per `ask_user` call.
     #[must_use]
@@ -73,7 +74,7 @@ impl ScriptedAskHandler {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 impl AskHandler for ScriptedAskHandler {
     fn ask_user(&self, question: &str) -> Result<String> {
         if let Ok(mut asked) = self.asked.lock() {

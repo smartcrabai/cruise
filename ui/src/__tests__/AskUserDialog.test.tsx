@@ -5,10 +5,12 @@ import { AskUserDialog } from "../components/AskUserDialog";
 import { ASK_USER_EVENT, type AskUserDetail } from "../lib/askUser";
 
 // AskUserDialog calls respondToAsk (a Tauri IPC wrapper) on submit; mock it.
-const respondToAsk = vi.fn(() => Promise.resolve());
-vi.mock("../lib/commands", () => ({
-  respondToAsk: (sessionId: string, answer: string) => respondToAsk(sessionId, answer),
+// Variadic so calling with (sessionId, answer) type-checks, and it returns a
+// Promise so the component's `.catch(...)` has something to chain.
+const { respondToAsk } = vi.hoisted(() => ({
+  respondToAsk: vi.fn((..._args: unknown[]) => Promise.resolve()),
 }));
+vi.mock("../lib/commands", () => ({ respondToAsk }));
 
 /** Dispatch the window event that surfaces an ask_user question. */
 function fireAsk(detail: AskUserDetail) {
