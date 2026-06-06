@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use seher::sdk::{
     CodexBarProbe, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk, poll_for_agent,
+    split_thinking_suffix,
 };
 
 use crate::cancellation::CancellationToken;
@@ -266,10 +267,16 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         // Resolution finished; the resolver thread has already exited.
         drop(abort_guard);
 
+        // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
+        // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
+        // config label (e.g. "codex"), which pi does not know about. Split the ref
+        // so pi receives its own provider / model / thinking parts.
+        let (provider, model, thinking) = split_model_ref(&resolved.provider, &resolved.model_id);
         let opts = PiRunnerOptions {
-            provider: Some(resolved.provider.clone()),
-            model: Some(resolved.model_id.clone()),
+            provider: Some(provider),
+            model: Some(model),
             api_key: resolved.api.as_ref().and_then(|a| a.key.clone()),
+            thinking,
             system_prompt: None,
             working_directory: req.working_dir.map(Path::to_path_buf),
             tools: req.tools.clone(),
@@ -502,6 +509,32 @@ pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -
         .to_string()
 }
 
+/// Split a seher model ref into the `(provider, model, thinking)` triple
+/// expected by [`PiRunnerOptions`].
+///
+/// `ResolvedAgent::model_id` carries a full pi model ref
+/// (`"<pi-provider>/<model>[:thinking]"`, e.g. `"openai-codex/gpt-5.5:xhigh"`),
+/// while `ResolvedAgent::provider` is the seher config label (e.g. `"codex"`),
+/// which pi's model registry does not know about. The leading path segment is
+/// therefore the pi provider. A ref without `/` carries no provider
+/// information, so as a best effort the seher label is passed through as
+/// `fallback_provider` — that only resolves when the label happens to equal a
+/// pi provider id. The trailing `:level` is split off only when it parses as a
+/// pi thinking level (`off`/`low`/`xhigh`/`0`-`4`/…, see
+/// [`split_thinking_suffix`]); any other `:` suffix (e.g. `:free`) stays part
+/// of the model id.
+fn split_model_ref(fallback_provider: &str, model_id: &str) -> (String, String, Option<String>) {
+    let (without_thinking, thinking) = split_thinking_suffix(model_id);
+    let (provider, model) = without_thinking
+        .split_once('/')
+        .unwrap_or((fallback_provider, without_thinking));
+    (
+        provider.to_string(),
+        model.to_string(),
+        thinking.map(str::to_string),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +569,56 @@ mod tests {
     fn plan_mode_key_defaults_to_plan() {
         assert_eq!(mode_key_for_plan(None, None), DEFAULT_PLAN_MODE_KEY);
         assert_eq!(mode_key_for_plan(None, None), "plan");
+    }
+
+    // -- split_model_ref --------------------------------------------------------
+
+    #[test]
+    fn split_model_ref_extracts_provider_and_thinking() {
+        assert_eq!(
+            split_model_ref("codex", "openai-codex/gpt-5.5:xhigh"),
+            (
+                "openai-codex".to_string(),
+                "gpt-5.5".to_string(),
+                Some("xhigh".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn split_model_ref_keeps_slashes_in_model_id() {
+        assert_eq!(
+            split_model_ref("openrouter", "openrouter/moonshotai/kimi-k2.6"),
+            (
+                "openrouter".to_string(),
+                "moonshotai/kimi-k2.6".to_string(),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn split_model_ref_falls_back_to_seher_provider_for_bare_model() {
+        assert_eq!(
+            split_model_ref("anthropic", "claude-sonnet-4-5"),
+            (
+                "anthropic".to_string(),
+                "claude-sonnet-4-5".to_string(),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn split_model_ref_ignores_non_thinking_colon_suffix() {
+        assert_eq!(
+            split_model_ref("openrouter", "openrouter/meta-llama/llama-3-8b:free"),
+            (
+                "openrouter".to_string(),
+                "meta-llama/llama-3-8b:free".to_string(),
+                None
+            )
+        );
     }
 
     // -- Executor dispatch ----------------------------------------------------
