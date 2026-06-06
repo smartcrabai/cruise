@@ -168,7 +168,7 @@ cruise --plan <INPUT|stdin> [--skip-planning]
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
 
-Adding `--skip-planning` (which requires `--plan`) skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `AwaitingApproval`.
+Adding `--skip-planning` skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `AwaitingApproval`. The flag also works without `--plan` (e.g. `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
 
 #### `cruise list`
 
@@ -281,11 +281,13 @@ The `description:` field of each config file is shown next to its filename in bo
 ### Basic Structure
 
 ```yaml
-command:
+command:                   # LLM invocation command (mutually exclusive with `sdk`)
   - claude
   - --model
   - "{model}"
   - -p
+
+# sdk: seher              # alternative to `command`: drive prompts via the seher SDK (see SDK Mode)
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -297,7 +299,7 @@ pr_language: English      # language for auto-generated PR title/body (optional,
 llm:                      # OpenAI-compatible API for session title generation (optional)
   api_key: sk-...         # API key (or set CRUISE_LLM_API_KEY env var)
   endpoint: https://api.openai.com/v1   # default endpoint
-  model: gpt-4o-mini      # model to use for title generation
+  model: gpt-4o           # model to use for title generation
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -347,6 +349,19 @@ steps:
     prompt: "Create a plan for: {input}"
 ```
 
+### SDK Mode
+
+Instead of spawning an external CLI via `command`, prompt steps can be driven in-process through an SDK by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified.
+
+```yaml
+sdk: seher        # currently the only supported value
+
+model: build      # in SDK mode, interpreted as a seher mode_key (default: build)
+plan_model: plan  # mode_key for the built-in plan step (falls back to `model`, then `plan`)
+```
+
+In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys** rather than LLM model names. When omitted, `model` defaults to `build`; `plan_model` falls back to `model`, or to `plan` when neither is set.
+
 ### PR Language
 
 The `pr_language` field controls the language used for the auto-generated PR title and body. Defaults to `"English"` when omitted.
@@ -365,7 +380,7 @@ Configure via the `llm:` block in the config file, or with environment variables
 |---------|-------------|----------------------|---------|
 | API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | *(required)* |
 | Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
-| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o-mini` |
+| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o` |
 
 Environment variables take precedence over config file values.
 
@@ -373,7 +388,7 @@ Environment variables take precedence over config file values.
 llm:
   api_key: sk-...
   endpoint: https://api.openai.com/v1
-  model: gpt-4o-mini
+  model: gpt-4o
 ```
 
 If no API key is configured, the title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
@@ -678,6 +693,7 @@ steps:
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
+| `{pr.language}` | Language used for PR title/body generation (from `pr_language`). Set only when the PR description is generated via the CLI/SDK prompt path (not the `llm:` API path) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
