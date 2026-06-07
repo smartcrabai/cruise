@@ -38,6 +38,8 @@ pub struct SessionDto {
     pub config_source: String,
     pub config_path: Option<String>,
     pub base_dir: String,
+    /// GitHub repository (`owner/repo`) backing this session, if any.
+    pub repo: Option<String>,
     pub input: String,
     pub title: Option<String>,
     pub current_step: Option<String>,
@@ -85,6 +87,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             config_source: s.config_source,
             config_path: s.config_path.map(|p| p.to_string_lossy().into_owned()),
             base_dir: s.base_dir.to_string_lossy().into_owned(),
+            repo: s.repo,
             input: s.input,
             title: s.title,
             current_step: s.current_step,
@@ -207,6 +210,42 @@ fn new_session_manager() -> std::result::Result<SessionManager, String> {
     Ok(SessionManager::new(data_dir))
 }
 
+/// Resolve the base directory and workflow config for a new GUI session.
+///
+/// For repo-backed sessions (`repo = Some("owner/repo")`) the repository is
+/// cloned into `<data_dir>/clones/{session_id}/`, which becomes the base
+/// directory; the clone is removed again if config resolution fails.
+fn resolve_new_session_workspace(
+    manager: &SessionManager,
+    session_id: &str,
+    repo: Option<&str>,
+    base_dir: &str,
+    config_path: Option<&str>,
+) -> std::result::Result<(PathBuf, String, cruise::resolver::ConfigSource), String> {
+    let Some(spec) = repo else {
+        return resolve_gui_session_paths(base_dir, config_path);
+    };
+    cruise::repo_clone::validate_repo_spec(spec).map_err(|e| e.to_string())?;
+    cruise::worktree_pr::ensure_gh_available().map_err(|e| e.to_string())?;
+    let clone_path = manager.clones_dir().join(session_id);
+    cruise::repo_clone::clone_repo(spec, &clone_path).map_err(|e| e.to_string())?;
+    match cruise::resolver::resolve_config_in_dir(config_path, &clone_path) {
+        Ok((yaml, source)) => Ok((clone_path, yaml, source)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&clone_path);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Remove the temporary clone for `session_id` if one exists (best-effort).
+fn remove_session_clone(manager: &SessionManager, session_id: &str) {
+    let clone_path = manager.clones_dir().join(session_id);
+    if clone_path.exists() {
+        let _ = std::fs::remove_dir_all(&clone_path);
+    }
+}
+
 fn prepare_run_session(
     manager: &SessionManager,
     session: &mut SessionState,
@@ -278,6 +317,44 @@ pub fn list_directory(path: String) -> std::result::Result<Vec<DirEntryDto>, Str
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries.truncate(50);
     Ok(entries)
+}
+
+/// List GitHub repositories (`owner/repo`) visible to the authenticated `gh`
+/// user, most recently pushed first.
+///
+/// Used by the New Session form's repository picker. Returns an error if `gh`
+/// is unavailable or not authenticated; the picker still accepts free-form
+/// `owner/repo` input in that case.
+#[tauri::command]
+pub fn list_github_repos() -> std::result::Result<Vec<String>, String> {
+    cruise::worktree_pr::ensure_gh_available().map_err(|e| e.to_string())?;
+    let output = std::process::Command::new("gh")
+        .args([
+            "repo",
+            "list",
+            "--limit",
+            "200",
+            "--json",
+            "nameWithOwner",
+            "--jq",
+            ".[].nameWithOwner",
+        ])
+        .output()
+        .map_err(|e| format!("failed to run gh repo list: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "gh repo list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
 }
 
 // --- Read commands -------------------------------------------------------------
@@ -548,6 +625,8 @@ pub struct NewSessionDraftDto {
     pub input: String,
     pub config_path: Option<String>,
     pub base_dir: String,
+    #[serde(default)]
+    pub repo: Option<String>,
     pub skipped_steps: Vec<String>,
     pub updated_at: Option<String>,
 }
@@ -601,6 +680,7 @@ pub async fn create_session(
     input: String,
     config_path: Option<String>,
     base_dir: String,
+    repo: Option<String>,
     skipped_steps: Vec<String>,
     use_input_as_plan: bool,
     channel: tauri::ipc::Channel<PlanEvent>,
@@ -610,32 +690,62 @@ pub async fn create_session(
     use cruise::session::{SessionManager, SessionState};
     use cruise::variable::VariableStore;
 
-    let (base, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
-    let config =
-        WorkflowConfig::from_yaml(&yaml).map_err(|e| format!("config parse error: {e}"))?;
-    validate_config(&config).map_err(|e| e.to_string())?;
-
+    let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let manager = new_session_manager()?;
     let session_id = SessionManager::new_session_id();
+    let (base, yaml, source) = resolve_new_session_workspace(
+        &manager,
+        &session_id,
+        repo.as_deref(),
+        &base_dir,
+        config_path.as_deref(),
+    )?;
+    let config = match WorkflowConfig::from_yaml(&yaml) {
+        Ok(config) => config,
+        Err(e) => {
+            remove_session_clone(&manager, &session_id);
+            return Err(format!("config parse error: {e}"));
+        }
+    };
+    if let Err(e) = validate_config(&config) {
+        remove_session_clone(&manager, &session_id);
+        return Err(e.to_string());
+    }
+
     let mut session = SessionState::new(
         session_id.clone(),
         base.clone(),
         source.display_string(),
         input.trim().to_string(),
     );
-    session.config_path = source.path().cloned();
+    session.repo = repo.clone();
+    // Configs that live inside the temporary clone are copied into the session
+    // directory below so they stay readable after the clone is removed.
+    session.config_path = if repo.is_some() {
+        cruise::repo_clone::persistent_config_path(&source, &base)
+    } else {
+        source.path().cloned()
+    };
     session.skipped_steps = skipped_steps;
-    manager.create(&session).map_err(|e| e.to_string())?;
+    if let Err(e) = manager.create(&session) {
+        remove_session_clone(&manager, &session_id);
+        return Err(e.to_string());
+    }
 
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
         input: session.input.clone(),
         requested_config_path: config_path,
-        working_dir: base.to_string_lossy().into_owned(),
-        resolved_config_key: source.path().map_or_else(
+        // Clone paths are temporary; never offer them as recent directories.
+        working_dir: if repo.is_some() {
+            String::new()
+        } else {
+            base.to_string_lossy().into_owned()
+        },
+        resolved_config_key: session.config_path.as_deref().map_or_else(
             || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
+            resolved_config_key_for_session,
         ),
         skipped_steps: session.skipped_steps.clone(),
     });
@@ -660,6 +770,7 @@ pub async fn create_session(
                 session.plan_error = None;
                 if let Err(e) = manager.save(&session) {
                     let _ = manager.delete(&session_id);
+                    remove_session_clone(&manager, &session_id);
                     return Err(e.to_string());
                 }
                 let _ = channel.send(PlanEvent::SessionCreated {
@@ -674,6 +785,7 @@ pub async fn create_session(
             }
             Err(e) => {
                 let _ = manager.delete(&session_id);
+                remove_session_clone(&manager, &session_id);
                 return Err(e.to_string());
             }
         }
@@ -713,6 +825,7 @@ pub async fn create_session(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = manager.delete(&session_id);
+                    remove_session_clone(&manager, &session_id);
                     let msg = e.to_string();
                     let _ = channel.send(PlanEvent::PlanFailed {
                         session_id: session_id.clone(),
@@ -729,6 +842,7 @@ pub async fn create_session(
         }
         Err(msg) => {
             let _ = manager.delete(&session_id);
+            remove_session_clone(&manager, &session_id);
             let _ = channel.send(PlanEvent::PlanFailed {
                 session_id: session_id.clone(),
                 error: msg.clone(),
@@ -752,36 +866,67 @@ pub(crate) fn create_draft_session_impl(
     input: String,
     config_path: Option<String>,
     base_dir: String,
+    repo: Option<String>,
     skipped_steps: Vec<String>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
 
-    let (base, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
-    let config =
-        WorkflowConfig::from_yaml(&yaml).map_err(|e| format!("config parse error: {e}"))?;
-    validate_config(&config).map_err(|e| e.to_string())?;
-
+    let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let session_id = SessionManager::new_session_id();
+    let (base, yaml, source) = resolve_new_session_workspace(
+        manager,
+        &session_id,
+        repo.as_deref(),
+        &base_dir,
+        config_path.as_deref(),
+    )?;
+    let config = match WorkflowConfig::from_yaml(&yaml) {
+        Ok(config) => config,
+        Err(e) => {
+            remove_session_clone(manager, &session_id);
+            return Err(format!("config parse error: {e}"));
+        }
+    };
+    if let Err(e) = validate_config(&config) {
+        remove_session_clone(manager, &session_id);
+        return Err(e.to_string());
+    }
+
     let mut session = SessionState::new(
         session_id.clone(),
         base.clone(),
         source.display_string(),
         input.trim().to_string(),
     );
-    session.config_path = source.path().cloned();
+    session.repo = repo.clone();
+    // Configs that live inside the temporary clone are copied into the session
+    // directory below so they stay readable after the clone is removed.
+    session.config_path = if repo.is_some() {
+        cruise::repo_clone::persistent_config_path(&source, &base)
+    } else {
+        source.path().cloned()
+    };
     session.skipped_steps = skipped_steps;
     session.phase = SessionPhase::Draft;
-    manager.create(&session).map_err(|e| e.to_string())?;
+    if let Err(e) = manager.create(&session) {
+        remove_session_clone(manager, &session_id);
+        return Err(e.to_string());
+    }
 
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
         input: session.input.clone(),
         requested_config_path: config_path,
-        working_dir: base.to_string_lossy().into_owned(),
-        resolved_config_key: source.path().map_or_else(
+        // Clone paths are temporary; never offer them as recent directories.
+        working_dir: if repo.is_some() {
+            String::new()
+        } else {
+            base.to_string_lossy().into_owned()
+        },
+        resolved_config_key: session.config_path.as_deref().map_or_else(
             || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
+            resolved_config_key_for_session,
         ),
         skipped_steps: session.skipped_steps.clone(),
     });
@@ -791,6 +936,7 @@ pub(crate) fn create_draft_session_impl(
         let session_dir = manager.sessions_dir().join(&session_id);
         if let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml) {
             let _ = manager.delete(&session_id);
+            remove_session_clone(manager, &session_id);
             return Err(format!("failed to write session config: {e}"));
         }
     }
@@ -807,10 +953,11 @@ pub fn create_draft_session(
     input: String,
     config_path: Option<String>,
     base_dir: String,
+    repo: Option<String>,
     skipped_steps: Vec<String>,
 ) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
-    create_draft_session_impl(&manager, input, config_path, base_dir, skipped_steps)
+    create_draft_session_impl(&manager, input, config_path, base_dir, repo, skipped_steps)
 }
 
 /// Return the latest persisted New Session selections and recent working directories.
@@ -946,6 +1093,9 @@ pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
         eprintln!("warning: failed to refresh session title: {err}");
     }
     session.approve();
+    // Repo-backed sessions: the temporary clone is no longer needed once the
+    // plan is approved; execution re-clones into a fresh directory.
+    cruise::repo_clone::cleanup_after_approval(&manager, &mut session);
     manager.save(&session).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1022,6 +1172,12 @@ async fn regenerate_plan(
     state: &AppState,
 ) -> std::result::Result<String, String> {
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+    // Repo-backed sessions plan inside the temporary clone; re-create it if missing.
+    if cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session)
+        .map_err(|e| e.to_string())?
+    {
+        let _ = manager.save(&session);
+    }
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let _ = channel.send(PlanEvent::PlanGenerating);
     let plan_path = session.plan_path(&manager.sessions_dir());
@@ -1098,6 +1254,11 @@ async fn regenerate_plan(
 #[tauri::command]
 pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
     let manager = new_session_manager()?;
+    if let Ok(session) = manager.load(&session_id)
+        && session.repo.is_some()
+    {
+        cruise::repo_clone::cleanup_session_workspace(&manager, &session);
+    }
     manager.delete(&session_id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1114,7 +1275,9 @@ pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
         return Err("Cannot delete a running session. Cancel it first.".to_string());
     }
 
-    if let Some(ctx) = session.worktree_context()
+    if session.repo.is_some() {
+        cruise::repo_clone::cleanup_session_workspace(&manager, &session);
+    } else if let Some(ctx) = session.worktree_context()
         && let Err(e) = cruise::worktree::cleanup_worktree(&ctx)
     {
         eprintln!(
@@ -1143,6 +1306,12 @@ pub async fn fix_session(
     let _fixing_guard = FixingGuard::new(&state, session_id.clone());
     let _ = channel.send(PlanEvent::PlanGenerating);
 
+    // Repo-backed sessions plan inside the temporary clone; re-create it if missing.
+    if cruise::repo_clone::ensure_repo_session_workspace(&manager, &mut session)
+        .map_err(|e| e.to_string())?
+    {
+        let _ = manager.save(&session);
+    }
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
@@ -1216,7 +1385,13 @@ pub(crate) async fn do_ask_session(
     session_id: &str,
     question: String,
 ) -> std::result::Result<String, String> {
-    let session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+    // Repo-backed sessions answer questions inside the temporary clone.
+    if cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session)
+        .map_err(|e| e.to_string())?
+    {
+        let _ = manager.save(&session);
+    }
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
@@ -1293,6 +1468,19 @@ async fn execute_single_session(
             session_id,
             session.phase.label()
         ));
+    }
+
+    // Repo-backed sessions always run in a worktree on a fresh clone so a PR
+    // is always created; current-branch (no-PR) mode is not available.
+    let workspace_mode = if session.repo.is_some() {
+        WorkspaceMode::Worktree
+    } else {
+        workspace_mode
+    };
+    if cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session)
+        .map_err(|e| e.to_string())?
+    {
+        let _ = manager.save(&session);
     }
 
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
@@ -1467,6 +1655,12 @@ async fn execute_single_session(
             final_session.clear_runner();
             final_session.phase = SessionPhase::Completed;
             final_session.completed_at = Some(current_iso8601());
+            // Repo-backed sessions: drop the temporary clone (and its
+            // worktree) once the PR has been created.
+            if final_session.repo.is_some() && final_session.pr_url.is_some() {
+                cruise::repo_clone::cleanup_session_workspace(manager, &final_session);
+                final_session.worktree_path = None;
+            }
             let _ = channel.send(WorkflowEvent::WorkflowCompleted {
                 session_id: sid_for_cleanup.clone(),
                 run: exec.run,
@@ -1754,6 +1948,7 @@ pub fn get_new_session_draft() -> std::result::Result<Option<NewSessionDraftDto>
             input: draft.input,
             config_path: draft.requested_config_path,
             base_dir: draft.working_dir,
+            repo: draft.repo,
             skipped_steps: draft.skipped_steps,
             updated_at: Some(draft.updated_at),
         }),
@@ -1767,6 +1962,7 @@ pub fn save_new_session_draft(draft: NewSessionDraftDto) -> std::result::Result<
         input: draft.input,
         requested_config_path: draft.config_path,
         working_dir: draft.base_dir,
+        repo: draft.repo,
         skipped_steps: draft.skipped_steps,
         updated_at: cruise::session::current_iso8601(),
     };
@@ -2825,6 +3021,7 @@ mod tests {
             "do the thing".to_string(),
             None,
             repo.to_string_lossy().into_owned(),
+            None,
             vec!["build".to_string()],
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -2865,6 +3062,7 @@ mod tests {
             "  padded input  ".to_string(),
             None,
             repo.to_string_lossy().into_owned(),
+            None,
             vec![],
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -2992,6 +3190,7 @@ mod tests {
             input: "test task".to_string(),
             config_path: Some("/tmp/cruise.yaml".to_string()),
             base_dir: "/tmp/project".to_string(),
+            repo: None,
             skipped_steps: vec!["review".to_string()],
             updated_at: None,
         };
@@ -3026,6 +3225,7 @@ mod tests {
             input: "temp".to_string(),
             config_path: None,
             base_dir: "/tmp".to_string(),
+            repo: None,
             skipped_steps: vec![],
             updated_at: None,
         })

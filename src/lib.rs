@@ -16,6 +16,7 @@ pub mod new_session_history;
 pub mod option_handler;
 pub mod paths;
 pub mod planning;
+pub mod repo_clone;
 pub mod resolver;
 pub mod sdk_tools;
 pub mod session;
