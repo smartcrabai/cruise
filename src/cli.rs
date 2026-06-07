@@ -25,6 +25,12 @@ pub struct Cli {
     #[arg(long)]
     pub skip_planning: bool,
 
+    /// GitHub repository (owner/repository) to clone into a temporary
+    /// directory for planning and execution. The clone is removed after the
+    /// plan is approved and again after the PR has been created.
+    #[arg(long, value_name = "OWNER/REPO")]
+    pub repo: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -69,6 +75,12 @@ pub struct PlanArgs {
     /// Use the input directly as the plan; skip LLM-based planning.
     #[arg(long)]
     pub skip_planning: bool,
+
+    /// GitHub repository (owner/repository) to clone into a temporary
+    /// directory for planning and execution. The clone is removed after the
+    /// plan is approved and again after the PR has been created.
+    #[arg(long, value_name = "OWNER/REPO")]
+    pub repo: Option<String>,
 
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
@@ -604,6 +616,43 @@ mod tests {
         );
         assert_eq!(cli.input, Some("task text".to_string()));
         assert_eq!(cli.plan, None, "--plan should stay empty");
+    }
+
+    // -- repo flag --------------------------------------------------------------
+
+    #[test]
+    fn test_plan_repo_flag_parses() {
+        // Given: plan subcommand with --repo owner/repo
+        let cli = Cli::parse_from(["cruise", "plan", "--repo", "owner/repo", "my task"]);
+        // When/Then: the repo spec and input are captured
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.repo, Some("owner/repo".to_string()));
+                assert_eq!(args.input, Some("my task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_repo_defaults_to_none() {
+        let cli = Cli::parse_from(["cruise", "plan", "my task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.repo, None, "--repo should default to None");
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_root_plan_flag_with_repo_parses() {
+        // Given: background --plan combined with --repo at root level
+        let cli = Cli::try_parse_from(["cruise", "--plan", "task", "--repo", "owner/repo"])
+            .unwrap_or_else(|e| panic!("expected --plan --repo to parse: {e}"));
+        // When/Then: both are captured on the root struct
+        assert_eq!(cli.plan, Some("task".to_string()));
+        assert_eq!(cli.repo, Some("owner/repo".to_string()));
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub struct NewSessionDraft {
     /// Working directory for the session.
     #[serde(default)]
     pub working_dir: String,
+    /// GitHub repository (`owner/repo`) selected instead of a directory.
+    #[serde(default)]
+    pub repo: Option<String>,
     /// Step names the user explicitly chose to skip.
     #[serde(default)]
     pub skipped_steps: Vec<String>,
@@ -187,6 +190,7 @@ mod tests {
             input: "test task".to_string(),
             requested_config_path: Some("/tmp/cruise.yaml".to_string()),
             working_dir: "/tmp/project".to_string(),
+            repo: None,
             skipped_steps: vec!["review".to_string(), "write-tests".to_string()],
             updated_at: "2026-04-07T00:00:00Z".to_string(),
         }

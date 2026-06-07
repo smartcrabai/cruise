@@ -158,6 +158,14 @@ export function listDirectory(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_directory", { path });
 }
 
+/**
+ * List GitHub repositories (`owner/repo`) for the authenticated `gh` user,
+ * for the New Session repository picker.
+ */
+export function listGithubRepos(): Promise<string[]> {
+  return invoke<string[]>("list_github_repos");
+}
+
 // ─── Session creation ─────────────────────────────────────────────────────────
 
 /** List workflow config files in ~/.cruise/. */
@@ -208,6 +216,8 @@ export function createSession(
     input: string;
     configPath?: string;
     baseDir: string;
+    /** GitHub repository (owner/repo) to clone instead of using baseDir. */
+    repo?: string;
     skippedSteps?: string[];
     useInputAsPlan?: boolean;
   },
@@ -217,6 +227,7 @@ export function createSession(
     input: params.input,
     configPath: params.configPath ?? null,
     baseDir: params.baseDir,
+    repo: params.repo ?? null,
     skippedSteps: params.skippedSteps ?? [],
     useInputAsPlan: params.useInputAsPlan ?? false,
     channel,
@@ -235,12 +246,15 @@ export function createDraftSession(params: {
   input: string;
   configPath?: string;
   baseDir: string;
+  /** GitHub repository (owner/repo) to clone instead of using baseDir. */
+  repo?: string;
   skippedSteps?: string[];
 }): Promise<string> {
   return invoke<string>("create_draft_session", {
     input: params.input,
     configPath: params.configPath ?? null,
     baseDir: params.baseDir,
+    repo: params.repo ?? null,
     skippedSteps: params.skippedSteps ?? [],
   });
 }

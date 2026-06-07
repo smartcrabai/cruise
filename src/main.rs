@@ -23,6 +23,7 @@ mod paths;
 mod plan_cmd;
 mod planning;
 mod platform;
+mod repo_clone;
 mod resolver;
 mod run_cmd;
 mod sdk_tools;
@@ -54,6 +55,7 @@ async fn run() -> error::Result<()> {
         command,
         input,
         skip_planning,
+        repo,
     } = cli::parse_cli();
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
@@ -64,9 +66,11 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
-        None if plan.is_some() => {
-            plan_cmd::launch_background_plan(&plan.unwrap_or_default(), skip_planning)
-        }
+        None if plan.is_some() => plan_cmd::launch_background_plan(
+            &plan.unwrap_or_default(),
+            skip_planning,
+            repo.as_deref(),
+        ),
         None => {
             // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
@@ -74,6 +78,7 @@ async fn run() -> error::Result<()> {
                 config: None,
                 dry_run: false,
                 skip_planning,
+                repo,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
             };
             plan_cmd::run(plan_args).await

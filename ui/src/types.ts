@@ -19,6 +19,8 @@ export interface Session {
   configSource: string;
   configPath?: string;
   baseDir: string;
+  /** GitHub repository (owner/repo) backing this session, if any. */
+  repo?: string;
   input: string;
   title?: string;
   currentStep?: string;
@@ -185,6 +187,8 @@ export interface NewSessionDraftPersisted {
   input: string;
   configPath?: string;
   baseDir: string;
+  /** GitHub repository (owner/repo) selected instead of a directory. */
+  repo?: string;
   skippedSteps: string[];
   updatedAt?: string;
 }

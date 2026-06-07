@@ -40,6 +40,7 @@ pub fn run() {
             commands::fix_session,
             commands::ask_session,
             commands::list_directory,
+            commands::list_github_repos,
             commands::run_all_sessions,
             commands::get_update_readiness,
             commands::get_new_session_history_summary,
