@@ -53,8 +53,9 @@ fn cli_plan_ctx<'a>(
 
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve config first so the path is visible before prompting for input.
-    let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
-    eprintln!("{}", style(source.display_string()).dim());
+    // For repo sessions the config lives in the temporary clone, which doesn't
+    // exist yet; resolution is deferred until after cloning.
+    let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref())?;
 
     // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
     // or backward-compat path where cli.rs already consumed stdin and placed
@@ -70,13 +71,11 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         );
         return Ok(());
     }
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    validate_config(&config)?;
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let mut session = create_planning_session(&manager, &source, input.trim().to_string())?;
-    setup_planning_worktree(&manager, &mut session)?;
+    let (config, mut session) =
+        create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
+    setup_planning_worktree_or_discard(&manager, &mut session)?;
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
@@ -95,7 +94,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
                 style("✗").red().bold(),
                 session.id
             );
-            cleanup_planning_worktree(&session);
+            cleanup_discarded_session_workspace(&manager, &session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
@@ -116,7 +115,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
                 style("✗").red().bold(),
                 session.id
             );
-            cleanup_planning_worktree(&session);
+            cleanup_discarded_session_workspace(&manager, &session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
@@ -138,18 +137,17 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     .await
 }
 
-pub fn launch_background_plan(plan_input: &str, skip_planning: bool) -> Result<()> {
-    let (yaml, source) = crate::resolver::resolve_config(None)?;
-    eprintln!("{}", style(source.display_string()).dim());
-
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    validate_config(&config)?;
+pub fn launch_background_plan(
+    plan_input: &str,
+    skip_planning: bool,
+    repo: Option<&str>,
+) -> Result<()> {
+    let target = resolve_plan_target(repo, None)?;
 
     let input = read_background_plan_input(plan_input)?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let mut session = create_planning_session(&manager, &source, input)?;
-    setup_planning_worktree(&manager, &mut session)?;
+    let (_config, mut session) = create_session_for_target(&manager, target, None, &input)?;
+    setup_planning_worktree_or_discard(&manager, &mut session)?;
 
     if skip_planning {
         let plan_path = session.plan_path(&manager.sessions_dir());
@@ -159,7 +157,7 @@ pub fn launch_background_plan(plan_input: &str, skip_planning: bool) -> Result<(
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
                 session.phase = SessionPhase::AwaitingApproval;
                 if let Err(e) = manager.save(&session) {
-                    cleanup_planning_worktree(&session);
+                    cleanup_discarded_session_workspace(&manager, &session);
                     if let Err(del_err) = manager.delete(&session.id) {
                         eprintln!("warning: failed to clean up session: {del_err}");
                     }
@@ -167,7 +165,7 @@ pub fn launch_background_plan(plan_input: &str, skip_planning: bool) -> Result<(
                 }
             }
             Err(e) => {
-                cleanup_planning_worktree(&session);
+                cleanup_discarded_session_workspace(&manager, &session);
                 if let Err(del_err) = manager.delete(&session.id) {
                     eprintln!("warning: failed to clean up session: {del_err}");
                 }
@@ -292,6 +290,9 @@ async fn approve_with_title(
         crate::metadata::refresh_session_title_from_plan(session, plan_content);
     }
     session.approve();
+    // Repo-backed sessions: the temporary clone (and its planning worktree)
+    // are no longer needed once the plan is approved; execution re-clones.
+    crate::repo_clone::cleanup_after_approval(manager, session);
     manager.save(session)
 }
 
@@ -338,6 +339,26 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
     Ok(())
 }
 
+/// [`setup_planning_worktree`], discarding the freshly created session (and
+/// its temporary clone, for repo-backed sessions) when worktree setup fails so
+/// nothing leaks on the error path.
+fn setup_planning_worktree_or_discard(
+    manager: &SessionManager,
+    session: &mut SessionState,
+) -> Result<()> {
+    setup_planning_worktree(manager, session).inspect_err(|_| {
+        eprintln!(
+            "\n{} Worktree setup failed. Session {} discarded.",
+            style("✗").red().bold(),
+            session.id
+        );
+        cleanup_discarded_session_workspace(manager, session);
+        if let Err(del_err) = manager.delete(&session.id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+    })
+}
+
 /// Clean up the planning worktree if one was created.  Failures are logged as
 /// warnings and do not propagate — cleanup is best-effort.
 fn cleanup_planning_worktree(session: &SessionState) {
@@ -361,6 +382,130 @@ fn create_planning_session(
     manager.create(&session)?;
 
     Ok(session)
+}
+
+/// Where a new plan session sources its working copy and config from.
+enum PlanTarget {
+    /// Plan in the current directory using an already-resolved config.
+    Local { yaml: String, source: ConfigSource },
+    /// Clone `owner/repo` into a temporary directory and plan there.
+    Repo(String),
+}
+
+/// Validate `--repo` and resolve the workflow config for the upcoming session.
+///
+/// For local sessions the config is resolved (and displayed) immediately; for
+/// repo sessions only the spec is validated -- the config lives in the
+/// temporary clone, which is created later.
+fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Result<PlanTarget> {
+    match repo.map(str::trim) {
+        Some(spec) if !spec.is_empty() => {
+            crate::repo_clone::validate_repo_spec(spec)?;
+            crate::worktree_pr::ensure_gh_available()?;
+            Ok(PlanTarget::Repo(spec.to_string()))
+        }
+        _ => {
+            let (yaml, source) = crate::resolver::resolve_config(explicit_config)?;
+            eprintln!("{}", style(source.display_string()).dim());
+            Ok(PlanTarget::Local { yaml, source })
+        }
+    }
+}
+
+/// Create the planning session (and, for repo targets, the temporary clone)
+/// for `target`, returning the parsed config alongside the session.
+fn create_session_for_target(
+    manager: &SessionManager,
+    target: PlanTarget,
+    explicit_config: Option<&str>,
+    input: &str,
+) -> Result<(WorkflowConfig, SessionState)> {
+    match target {
+        PlanTarget::Local { yaml, source } => {
+            let config = WorkflowConfig::from_yaml(&yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+            validate_config(&config)?;
+            let session = create_planning_session(manager, &source, input.to_string())?;
+            Ok((config, session))
+        }
+        PlanTarget::Repo(repo) => {
+            create_repo_planning_session(manager, &repo, explicit_config, input.to_string())
+        }
+    }
+}
+
+/// Clone `repo` into the session clone directory and create a session whose
+/// `base_dir` points at the clone. On failure the clone and the session
+/// directory are removed.
+fn create_repo_planning_session(
+    manager: &SessionManager,
+    repo: &str,
+    explicit_config: Option<&str>,
+    input: String,
+) -> Result<(WorkflowConfig, SessionState)> {
+    let session_id = SessionManager::new_session_id();
+    let clone_path = manager.clones_dir().join(&session_id);
+    eprintln!("{} cloning {} (planning)...", style("->").cyan(), repo);
+    crate::repo_clone::clone_repo(repo, &clone_path)?;
+
+    let result = build_repo_planning_session(
+        manager,
+        repo,
+        explicit_config,
+        input,
+        &session_id,
+        &clone_path,
+    );
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&clone_path);
+        if let Err(del_err) = manager.delete(&session_id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+    }
+    result
+}
+
+fn build_repo_planning_session(
+    manager: &SessionManager,
+    repo: &str,
+    explicit_config: Option<&str>,
+    input: String,
+    session_id: &str,
+    clone_path: &Path,
+) -> Result<(WorkflowConfig, SessionState)> {
+    let (yaml, source) = crate::resolver::resolve_config_in_dir(explicit_config, clone_path)?;
+    eprintln!("{}", style(source.display_string()).dim());
+    let config = WorkflowConfig::from_yaml(&yaml)
+        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    validate_config(&config)?;
+
+    let mut session = SessionState::new(
+        session_id.to_string(),
+        clone_path.to_path_buf(),
+        source.display_string(),
+        input,
+    );
+    session.repo = Some(repo.to_string());
+    // Configs that live inside the clone (or the builtin default) are copied
+    // into the session directory so they stay readable after the clone is
+    // removed at approval time.
+    session.config_path = crate::repo_clone::persistent_config_path(&source, clone_path);
+    manager.create(&session)?;
+    if session.config_path.is_none() {
+        let session_dir = manager.sessions_dir().join(session_id);
+        std::fs::write(session_dir.join("config.yaml"), &yaml)?;
+    }
+    Ok((config, session))
+}
+
+/// Best-effort cleanup when a session is discarded before approval: removes
+/// the planning worktree and, for repo-backed sessions, the temporary clone.
+fn cleanup_discarded_session_workspace(manager: &SessionManager, session: &SessionState) {
+    if session.repo.is_some() {
+        crate::repo_clone::cleanup_session_workspace(manager, session);
+    } else {
+        cleanup_planning_worktree(session);
+    }
 }
 
 fn spawn_plan_worker(session_id: &str, rate_limit_retries: usize) -> Result<()> {
@@ -616,7 +761,7 @@ async fn run_approve_loop(
                 style("x").red().bold(),
                 session.id
             );
-            cleanup_planning_worktree(session);
+            cleanup_discarded_session_workspace(manager, session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
@@ -646,7 +791,7 @@ async fn run_approve_loop(
             Ok(s) => s,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 eprintln!("\nCancelled. Session {} discarded.", session.id);
-                cleanup_planning_worktree(session);
+                cleanup_discarded_session_workspace(manager, session);
                 manager.delete(&session.id)?;
                 return Ok(());
             }
@@ -714,6 +859,9 @@ pub async fn replan_session(
     feedback: String,
     rate_limit_retries: usize,
 ) -> Result<()> {
+    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+        manager.save(session)?;
+    }
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
@@ -842,6 +990,9 @@ pub async fn generate_plan_for_draft_session(
             "expected Draft phase, got {}",
             session.phase.label()
         )));
+    }
+    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+        manager.save(session)?;
     }
     let config = manager.load_config(session)?;
     setup_planning_worktree(manager, session)?;

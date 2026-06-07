@@ -188,6 +188,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         eprintln!("warning: failed to refresh session title: {err}");
                     }
                     session.approve();
+                    crate::repo_clone::cleanup_after_approval(&manager, &mut session);
                     manager.save(&session)?;
                     eprintln!(
                         "{} Session {} approved. Run with: {}",
@@ -244,6 +245,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     );
                 }
                 "Delete" => {
+                    if session.repo.is_some() {
+                        crate::repo_clone::cleanup_session_workspace(&manager, &session);
+                    }
                     manager.delete(&session.id)?;
                     eprintln!("{} Session {} deleted.", style("v").green(), session.id);
                     break;

@@ -264,7 +264,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
 #[expect(clippy::too_many_lines)]
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
-    let _current_dir_guard = CurrentDirGuard::capture()?;
+    let current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = args
         .session
@@ -289,13 +289,21 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     }
 
     let compiled = crate::workflow::compile(config)?;
-    let effective_workspace_mode = match workspace_override {
-        WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
-        WorkspaceOverride::RespectSession => {
-            if session.current_step.is_none() && session.workspace_mode == WorkspaceMode::Worktree {
-                prompt_workspace_mode()?
-            } else {
-                session.workspace_mode
+    let effective_workspace_mode = if session.repo.is_some() {
+        // Repo-backed sessions always execute in a worktree on a fresh clone so
+        // a PR is always created; current-branch (no-PR) mode is not available.
+        WorkspaceMode::Worktree
+    } else {
+        match workspace_override {
+            WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
+            WorkspaceOverride::RespectSession => {
+                if session.current_step.is_none()
+                    && session.workspace_mode == WorkspaceMode::Worktree
+                {
+                    prompt_workspace_mode()?
+                } else {
+                    session.workspace_mode
+                }
             }
         }
     };
@@ -327,6 +335,15 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         Ok,
     )?;
     log_resume_message(&session);
+    // Repo-backed sessions execute in a temporary clone; re-create it if the
+    // post-approval cleanup (or a previous run) removed it.
+    if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
+        eprintln!(
+            "{} clone: {}",
+            style("->").cyan(),
+            session.base_dir.display()
+        );
+    }
     std::env::set_current_dir(session.base_dir.clone())?;
     let execution_workspace =
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
@@ -453,6 +470,22 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     }
 
     apply_run_result_to_session(session, &overall_result);
+    // Repo-backed sessions: drop the temporary clone (and its worktree) once
+    // the PR has been created.
+    if session.repo.is_some()
+        && matches!(session.phase, SessionPhase::Completed)
+        && session.pr_url.is_some()
+    {
+        // Step out of the soon-to-be-removed worktree before deleting it.
+        let _ = std::env::set_current_dir(&current_dir_guard.original);
+        crate::repo_clone::cleanup_session_workspace(&manager, session);
+        session.worktree_path = None;
+        eprintln!(
+            "{} removed temporary clone for {}",
+            style("->").cyan(),
+            session.id
+        );
+    }
     save_session_state_with_conflict_resolution(&manager, session, session_fingerprint.get())?;
     overall_result
 }

@@ -41,6 +41,8 @@ import { ASK_USER_EVENT } from "./lib/askUser";
 import { notifyDesktop } from "./lib/desktopNotifications";
 import { AskUserDialog } from "./components/AskUserDialog";
 import { DirectoryPicker } from "./components/DirectoryPicker";
+import { RepoPicker } from "./components/RepoPicker";
+import { isValidRepoSpec } from "./lib/repoSpec";
 import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionConfigEditor } from "./components/SessionConfigEditor";
@@ -354,8 +356,10 @@ function WorkflowInfoPanel({ session, panelInfoId, tabInfoId, className = "" }: 
         <p className="font-mono text-gray-300 mt-0.5">{session.configSource}</p>
       </div>
       <div>
-        <span className="text-gray-600 text-xs uppercase tracking-wide">Base dir</span>
-        <p className="font-mono text-gray-300 mt-0.5">{session.baseDir}</p>
+        <span className="text-gray-600 text-xs uppercase tracking-wide">
+          {session.repo ? "Repository" : "Base dir"}
+        </span>
+        <p className="font-mono text-gray-300 mt-0.5">{session.repo ?? session.baseDir}</p>
       </div>
       {session.worktreeBranch && (
         <div>
@@ -868,22 +872,34 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             </button>
           )}
           {actions.showCreateWorktree && (
-            <>
+            session.repo ? (
+              // Repo-backed sessions always run in a fresh clone and create a
+              // PR; current-branch (no-PR) mode is not available.
               <button
                 type="button"
                 onClick={() => void startRun("Worktree")}
                 className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
               >
-                Create worktree (new branch)
+                Run (clone &amp; create PR)
               </button>
-              <button
-                type="button"
-                onClick={() => void startRun("CurrentBranch")}
-                className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
-              >
-                Use current branch
-              </button>
-            </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void startRun("Worktree")}
+                  className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                >
+                  Create worktree (new branch)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void startRun("CurrentBranch")}
+                  className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
+                >
+                  Use current branch
+                </button>
+              </>
+            )
           )}
           {actions.showRun && (
             <button
@@ -1136,10 +1152,16 @@ function EmptyState() {
 
 // --- NewSessionForm ---------------------------------------------------------------
 
+type NewSessionSourceKind = "directory" | "repository";
+
 interface NewSessionDraft {
   input: string;
   configPath: string;
   baseDir: string;
+  /** Where the session's working copy comes from: a local directory or a GitHub repository clone. */
+  sourceKind: NewSessionSourceKind;
+  /** GitHub repository (owner/repo) used when sourceKind === "repository". */
+  repo: string;
   useInputAsPlan: boolean;
   isGenerating: boolean;
   error: string | null;
@@ -1150,6 +1172,8 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     input: "",
     configPath: "",
     baseDir: "",
+    sourceKind: "directory",
+    repo: "",
     useInputAsPlan: false,
     isGenerating: false,
     error: null,
@@ -1172,8 +1196,12 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, useInputAsPlan, isGenerating, error } = draft;
-  const configLookupBaseDir = configPath ? "." : (baseDir || ".");
+  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, isGenerating, error } = draft;
+  const isRepoMode = sourceKind === "repository";
+  // Repository clones don't exist yet at form time, so config lookup falls
+  // back to the user-level / builtin configs in repository mode.
+  const configLookupBaseDir = configPath !== "" || isRepoMode ? "." : (baseDir || ".");
+  const repoSpecValid = isValidRepoSpec(repo);
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
@@ -1232,11 +1260,12 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         input: draft.input,
         configPath: draft.configPath || undefined,
         baseDir: draft.baseDir,
+        repo: draft.sourceKind === "repository" ? draft.repo || undefined : undefined,
         skippedSteps: Array.from(skippedSteps),
       });
     }, 500);
     return () => clearTimeout(timer);
-  }, [draft.input, draft.configPath, draft.baseDir, skippedSteps, isGenerating]);
+  }, [draft.input, draft.configPath, draft.baseDir, draft.sourceKind, draft.repo, skippedSteps, isGenerating]);
 
   function isParentChecked(node: SkippableStepDto): boolean {
     return node.expandedStepIds.every((id) => skippedSteps.has(id));
@@ -1337,8 +1366,11 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     };
   }, [onDraftChange, refreshHistorySummary]);
 
+  // True when the form has everything it needs to create a session.
+  const canSubmit = input.trim() !== "" && (!isRepoMode || repoSpecValid);
+
   async function handleGenerate() {
-    if (!input.trim()) return;
+    if (!canSubmit) return;
     onDraftChange((prev) => ({ ...prev, error: null, isGenerating: true }));
     let formReleased = false;
 
@@ -1350,6 +1382,8 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           ...createInitialNewSessionDraft(),
           baseDir: prev.baseDir,
           configPath: prev.configPath,
+          sourceKind: prev.sourceKind,
+          repo: prev.repo,
         }));
         void clearNewSessionDraft();
         void refreshHistorySummary();
@@ -1367,6 +1401,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           input: input.trim(),
           configPath: configPath || undefined,
           baseDir: baseDir || ".",
+          repo: isRepoMode ? repo.trim() : undefined,
           skippedSteps: Array.from(skippedSteps),
           useInputAsPlan,
         },
@@ -1380,7 +1415,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   }
 
   async function handleSaveDraft() {
-    if (!input.trim()) return;
+    if (!canSubmit) return;
     setSavingDraft(true);
     onDraftChange((prev) => ({ ...prev, error: null, isGenerating: true }));
 
@@ -1389,12 +1424,15 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         input: input.trim(),
         configPath: configPath || undefined,
         baseDir: baseDir || ".",
+        repo: isRepoMode ? repo.trim() : undefined,
         skippedSteps: Array.from(skippedSteps),
       });
       onDraftChange((prev) => ({
         ...createInitialNewSessionDraft(),
         baseDir: prev.baseDir,
         configPath: prev.configPath,
+        sourceKind: prev.sourceKind,
+        repo: prev.repo,
       }));
       void clearNewSessionDraft();
       void refreshHistorySummary();
@@ -1449,32 +1487,80 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           </div>
         )}
 
-        {/* Base dir */}
+        {/* Workspace source: local directory or GitHub repository clone */}
         <div className="space-y-1.5">
-          <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
-          <DirectoryPicker
-            id="base-dir-input"
-            value={baseDir}
-            onChange={(v) => set("baseDir", v)}
-            disabled={isGenerating}
-            placeholder="e.g. /Users/you/projects/myapp"
-          />
-          {recentWorkingDirs.length > 0 && (
-            <div className="relative z-[60] flex flex-wrap gap-2 pt-1">
-              {recentWorkingDirs.map((dir) => (
-                <button
-                  key={dir}
-                  type="button"
-                  onClick={() => set("baseDir", dir)}
-                  disabled={isGenerating}
-                  className="px-2.5 py-1 rounded-full border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {dir}
-                </button>
-              ))}
-            </div>
-          )}
+          <span className="text-xs text-gray-500 uppercase tracking-wide">Source</span>
+          <div className="flex gap-4" role="radiogroup" aria-label="Workspace source">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="source-kind"
+                checked={!isRepoMode}
+                onChange={() => set("sourceKind", "directory")}
+                disabled={isGenerating}
+                className="accent-blue-500"
+              />
+              <span className="text-sm text-gray-300">Directory</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="source-kind"
+                checked={isRepoMode}
+                onChange={() => set("sourceKind", "repository")}
+                disabled={isGenerating}
+                className="accent-blue-500"
+              />
+              <span className="text-sm text-gray-300">GitHub Repository</span>
+            </label>
+          </div>
         </div>
+
+        {isRepoMode ? (
+          <div className="space-y-1.5">
+            <label htmlFor="repo-input" className="text-xs text-gray-500 uppercase tracking-wide">Repository</label>
+            <RepoPicker
+              id="repo-input"
+              value={repo}
+              onChange={(v) => set("repo", v)}
+              disabled={isGenerating}
+              placeholder="owner/repository"
+            />
+            {repo.trim() !== "" && !repoSpecValid && (
+              <p className="text-xs text-red-400">Expected format: owner/repository</p>
+            )}
+            <p className="text-xs text-gray-500">
+              The repository is cloned into a temporary directory for planning and execution; a PR
+              is created when the run finishes and the clone is removed.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
+            <DirectoryPicker
+              id="base-dir-input"
+              value={baseDir}
+              onChange={(v) => set("baseDir", v)}
+              disabled={isGenerating}
+              placeholder="e.g. /Users/you/projects/myapp"
+            />
+            {recentWorkingDirs.length > 0 && (
+              <div className="relative z-[60] flex flex-wrap gap-2 pt-1">
+                {recentWorkingDirs.map((dir) => (
+                  <button
+                    key={dir}
+                    type="button"
+                    onClick={() => set("baseDir", dir)}
+                    disabled={isGenerating}
+                    className="px-2.5 py-1 rounded-full border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {dir}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Task input */}
         <div className="space-y-1.5">
@@ -1508,7 +1594,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <button
             type="button"
             onClick={() => void handleGenerate()}
-            disabled={isGenerating || !input.trim()}
+            disabled={isGenerating || !canSubmit}
             className="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isGenerating && !savingDraft ? (
@@ -1523,7 +1609,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <button
             type="button"
             onClick={() => void handleSaveDraft()}
-            disabled={isGenerating || !input.trim()}
+            disabled={isGenerating || !canSubmit}
             title="Save as a draft without generating a plan; generate the plan later."
             className="px-5 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
@@ -1761,6 +1847,8 @@ export default function App() {
         input: d.input,
         configPath: d.configPath ?? "",
         baseDir: d.baseDir,
+        sourceKind: d.repo ? "repository" : "directory",
+        repo: d.repo ?? "",
       }));
     }).catch(() => {});
     return () => { active = false; };

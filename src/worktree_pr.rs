@@ -143,6 +143,13 @@ pub async fn handle_worktree_pr(
             ctx.branch
         ))),
         PrAttemptOutcome::CreateFailed { error, .. } => {
+            // Repo-backed sessions exist solely to produce a PR, and their
+            // temporary clone is only reclaimed once one exists -- treat the
+            // failure as fatal so the session stays runnable (Failed) and the
+            // clone is retried instead of leaking under a Completed session.
+            if session.repo.is_some() {
+                return Err(CruiseError::Other(format!("PR creation failed: {error}")));
+            }
             eprintln!("warning: PR creation failed: {error}");
             Ok(())
         }

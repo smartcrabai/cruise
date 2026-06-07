@@ -111,6 +111,12 @@ pub struct SessionState {
     /// Unix epoch seconds of when the runner process started (PID reuse guard).
     #[serde(default)]
     pub runner_started_at: Option<u64>,
+    /// GitHub repository (`owner/repo`) backing this session. When set, the
+    /// session has no permanent local checkout: `base_dir` points at a
+    /// temporary clone under `<data_dir>/clones/{id}/` that is re-created for
+    /// execution and removed after the PR is created.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +178,7 @@ impl SessionState {
             skipped_steps: vec![],
             runner_pid: None,
             runner_started_at: None,
+            repo: None,
         }
     }
 
@@ -290,6 +297,12 @@ impl SessionManager {
     #[must_use]
     pub fn worktrees_dir(&self) -> PathBuf {
         self.base.join("worktrees")
+    }
+
+    /// Get the directory holding temporary clones for repo-backed sessions.
+    #[must_use]
+    pub fn clones_dir(&self) -> PathBuf {
+        self.base.join("clones")
     }
 
     /// Get the run log path for a session.
@@ -600,8 +613,11 @@ impl SessionManager {
                 continue;
             }
 
-            // Remove the git worktree if it still exists.
-            if let Some(ctx) = session.worktree_context()
+            // Remove the git worktree (and, for repo-backed sessions, the
+            // temporary clone) if they still exist.
+            if session.repo.is_some() {
+                crate::repo_clone::cleanup_session_workspace(self, &session);
+            } else if let Some(ctx) = session.worktree_context()
                 && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
             {
                 eprintln!(
@@ -1140,6 +1156,30 @@ mod tests {
     }
 
     #[test]
+    fn test_session_state_repo_roundtrip() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260607120000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/clones/20260607120000"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.repo = Some("owner/repo".to_string());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(loaded.repo.as_deref(), Some("owner/repo"));
+    }
+
+    #[test]
+    fn test_clones_dir_is_under_base() {
+        let manager = SessionManager::new(PathBuf::from("/data"));
+        assert_eq!(manager.clones_dir(), PathBuf::from("/data/clones"));
+    }
+
+    #[test]
     fn test_session_state_backward_compat() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
@@ -1168,6 +1208,7 @@ mod tests {
         assert_eq!(loaded.target_branch, None);
         assert_eq!(loaded.pr_url, None);
         assert_eq!(loaded.title, None);
+        assert_eq!(loaded.repo, None);
         assert_eq!(loaded.input, "old task");
     }
 
