@@ -220,6 +220,8 @@ export function createSession(
     repo?: string;
     skippedSteps?: string[];
     useInputAsPlan?: boolean;
+    /** "Grill me" planning: interview the user via `ask_user` before writing the plan. Requires the SDK backend. */
+    grill?: boolean;
   },
   channel: Channel<PlanEvent>
 ): Promise<string> {
@@ -230,6 +232,7 @@ export function createSession(
     repo: params.repo ?? null,
     skippedSteps: params.skippedSteps ?? [],
     useInputAsPlan: params.useInputAsPlan ?? false,
+    grill: params.grill ?? false,
     channel,
   });
 }

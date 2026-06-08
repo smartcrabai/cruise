@@ -19,7 +19,7 @@ use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{
     BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
 };
-use crate::planning::{PlanPromptCtx, ask_plan_template, fix_plan_template, plan_template};
+use crate::planning::{PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template};
 use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
@@ -32,6 +32,7 @@ fn cli_plan_ctx<'a>(
     working_dir: Option<&'a Path>,
     interactive: bool,
     rate_limit_retries: usize,
+    grill: bool,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
     // a handler that errors rather than blocking on stdin (ask_user is not
@@ -48,6 +49,7 @@ fn cli_plan_ctx<'a>(
         interactive,
         rate_limit_retries,
         working_dir,
+        grill,
     }
 }
 
@@ -62,6 +64,17 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     // the content in args.input).  This prevents inquire from attempting to
     // read interactive input from a non-TTY file descriptor.
     let noninteractive = !std::io::stdin().is_terminal();
+
+    // Grill mode interviews the user via interactive prompts, so it cannot run in
+    // a non-TTY context. Fail before creating any session.
+    if args.grill && noninteractive {
+        return Err(CruiseError::Other(
+            "--grill requires an interactive terminal (it interviews you one \
+             question at a time); it cannot run in a non-TTY context"
+                .to_string(),
+        ));
+    }
+
     let input = read_plan_input(args.input, noninteractive)?;
 
     if args.dry_run {
@@ -75,6 +88,20 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
+
+    // Grill mode relies on the SDK `ask_user` tool; the command backend has no
+    // equivalent. Reject early and discard the session we just created.
+    if args.grill && config.sdk.is_none() {
+        if let Err(del_err) = manager.delete(&session.id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+        return Err(CruiseError::Other(
+            "--grill requires the SDK backend (set `sdk:` in the workflow config); \
+             the command backend has no interactive ask_user tool"
+                .to_string(),
+        ));
+    }
+
     setup_planning_worktree_or_discard(&manager, &mut session)?;
 
     // Set up variables with the session plan path.
@@ -108,6 +135,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             Some(&work_dir),
             interactive,
             args.rate_limit_retries,
+            args.grill,
         );
         if let Err(e) = generate_plan_markdown(&ctx, &mut vars, &mut resume).await {
             eprintln!(
@@ -536,12 +564,14 @@ async fn generate_plan_for_session(
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
+    // Background worker is non-interactive, so grill mode is never used here.
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
         Some(plan_working_dir(session)),
         false,
         rate_limit_retries,
+        false,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
 }
@@ -554,7 +584,7 @@ async fn generate_plan_markdown(
     let prompt_result = crate::planning::run_plan_prompt_template(
         ctx,
         vars,
-        plan_template(ctx.config),
+        initial_plan_template(ctx.config, ctx.grill),
         "[plan] creating plan...",
         None,
         resume,
@@ -744,12 +774,14 @@ async fn run_approve_loop(
         .unwrap_or_else(|| session.base_dir.clone());
     // Fix / Ask turns reuse one planning context. It is only reached on the
     // interactive path — the noninteractive branch auto-approves below.
+    // Grill affects only the initial plan template; fix/ask turns are standard.
     let ctx = cli_plan_ctx(
         config,
         plan_path,
         Some(working_dir.as_path()),
         !noninteractive,
         rate_limit_retries,
+        false,
     );
 
     // Read the plan once up front; re-read only after Fix modifies it.
@@ -872,12 +904,14 @@ pub async fn replan_session(
         .clone()
         .unwrap_or_else(|| session.base_dir.clone());
     let mut resume: Option<String> = None;
+    // Fix-plan reuses the standard template regardless of grill.
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
         Some(working_dir.as_path()),
         std::io::stdin().is_terminal(),
         rate_limit_retries,
+        false,
     );
     run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
@@ -1004,12 +1038,15 @@ pub async fn generate_plan_for_draft_session(
     // mutable `inspect_err` below.
     let work_dir = plan_working_dir(session).to_path_buf();
     let mut resume: Option<String> = None;
+    // Draft regeneration uses the standard plan flow; grill is a `cruise plan`
+    // flag and is not threaded through drafts.
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
         Some(&work_dir),
         std::io::stdin().is_terminal(),
         rate_limit_retries,
+        false,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume)
         .await
