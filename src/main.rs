@@ -78,6 +78,7 @@ async fn run() -> error::Result<()> {
                 config: None,
                 dry_run: false,
                 skip_planning,
+                grill: false,
                 repo,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
             };

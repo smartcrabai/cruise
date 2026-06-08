@@ -21,6 +21,10 @@ pub const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md"
 pub const PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-sdk.md");
 pub const FIX_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/fix-plan-sdk.md");
 pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan-sdk.md");
+/// "Grill me" planning variant: the agent interviews the user one question at a
+/// time (via `ask_user`) until every design branch is resolved, then submits the
+/// plan. SDK-only — it relies on the interactive `ask_user` tool.
+pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
 
 /// Select the plan-generation template for the configured backend.
 #[must_use]
@@ -29,6 +33,20 @@ pub fn plan_template(config: &WorkflowConfig) -> &'static str {
         PLAN_PROMPT_TEMPLATE_SDK
     } else {
         PLAN_PROMPT_TEMPLATE
+    }
+}
+
+/// Select the initial plan template, accounting for the "grill me" mode.
+///
+/// Grill mode is SDK-only and interactive-only (enforced by the caller before
+/// reaching here); when `grill` is set it returns the grill template. Otherwise
+/// it falls back to [`plan_template`].
+#[must_use]
+pub fn initial_plan_template(config: &WorkflowConfig, grill: bool) -> &'static str {
+    if grill && config.sdk.is_some() {
+        PLAN_GRILL_PROMPT_TEMPLATE_SDK
+    } else {
+        plan_template(config)
     }
 }
 
@@ -72,6 +90,10 @@ pub struct PlanPromptCtx<'a> {
     pub rate_limit_retries: usize,
     /// Working directory for the command / agent.
     pub working_dir: Option<&'a Path>,
+    /// "Grill me" mode: drive initial planning with the interview-style template
+    /// ([`PLAN_GRILL_PROMPT_TEMPLATE_SDK`]). SDK + interactive only; validated by
+    /// the caller. Affects only the initial plan turn (not fix/ask).
+    pub grill: bool,
 }
 
 impl PlanPromptCtx<'_> {
@@ -287,5 +309,38 @@ mod tests {
         assert_ne!(PLAN_PROMPT_TEMPLATE, PLAN_PROMPT_TEMPLATE_SDK);
         assert_ne!(FIX_PLAN_PROMPT_TEMPLATE, FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_ne!(ASK_PLAN_PROMPT_TEMPLATE, ASK_PLAN_PROMPT_TEMPLATE_SDK);
+    }
+
+    // -- grill template selection ---------------------------------------------
+
+    #[test]
+    fn initial_plan_template_uses_grill_variant_for_sdk_when_enabled() {
+        let config = config_with(Some("seher"), None);
+        assert_eq!(
+            initial_plan_template(&config, true),
+            PLAN_GRILL_PROMPT_TEMPLATE_SDK
+        );
+    }
+
+    #[test]
+    fn initial_plan_template_uses_standard_sdk_variant_when_grill_off() {
+        let config = config_with(Some("seher"), None);
+        assert_eq!(
+            initial_plan_template(&config, false),
+            PLAN_PROMPT_TEMPLATE_SDK
+        );
+    }
+
+    #[test]
+    fn initial_plan_template_ignores_grill_without_sdk() {
+        // Grill is SDK-only; the command backend falls back to the standard plan
+        // template even if the flag is set (the CLI rejects this combo earlier).
+        let config = config_with(None, Some("echo"));
+        assert_eq!(initial_plan_template(&config, true), PLAN_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn grill_template_differs_from_standard_sdk_plan() {
+        assert_ne!(PLAN_GRILL_PROMPT_TEMPLATE_SDK, PLAN_PROMPT_TEMPLATE_SDK);
     }
 }

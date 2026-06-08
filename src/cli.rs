@@ -76,6 +76,12 @@ pub struct PlanArgs {
     #[arg(long)]
     pub skip_planning: bool,
 
+    /// "Grill me" planning: interview you one question at a time until the design
+    /// is fully pinned down, then write the plan. Requires the SDK backend and an
+    /// interactive terminal (errors otherwise). Conflicts with `--skip-planning`.
+    #[arg(long, conflicts_with = "skip_planning")]
+    pub grill: bool,
+
     /// GitHub repository (owner/repository) to clone into a temporary
     /// directory for planning and execution. The clone is removed after the
     /// plan is approved and again after the PR has been created.
@@ -237,6 +243,32 @@ mod tests {
             }
             _ => panic!("expected Plan subcommand"),
         }
+    }
+
+    #[test]
+    fn test_plan_grill_defaults_to_false() {
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.grill),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_grill_flag_sets_true() {
+        let cli = Cli::parse_from(["cruise", "plan", "--grill", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.grill),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_grill_conflicts_with_skip_planning() {
+        // `--grill` (interview to build the plan) is incompatible with
+        // `--skip-planning` (use input verbatim as the plan).
+        let result = Cli::try_parse_from(["cruise", "plan", "--grill", "--skip-planning", "task"]);
+        assert!(result.is_err());
     }
 
     #[test]
