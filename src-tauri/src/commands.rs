@@ -17,7 +17,9 @@ use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 
-use cruise::planning::{ask_plan_template, fix_plan_template, plan_template};
+use cruise::planning::{
+    ask_plan_template, fix_plan_template, initial_plan_template, plan_template,
+};
 
 use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
@@ -557,6 +559,7 @@ impl GuiPlanCtx {
         config: &'a cruise::config::WorkflowConfig,
         plan_path: &'a std::path::Path,
         working_dir: &'a std::path::Path,
+        grill: bool,
     ) -> (Self, cruise::planning::PlanPromptCtx<'a>) {
         let responder = state.register_ask_responder(session_id);
         let ask: Arc<dyn cruise::ask_handler::AskHandler> =
@@ -572,6 +575,9 @@ impl GuiPlanCtx {
             interactive: true,
             rate_limit_retries: 5,
             working_dir: Some(working_dir),
+            // Grill is opt-in per command: the initial-plan command (`create_session`)
+            // may set it; regenerate/fix always pass `false`.
+            grill,
         };
         (
             Self {
@@ -683,6 +689,7 @@ pub async fn create_session(
     repo: Option<String>,
     skipped_steps: Vec<String>,
     use_input_as_plan: bool,
+    grill: bool,
     channel: tauri::ipc::Channel<PlanEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
@@ -710,6 +717,15 @@ pub async fn create_session(
     if let Err(e) = validate_config(&config) {
         remove_session_clone(&manager, &session_id);
         return Err(e.to_string());
+    }
+
+    // Grill mode interviews the user via the SDK `ask_user` tool; the command
+    // backend has no equivalent. Reject before creating the session.
+    if grill && config.sdk.is_none() {
+        remove_session_clone(&manager, &session_id);
+        return Err(
+            "grill mode requires the SDK backend (set `sdk:` in the workflow config)".to_string(),
+        );
     }
 
     let mut session = SessionState::new(
@@ -802,12 +818,19 @@ pub async fn create_session(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
-    let (_ask_guard, ctx) =
-        GuiPlanCtx::build(&state, &session_id, &channel, &config, &plan_path, &base);
+    let (_ask_guard, ctx) = GuiPlanCtx::build(
+        &state,
+        &session_id,
+        &channel,
+        &config,
+        &plan_path,
+        &base,
+        grill,
+    );
     match cruise::planning::run_plan_prompt_template(
         &ctx,
         &mut vars,
-        plan_template(&config),
+        initial_plan_template(&config, grill),
         "[plan] creating plan...",
         Some(&stream_callbacks),
         &mut None,
@@ -1191,8 +1214,9 @@ async fn regenerate_plan(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
-    let (_ask_guard, ctx) =
-        GuiPlanCtx::build(state, session_id, channel, &config, &plan_path, &base);
+    let (_ask_guard, ctx) = GuiPlanCtx::build(
+        state, session_id, channel, &config, &plan_path, &base, false,
+    );
     match cruise::planning::run_plan_prompt_template(
         &ctx,
         &mut vars,
@@ -1325,8 +1349,15 @@ pub async fn fix_session(
         on_stderr: Some(on_stderr.as_ref()),
     };
 
-    let (_ask_guard, ctx) =
-        GuiPlanCtx::build(&state, &session_id, &channel, &config, &plan_path, &base);
+    let (_ask_guard, ctx) = GuiPlanCtx::build(
+        &state,
+        &session_id,
+        &channel,
+        &config,
+        &plan_path,
+        &base,
+        false,
+    );
     match cruise::planning::run_plan_prompt_template(
         &ctx,
         &mut vars,
@@ -1409,6 +1440,8 @@ pub(crate) async fn do_ask_session(
         interactive: false,
         rate_limit_retries: 5,
         working_dir: Some(&session.base_dir),
+        // Grill mode is a CLI-only flag; the GUI uses the standard plan flow.
+        grill: false,
     };
     let result = cruise::planning::run_plan_prompt_template(
         &ctx,

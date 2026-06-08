@@ -1163,6 +1163,8 @@ interface NewSessionDraft {
   /** GitHub repository (owner/repo) used when sourceKind === "repository". */
   repo: string;
   useInputAsPlan: boolean;
+  /** "Grill me" planning: interview before writing the plan (SDK backend only). */
+  grill: boolean;
   isGenerating: boolean;
   error: string | null;
 }
@@ -1175,6 +1177,7 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     sourceKind: "directory",
     repo: "",
     useInputAsPlan: false,
+    grill: false,
     isGenerating: false,
     error: null,
   };
@@ -1196,7 +1199,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, isGenerating, error } = draft;
+  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, isGenerating, error } = draft;
   const isRepoMode = sourceKind === "repository";
   // Repository clones don't exist yet at form time, so config lookup falls
   // back to the user-level / builtin configs in repository mode.
@@ -1404,6 +1407,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           repo: isRepoMode ? repo.trim() : undefined,
           skippedSteps: Array.from(skippedSteps),
           useInputAsPlan,
+          grill,
         },
         channel,
       );
@@ -1583,11 +1587,38 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           <input
             type="checkbox"
             checked={useInputAsPlan}
-            onChange={(e) => set("useInputAsPlan", e.target.checked)}
+            onChange={(e) =>
+              onDraftChange((prev) => ({
+                ...prev,
+                useInputAsPlan: e.target.checked,
+                // Mutually exclusive with grill: input-as-plan skips planning entirely.
+                grill: e.target.checked ? false : prev.grill,
+              }))
+            }
             disabled={isGenerating}
             className="accent-blue-500"
           />
           <span className="text-sm text-gray-300">Use input as plan (skip LLM planning)</span>
+        </label>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={grill}
+            onChange={(e) =>
+              onDraftChange((prev) => ({
+                ...prev,
+                grill: e.target.checked,
+                // Mutually exclusive with use-input-as-plan.
+                useInputAsPlan: e.target.checked ? false : prev.useInputAsPlan,
+              }))
+            }
+            disabled={isGenerating || useInputAsPlan}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300">
+            Grill me (interview one question at a time, then write the plan; SDK backend only)
+          </span>
         </label>
 
         <div className="flex gap-2">
