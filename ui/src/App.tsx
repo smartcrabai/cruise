@@ -693,6 +693,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         setPlanProgress((prev) => [...prev, event.data.line]);
       } else if (event.event === "askUserRequired") {
         window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
+        onToast({ kind: "input-required", sessionInput: session.input, detail: event.data.question });
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -733,6 +734,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         setPlanProgress((prev) => [...prev, event.data.line]);
       } else if (event.event === "askUserRequired") {
         window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
+        onToast({ kind: "input-required", sessionInput: session.input, detail: event.data.question });
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -1187,9 +1189,10 @@ interface NewSessionFormProps {
   draft: NewSessionDraft;
   onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
   onRefreshSidebar: () => void;
+  onToast: (toast: Omit<WorkflowToast, "id">) => void;
 }
 
-function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
+function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
@@ -1393,6 +1396,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         onRefreshSidebar();
       } else if (event.event === "askUserRequired") {
         window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
+        onToast({ kind: "input-required", sessionInput: input, detail: event.data.question });
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
       }
@@ -2214,6 +2218,7 @@ export default function App() {
             draft={newSessionDraft}
             onDraftChange={setNewSessionDraft}
             onRefreshSidebar={() => sidebarRefreshRef.current?.()}
+            onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
           />
         ) : selectedSession ? (
           <WorkflowRunner
