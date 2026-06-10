@@ -53,6 +53,12 @@ cruise plan "implement the feature"
 # Create a session and generate the plan in the background
 cruise --plan "implement the feature"
 
+# Interview-style planning: answer one question at a time, then the plan is written (SDK backend + TTY)
+cruise plan --grill "implement the feature"
+
+# Plan against a GitHub repository instead of a local directory (temporary clone)
+cruise plan --repo owner/repository "implement the feature"
+
 # Background planning from stdin
 echo "implement the feature" | cruise --plan stdin
 
@@ -105,12 +111,18 @@ Options:
   -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
+      --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
+      --repo <OWNER/REPO>          GitHub repository to clone into a temporary directory for planning and execution
       --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
 ```
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning. Non-git directories fall back to running in place with a warning.
 
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `AwaitingApproval`, ready for `cruise run`. Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
+
+With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires the SDK backend (`sdk:` in the workflow config) and an interactive terminal; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
+
+With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config found inside the clone is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
 #### `cruise draft`
 
@@ -163,12 +175,14 @@ Runs the workflow steps directly in the current directory: no plan is generated,
 #### `cruise --plan`
 
 ```
-cruise --plan <INPUT|stdin> [--skip-planning]
+cruise --plan <INPUT|stdin> [--skip-planning] [--repo <OWNER/REPO>]
 ```
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
 
 Adding `--skip-planning` skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `AwaitingApproval`. The flag also works without `--plan` (e.g. `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
+
+`--repo <owner>/<repository>` is accepted here too and behaves as described under [`cruise plan`](#cruise-plan): the repository is cloned into a temporary directory and the session targets the clone. `--grill` is not available on this path — background planning has no interactive user to interview.
 
 #### `cruise list`
 
@@ -198,7 +212,7 @@ Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/c
 cruise clean
 ```
 
-Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is closed or merged are deleted along with their worktrees. Sessions without a PR URL or with an open PR are skipped.
+Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is closed or merged are deleted along with their worktrees (and any leftover `--repo` clone). Sessions without a PR URL or with an open PR are skipped.
 
 > **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached (e.g. the workflow failed before completion, or PR creation returned an error). If a session is unexpectedly skipped by `cruise clean`, check the session logs or re-run PR creation manually with `gh pr create`.
 
@@ -213,7 +227,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Kind | Path |
 |------|------|
 | User YAML configs and application settings | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
-| Sessions and worktrees | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
+| Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
 
 > **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
@@ -712,7 +726,7 @@ When `cruise run` starts a new session, it prompts you to choose a workspace mod
 | **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation. |
 | **Current branch** | Executes directly in the current repository on the active branch. No worktree is created, and no PR is created automatically. |
 
-In non-interactive environments (piped stdin) and with `--all`, worktree mode is used automatically.
+In non-interactive environments (piped stdin) and with `--all`, worktree mode is used automatically. Sessions created with `--repo` (or the GUI repository picker) are always pinned to Worktree mode — the prompt is skipped and current-branch mode is not available, since a PR is the only way the work leaves the temporary clone.
 
 ### Current-branch mode constraints
 
