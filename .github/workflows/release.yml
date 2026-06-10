@@ -242,9 +242,6 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-latest
             bundles: deb,appimage
-          - platform: windows-x86_64
-            runner: windows-latest
-            bundles: msi,nsis
     runs-on: ${{ matrix.runner }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -352,16 +349,6 @@ jobs:
           find target/release/bundle/appimage -name "*.AppImage" -exec cp {} tauri-artifacts/ \;
           find target/release/bundle/appimage -name "*.AppImage.sig" -exec cp {} tauri-artifacts/ \;
 
-      - name: Collect artifacts (Windows)
-        if: matrix.platform == 'windows-x86_64'
-        shell: bash
-        run: |
-          mkdir -p tauri-artifacts
-          find target/release/bundle/msi -name "*.msi" -exec cp {} tauri-artifacts/ \;
-          find target/release/bundle/msi -name "*.msi.sig" -exec cp {} tauri-artifacts/ \;
-          find target/release/bundle/nsis -name "*.exe" -exec cp {} tauri-artifacts/ \;
-          find target/release/bundle/nsis -name "*.exe.sig" -exec cp {} tauri-artifacts/ \;
-
       - name: Upload Tauri artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -391,16 +378,14 @@ jobs:
           REPO="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
           # Read signatures and find updater bundle filenames (v2 mode)
-          # macOS: .app.tar.gz, Linux: .AppImage (re-used), Windows: .exe (re-used)
+          # macOS: .app.tar.gz, Linux: .AppImage (re-used)
           read_sig() { for f in "$@"; do if [ -f "$f" ]; then tr -d '\n' < "$f"; return; fi; done; }
           find_file() { for f in "$@"; do if [ -f "$f" ]; then basename "$f"; return; fi; done; }
 
           MAC_SIG=$(read_sig tauri-artifacts/*.app.tar.gz.sig)
           LINUX_SIG=$(read_sig tauri-artifacts/*.AppImage.sig)
-          WIN_SIG=$(read_sig tauri-artifacts/*-setup.exe.sig)
           MAC_FILE=$(find_file tauri-artifacts/*.app.tar.gz)
           LINUX_FILE=$(find_file tauri-artifacts/*.AppImage)
-          WIN_FILE=$(find_file tauri-artifacts/*-setup.exe)
 
           # Build latest.json with jq for proper escaping
           PLATFORMS='{}'
@@ -412,11 +397,6 @@ jobs:
             PLATFORMS=$(echo "$PLATFORMS" | jq --arg sig "$LINUX_SIG" --arg url "$REPO/$LINUX_FILE" \
               '. + {"linux-x86_64": {signature: $sig, url: $url}}')
           fi
-          if [ -n "$WIN_SIG" ] && [ -n "$WIN_FILE" ]; then
-            PLATFORMS=$(echo "$PLATFORMS" | jq --arg sig "$WIN_SIG" --arg url "$REPO/$WIN_FILE" \
-              '. + {"windows-x86_64": {signature: $sig, url: $url}}')
-          fi
-
           mkdir -p updater-output
           jq -n --arg ver "$VERSION" --arg date "$PUB_DATE" --argjson platforms "$PLATFORMS" \
             '{version: $ver, pub_date: $date, platforms: $platforms}' > updater-output/latest.json

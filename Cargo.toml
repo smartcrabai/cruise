@@ -28,7 +28,7 @@ ci = "github"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # The installers to generate for each app
-installers = ["shell", "homebrew", "powershell"]
+installers = ["shell", "homebrew"]
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # A GitHub repo to push Homebrew formulas to
@@ -37,20 +37,11 @@ tap = "smartcrabai/homebrew-tap"
 targets = [
   "aarch64-apple-darwin",
   "aarch64-unknown-linux-gnu",
-  "aarch64-pc-windows-msvc",
   "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
-  "x86_64-pc-windows-msvc",
 ]
 # Whether to install an updater program
 install-updater = false
-
-# Build Windows ARM64 natively instead of cross-compiling via cargo-xwin.
-# The xwin container breaks ring's build script (clang-cl style /imsvc flags
-# are passed to plain clang, which ring forces for aarch64-pc-windows-msvc).
-[workspace.metadata.dist.github-custom-runners.aarch64-pc-windows-msvc]
-host = "aarch64-pc-windows-msvc"
-runner = "windows-11-arm"
 
 [features]
 test-utils = []
