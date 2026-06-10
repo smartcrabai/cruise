@@ -149,12 +149,17 @@ impl Executor {
 
 /// Resolve a non-rate-limited seher provider for `mode_key`.
 ///
+/// `require_tools` restricts candidates to SDKs that can execute custom tools
+/// (currently only `pi`); with `false`, `sdk: claude-terminal` providers are
+/// also eligible and the caller must dispatch on `ResolvedAgent::sdk`.
+///
 /// `poll_for_agent` borrows a `&mut dyn LimitProbe` whose probe future is not
 /// `Send`, which would make the whole `run_sdk` future `!Send` and break the
 /// multi-threaded Tauri runtime. Confine that `!Send` work to a dedicated thread
 /// with its own current-thread runtime and return the `Send` `ResolvedAgent`.
 async fn resolve_provider(
     mode_key: String,
+    require_tools: bool,
     cancel: Arc<AtomicBool>,
 ) -> Result<seher::sdk::ResolvedAgent> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -169,7 +174,7 @@ async fn resolve_provider(
                     poll_for_agent(
                         PollOptions {
                             mode_key,
-                            require_tools: true,
+                            require_tools,
                             interval_ms: SDK_POLL_INTERVAL_MS,
                             // Lets the caller abort the (otherwise unbounded)
                             // all-providers-rate-limited wait.
@@ -244,29 +249,32 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
     })
 }
 
-/// SDK-backend execution: resolve a non-limited provider, run pi with the custom
-/// tools, and fold the streamed chunks into a [`PromptOutcome`].
-async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let mode_key = req
-        .model_or_mode
-        .unwrap_or(DEFAULT_STEP_MODE_KEY)
-        .to_string();
-    let on_delta = req.stream.and_then(|s| s.on_stdout);
-
-    let mut attempts = 0;
-    loop {
-        // Signal the detached resolver thread to stop polling if this future is
-        // cancelled or dropped (e.g. timeout / Ctrl-C) before resolution finishes.
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let abort_guard = AbortOnDrop(Arc::clone(&cancel_flag));
-        let resolved = tokio::select! {
-            biased;
-            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
-            out = resolve_provider(mode_key.clone(), cancel_flag) => out,
-        }?;
-        // Resolution finished; the resolver thread has already exited.
-        drop(abort_guard);
-
+/// Start `resolved` on the engine its `sdk` kind requires and return the chunk
+/// stream: the in-process pi engine, or the local `claude` CLI via tmux for
+/// `sdk: claude-terminal`.
+fn spawn_agent_stream(
+    resolved: &seher::sdk::ResolvedAgent,
+    req: &PromptRun<'_>,
+) -> std::sync::mpsc::Receiver<StreamChunk> {
+    if resolved.sdk == "claude-terminal" {
+        // claude-terminal cannot run custom tools; `require_tools` in
+        // [`run_sdk`] guarantees `req.tools` is empty here. `resolved.model_id`
+        // is a plain `claude --model` name, not a pi model ref.
+        let sdk = seher::claude_terminal::new_sdk_with_defaults(
+            None,
+            None,
+            Some(resolved.model_id.clone()),
+            None,
+            None,
+            req.working_dir.map(|p| p.to_string_lossy().into_owned()),
+        );
+        seher::claude_terminal::stream_via_thread(
+            sdk,
+            req.prompt.to_string(),
+            resolved.provider.clone(),
+            req.resume.clone(),
+        )
+    } else {
         // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
         // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
         // config label (e.g. "codex"), which pi does not know about. Split the ref
@@ -281,8 +289,39 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
             working_directory: req.working_dir.map(Path::to_path_buf),
             tools: req.tools.clone(),
         };
-        let runner = PiRunner::new(opts);
-        let rx_std = runner.stream(req.prompt.to_string(), req.resume.clone());
+        PiRunner::new(opts).stream(req.prompt.to_string(), req.resume.clone())
+    }
+}
+
+/// SDK-backend execution: resolve a non-limited provider, run it via
+/// [`spawn_agent_stream`], and fold the streamed chunks into a [`PromptOutcome`].
+async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let mode_key = req
+        .model_or_mode
+        .unwrap_or(DEFAULT_STEP_MODE_KEY)
+        .to_string();
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+    // Custom tools only run on the in-process pi engine, and `resume` ids are pi
+    // session ids (every resumable turn in the planning flow starts with a
+    // tool-registering one), so both pin resolution to tool-capable providers.
+    // Tool-less fresh runs may also resolve `sdk: claude-terminal` providers.
+    let require_tools = !req.tools.is_empty() || req.resume.is_some();
+
+    let mut attempts = 0;
+    loop {
+        // Signal the detached resolver thread to stop polling if this future is
+        // cancelled or dropped (e.g. timeout / Ctrl-C) before resolution finishes.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let abort_guard = AbortOnDrop(Arc::clone(&cancel_flag));
+        let resolved = tokio::select! {
+            biased;
+            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+            out = resolve_provider(mode_key.clone(), require_tools, cancel_flag) => out,
+        }?;
+        // Resolution finished; the resolver thread has already exited.
+        drop(abort_guard);
+
+        let rx_std = spawn_agent_stream(&resolved, &req);
 
         // Bridge the blocking std channel to an async one so we can stream
         // deltas through the borrowed `on_delta` callback without moving it

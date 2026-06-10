@@ -4,7 +4,7 @@ A CLI tool that orchestrates coding agent workflows defined in a YAML config fil
 
 Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan -> approve -> write tests -> implement -> test -> review -> open PR -> post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
 
-> **Note:** This project has been developed and tested on macOS only. It has not been verified on Linux or Windows.
+> **Note:** This project supports macOS and Linux only. **Windows is not supported** and Windows binaries are not built or tested. Development and testing happen primarily on macOS; Linux has not been fully verified.
 
 ## Prerequisites
 
@@ -32,7 +32,6 @@ A desktop GUI is also available. Download the latest installer from [GitHub Rele
 |----------|--------|
 | macOS (Apple Silicon) | `.dmg` |
 | Linux (x86_64) | `.deb`, `.AppImage` |
-| Windows (x86_64) | `.msi`, `.exe` |
 
 #### macOS GUI Installation
 
