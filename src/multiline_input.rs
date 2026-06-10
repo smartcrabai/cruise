@@ -72,6 +72,10 @@ impl Prompt for CruisePrompt {
 ///
 /// Returns `Err(CruiseError::IoError)` on terminal I/O failure.
 pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
+    // SDK turns may have run before this prompt; recover the terminal if a
+    // child process left the foreground process group dead (otherwise the
+    // raw-mode switch below stops the process with SIGTTOU).
+    crate::platform::reclaim_terminal_foreground();
     println!("{message}");
     let kb = build_keybindings();
     let mut editor = build_reedline(kb);

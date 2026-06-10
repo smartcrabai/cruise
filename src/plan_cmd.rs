@@ -687,6 +687,7 @@ fn select_steps_to_skip(
     let flat = flatten_nodes(&nodes);
     let defaults = flat_node_default_indices(&flat, previously_skipped);
 
+    crate::platform::reclaim_terminal_foreground();
     match inquire::MultiSelect::new("Steps to skip (Space to toggle, Enter to confirm):", flat)
         .with_help_message("No selection = run all steps")
         .with_default(&defaults)
@@ -819,6 +820,7 @@ async fn run_approve_loop(
         }
 
         let options = vec!["Approve", "Fix", "Ask", "Execute now"];
+        crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
             Ok(s) => s,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {

@@ -34,6 +34,7 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
         });
     }
 
+    crate::platform::reclaim_terminal_foreground();
     let selected_label = match Select::new("Select an option", labels).prompt() {
         Ok(label) => label,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
