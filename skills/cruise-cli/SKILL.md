@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
+description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -24,6 +24,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Plan a task, then approve it interactively (foreground) | `cruise plan "task"` |
 | Plan in the background, review later, return immediately | `cruise --plan "task"` |
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
+| Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend + TTY) |
+| Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute the next approved (Planned) session | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
@@ -52,11 +54,19 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 
 3. **Run.** `cruise run` picks up a `Planned` session, prompts for a **workspace mode** (below), reuses/creates the worktree, executes the workflow steps, creates a PR with `gh pr create`, then runs any `after-pr` steps. The session ends as `Completed` (or `Failed`).
 
-4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` and deletes the session + worktree once the PR is merged or closed.
+4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` and deletes the session + worktree (and any leftover `--repo` clone) once the PR is merged or closed.
 
 ### `--skip-planning`
 
 No LLM is called: your input is written verbatim to `plan.md` and the session goes straight to `AwaitingApproval`. Empty/whitespace input is rejected. Use it when you've already written the plan and just want cruise to execute it. Requires either `--plan` or the positional input form.
+
+### `--grill` (interview planning)
+
+`cruise plan --grill "task"` turns the plan step into an interview: the SDK agent asks you questions **one at a time** (via its `ask_user` tool), recommending an answer for each, until scope, edge cases, and the approach are pinned down — then writes `plan.md`. Constraints: requires the **SDK backend** (`sdk:` in the workflow config) and an **interactive terminal**; cruise errors out and discards the session otherwise. Conflicts with `--skip-planning`, and only affects the *initial* plan — Fix/Ask, replan, drafts, and background `--plan` use the standard prompt. The GUI equivalent is the **"Grill me"** toggle on the New Session form.
+
+### `--repo` (GitHub repo sessions)
+
+`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **clone removed on approval** (branch kept) → `cruise run` re-clones → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and a config found inside the clone is copied to `sessions/<id>/config.yaml` so it survives clone removal. The GUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
 
 ## Workspace modes (chosen at `cruise run`)
 
@@ -71,7 +81,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 | **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched; supports parallel sessions. **Requires `gh` CLI.** |
 | **Current branch** | Runs in place on the active branch. No worktree, no auto-PR. | Quick iterations on the current branch. Needs a **clean working tree** and an **attached branch** (not detached HEAD). On resume the branch must match. |
 
-Non-interactive runs (piped stdin) and `cruise run --all` always force worktree mode.
+Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely).
 
 **Copy files into the worktree** by listing relative paths in a `.worktreeinclude` at the repo root (e.g. `.env`, `secrets/`). Absolute paths and `..` are ignored for safety.
 
@@ -111,7 +121,7 @@ The interactive menu changes with the session's phase:
 | Kind | Path (default) |
 |------|----------------|
 | User YAML configs + app settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
-| Sessions + worktrees | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` |
+| Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` |
 | State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
 > Older versions kept everything under `~/.cruise/`. If migrating, move configs to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees.
