@@ -6079,9 +6079,9 @@ dependencies = [
 
 [[package]]
 name = "seher-sdk"
-version = "0.0.39"
+version = "0.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2762c45c448dafb4717ca121c287006898c52f68b5b7e59edc22e6724dab8f91"
+checksum = "e4fc5367c8044c0ec58fbe2f3901676e5938960b08db4b66a7748fe23ee0c9f6"
 dependencies = [
  "async-trait",
  "chrono",
