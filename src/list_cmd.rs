@@ -151,6 +151,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
             // Action menu.
             let actions = session_actions_with_plan_availability(&session, plan_available);
 
+            // Re-shown after Generate Plan / Replan (SDK turns), which may have
+            // left the terminal's foreground process group dead.
+            crate::platform::reclaim_terminal_foreground();
             let action = match inquire::Select::new("Action:", actions).prompt() {
                 Ok(a) => a,
                 Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => "Back",
@@ -279,6 +282,7 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
         })
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
+    crate::platform::reclaim_terminal_foreground();
     let selected = match inquire::Select::new("Select a session:", label_refs).prompt() {
         Ok(s) => s,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {

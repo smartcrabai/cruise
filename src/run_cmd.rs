@@ -148,6 +148,7 @@ fn prompt_for_session_state_conflict(message: &str) -> Result<SessionStateConfli
         SESSION_STATE_CONFLICT_ABORT_LABEL,
         SESSION_STATE_CONFLICT_OVERWRITE_LABEL,
     ];
+    crate::platform::reclaim_terminal_foreground();
     match inquire::Select::new("How should cruise proceed?", options).prompt() {
         Ok(choice) if choice == SESSION_STATE_CONFLICT_ABORT_LABEL => {
             Ok(SessionStateConflictChoice::Abort)
@@ -180,6 +181,7 @@ fn prompt_workspace_mode() -> Result<WorkspaceMode> {
     }
 
     let options = vec![WORKSPACE_WORKTREE_LABEL, WORKSPACE_CURRENT_BRANCH_LABEL];
+    crate::platform::reclaim_terminal_foreground();
     match inquire::Select::new("Where should cruise execute?", options).prompt() {
         Ok(choice) if choice == WORKSPACE_CURRENT_BRANCH_LABEL => Ok(WorkspaceMode::CurrentBranch),
         Ok(_) => Ok(WorkspaceMode::Worktree),
