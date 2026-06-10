@@ -1225,6 +1225,7 @@ dependencies = [
  "home",
  "indexmap 2.14.0",
  "inquire",
+ "libc",
  "reedline",
  "reqwest",
  "seher-sdk",
