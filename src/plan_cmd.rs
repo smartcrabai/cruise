@@ -450,8 +450,14 @@ fn create_session_for_target(
 ) -> Result<(WorkflowConfig, SessionState)> {
     match target {
         PlanTarget::Local { yaml, source } => {
-            let config = WorkflowConfig::from_yaml(&yaml)
-                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+            let config = match source.path() {
+                Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
+                None => crate::workflow_call::resolve_workflow_calls(
+                    WorkflowConfig::from_yaml(&yaml)
+                        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+                    std::env::current_dir()?,
+                )?,
+            };
             validate_config(&config)?;
             let session = create_planning_session(manager, &source, input.to_string())?;
             Ok((config, session))
@@ -503,8 +509,14 @@ fn build_repo_planning_session(
 ) -> Result<(WorkflowConfig, SessionState)> {
     let (yaml, source) = crate::resolver::resolve_config_in_dir(explicit_config, clone_path)?;
     eprintln!("{}", style(source.display_string()).dim());
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    let config = match source.path() {
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
+        None => crate::workflow_call::resolve_workflow_calls(
+            WorkflowConfig::from_yaml(&yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+            clone_path,
+        )?,
+    };
     validate_config(&config)?;
 
     let mut session = SessionState::new(
@@ -521,7 +533,12 @@ fn build_repo_planning_session(
     manager.create(&session)?;
     if session.config_path.is_none() {
         let session_dir = manager.sessions_dir().join(session_id);
-        std::fs::write(session_dir.join("config.yaml"), &yaml)?;
+        let config_to_persist = serde_yaml::to_string(&config).map_err(|e| {
+            CruiseError::Other(format!(
+                "failed to serialize resolved workflow config for session: {e}"
+            ))
+        })?;
+        std::fs::write(session_dir.join("config.yaml"), config_to_persist)?;
     }
     Ok((config, session))
 }

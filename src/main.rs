@@ -37,6 +37,7 @@ mod test_support;
 mod timeout;
 mod variable;
 mod workflow;
+mod workflow_call;
 mod workspace;
 mod worktree;
 mod worktree_pr;

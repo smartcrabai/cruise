@@ -137,6 +137,10 @@ pub struct StepConfig {
     /// Group this step belongs to.
     pub group: Option<String>,
 
+    /// Reference to another cruise workflow YAML file to inline at compile/load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_call: Option<String>,
+
     /// If true, the step fails immediately when no workspace file changes are detected.
     #[serde(default, rename = "fail-if-no-file-changes")]
     pub fail_if_no_file_changes: bool,

@@ -134,6 +134,10 @@
           "type": "string",
           "description": "Group this step belongs to"
         },
+        "workflow_call": {
+          "type": "string",
+          "description": "Reference to another cruise workflow YAML file or supported GitHub URL to inline"
+        },
         "fail-if-no-file-changes": {
           "type": "boolean",
           "description": "Fail the step if no files were changed"

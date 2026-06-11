@@ -3,7 +3,7 @@ use std::io::{IsTerminal, Read};
 use console::style;
 
 use crate::cli::DraftArgs;
-use crate::config::{WorkflowConfig, validate_config};
+use crate::config::validate_config;
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState};
@@ -15,8 +15,14 @@ pub fn run(args: DraftArgs) -> Result<()> {
     let noninteractive = !std::io::stdin().is_terminal();
     let input = read_draft_input(args.input, noninteractive)?;
 
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    let config = match source.path() {
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
+        None => crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml(&yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+            std::env::current_dir()?,
+        )?,
+    };
     validate_config(&config)?;
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
