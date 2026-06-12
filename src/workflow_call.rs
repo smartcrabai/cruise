@@ -227,7 +227,7 @@ fn load_called_workflow(
     if workflow_call.starts_with(GITHUB_BLOB_PREFIX) || workflow_call.starts_with(GITHUB_RAW_PREFIX)
     {
         let parsed = parse_github_workflow_url(workflow_call)?;
-        return load_github_workflow(parsed, stack);
+        return load_github_workflow(&parsed, stack);
     }
 
     let base_dir_string = base_dir.to_string_lossy();
@@ -236,7 +236,7 @@ fn load_called_workflow(
     {
         let url = github_relative_workflow_url(&base_dir_string, workflow_call);
         let parsed = parse_github_workflow_url(&url)?;
-        return load_github_workflow(parsed, stack);
+        return load_github_workflow(&parsed, stack);
     }
 
     let path = base_dir.join(workflow_call);
@@ -258,10 +258,10 @@ fn github_relative_workflow_url(base_dir: &str, workflow_call: &str) -> String {
 }
 
 fn load_github_workflow(
-    reference: GitHubWorkflowRef,
+    reference: &GitHubWorkflowRef,
     stack: &mut CallStack,
 ) -> Result<WorkflowConfig> {
-    if stack.github.contains(&reference) {
+    if stack.github.contains(reference) {
         return Err(CruiseError::InvalidStepConfig(format!(
             "workflow_call cycle detected at GitHub workflow '{}', ref '{}'",
             reference.path, reference.git_ref
@@ -269,10 +269,10 @@ fn load_github_workflow(
     }
 
     stack.github.push(reference.clone());
-    let yaml = fetch_github_workflow(&reference)?;
+    let yaml = fetch_github_workflow(reference)?;
     let config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let remote_base = github_workflow_base_url(&reference);
+    let remote_base = github_workflow_base_url(reference);
     let resolved = resolve_workflow_calls_inner(config, Path::new(&remote_base), stack);
     stack.github.pop();
     resolved
