@@ -836,7 +836,6 @@ steps:
         assert!(msg.contains("called workflows"), "unexpected error: {msg}");
     }
 
-
     #[test]
     fn test_resolve_rejects_call_site_mixed_with_executable_step_fields() {
         // Given: a call-site also declares a command, which would be ambiguous.
