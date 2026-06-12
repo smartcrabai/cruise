@@ -508,15 +508,7 @@ impl SessionManager {
             // Backward-compatible fallback: session-local copy
             self.sessions_dir().join(&state.id).join("config.yaml")
         });
-        let yaml = std::fs::read_to_string(&config_path).map_err(|e| {
-            CruiseError::Other(format!(
-                "failed to read session config {}: {}",
-                config_path.display(),
-                e
-            ))
-        })?;
-        crate::config::WorkflowConfig::from_yaml(&yaml)
-            .map_err(|e| CruiseError::ConfigParseError(e.to_string()))
+        crate::workflow_call::resolve_workflow_calls_from_path(config_path)
     }
 
     /// If `state` is in `Running` phase but the runner process is no longer

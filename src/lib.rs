@@ -24,6 +24,7 @@ pub mod step;
 pub mod timeout;
 pub mod variable;
 pub mod workflow;
+pub mod workflow_call;
 pub mod workspace;
 pub mod worktree;
 pub mod worktree_pr;

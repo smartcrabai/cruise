@@ -370,11 +370,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                 if current_mtime == last_mtime.get() {
                     return Ok(None);
                 }
-                let yaml = std::fs::read_to_string(&path).map_err(|e| {
-                    CruiseError::Other(format!("failed to read config {}: {}", path.display(), e))
-                })?;
-                let config = crate::config::WorkflowConfig::from_yaml(&yaml)
-                    .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+                let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
                 let compiled = crate::workflow::compile(config)?;
                 last_mtime.set(current_mtime);
                 Ok(Some(compiled))
