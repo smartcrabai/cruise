@@ -1,5 +1,5 @@
 use crate::cli::{ExecArgs, RunArgs};
-use crate::config::{WorkflowConfig, validate_config};
+use crate::config::validate_config;
 use crate::engine;
 use crate::error::{CruiseError, Result};
 use crate::paths;
@@ -8,8 +8,14 @@ use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 
 pub async fn run(args: ExecArgs) -> Result<()> {
     let (yaml, source) = resolve_config(args.config.as_deref())?;
-    let config = WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+    let config = match source.path() {
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
+        None => crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml(&yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+            std::env::current_dir()?,
+        )?,
+    };
     validate_config(&config)?;
 
     if args.dry_run {
