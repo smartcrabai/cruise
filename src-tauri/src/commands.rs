@@ -510,11 +510,34 @@ pub fn get_session_log(session_id: String) -> std::result::Result<String, String
 
 // --- Plan generation helpers ---------------------------------------------------
 
+/// Create a logger for GUI planning output and write the operation start boundary.
+fn plan_logger(manager: &SessionManager, session_id: &str, operation: &str) -> Arc<SessionLogger> {
+    let logger = Arc::new(SessionLogger::new(manager.run_log_path(session_id)));
+    logger.write(&format!("--- {operation} started ---"));
+    logger
+}
+
+/// Persist one streamed planning output line to the session log.
+fn log_plan_chunk(logger: &SessionLogger, line: &str) {
+    logger.write(line);
+}
+
+/// Write a concise successful terminal marker for a planning operation.
+fn log_plan_success(logger: &SessionLogger, message: &str) {
+    logger.write(&format!("[OK] {message}"));
+}
+
+/// Write a concise failed terminal marker for a planning operation.
+fn log_plan_failure(logger: &SessionLogger, message: &str) {
+    logger.write(&format!("[FAIL] {message}"));
+}
+
 /// Build stdout/stderr callbacks that stream LLM output lines as [`PlanEvent::PlanChunk`]
 /// events over the given IPC channel.
 fn plan_chunk_callbacks(
     session_id: String,
     channel: tauri::ipc::Channel<PlanEvent>,
+    logger: Option<Arc<SessionLogger>>,
 ) -> (
     Box<dyn Fn(&str) + Send + Sync>,
     Box<dyn Fn(&str) + Send + Sync>,
@@ -522,7 +545,11 @@ fn plan_chunk_callbacks(
     let make_callback = move |stream: &'static str| {
         let ch = channel.clone();
         let sid = session_id.clone();
+        let log = logger.clone();
         Box::new(move |line: &str| {
+            if let Some(logger) = log.as_deref() {
+                log_plan_chunk(logger, line);
+            }
             let _ = ch.send(PlanEvent::PlanChunk {
                 session_id: sid.clone(),
                 stream: stream.to_string(),
@@ -773,6 +800,16 @@ pub async fn create_session(
             .map_err(|e| format!("failed to write session config: {e}"))?;
     }
 
+    let plan_logger = plan_logger(
+        &manager,
+        &session_id,
+        if use_input_as_plan {
+            "planning (input as plan)"
+        } else {
+            "planning"
+        },
+    );
+
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
@@ -785,10 +822,12 @@ pub async fn create_session(
                 cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
                 session.plan_error = None;
                 if let Err(e) = manager.save(&session) {
+                    log_plan_failure(&plan_logger, &format!("planning failed: {e}"));
                     let _ = manager.delete(&session_id);
                     remove_session_clone(&manager, &session_id);
                     return Err(e.to_string());
                 }
+                log_plan_success(&plan_logger, "input saved as plan");
                 let _ = channel.send(PlanEvent::SessionCreated {
                     session_id: session_id.clone(),
                 });
@@ -800,6 +839,7 @@ pub async fn create_session(
                 return Ok(session_id);
             }
             Err(e) => {
+                log_plan_failure(&plan_logger, &format!("planning failed: {e}"));
                 let _ = manager.delete(&session_id);
                 remove_session_clone(&manager, &session_id);
                 return Err(e.to_string());
@@ -812,7 +852,8 @@ pub async fn create_session(
     });
     let _ = channel.send(PlanEvent::PlanGenerating);
 
-    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+    let (on_stdout, on_stderr) =
+        plan_chunk_callbacks(session_id.clone(), channel.clone(), Some(plan_logger.clone()));
     let stream_callbacks = cruise::step::prompt::StreamCallbacks {
         on_stdout: Some(on_stdout.as_ref()),
         on_stderr: Some(on_stderr.as_ref()),
@@ -847,6 +888,7 @@ pub async fn create_session(
             ) {
                 Ok(c) => c,
                 Err(e) => {
+                    log_plan_failure(&plan_logger, &format!("planning failed: {e}"));
                     let _ = manager.delete(&session_id);
                     remove_session_clone(&manager, &session_id);
                     let msg = e.to_string();
@@ -857,6 +899,7 @@ pub async fn create_session(
                     return Err(msg);
                 }
             };
+            log_plan_success(&plan_logger, "plan generated");
             let _ = channel.send(PlanEvent::PlanGenerated {
                 session_id: session_id.clone(),
                 content: content.clone(),
@@ -864,6 +907,7 @@ pub async fn create_session(
             Ok(session_id)
         }
         Err(msg) => {
+            log_plan_failure(&plan_logger, &format!("planning failed: {msg}"));
             let _ = manager.delete(&session_id);
             remove_session_clone(&manager, &session_id);
             let _ = channel.send(PlanEvent::PlanFailed {
@@ -1195,6 +1239,12 @@ async fn regenerate_plan(
     state: &AppState,
 ) -> std::result::Result<String, String> {
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let operation = if matches!(session.phase, SessionPhase::Draft) {
+        "planning"
+    } else {
+        "regenerate-plan"
+    };
+    let plan_logger = plan_logger(manager, session_id, operation);
     // Repo-backed sessions plan inside the temporary clone; re-create it if missing.
     if cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session)
         .map_err(|e| e.to_string())?
@@ -1208,7 +1258,11 @@ async fn regenerate_plan(
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
-    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.to_string(), channel.clone());
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(
+        session_id.to_string(),
+        channel.clone(),
+        Some(plan_logger.clone()),
+    );
     let stream_callbacks = cruise::step::prompt::StreamCallbacks {
         on_stdout: Some(on_stdout.as_ref()),
         on_stderr: Some(on_stderr.as_ref()),
@@ -1238,6 +1292,7 @@ async fn regenerate_plan(
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();
+                    log_plan_failure(&plan_logger, &format!("planning failed: {msg}"));
                     let _ = channel.send(PlanEvent::PlanFailed {
                         session_id: session_id.to_string(),
                         error: msg.clone(),
@@ -1256,6 +1311,11 @@ async fn regenerate_plan(
             }
             manager.save(&session).map_err(|e| e.to_string())?;
 
+            if matches!(operation, "planning") {
+                log_plan_success(&plan_logger, "plan generated");
+            } else {
+                log_plan_success(&plan_logger, "plan regenerated");
+            }
             let _ = channel.send(PlanEvent::PlanGenerated {
                 session_id: session_id.to_string(),
                 content: content.clone(),
@@ -1263,6 +1323,7 @@ async fn regenerate_plan(
             Ok(content)
         }
         Err(msg) => {
+            log_plan_failure(&plan_logger, &format!("planning failed: {msg}"));
             let _ = channel.send(PlanEvent::PlanFailed {
                 session_id: session_id.to_string(),
                 error: msg.clone(),
@@ -1326,6 +1387,7 @@ pub async fn fix_session(
 ) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
     let mut session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    let plan_logger = plan_logger(&manager, &session_id, "fix-plan");
 
     let _fixing_guard = FixingGuard::new(&state, session_id.clone());
     let _ = channel.send(PlanEvent::PlanGenerating);
@@ -1343,7 +1405,8 @@ pub async fn fix_session(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
-    let (on_stdout, on_stderr) = plan_chunk_callbacks(session_id.clone(), channel.clone());
+    let (on_stdout, on_stderr) =
+        plan_chunk_callbacks(session_id.clone(), channel.clone(), Some(plan_logger.clone()));
     let stream_callbacks = cruise::step::prompt::StreamCallbacks {
         on_stdout: Some(on_stdout.as_ref()),
         on_stderr: Some(on_stderr.as_ref()),
@@ -1379,6 +1442,7 @@ pub async fn fix_session(
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();
+                    log_plan_failure(&plan_logger, &format!("fix-plan failed: {msg}"));
                     let _ = channel.send(PlanEvent::PlanFailed {
                         session_id: session_id.clone(),
                         error: msg.clone(),
@@ -1390,6 +1454,7 @@ pub async fn fix_session(
             // Re-save to update updated_at timestamp
             manager.save(&session).map_err(|e| e.to_string())?;
 
+            log_plan_success(&plan_logger, "plan fixed");
             let _ = channel.send(PlanEvent::PlanGenerated {
                 session_id: session_id.clone(),
                 content: content.clone(),
@@ -2036,6 +2101,92 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn test_plan_logger_writes_start_boundary_to_run_log() {
+        // Given: a persisted session managed by a temp SessionManager
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260613000000".to_string();
+        let session = cruise::session::SessionState::new(
+            session_id.clone(),
+            tmp.path().join("repo"),
+            "cruise.yaml".to_string(),
+            "add planning log persistence".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planning logging starts
+        let _logger = plan_logger(&manager, &session_id, "planning");
+
+        // Then: the canonical run.log contains a planning start boundary
+        let content = std::fs::read_to_string(manager.run_log_path(&session_id))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            content.contains("--- planning started ---"),
+            "run.log should contain planning start boundary, got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_plan_chunk_logging_appends_streamed_lines_in_order() {
+        // Given: a persisted session with planning logging started
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260613000001".to_string();
+        let session = cruise::session::SessionState::new(
+            session_id.clone(),
+            tmp.path().join("repo"),
+            "cruise.yaml".to_string(),
+            "stream planner chunks".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let logger = plan_logger(&manager, &session_id, "planning");
+
+        // When: streamed plan chunks are persisted
+        log_plan_chunk(&logger, "first streamed line");
+        log_plan_chunk(&logger, "second streamed line");
+
+        // Then: the chunk lines are appended to run.log in callback order
+        let content = std::fs::read_to_string(manager.run_log_path(&session_id))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let first = content
+            .find("first streamed line")
+            .unwrap_or_else(|| panic!("missing first chunk in {content:?}"));
+        let second = content
+            .find("second streamed line")
+            .unwrap_or_else(|| panic!("missing second chunk in {content:?}"));
+        assert!(first < second, "streamed lines should preserve order: {content:?}");
+    }
+
+    #[test]
+    fn test_plan_success_and_failure_helpers_append_terminal_lines() {
+        // Given: a persisted session with planning logging started
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let session_id = "20260613000002".to_string();
+        let session = cruise::session::SessionState::new(
+            session_id.clone(),
+            tmp.path().join("repo"),
+            "cruise.yaml".to_string(),
+            "record terminal planning status".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let logger = plan_logger(&manager, &session_id, "planning");
+
+        // When: terminal statuses are logged
+        log_plan_success(&logger, "plan generated");
+        log_plan_failure(&logger, "planning failed: boom");
+
+        // Then: run.log contains concise OK/FAIL markers
+        let content = std::fs::read_to_string(manager.run_log_path(&session_id))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(content.contains("[OK] plan generated"), "missing success marker: {content:?}");
+        assert!(
+            content.contains("[FAIL] planning failed: boom"),
+            "missing failure marker: {content:?}"
+        );
     }
 
     #[test]
