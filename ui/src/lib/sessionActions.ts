@@ -87,7 +87,11 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
 
   const showDelete = !isLocallyRunning && phase !== "Running";
 
-  const showGeneratePlan = !isLocallyRunning && !isFixing && !session.fixInProgress && phase === "Draft";
+  const showGeneratePlan =
+    !isLocallyRunning &&
+    !isFixing &&
+    !session.fixInProgress &&
+    (phase === "Draft" || phase === "Awaiting Input");
 
   return {
     showApprove,
