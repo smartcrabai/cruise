@@ -60,6 +60,10 @@ pub enum Commands {
 }
 
 #[derive(Parser, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags are naturally boolean"
+)]
 pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
@@ -81,6 +85,13 @@ pub struct PlanArgs {
     /// interactive terminal (errors otherwise). Conflicts with `--skip-planning`.
     #[arg(long, conflicts_with = "skip_planning")]
     pub grill: bool,
+
+    /// Disable interactive planning tools (`submit_plan`/`update_plan`/`ask_user`)
+    /// for this session, even if the workflow config has `interactive_planning: true`.
+    /// The agent writes `plan.md` directly instead. Useful when using
+    /// tool-incapable providers. Conflicts with `--grill`.
+    #[arg(long, conflicts_with = "grill")]
+    pub no_interactive_planning: bool,
 
     /// GitHub repository (owner/repository) to clone into a temporary
     /// directory for planning and execution. The clone is removed after the
@@ -261,6 +272,36 @@ mod tests {
             Some(Commands::Plan(args)) => assert!(args.grill),
             _ => panic!("expected Plan subcommand"),
         }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_defaults_to_false() {
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.no_interactive_planning),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_flag_sets_true() {
+        let cli = Cli::parse_from(["cruise", "plan", "--no-interactive-planning", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.no_interactive_planning),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_conflicts_with_grill() {
+        let result = Cli::try_parse_from([
+            "cruise",
+            "plan",
+            "--no-interactive-planning",
+            "--grill",
+            "task",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]

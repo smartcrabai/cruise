@@ -222,6 +222,8 @@ export function createSession(
     useInputAsPlan?: boolean;
     /** "Grill me" planning: interview the user via `ask_user` before writing the plan. Requires the SDK backend. */
     grill?: boolean;
+    /** Disable interactive planning tools for this session, making the agent write plan.md directly. */
+    noInteractivePlanning?: boolean;
   },
   channel: Channel<PlanEvent>
 ): Promise<string> {
@@ -233,6 +235,7 @@ export function createSession(
     skippedSteps: params.skippedSteps ?? [],
     useInputAsPlan: params.useInputAsPlan ?? false,
     grill: params.grill ?? false,
+    noInteractivePlanning: params.noInteractivePlanning ?? false,
     channel,
   });
 }

@@ -1176,6 +1176,8 @@ interface NewSessionDraft {
   useInputAsPlan: boolean;
   /** "Grill me" planning: interview before writing the plan (SDK backend only). */
   grill: boolean;
+  /** Disable interactive planning tools; agent writes plan.md directly. */
+  noInteractivePlanning: boolean;
   isGenerating: boolean;
   error: string | null;
 }
@@ -1189,6 +1191,7 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     repo: "",
     useInputAsPlan: false,
     grill: false,
+    noInteractivePlanning: false,
     isGenerating: false,
     error: null,
   };
@@ -1211,7 +1214,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
   const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, isGenerating, error } = draft;
+  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, noInteractivePlanning, isGenerating, error } = draft;
   const isRepoMode = sourceKind === "repository";
   // Repository clones don't exist yet at form time, so config lookup falls
   // back to the user-level / builtin configs in repository mode.
@@ -1421,6 +1424,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
           skippedSteps: Array.from(skippedSteps),
           useInputAsPlan,
           grill,
+          noInteractivePlanning,
         },
         channel,
       );
@@ -1626,11 +1630,31 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
                 useInputAsPlan: e.target.checked ? false : prev.useInputAsPlan,
               }))
             }
-            disabled={isGenerating || useInputAsPlan}
+            disabled={isGenerating || useInputAsPlan || noInteractivePlanning}
             className="accent-blue-500"
           />
           <span className="text-sm text-gray-300">
             Grill me (interview one question at a time, then write the plan; SDK backend only)
+          </span>
+        </label>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={noInteractivePlanning}
+            onChange={(e) =>
+              onDraftChange((prev) => ({
+                ...prev,
+                noInteractivePlanning: e.target.checked,
+                // Mutually exclusive with grill: grill requires interactive planning tools.
+                grill: e.target.checked ? false : prev.grill,
+              }))
+            }
+            disabled={isGenerating || useInputAsPlan}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-300">
+            Non-interactive planning (agent writes plan.md directly, no planning tools)
           </span>
         </label>
 
