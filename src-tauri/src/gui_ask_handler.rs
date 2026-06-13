@@ -10,6 +10,7 @@
 
 use cruise::ask_handler::AskHandler;
 use cruise::error::{CruiseError, Result};
+use cruise::session::{SessionManager, SessionPhase};
 use tokio::sync::oneshot;
 
 use crate::events::PlanEvent;
@@ -33,15 +34,23 @@ impl PlanEmitter for tauri::ipc::Channel<PlanEvent> {
 pub struct GuiAskHandler<E: PlanEmitter> {
     emitter: E,
     session_id: String,
+    /// Manager used to persist the Awaiting Input phase and pending question.
+    manager: SessionManager,
     /// Slot shared with the `respond_to_ask` IPC command (via `AppState`).
     pending: AskResponder,
 }
 
 impl<E: PlanEmitter> GuiAskHandler<E> {
-    pub fn new(emitter: E, session_id: String, pending: AskResponder) -> Self {
+    pub fn new(
+        emitter: E,
+        session_id: String,
+        manager: SessionManager,
+        pending: AskResponder,
+    ) -> Self {
         Self {
             emitter,
             session_id,
+            manager,
             pending,
         }
     }
@@ -56,6 +65,11 @@ impl<E: PlanEmitter> AskHandler for GuiAskHandler<E> {
                 .lock()
                 .map_err(|e| CruiseError::Other(format!("ask_responder lock poisoned: {e}")))?;
             *guard = Some(tx);
+        }
+        if let Ok(mut state) = self.manager.load(&self.session_id) {
+            state.phase = SessionPhase::AwaitingInput;
+            state.pending_ask_question = Some(question.to_string());
+            let _ = self.manager.save(&state);
         }
         self.emitter.emit(PlanEvent::AskUserRequired {
             session_id: self.session_id.clone(),

@@ -54,6 +54,8 @@ pub struct SessionDto {
     pub workspace_mode: WorkspaceMode,
     /// Whether a valid (non-empty) `plan.md` exists for this session.
     pub plan_available: bool,
+    /// Persisted planning ask_user question while phase == "Awaiting Input".
+    pub pending_ask_question: Option<String>,
     /// True while a plan-fix request is in progress.
     pub fix_in_progress: bool,
     pub skipped_steps: Vec<String>,
@@ -101,6 +103,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             awaiting_input: s.awaiting_input,
             workspace_mode: s.workspace_mode,
             plan_available: false,
+            pending_ask_question: s.pending_ask_question,
             fix_in_progress: false, // populated from AppState in list_sessions / get_session
             skipped_steps: s.skipped_steps,
         }
@@ -581,6 +584,7 @@ impl GuiPlanCtx {
     /// commands would require additional `AppState` plumbing.
     fn build<'a>(
         state: &AppState,
+        manager: &SessionManager,
         session_id: &str,
         channel: &tauri::ipc::Channel<PlanEvent>,
         config: &'a cruise::config::WorkflowConfig,
@@ -593,6 +597,7 @@ impl GuiPlanCtx {
             Arc::new(crate::gui_ask_handler::GuiAskHandler::new(
                 channel.clone(),
                 session_id.to_string(),
+                manager.clone(),
                 Arc::clone(&responder),
             ));
         let ctx = cruise::planning::PlanPromptCtx {
