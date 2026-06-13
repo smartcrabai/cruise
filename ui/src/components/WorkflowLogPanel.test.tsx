@@ -33,11 +33,11 @@ describe("WorkflowLogPanel", () => {
   });
 
   describe("Message when log is empty", () => {
-    it("'Run the session to see logs here.' is shown when status='idle' and logContent is empty", () => {
+    it("'Generate a plan or run the session to see logs here.' is shown when status='idle' and logContent is empty", () => {
       // Given / When
       render(<WorkflowLogPanel {...baseProps} status="idle" logContent="" />);
       // Then
-      expect(screen.getByText("Run the session to see logs here.")).toBeInTheDocument();
+      expect(screen.getByText("Generate a plan or run the session to see logs here.")).toBeInTheDocument();
     });
 
     it("'No log entries yet.' is shown when status='running' and logContent is empty", () => {
@@ -85,7 +85,7 @@ describe("WorkflowLogPanel", () => {
         />
       );
       // Then
-      expect(screen.queryByText("Run the session to see logs here.")).not.toBeInTheDocument();
+      expect(screen.queryByText("Generate a plan or run the session to see logs here.")).not.toBeInTheDocument();
     });
   });
 });
