@@ -852,8 +852,11 @@ pub async fn create_session(
     });
     let _ = channel.send(PlanEvent::PlanGenerating);
 
-    let (on_stdout, on_stderr) =
-        plan_chunk_callbacks(session_id.clone(), channel.clone(), Some(plan_logger.clone()));
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(
+        session_id.clone(),
+        channel.clone(),
+        Some(plan_logger.clone()),
+    );
     let stream_callbacks = cruise::step::prompt::StreamCallbacks {
         on_stdout: Some(on_stdout.as_ref()),
         on_stderr: Some(on_stderr.as_ref()),
@@ -1435,8 +1438,11 @@ pub async fn fix_session(
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
-    let (on_stdout, on_stderr) =
-        plan_chunk_callbacks(session_id.clone(), channel.clone(), Some(plan_logger.clone()));
+    let (on_stdout, on_stderr) = plan_chunk_callbacks(
+        session_id.clone(),
+        channel.clone(),
+        Some(plan_logger.clone()),
+    );
     let stream_callbacks = cruise::step::prompt::StreamCallbacks {
         on_stdout: Some(on_stdout.as_ref()),
         on_stderr: Some(on_stderr.as_ref()),
@@ -2192,7 +2198,10 @@ mod tests {
         let second = content
             .find("second streamed line")
             .unwrap_or_else(|| panic!("missing second chunk in {content:?}"));
-        assert!(first < second, "streamed lines should preserve order: {content:?}");
+        assert!(
+            first < second,
+            "streamed lines should preserve order: {content:?}"
+        );
     }
 
     #[test]
@@ -2217,7 +2226,10 @@ mod tests {
         // Then: run.log contains concise OK/FAIL markers
         let content = std::fs::read_to_string(manager.run_log_path(&session_id))
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(content.contains("[OK] plan generated"), "missing success marker: {content:?}");
+        assert!(
+            content.contains("[OK] plan generated"),
+            "missing success marker: {content:?}"
+        );
         assert!(
             content.contains("[FAIL] planning failed: boom"),
             "missing failure marker: {content:?}"
