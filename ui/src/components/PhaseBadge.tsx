@@ -9,6 +9,7 @@ export const FIXING_LABEL = "Fixing";
 const PHASE_COLORS: Record<SessionPhase, string> = {
   Draft: "bg-gray-800/50 text-gray-400",
   "Awaiting Approval": "bg-yellow-900/50 text-yellow-300",
+  "Awaiting Input": "bg-amber-900/50 text-amber-300",
   Planned: "bg-blue-900/50 text-blue-300",
   Running: "bg-green-900/50 text-green-300",
   Completed: "bg-gray-700/50 text-gray-300",
@@ -31,9 +32,7 @@ export function PhaseBadge({
   const showApproveReady = isAwaiting && planAvailable === true && !fixing;
   const displayLabel = isAwaiting && fixing
     ? FIXING_LABEL
-    : isAwaiting && planAvailable !== true
-      ? PLANNING_LABEL
-      : phase;
+    : phase;
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
       {showApproveReady && (

@@ -829,6 +829,7 @@ pub async fn create_session(
 
     let (_ask_guard, ctx) = GuiPlanCtx::build(
         &state,
+        &manager,
         &session_id,
         &channel,
         &config,
@@ -1187,7 +1188,7 @@ pub async fn generate_plan_for_draft(
         .ok_or_else(|| "plan generation already in progress for this session".to_string())?;
     {
         let session = manager.load(&session_id).map_err(|e| e.to_string())?;
-        if !matches!(session.phase, SessionPhase::Draft) {
+        if !matches!(session.phase, SessionPhase::Draft | SessionPhase::AwaitingInput) {
             return Err(format!(
                 "expected Draft phase, got {}",
                 session.phase.label()
@@ -1224,7 +1225,7 @@ async fn regenerate_plan(
     };
 
     let (_ask_guard, ctx) = GuiPlanCtx::build(
-        state, session_id, channel, &config, &plan_path, &base, false,
+        state, manager, session_id, channel, &config, &plan_path, &base, false,
     );
     match cruise::planning::run_plan_prompt_template(
         &ctx,
@@ -1252,6 +1253,7 @@ async fn regenerate_plan(
                         error: msg.clone(),
                     });
                     session.plan_error = Some(msg.clone());
+                    session.pending_ask_question = None;
                     let _ = manager.save(&session);
                     return Err(msg);
                 }
@@ -1260,9 +1262,10 @@ async fn regenerate_plan(
             session.plan_error = None;
             // Set AwaitingApproval before sending PlanGenerated so that any
             // immediate refreshSession() call in the UI sees the correct phase.
-            if matches!(session.phase, SessionPhase::Draft) {
+            if matches!(session.phase, SessionPhase::Draft | SessionPhase::AwaitingInput) {
                 session.phase = SessionPhase::AwaitingApproval;
             }
+            session.pending_ask_question = None;
             manager.save(&session).map_err(|e| e.to_string())?;
 
             let _ = channel.send(PlanEvent::PlanGenerated {
@@ -1277,6 +1280,7 @@ async fn regenerate_plan(
                 error: msg.clone(),
             });
             session.plan_error = Some(msg.clone());
+            session.pending_ask_question = None;
             let _ = manager.save(&session);
             Err(msg)
         }
@@ -1360,6 +1364,7 @@ pub async fn fix_session(
 
     let (_ask_guard, ctx) = GuiPlanCtx::build(
         &state,
+        &manager,
         &session_id,
         &channel,
         &config,

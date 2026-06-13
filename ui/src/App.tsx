@@ -40,6 +40,7 @@ import {
 import { ASK_USER_EVENT } from "./lib/askUser";
 import { notifyDesktop } from "./lib/desktopNotifications";
 import { AskUserDialog } from "./components/AskUserDialog";
+import { AskUserPanel } from "./components/AskUserPanel";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { RepoPicker } from "./components/RepoPicker";
 import { isValidRepoSpec } from "./lib/repoSpec";
@@ -834,6 +835,14 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         )}
 
         <div className="text-sm text-gray-400 italic">{session.input}</div>
+
+        {session.phase === "Awaiting Input" && session.pendingAskQuestion && (
+          <AskUserPanel
+            sessionId={session.id}
+            question={session.pendingAskQuestion}
+            onAnswered={() => void refreshSession()}
+          />
+        )}
 
         {/* Controls */}
         <div className="flex gap-2">
