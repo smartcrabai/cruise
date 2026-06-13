@@ -47,6 +47,7 @@ fn session_to_json_with_plan_availability(
 ) -> ListSessionJson {
     let (phase, phase_error): (&'static str, Option<String>) = match session.phase {
         SessionPhase::Draft => ("Draft", None),
+        SessionPhase::AwaitingInput => ("AwaitingInput", None),
         SessionPhase::AwaitingApproval => ("AwaitingApproval", None),
         SessionPhase::Planned => ("Planned", None),
         SessionPhase::Running => ("Running", None),
@@ -316,7 +317,7 @@ fn session_actions_with_plan_availability(
 ) -> Vec<&'static str> {
     let mut actions = vec![];
     match &session.phase {
-        SessionPhase::Draft => {
+        SessionPhase::Draft | SessionPhase::AwaitingInput => {
             actions.push("Generate Plan");
         }
         SessionPhase::AwaitingApproval => {
@@ -376,6 +377,7 @@ fn format_session_label(s: &SessionState) -> String {
 fn format_session_label_with_plan_availability(s: &SessionState, plan_available: bool) -> String {
     let (icon, phase_str) = match &s.phase {
         SessionPhase::Draft => (style("○").dim(), style("Draft").dim()),
+        SessionPhase::AwaitingInput => (style("?").yellow(), style("Awaiting Input").yellow()),
         SessionPhase::AwaitingApproval if s.plan_error.is_some() => {
             (style("✗").red(), style("Plan Failed").red())
         }
