@@ -719,12 +719,16 @@ pub async fn create_session(
         return Err(e.to_string());
     }
 
-    // Grill mode interviews the user via the SDK `ask_user` tool; the command
-    // backend has no equivalent. Reject before creating the session.
-    if grill && config.sdk.is_none() {
+    // Grill mode interviews the user via the SDK `ask_user` tool, which is only
+    // registered in the interactive tool-based planning flow. Reject before
+    // creating the session when the SDK backend is absent or interactive
+    // planning is disabled.
+    if grill && !cruise::planning::sdk_plan_tools_enabled(&config) {
         remove_session_clone(&manager, &session_id);
         return Err(
-            "grill mode requires the SDK backend (set `sdk:` in the workflow config)".to_string(),
+            "grill mode requires the SDK backend with interactive planning enabled \
+             (`sdk:` must be set and `interactive_planning` must not be disabled)"
+                .to_string(),
         );
     }
 
