@@ -26,10 +26,22 @@ pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan
 /// plan. SDK-only — it relies on the interactive `ask_user` tool.
 pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
 
+/// Whether SDK-mode planning should drive the plan through the interactive
+/// custom tools (`submit_plan` / `update_plan` / `ask_user`).
+///
+/// True only when the SDK backend is selected *and* `interactive_planning` is
+/// left enabled. When false the planning turns fall back to the file-writing
+/// (`command`-style) templates and register no custom tools, so tool-incapable
+/// providers (e.g. `sdk: claude-terminal`) stay eligible.
+#[must_use]
+pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
+    config.sdk.is_some() && config.interactive_planning
+}
+
 /// Select the plan-generation template for the configured backend.
 #[must_use]
 pub fn plan_template(config: &WorkflowConfig) -> &'static str {
-    if config.sdk.is_some() {
+    if sdk_plan_tools_enabled(config) {
         PLAN_PROMPT_TEMPLATE_SDK
     } else {
         PLAN_PROMPT_TEMPLATE
@@ -43,7 +55,7 @@ pub fn plan_template(config: &WorkflowConfig) -> &'static str {
 /// it falls back to [`plan_template`].
 #[must_use]
 pub fn initial_plan_template(config: &WorkflowConfig, grill: bool) -> &'static str {
-    if grill && config.sdk.is_some() {
+    if grill && sdk_plan_tools_enabled(config) {
         PLAN_GRILL_PROMPT_TEMPLATE_SDK
     } else {
         plan_template(config)
@@ -53,7 +65,7 @@ pub fn initial_plan_template(config: &WorkflowConfig, grill: bool) -> &'static s
 /// Select the fix-plan template for the configured backend.
 #[must_use]
 pub fn fix_plan_template(config: &WorkflowConfig) -> &'static str {
-    if config.sdk.is_some() {
+    if sdk_plan_tools_enabled(config) {
         FIX_PLAN_PROMPT_TEMPLATE_SDK
     } else {
         FIX_PLAN_PROMPT_TEMPLATE
@@ -63,7 +75,7 @@ pub fn fix_plan_template(config: &WorkflowConfig) -> &'static str {
 /// Select the ask-plan template for the configured backend.
 #[must_use]
 pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
-    if config.sdk.is_some() {
+    if sdk_plan_tools_enabled(config) {
         ASK_PLAN_PROMPT_TEMPLATE_SDK
     } else {
         ASK_PLAN_PROMPT_TEMPLATE
@@ -135,7 +147,11 @@ pub async fn run_plan_prompt_template(
         ctx.config.plan_model.as_deref(),
         ctx.config.model.as_deref(),
     );
-    let tools = if executor.is_sdk() && register_plan_tools {
+    // Tool-based planning is gated on `interactive_planning`; when it is off the
+    // plan is written to `{plan}` directly via the file-writing templates and no
+    // custom tools are registered, keeping tool-incapable providers eligible.
+    let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
+    let tools = if plan_tools_enabled && register_plan_tools {
         crate::sdk_tools::planning_tools(
             ctx.plan_path.to_path_buf(),
             Arc::clone(&ctx.ask),
@@ -169,7 +185,12 @@ pub async fn run_plan_prompt_template(
     drop(spinner);
 
     let outcome = outcome?;
-    if outcome.session_id.is_some() {
+    // Carry the seher session id forward only in the tool-based interactive flow,
+    // where plan/fix/ask turns share one pi conversation. The tool-less flow is
+    // stateless (templates read `{plan}` from disk each turn), so leaving `resume`
+    // empty keeps `require_tools` false and tool-incapable providers
+    // (e.g. claude-terminal) eligible for the fix/ask turns too.
+    if plan_tools_enabled && outcome.session_id.is_some() {
         *resume = outcome.session_id;
     }
     Ok(outcome.result)
@@ -301,6 +322,46 @@ mod tests {
         assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
+    }
+
+    /// Build an SDK config with `interactive_planning: false`.
+    fn sdk_config_no_interactive() -> WorkflowConfig {
+        WorkflowConfig::from_yaml(
+            "sdk: seher\ninteractive_planning: false\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn interactive_planning_defaults_to_true_for_sdk() {
+        // Omitting the field keeps the tool-based interactive flow (SDK templates).
+        let config = config_with(Some("seher"), None);
+        assert!(config.interactive_planning);
+        assert!(sdk_plan_tools_enabled(&config));
+    }
+
+    #[test]
+    fn sdk_plan_tools_disabled_when_interactive_planning_off() {
+        let config = sdk_config_no_interactive();
+        assert!(!sdk_plan_tools_enabled(&config));
+    }
+
+    #[test]
+    fn templates_fall_back_to_command_variants_when_interactive_planning_off() {
+        // Tool-less SDK planning reuses the file-writing (command-style) templates
+        // so the agent writes `{plan}` directly with no custom tools.
+        let config = sdk_config_no_interactive();
+        assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE);
+        assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE);
+        assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn grill_ignored_when_interactive_planning_off() {
+        // Grill needs the `ask_user` tool, which is not registered in the
+        // tool-less flow; the initial template falls back to the file-writing one.
+        let config = sdk_config_no_interactive();
+        assert_eq!(initial_plan_template(&config, true), PLAN_PROMPT_TEMPLATE);
     }
 
     #[test]

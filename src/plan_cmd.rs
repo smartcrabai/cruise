@@ -89,15 +89,19 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let (config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
 
-    // Grill mode relies on the SDK `ask_user` tool; the command backend has no
-    // equivalent. Reject early and discard the session we just created.
-    if args.grill && config.sdk.is_none() {
+    // Grill mode relies on the SDK `ask_user` tool, which is only registered in
+    // the interactive tool-based planning flow. Reject when the SDK backend is
+    // absent or when `interactive_planning` is disabled, discarding the session
+    // we just created.
+    if args.grill && !crate::planning::sdk_plan_tools_enabled(&config) {
         if let Err(del_err) = manager.delete(&session.id) {
             eprintln!("warning: failed to clean up session: {del_err}");
         }
         return Err(CruiseError::Other(
-            "--grill requires the SDK backend (set `sdk:` in the workflow config); \
-             the command backend has no interactive ask_user tool"
+            "--grill requires the SDK backend with interactive planning enabled \
+             (`sdk:` must be set and `interactive_planning` must not be disabled); \
+             the command backend and tool-less planning have no interactive \
+             ask_user tool"
                 .to_string(),
         ));
     }
