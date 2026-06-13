@@ -3,6 +3,7 @@
 export type SessionPhase =
   | "Draft"
   | "Awaiting Approval"
+  | "Awaiting Input"
   | "Planned"
   | "Running"
   | "Completed"
@@ -33,6 +34,8 @@ export interface Session {
   awaitingInput?: boolean;
   /** Whether a valid (non-empty) plan.md exists for this session. */
   planAvailable?: boolean;
+  /** Persisted planning ask_user question while phase === "Awaiting Input". */
+  pendingAskQuestion?: string;
   /** True while a plan-fix request is in progress (persisted in session state). */
   fixInProgress?: boolean;
   skippedSteps: string[];
