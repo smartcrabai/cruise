@@ -60,6 +60,10 @@ pub enum Commands {
 }
 
 #[derive(Parser, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags are naturally boolean"
+)]
 pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
@@ -82,8 +86,8 @@ pub struct PlanArgs {
     #[arg(long, conflicts_with = "skip_planning")]
     pub grill: bool,
 
-    /// Disable interactive planning tools (submit_plan/update_plan/ask_user) for
-    /// this session, even if the workflow config has `interactive_planning: true`.
+    /// Disable interactive planning tools (`submit_plan`/`update_plan`/`ask_user`)
+    /// for this session, even if the workflow config has `interactive_planning: true`.
     /// The agent writes `plan.md` directly instead. Useful when using
     /// tool-incapable providers. Conflicts with `--grill`.
     #[arg(long, conflicts_with = "grill")]
