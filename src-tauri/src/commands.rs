@@ -722,6 +722,7 @@ pub async fn create_session(
     skipped_steps: Vec<String>,
     use_input_as_plan: bool,
     grill: bool,
+    no_interactive_planning: bool,
     channel: tauri::ipc::Channel<PlanEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
@@ -739,7 +740,7 @@ pub async fn create_session(
         &base_dir,
         config_path.as_deref(),
     )?;
-    let config = match WorkflowConfig::from_yaml(&yaml) {
+    let mut config = match WorkflowConfig::from_yaml(&yaml) {
         Ok(config) => config,
         Err(e) => {
             remove_session_clone(&manager, &session_id);
@@ -749,6 +750,10 @@ pub async fn create_session(
     if let Err(e) = validate_config(&config) {
         remove_session_clone(&manager, &session_id);
         return Err(e.to_string());
+    }
+
+    if no_interactive_planning {
+        config.interactive_planning = false;
     }
 
     // Grill mode interviews the user via the SDK `ask_user` tool, which is only
