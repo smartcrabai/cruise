@@ -241,6 +241,9 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
    - **Fix** -- Provide feedback; the plan step reruns with your input.
    - **Ask** -- Ask a question; the answer is shown before the menu reappears.
    - **Execute now** -- Skip approval and run immediately.
+
+   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config.
+
 5. **`cruise run`** -- Picks up the approved session, reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
@@ -707,6 +710,55 @@ steps:
 - When the group's `if: file-changed` condition triggers, execution jumps back to the **first step of the group** and all group steps re-run.
 - A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
 
+### Workflow Composition (`workflow_call`)
+
+A step can delegate to another workflow config file by setting `workflow_call` instead of `prompt`, `command`, or `option`. The called workflow's steps are inlined into the parent at the call site, with each step ID prefixed by the call-site name (e.g. `shared-review/simplify`).
+
+```yaml
+steps:
+  build:
+    command: cargo build
+
+  shared-review:
+    workflow_call: ./workflows/review.yaml    # local relative path
+
+  deploy:
+    command: cargo publish
+```
+
+The referenced file is a regular cruise config. Its top-level execution settings (`command`, `sdk`, `model`, `env`, etc.) are ignored -- only its `steps` are imported. The parent's settings apply to the expanded steps.
+
+#### Supported sources
+
+| Source | Example |
+|--------|---------|
+| Local relative path | `workflow_call: ./workflows/review.yaml` |
+| GitHub blob URL | `workflow_call: https://github.com/org/repo/blob/main/workflows/review.yaml` |
+| GitHub raw URL | `workflow_call: https://raw.githubusercontent.com/org/repo/main/workflows/review.yaml` |
+
+GitHub workflows are fetched via `gh api` at config-load time. Relative paths inside a GitHub-hosted workflow resolve from the remote directory, so nested references work across repositories.
+
+#### Call-site fields
+
+A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `next` may be set alongside `workflow_call`:
+
+- `skip` and `when` are applied to the **first** expanded step.
+- `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
+
+All other step fields (`prompt`, `command`, `model`, `if`, `timeout`, `env`, etc.) are rejected at validation time.
+
+#### Nesting and cycle detection
+
+Workflow calls can be nested: a called workflow may itself contain `workflow_call` steps. Step IDs accumulate prefixes (`outer/inner/step`). Circular references (A calls B, B calls A) are detected and rejected. Groups inside called workflows are not supported.
+
+```yaml
+# parent.yaml -> nested/outer.yaml -> inner/leaf.yaml
+# Results in step IDs: outer-call/leaf-call/leaf
+steps:
+  outer-call:
+    workflow_call: ./nested/outer.yaml
+```
+
 ### Variable Reference
 
 | Variable | Description |
@@ -894,6 +946,31 @@ When a rate-limit error (HTTP 429) is detected in a prompt or command step, crui
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
+
+## Stale Session Detection
+
+When `cruise list` (or the desktop GUI) loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
+
+Suspended sessions can be resumed from `cruise list` or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+
+## Parallel Session Execution
+
+The desktop GUI supports running multiple sessions concurrently during `run --all`. The parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+
+The batch scheduler:
+- Seeds from Planned and Suspended sessions.
+- Launches up to `N` sessions concurrently.
+- Re-scans for newly added Planned sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
+- Results are returned in scheduling order regardless of completion order.
+
+The CLI `cruise run --all` always runs sessions sequentially regardless of the parallelism setting.
+
+## New Session Form Persistence
+
+The desktop GUI persists two pieces of state across sessions:
+
+- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
+- **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.
 
 ## License
 
