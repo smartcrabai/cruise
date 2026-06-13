@@ -13,6 +13,8 @@ pub const PLAN_VAR: &str = "plan";
 pub enum SessionPhase {
     /// User saved the prompt as a draft; planning has not yet been started.
     Draft,
+    /// Plan generation is blocked waiting for an SDK `ask_user` answer.
+    AwaitingInput,
     /// Plan has been generated but not yet approved by the user.
     AwaitingApproval,
     Planned,
@@ -28,6 +30,7 @@ impl SessionPhase {
     pub fn label(&self) -> &str {
         match self {
             Self::Draft => "Draft",
+            Self::AwaitingInput => "Awaiting Input",
             Self::AwaitingApproval => "Awaiting Approval",
             Self::Planned => "Planned",
             Self::Running => "Running",
@@ -99,6 +102,9 @@ pub struct SessionState {
     /// True when the session is waiting for user input (option step).
     #[serde(default)]
     pub awaiting_input: bool,
+    /// Persisted planning `ask_user` question while waiting for an answer.
+    #[serde(default)]
+    pub pending_ask_question: Option<String>,
     /// Durable background-planning failure detail, if plan generation failed before approval.
     #[serde(default)]
     pub plan_error: Option<String>,
@@ -174,6 +180,7 @@ impl SessionState {
             config_path: None,
             updated_at: None,
             awaiting_input: false,
+            pending_ask_question: None,
             plan_error: None,
             skipped_steps: vec![],
             runner_pid: None,
@@ -277,6 +284,7 @@ impl SessionState {
 }
 
 /// Manages sessions stored under `<base>/sessions/`.
+#[derive(Clone)]
 pub struct SessionManager {
     base: PathBuf,
 }

@@ -700,6 +700,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                 )
             }
             SessionPhase::Draft
+            | SessionPhase::AwaitingInput
             | SessionPhase::AwaitingApproval
             | SessionPhase::Planned
             | SessionPhase::Running => {
