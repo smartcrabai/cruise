@@ -38,7 +38,7 @@ export function WorkflowLogPanel({
       ) : (
         <p className="text-sm text-gray-500">
           {status === "idle"
-            ? "Run the session to see logs here."
+            ? "Generate a plan or run the session to see logs here."
             : status === "cancelled"
               ? "Session was cancelled."
               : "No log entries yet."}

@@ -1246,12 +1246,25 @@ async fn regenerate_plan(
     };
     let plan_logger = plan_logger(manager, session_id, operation);
     // Repo-backed sessions plan inside the temporary clone; re-create it if missing.
-    if cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session)
-        .map_err(|e| e.to_string())?
-    {
-        let _ = manager.save(&session);
+    match cruise::repo_clone::ensure_repo_session_workspace(manager, &mut session) {
+        Ok(true) => {
+            let _ = manager.save(&session);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            log_plan_failure(&plan_logger, &format!("{operation} failed: {msg}"));
+            return Err(msg);
+        }
     }
-    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let config = match manager.load_config(&session) {
+        Ok(config) => config,
+        Err(e) => {
+            let msg = e.to_string();
+            log_plan_failure(&plan_logger, &format!("{operation} failed: {msg}"));
+            return Err(msg);
+        }
+    };
     let _ = channel.send(PlanEvent::PlanGenerating);
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
@@ -1309,7 +1322,11 @@ async fn regenerate_plan(
             if matches!(session.phase, SessionPhase::Draft) {
                 session.phase = SessionPhase::AwaitingApproval;
             }
-            manager.save(&session).map_err(|e| e.to_string())?;
+            if let Err(e) = manager.save(&session) {
+                let msg = e.to_string();
+                log_plan_failure(&plan_logger, &format!("{operation} failed: {msg}"));
+                return Err(msg);
+            }
 
             if matches!(operation, "planning") {
                 log_plan_success(&plan_logger, "plan generated");
@@ -1393,12 +1410,25 @@ pub async fn fix_session(
     let _ = channel.send(PlanEvent::PlanGenerating);
 
     // Repo-backed sessions plan inside the temporary clone; re-create it if missing.
-    if cruise::repo_clone::ensure_repo_session_workspace(&manager, &mut session)
-        .map_err(|e| e.to_string())?
-    {
-        let _ = manager.save(&session);
+    match cruise::repo_clone::ensure_repo_session_workspace(&manager, &mut session) {
+        Ok(true) => {
+            let _ = manager.save(&session);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            log_plan_failure(&plan_logger, &format!("fix-plan failed: {msg}"));
+            return Err(msg);
+        }
     }
-    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let config = match manager.load_config(&session) {
+        Ok(config) => config,
+        Err(e) => {
+            let msg = e.to_string();
+            log_plan_failure(&plan_logger, &format!("fix-plan failed: {msg}"));
+            return Err(msg);
+        }
+    };
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
     let mut vars = cruise::variable::VariableStore::new(session.input.clone());
@@ -1452,7 +1482,11 @@ pub async fn fix_session(
             };
             cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
             // Re-save to update updated_at timestamp
-            manager.save(&session).map_err(|e| e.to_string())?;
+            if let Err(e) = manager.save(&session) {
+                let msg = e.to_string();
+                log_plan_failure(&plan_logger, &format!("fix-plan failed: {msg}"));
+                return Err(msg);
+            }
 
             log_plan_success(&plan_logger, "plan fixed");
             let _ = channel.send(PlanEvent::PlanGenerated {
@@ -1462,6 +1496,7 @@ pub async fn fix_session(
             Ok(content)
         }
         Err(msg) => {
+            log_plan_failure(&plan_logger, &format!("fix-plan failed: {msg}"));
             let _ = channel.send(PlanEvent::PlanFailed {
                 session_id: session_id.clone(),
                 error: msg.clone(),
