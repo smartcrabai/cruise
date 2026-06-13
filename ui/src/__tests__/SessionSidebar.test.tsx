@@ -493,8 +493,9 @@ describe("SessionSidebar", () => {
     });
   });
 
-  it("shows 'Planning' label for 'Awaiting Approval' session when planAvailable is false", async () => {
+  it("shows 'Awaiting Approval' label (not 'Planning') when planAvailable is false", async () => {
     // Given: a session that is awaiting approval but plan is not yet generated
+    // Planning waits use the distinct Awaiting Input phase instead of a label override
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: false }),
     ]);
@@ -502,10 +503,11 @@ describe("SessionSidebar", () => {
     // When
     render(<SessionSidebar {...defaultProps} />);
 
-    // Then: the label shows "Planning" instead of "Awaiting Approval"
+    // Then: the label shows "Awaiting Approval" (not "Planning")
     await waitFor(() => {
-      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
     });
+    expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
 
     // And: no blue dot is shown
     expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
