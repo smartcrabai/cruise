@@ -29,6 +29,21 @@ pub struct WorkflowConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<String>,
 
+    /// Whether SDK-mode planning drives the plan through the interactive custom
+    /// tools (`submit_plan` / `update_plan` / `ask_user`).
+    ///
+    /// When `true` (the default) the planning agent persists and edits the plan
+    /// via those tools, which restricts provider resolution to the tool-capable
+    /// `pi` SDK. When `false`, planning instead embeds the target plan file path
+    /// in the prompt and asks the agent to write `plan.md` directly — exactly
+    /// like the `command` backend (the file is read back afterward, falling back
+    /// to the agent's captured output if it was not written). No custom tools
+    /// are registered, so tool-incapable providers (e.g.
+    /// `sdk: claude-terminal`) become eligible. Has no effect in `command` mode,
+    /// which is always file-based.
+    #[serde(default = "default_true")]
+    pub interactive_planning: bool,
+
     /// Language to use for built-in PR title/body generation.
     #[serde(default = "default_pr_language")]
     pub pr_language: String,
@@ -234,6 +249,10 @@ fn default_pr_language() -> String {
     DEFAULT_PR_LANGUAGE.to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl WorkflowConfig {
     /// Parse a workflow config from a YAML string.
     ///
@@ -275,6 +294,7 @@ impl WorkflowConfig {
             sdk: None,
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
+            interactive_planning: true,
             pr_language: default_pr_language(),
             env: HashMap::new(),
             groups: HashMap::new(),
