@@ -17,6 +17,40 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe("getSessionActions", () => {
+  describe("Awaiting Input phase", () => {
+    it("hides approval and plan-run actions while the planning agent waits for an answer", () => {
+      // Given: an ask_user question is pending inside the session detail screen
+      const session = makeSession({
+        phase: "Awaiting Input",
+        pendingAskQuestion: "Which auth strategy should I plan for?",
+        planAvailable: false,
+      });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: the session cannot be approved, fixed, asked, or executed until answered
+      expect(actions.showApprove).toBe(false);
+      expect(actions.showFix).toBe(false);
+      expect(actions.showAsk).toBe(false);
+      expect(actions.showCreateWorktree).toBe(false);
+      expect(actions.showRun).toBe(false);
+      expect(actions.showReset).toBe(false);
+    });
+
+    it("allows deleting an Awaiting Input session because it is not a running workflow", () => {
+      // Given: a planning session blocked on ask_user input
+      const session = makeSession({ phase: "Awaiting Input", pendingAskQuestion: "Proceed?" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: Delete remains available, matching non-Running phases
+      expect(actions.showDelete).toBe(true);
+      expect(actions.showCancel).toBe(false);
+    });
+  });
+
   // --- Running phase ---------------------------------------------------------
 
   describe("Running phase", () => {
