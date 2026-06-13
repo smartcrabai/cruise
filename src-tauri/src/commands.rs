@@ -1235,7 +1235,10 @@ pub async fn generate_plan_for_draft(
         .ok_or_else(|| "plan generation already in progress for this session".to_string())?;
     {
         let session = manager.load(&session_id).map_err(|e| e.to_string())?;
-        if !matches!(session.phase, SessionPhase::Draft | SessionPhase::AwaitingInput) {
+        if !matches!(
+            session.phase,
+            SessionPhase::Draft | SessionPhase::AwaitingInput
+        ) {
             return Err(format!(
                 "expected Draft phase, got {}",
                 session.phase.label()
@@ -1333,7 +1336,10 @@ async fn regenerate_plan(
             session.plan_error = None;
             // Set AwaitingApproval before sending PlanGenerated so that any
             // immediate refreshSession() call in the UI sees the correct phase.
-            if matches!(session.phase, SessionPhase::Draft | SessionPhase::AwaitingInput) {
+            if matches!(
+                session.phase,
+                SessionPhase::Draft | SessionPhase::AwaitingInput
+            ) {
                 session.phase = SessionPhase::AwaitingApproval;
             }
             session.pending_ask_question = None;
