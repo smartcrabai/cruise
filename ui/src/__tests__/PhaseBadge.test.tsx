@@ -43,20 +43,22 @@ describe("PhaseBadge", () => {
       expect(screen.getByText("Awaiting Approval")).toBeTruthy();
     });
 
-    it("renders 'Planning' text when planAvailable is false", () => {
+    it("renders 'Awaiting Approval' text even when planAvailable is false", () => {
       // Given / When
       render(<PhaseBadge phase="Awaiting Approval" planAvailable={false} />);
 
-      // Then
-      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+      // Then: planning waits use the distinct Awaiting Input phase instead
+      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
     });
 
-    it("renders 'Planning' text when planAvailable is undefined (safe default)", () => {
+    it("renders 'Awaiting Approval' text when planAvailable is undefined", () => {
       // Given / When
       render(<PhaseBadge phase="Awaiting Approval" />);
 
-      // Then
-      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+      // Then: missing plan availability no longer masquerades as Planning
+      expect(screen.getByText("Awaiting Approval")).toBeTruthy();
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
     });
   });
 
@@ -101,6 +103,15 @@ describe("PhaseBadge", () => {
       expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
     });
 
+    it("does not show blue dot for Awaiting Input even when planAvailable is true", () => {
+      // Given: the planning agent is blocked on user input rather than ready for approval
+      // When
+      render(<PhaseBadge phase="Awaiting Input" planAvailable={true} />);
+
+      // Then
+      expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
+    });
+
     it("renders correct label text for each phase", () => {
       // Given / When / Then: text content matches the phase name
       const { rerender } = render(<PhaseBadge phase="Planned" />);
@@ -114,6 +125,9 @@ describe("PhaseBadge", () => {
 
       rerender(<PhaseBadge phase="Failed" />);
       expect(screen.getByText("Failed")).toBeTruthy();
+
+      rerender(<PhaseBadge phase="Awaiting Input" />);
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
 
       rerender(<PhaseBadge phase="Suspended" />);
       expect(screen.getByText("Suspended")).toBeTruthy();
