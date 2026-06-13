@@ -437,7 +437,7 @@ export function WorkflowLogPanel({ panelLogId, tabLogId, status, logContent, log
         </pre>
       ) : (
         <p className="p-4 text-xs text-gray-600">
-          {status === "idle" ? "Run the session to see logs here." : "No log entries yet."}
+          {status === "idle" ? "Generate a plan or run the session to see logs here." : "No log entries yet."}
         </p>
       )}
     </div>
