@@ -86,8 +86,12 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     }
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let (config, mut session) =
+    let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
+
+    if args.no_interactive_planning {
+        config.interactive_planning = false;
+    }
 
     // Grill mode relies on the SDK `ask_user` tool, which is only registered in
     // the interactive tool-based planning flow. Reject when the SDK backend is
