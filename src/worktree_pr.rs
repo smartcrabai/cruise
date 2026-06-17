@@ -3,7 +3,7 @@
 /// Functions in this module are extracted from `run_cmd.rs` so that
 /// `src-tauri` (the GUI crate) can call the same PR post-processing logic
 /// without duplicating it.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use console::style;
 
@@ -11,7 +11,7 @@ use crate::engine::{ExecutionContext, execute_steps};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
-use crate::session::{PLAN_VAR, SessionState};
+use crate::session::SessionState;
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
 use crate::worktree;
@@ -114,8 +114,7 @@ pub async fn handle_worktree_pr(
     rate_limit_retries: usize,
     max_retries: usize,
 ) -> Result<()> {
-    let (pr_title, pr_body) =
-        generate_pr_description(compiled, vars, rate_limit_retries, &ctx.path).await;
+    let (pr_title, pr_body) = generate_pr_description(compiled, vars, rate_limit_retries).await;
 
     let pr_attempt = attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body)?;
     pr_attempt.report();
@@ -156,33 +155,12 @@ pub async fn handle_worktree_pr(
     }
 }
 
-/// Generate a PR title and body using the LLM, returning empty strings on failure.
+/// Generate a PR title and body, returning empty strings on failure.
 async fn generate_pr_description(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
-    working_dir: &Path,
 ) -> (String, String) {
-    // If LLM API is configured, try the API path first.
-    if let Some(ref api_config) = compiled.llm_api
-        && let Ok(plan_path_str) = vars.get_variable(PLAN_VAR)
-    {
-        let plan_path = PathBuf::from(&plan_path_str);
-        match crate::llm_api::generate_pr_metadata(
-            api_config,
-            &plan_path,
-            &compiled.pr_language,
-            working_dir,
-        )
-        .await
-        {
-            Ok((title, body)) => return (title, body),
-            Err(e) => {
-                eprintln!("warning: LLM API call failed, falling back to CLI: {e}");
-            }
-        }
-    }
-
     let pr_prompt = match build_pr_prompt(vars, compiled) {
         Err(e) => {
             eprintln!("warning: PR prompt resolution failed: {e}");
@@ -190,13 +168,26 @@ async fn generate_pr_description(
         }
         Ok(p) => p,
     };
-    // PR-description generation is a non-interactive, tool-less prompt; route it
-    // through the executor so it works on both the command and SDK backends.
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode = executor.step_model_or_mode(None, compiled.model.as_deref());
     let spinner = crate::spinner::Spinner::start("Generating PR description...");
     let env = std::collections::HashMap::new();
-    let llm_output = {
+
+    if executor.is_sdk() {
+        let result = generate_pr_via_sdk_tool(
+            &executor,
+            &pr_prompt,
+            model_or_mode.as_deref(),
+            rate_limit_retries,
+            &env,
+            &spinner,
+        )
+        .await;
+        drop(spinner);
+        return result;
+    }
+
+    let output = {
         let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
         match executor
             .run(crate::executor::PromptRun {
@@ -221,9 +212,9 @@ async fn generate_pr_description(
         }
     };
     drop(spinner);
-    let (pr_title, pr_body) = parse_pr_metadata(&llm_output);
-    if pr_title.is_empty() && !llm_output.trim().is_empty() {
-        let truncated: String = llm_output.chars().take(500).collect();
+    let (pr_title, pr_body) = parse_pr_metadata(&output);
+    if pr_title.is_empty() && !output.trim().is_empty() {
+        let truncated: String = output.chars().take(500).collect();
         eprintln!(
             "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
             style("!").yellow(),
@@ -231,6 +222,55 @@ async fn generate_pr_description(
         );
     }
     (pr_title, pr_body)
+}
+
+async fn generate_pr_via_sdk_tool(
+    executor: &crate::executor::Executor,
+    pr_prompt: &str,
+    model_or_mode: Option<&str>,
+    rate_limit_retries: usize,
+    env: &std::collections::HashMap<String, String>,
+    spinner: &crate::spinner::Spinner,
+) -> (String, String) {
+    use std::sync::{Arc, Mutex};
+
+    let store = Arc::new(Mutex::new(None::<crate::sdk_tools::PrMetadata>));
+    let tool = crate::sdk_tools::submit_pr_metadata_tool(Arc::clone(&store));
+    let prompt = format!(
+        "{pr_prompt}\n\n\
+         Call the submit_pr_metadata tool with the title and body."
+    );
+    let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+    match executor
+        .run(crate::executor::PromptRun {
+            prompt: &prompt,
+            model_or_mode,
+            max_retries: rate_limit_retries,
+            env,
+            on_retry: Some(&on_retry),
+            cancel_token: None,
+            working_dir: None,
+            stream: None,
+            tools: vec![tool],
+            resume: None,
+        })
+        .await
+    {
+        Ok(_) => {
+            if let Ok(mut guard) = store.lock()
+                && let Some(meta) = guard.take()
+            {
+                (meta.title, meta.body)
+            } else {
+                eprintln!("warning: SDK agent did not call submit_pr_metadata tool");
+                (String::new(), String::new())
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: PR description generation failed: {e}");
+            (String::new(), String::new())
+        }
+    }
 }
 
 /// Run the after-PR workflow steps, logging any errors.
