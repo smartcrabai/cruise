@@ -14,7 +14,6 @@ mod exec_cmd;
 mod executor;
 mod file_tracker;
 mod list_cmd;
-mod llm_api;
 mod metadata;
 mod multiline_input;
 mod new_session_history;

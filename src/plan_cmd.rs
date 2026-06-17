@@ -310,15 +310,14 @@ fn read_background_plan_input(input: &str) -> Result<String> {
 async fn approve_with_title(
     session: &mut SessionState,
     manager: &SessionManager,
+    config: &WorkflowConfig,
     plan_content: &str,
-    llm_api: Option<&crate::llm_api::LlmApiConfig>,
 ) -> Result<()> {
-    if let Some(api_config) = llm_api {
-        match crate::llm_api::generate_session_title(api_config, &session.input, plan_content).await
-        {
+    if config.sdk.is_some() {
+        match generate_title_via_sdk(config, &session.input, plan_content).await {
             Ok(title) => session.title = Some(title),
             Err(e) => {
-                eprintln!("warning: session title generation via API failed: {e}");
+                eprintln!("warning: SDK title generation failed: {e}");
                 crate::metadata::refresh_session_title_from_plan(session, plan_content);
             }
         }
@@ -326,10 +325,49 @@ async fn approve_with_title(
         crate::metadata::refresh_session_title_from_plan(session, plan_content);
     }
     session.approve();
-    // Repo-backed sessions: the temporary clone (and its planning worktree)
-    // are no longer needed once the plan is approved; execution re-clones.
     crate::repo_clone::cleanup_after_approval(manager, session);
     manager.save(session)
+}
+
+async fn generate_title_via_sdk(
+    config: &WorkflowConfig,
+    input: &str,
+    plan_content: &str,
+) -> Result<String> {
+    let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
+
+    let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
+    let model_or_mode = executor.plan_model_or_mode(
+        config.plan_model.as_deref(),
+        config.model.as_deref(),
+    );
+    let prompt = format!(
+        "Generate a concise session title (max 80 chars) for this task and plan. \
+         Call the generate_title tool with your title.\n\n\
+         Task: {input}\n\nPlan:\n{plan_content}"
+    );
+    let env = std::collections::HashMap::new();
+    executor
+        .run(crate::executor::PromptRun {
+            prompt: &prompt,
+            model_or_mode: model_or_mode.as_deref(),
+            max_retries: 1,
+            env: &env,
+            on_retry: None,
+            cancel_token: None,
+            working_dir: None,
+            stream: None,
+            tools: vec![tool],
+            resume: None,
+        })
+        .await?;
+
+    title_store
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| CruiseError::Other("SDK agent did not call generate_title tool".to_string()))
 }
 
 /// Return the directory where plan-related LLM calls should run.
@@ -793,7 +831,6 @@ async fn run_approve_loop(
     noninteractive: bool,
     resume: &mut Option<String>,
 ) -> Result<()> {
-    let llm_api = crate::llm_api::resolve_llm_api_config(config.llm.as_ref());
     let working_dir = session
         .worktree_path
         .clone()
@@ -831,7 +868,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
+            approve_with_title(session, manager, config, &plan_content).await?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("v").green().bold(),
@@ -860,7 +897,7 @@ async fn run_approve_loop(
         match selected {
             "Approve" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
-                approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
+                approve_with_title(session, manager, config, &plan_content).await?;
                 eprintln!(
                     "\n{} Session {} created.",
                     style("v").green().bold(),
@@ -891,7 +928,7 @@ async fn run_approve_loop(
             }
             "Execute now" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
-                approve_with_title(session, manager, &plan_content, llm_api.as_ref()).await?;
+                approve_with_title(session, manager, config, &plan_content).await?;
                 eprintln!(
                     "\n{} Executing session {}...",
                     style("->").cyan(),
