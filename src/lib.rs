@@ -9,7 +9,6 @@ pub mod engine;
 pub mod error;
 pub mod executor;
 pub mod file_tracker;
-pub mod llm_api;
 pub mod metadata;
 pub mod new_session_draft;
 pub mod new_session_history;
