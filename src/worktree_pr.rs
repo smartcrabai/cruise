@@ -114,8 +114,7 @@ pub async fn handle_worktree_pr(
     rate_limit_retries: usize,
     max_retries: usize,
 ) -> Result<()> {
-    let (pr_title, pr_body) =
-        generate_pr_description(compiled, vars, rate_limit_retries).await;
+    let (pr_title, pr_body) = generate_pr_description(compiled, vars, rate_limit_retries).await;
 
     let pr_attempt = attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body)?;
     pr_attempt.report();
@@ -258,7 +257,9 @@ async fn generate_pr_via_sdk_tool(
         .await
     {
         Ok(_) => {
-            if let Some(meta) = store.lock().unwrap().take() {
+            if let Ok(mut guard) = store.lock()
+                && let Some(meta) = guard.take()
+            {
                 (meta.title, meta.body)
             } else {
                 eprintln!("warning: SDK agent did not call submit_pr_metadata tool");

@@ -147,7 +147,10 @@ pub fn generate_title_tool(title_store: Arc<std::sync::Mutex<Option<String>>>) -
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let title = require_str(&input, "title")?;
         let truncated: String = title.chars().take(80).collect();
-        *title_store.lock().unwrap() = Some(truncated.trim().to_string());
+        *title_store
+            .lock()
+            .map_err(|e| format!("title store lock poisoned: {e}"))? =
+            Some(truncated.trim().to_string());
         Ok("Title saved.".to_string())
     });
     SeherTool::new(
@@ -176,13 +179,13 @@ pub struct PrMetadata {
 
 /// `submit_pr_metadata` — captures PR title and body submitted by the agent.
 #[must_use]
-pub fn submit_pr_metadata_tool(
-    store: Arc<std::sync::Mutex<Option<PrMetadata>>>,
-) -> SeherTool {
+pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>) -> SeherTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let title = require_str(&input, "title")?;
         let body = require_str(&input, "body")?;
-        *store.lock().unwrap() = Some(PrMetadata {
+        *store
+            .lock()
+            .map_err(|e| format!("PR metadata store lock poisoned: {e}"))? = Some(PrMetadata {
             title: title.to_string(),
             body: body.to_string(),
         });
@@ -378,7 +381,10 @@ mod tests {
         let tool = generate_title_tool(Arc::clone(&store));
         let res = invoke(&tool, json!({"title": "Add session titles"}));
         assert!(res.is_ok(), "got: {res:?}");
-        assert_eq!(store.lock().unwrap().as_deref(), Some("Add session titles"));
+        assert_eq!(
+            store.lock().unwrap_or_else(|e| panic!("{e:?}")).as_deref(),
+            Some("Add session titles")
+        );
     }
 
     #[test]
@@ -388,7 +394,15 @@ mod tests {
         let long = "a".repeat(100);
         let res = invoke(&tool, json!({"title": long}));
         assert!(res.is_ok(), "got: {res:?}");
-        assert_eq!(store.lock().unwrap().as_ref().unwrap().len(), 80);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected Some"))
+                .len(),
+            80
+        );
     }
 
     #[test]
@@ -406,7 +420,11 @@ mod tests {
         let tool = submit_pr_metadata_tool(Arc::clone(&store));
         let res = invoke(&tool, json!({"title": "fix: bug", "body": "Fixes #42"}));
         assert!(res.is_ok(), "got: {res:?}");
-        let meta = store.lock().unwrap().clone().unwrap();
+        let meta = store
+            .lock()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .clone()
+            .unwrap_or_else(|| panic!("expected Some"));
         assert_eq!(meta.title, "fix: bug");
         assert_eq!(meta.body, "Fixes #42");
     }

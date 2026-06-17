@@ -338,10 +338,8 @@ async fn generate_title_via_sdk(
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
 
     let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let model_or_mode = executor.plan_model_or_mode(
-        config.plan_model.as_deref(),
-        config.model.as_deref(),
-    );
+    let model_or_mode =
+        executor.plan_model_or_mode(config.plan_model.as_deref(), config.model.as_deref());
     let prompt = format!(
         "Generate a concise session title (max 80 chars) for this task and plan. \
          Call the generate_title tool with your title.\n\n\
@@ -365,7 +363,7 @@ async fn generate_title_via_sdk(
 
     title_store
         .lock()
-        .unwrap()
+        .map_err(|e| CruiseError::Other(format!("title store lock poisoned: {e}")))?
         .clone()
         .ok_or_else(|| CruiseError::Other("SDK agent did not call generate_title tool".to_string()))
 }
