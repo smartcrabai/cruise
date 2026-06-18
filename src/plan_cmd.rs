@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use console::style;
@@ -24,6 +24,24 @@ use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
+use crate::worktree_pr::PLAN_LANGUAGE_VAR;
+
+fn setup_plan_vars(
+    session_input: String,
+    plan_path: PathBuf,
+    config: &WorkflowConfig,
+) -> VariableStore {
+    let mut vars = VariableStore::new(session_input);
+    vars.set_named_file(PLAN_VAR, plan_path);
+    let lang = config.plan_language.trim();
+    let lang = if lang.is_empty() {
+        crate::config::DEFAULT_PLAN_LANGUAGE
+    } else {
+        lang
+    };
+    vars.set_named_value(PLAN_LANGUAGE_VAR, lang.to_string());
+    vars
+}
 
 /// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
 fn cli_plan_ctx<'a>(

@@ -126,6 +126,8 @@ pub struct CompiledWorkflow {
     pub env: HashMap<String, String>,
     /// Language to use for PR title/body generation.
     pub pr_language: String,
+    /// Language to use for planning prompts.
+    pub plan_language: String,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -153,6 +155,7 @@ impl CompiledWorkflow {
             plan_model: self.plan_model.clone(),
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
+            plan_language: self.plan_language.clone(),
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -189,6 +192,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         plan_model: config.plan_model,
         env: config.env,
         pr_language: config.pr_language,
+        plan_language: config.plan_language,
         steps,
         after_pr,
         invocations,
@@ -311,6 +315,46 @@ mod tests {
 
     fn compiled(yaml: &str) -> CompiledWorkflow {
         compile(parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn test_compile_carries_plan_language() {
+        // Given: a workflow config with a custom planning language
+        let yaml = r"
+command: [echo]
+plan_language: Japanese
+steps:
+  step1:
+    command: echo hello
+";
+
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: the compiled workflow carries the planning language
+        assert_eq!(c.plan_language, "Japanese");
+    }
+
+    #[test]
+    fn test_after_pr_compiled_preserves_plan_language() {
+        // Given: a compiled workflow with after-pr steps and a custom planning language
+        let yaml = r"
+command: [echo]
+plan_language: Japanese
+steps:
+  main:
+    command: echo main
+after-pr:
+  notify:
+    command: echo done
+";
+        let c = compiled(yaml);
+
+        // When: converting to an after-pr compiled workflow
+        let after_pr = c.to_after_pr_compiled();
+
+        // Then: the planning language is preserved
+        assert_eq!(after_pr.plan_language, "Japanese");
     }
 
     // -----------------------------------------------------------------------
