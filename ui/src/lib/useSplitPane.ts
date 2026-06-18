@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -23,9 +23,11 @@ export function useSplitPane(
     return defaultWidth;
   });
 
-  // Assign during render so stable callbacks always read the current value
   const widthRef = useRef(width);
-  widthRef.current = width;
+  // Keep the ref in sync after every commit. widthRef is only read inside event
+  // handlers (mousedown, mousemove), which always fire post-commit, so the
+  // post-render timing of useLayoutEffect is safe here.
+  useLayoutEffect(() => { widthRef.current = width; });
 
   const isResizingRef = useRef(false);
   const startXRef = useRef(0);

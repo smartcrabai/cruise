@@ -119,24 +119,22 @@ impl AppState {
         }
     }
 
-    /// Route an `ask_user` answer to the waiting session by ID.
+    /// Take the pending oneshot sender for `session_id` out of its slot without
+    /// sending. Returns `None` if the session has no registered responder or the
+    /// slot is empty.
     ///
-    /// Returns `true` if a pending dialog was found and the answer delivered.
-    pub fn respond_to_ask(&self, session_id: &str, answer: String) -> bool {
+    /// Used by `respond_to_ask_impl` to atomically claim the sender before
+    /// modifying persisted state, avoiding a race with a second `ask_user`.
+    pub fn take_ask_sender(&self, session_id: &str) -> Option<oneshot::Sender<String>> {
         let responder = {
             let map = self.lock_ask_responders();
             map.get(session_id).map(Arc::clone)
         };
-        let Some(responder) = responder else {
-            return false;
-        };
+        let responder = responder?;
         let mut guard = responder
             .lock()
             .unwrap_or_else(|e| panic!("ask_responder mutex poisoned: {e}"));
-        let Some(sender) = guard.take() else {
-            return false;
-        };
-        sender.send(answer).is_ok()
+        guard.take()
     }
 
     /// Return the current runtime concurrency limit for Run All batches.
@@ -625,7 +623,7 @@ mod tests {
     // -- ask_user responder routing -------------------------------------------
 
     #[test]
-    fn test_respond_to_ask_routes_to_correct_session() {
+    fn test_take_ask_sender_routes_to_correct_session() {
         // Given: two sessions each with a registered ask slot and pending sender
         let state = AppState::new();
         let r1 = state.register_ask_responder("sess-1");
@@ -635,11 +633,12 @@ mod tests {
         *r1.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx1);
         *r2.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx2);
 
-        // When: answer sess-2 only
-        let sent = state.respond_to_ask("sess-2", "the answer".to_string());
+        // When: take and send to sess-2 only
+        let sender = state.take_ask_sender("sess-2");
+        assert!(sender.is_some(), "expected a sender for sess-2");
+        let _ = sender.unwrap().send("the answer".to_string());
 
         // Then: sess-2 receives it, sess-1 is untouched
-        assert!(sent);
         assert_eq!(
             rx2.try_recv().unwrap_or_else(|e| panic!("{e}")),
             "the answer"
@@ -648,17 +647,17 @@ mod tests {
     }
 
     #[test]
-    fn test_respond_to_ask_returns_false_for_unknown_session() {
+    fn test_take_ask_sender_returns_none_for_unknown_session() {
         let state = AppState::new();
-        assert!(!state.respond_to_ask("nope", "x".to_string()));
+        assert!(state.take_ask_sender("nope").is_none());
     }
 
     #[test]
-    fn test_respond_to_ask_returns_false_when_no_pending_sender() {
+    fn test_take_ask_sender_returns_none_when_no_pending_sender() {
         // Registered but the GUI ask handler has not installed a sender yet.
         let state = AppState::new();
         state.register_ask_responder("sess-1");
-        assert!(!state.respond_to_ask("sess-1", "x".to_string()));
+        assert!(state.take_ask_sender("sess-1").is_none());
     }
 
     #[test]
@@ -670,7 +669,7 @@ mod tests {
 
         state.unregister_ask_responder("sess-1", &r);
         // After removal the answer has nowhere to go.
-        assert!(!state.respond_to_ask("sess-1", "x".to_string()));
+        assert!(state.take_ask_sender("sess-1").is_none());
     }
 
     #[test]
@@ -686,8 +685,10 @@ mod tests {
         // Old command finishes and tries to clean up its (stale) slot.
         state.unregister_ask_responder("sess-1", &old);
 
-        // The newer responder is still routable.
-        assert!(state.respond_to_ask("sess-1", "answer".to_string()));
+        // The newer sender is still retrievable and routable.
+        let sender = state.take_ask_sender("sess-1");
+        assert!(sender.is_some(), "expected sender for newer slot");
+        let _ = sender.unwrap().send("answer".to_string());
         assert_eq!(rx.try_recv().unwrap_or_else(|e| panic!("{e}")), "answer");
     }
 }

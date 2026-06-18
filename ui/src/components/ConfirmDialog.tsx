@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useLayoutEffect, useRef } from "react";
 
 interface ConfirmDialogProps {
   title: string;
@@ -22,7 +22,7 @@ export function ConfirmDialog({
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
+  useLayoutEffect(() => { onCancelRef.current = onCancel; });
 
   // Close on Escape
   useEffect(() => {
