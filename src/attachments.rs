@@ -94,10 +94,10 @@ pub fn copy_images_into_session(session_dir: &Path, sources: &[PathBuf]) -> Resu
 /// if the namespace `image[-2..999].ext` is exhausted instead of silently
 /// overwriting an existing attachment.
 fn unique_dest_path(dest_dir: &Path, src: &Path) -> Result<PathBuf> {
-    let filename = src
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_else(|| std::ffi::OsString::from("image"));
+    let filename = src.file_name().map_or_else(
+        || std::ffi::OsString::from("image"),
+        std::ffi::OsStr::to_os_string,
+    );
     let candidate = dest_dir.join(&filename);
     if !candidate.exists() {
         return Ok(candidate);

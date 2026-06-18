@@ -53,6 +53,10 @@ fn cli_plan_ctx<'a>(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "plan-creation flow: input + dry-run + attachments + worktree + plan + approve loop"
+)]
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve config first so the path is visible before prompting for input.
     // For repo sessions the config lives in the temporary clone, which doesn't
@@ -108,31 +112,13 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
 
-    // Copy attachments into the session and record their stored paths on
-    // session.attachments (NOT session.input — that would pollute PR titles,
-    // branch names, and history records with the "Attached images:" block).
-    // The planning prompt picks them up via session.input_with_attachments().
-    // On copy failure the session is discarded so nothing leaks.
-    if !images.is_empty() {
-        let session_dir = manager.sessions_dir().join(&session.id);
-        match crate::attachments::copy_images_into_session(&session_dir, &images) {
-            Ok(stored) => {
-                session.attachments = stored;
-                manager.save(&session)?;
-            }
-            Err(e) => {
-                eprintln!(
-                    "\n{} Failed to attach images. Session {} discarded.",
-                    style("✗").red().bold(),
-                    session.id
-                );
-                cleanup_discarded_session_workspace(&manager, &session);
-                if let Err(del_err) = manager.delete(&session.id) {
-                    eprintln!("warning: failed to clean up session: {del_err}");
-                }
-                return Err(e);
-            }
-        }
+    if let Err(e) = attach_images_or_discard(&manager, &mut session, &images) {
+        eprintln!(
+            "\n{} Failed to attach images. Session {} discarded.",
+            style("✗").red().bold(),
+            session.id
+        );
+        return Err(e);
     }
 
     if args.no_interactive_planning {
@@ -241,22 +227,7 @@ pub fn launch_background_plan(
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (_config, mut session) = create_session_for_target(&manager, target, None, &input)?;
-    if !detected_images.is_empty() {
-        let session_dir = manager.sessions_dir().join(&session.id);
-        match crate::attachments::copy_images_into_session(&session_dir, &detected_images) {
-            Ok(stored) => {
-                session.attachments = stored;
-                manager.save(&session)?;
-            }
-            Err(e) => {
-                cleanup_discarded_session_workspace(&manager, &session);
-                if let Err(del_err) = manager.delete(&session.id) {
-                    eprintln!("warning: failed to clean up session: {del_err}");
-                }
-                return Err(e);
-            }
-        }
-    }
+    attach_images_or_discard(&manager, &mut session, &detected_images)?;
     setup_planning_worktree_or_discard(&manager, &mut session)?;
 
     if skip_planning {
@@ -666,6 +637,35 @@ fn build_repo_planning_session(
         std::fs::write(session_dir.join("config.yaml"), config_to_persist)?;
     }
     Ok((config, session))
+}
+
+/// Copy `images` into the freshly-created `session`'s attachments directory
+/// and persist the stored paths on `session.attachments`. On any failure the
+/// session (and, for repo-backed sessions, its temporary clone) is removed
+/// before propagating the error so nothing leaks behind a half-attached
+/// session. No-op when `images` is empty.
+fn attach_images_or_discard(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    images: &[PathBuf],
+) -> Result<()> {
+    if images.is_empty() {
+        return Ok(());
+    }
+    let session_dir = manager.sessions_dir().join(&session.id);
+    match crate::attachments::copy_images_into_session(&session_dir, images) {
+        Ok(stored) => {
+            session.attachments = stored;
+            manager.save(session)
+        }
+        Err(e) => {
+            cleanup_discarded_session_workspace(manager, session);
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Best-effort cleanup when a session is discarded before approval: removes
