@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import type { ConfigEntry, PlanEvent, SkippableStepDto } from "../types";
 import { getNewSessionConfigDefaults, listConfigs, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";
@@ -40,7 +40,7 @@ export function SessionConfigEditor({
   // Ref to read the latest skippedSteps in the config-loading effect without
   // re-triggering it on every parent re-render (array reference changes after save).
   const skippedStepsRef = useRef(skippedSteps);
-  skippedStepsRef.current = skippedSteps;
+  useLayoutEffect(() => { skippedStepsRef.current = skippedSteps; });
 
   const configLookupBaseDir = selectedConfigPath ? "." : baseDir;
   const isDisabled = disabled || isSaving || isRegenerating;
@@ -133,8 +133,7 @@ export function SessionConfigEditor({
     return slash === -1 ? node.id : node.id.slice(slash + 1);
   }, []);
 
-  const renderStepNode = useCallback(
-    (node: SkippableStepDto, isChild: boolean): React.ReactElement => {
+  function renderStepNode(node: SkippableStepDto, isChild: boolean): React.ReactElement {
       const label = stepNodeLabel(node, isChild);
 
       if (node.children.length === 0) {
@@ -174,9 +173,7 @@ export function SessionConfigEditor({
           </div>
         </div>
       );
-    },
-    [isDisabled, isParentChecked, isParentIndeterminate, selectedSkippedSteps, stepNodeLabel, toggleStepIds],
-  );
+  }
 
   const hasConfigChanged = selectedConfigPath !== (configPath ?? "");
   const hasSkipChanged =
