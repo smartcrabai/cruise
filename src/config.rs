@@ -34,13 +34,13 @@ pub struct WorkflowConfig {
     ///
     /// When `true` (the default) the planning agent persists and edits the plan
     /// via those tools, which restricts provider resolution to the tool-capable
-    /// `pi` SDK. When `false`, planning instead embeds the target plan file path
-    /// in the prompt and asks the agent to write `plan.md` directly — exactly
-    /// like the `command` backend (the file is read back afterward, falling back
-    /// to the agent's captured output if it was not written). No custom tools
-    /// are registered, so tool-incapable providers (e.g.
-    /// `sdk: claude-terminal`) become eligible. Has no effect in `command` mode,
-    /// which is always file-based.
+    /// SDKs (`pi`, `claude`). When `false`, planning instead embeds the target
+    /// plan file path in the prompt and asks the agent to write `plan.md`
+    /// directly — exactly like the `command` backend (the file is read back
+    /// afterward, falling back to the agent's captured output if it was not
+    /// written). No custom tools are registered, so tool-incapable providers
+    /// (e.g. `sdk: claude-terminal`, `sdk: claude-headless`) become eligible.
+    /// Has no effect in `command` mode, which is always file-based.
     #[serde(default = "default_true")]
     pub interactive_planning: bool,
 

@@ -78,7 +78,9 @@ pub struct PromptOutcome {
 pub enum Executor {
     /// Spawn an external command (the classic `claude -p` path).
     Command { command: Vec<String> },
-    /// Drive prompts in-process via the seher SDK (pi backend).
+    /// Drive prompts through one of the seher SDKs (`pi`, `claude`,
+    /// `claude-terminal`, `claude-headless`); the concrete backend is picked
+    /// by [`spawn_agent_stream`] from the resolved provider's `sdk` field.
     Sdk,
 }
 
@@ -150,8 +152,9 @@ impl Executor {
 /// Resolve a non-rate-limited seher provider for `mode_key`.
 ///
 /// `require_tools` restricts candidates to SDKs that can execute custom tools
-/// (currently only `pi`); with `false`, `sdk: claude-terminal` providers are
-/// also eligible and the caller must dispatch on `ResolvedAgent::sdk`.
+/// (`pi` and `claude`); with `false`, the tool-incapable SDKs (`claude-terminal`
+/// and `claude-headless`) are also eligible and the caller must dispatch on
+/// `ResolvedAgent::sdk`.
 ///
 /// `poll_for_agent` borrows a `&mut dyn LimitProbe` whose probe future is not
 /// `Send`, which would make the whole `run_sdk` future `!Send` and break the
@@ -250,46 +253,100 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 }
 
 /// Start `resolved` on the engine its `sdk` kind requires and return the chunk
-/// stream: the in-process pi engine, or the local `claude` CLI via tmux for
-/// `sdk: claude-terminal`.
+/// stream. Routes by `ResolvedAgent::sdk`:
+///
+/// - `pi` — in-process pi engine. `resolved.model_id` is a full pi model ref
+///   (`"<pi-provider>/<model>[:thinking]"`).
+/// - `claude` — `claude-agent-sdk` (supports custom tools). `resolved.model_id`
+///   is a plain `claude --model` name.
+/// - `claude-terminal` — local `claude` CLI via tmux. No tools.
+/// - `claude-headless` — `claude -p` subprocess. No tools.
+///
+/// `seher::sdk::is_supported_sdk` filters the candidate list to exactly these
+/// four kinds before resolution, so the match is exhaustive; an unknown kind
+/// here indicates the cruise<->seher dispatch mapping has drifted out of sync
+/// with the seher version in use and is treated as a bug.
 fn spawn_agent_stream(
     resolved: &seher::sdk::ResolvedAgent,
     req: &PromptRun<'_>,
 ) -> std::sync::mpsc::Receiver<StreamChunk> {
-    if resolved.sdk == "claude-terminal" {
-        // claude-terminal cannot run custom tools; `require_tools` in
-        // [`run_sdk`] guarantees `req.tools` is empty here. `resolved.model_id`
-        // is a plain `claude --model` name, not a pi model ref.
-        let sdk = seher::claude_terminal::new_sdk_with_defaults(
-            None,
-            None,
-            Some(resolved.model_id.clone()),
-            None,
-            None,
-            req.working_dir.map(|p| p.to_string_lossy().into_owned()),
-        );
-        seher::claude_terminal::stream_via_thread(
-            sdk,
-            req.prompt.to_string(),
-            resolved.provider.clone(),
-            req.resume.clone(),
-        )
-    } else {
-        // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
-        // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
-        // config label (e.g. "codex"), which pi does not know about. Split the ref
-        // so pi receives its own provider / model / thinking parts.
-        let (provider, model, thinking) = split_model_ref(&resolved.provider, &resolved.model_id);
-        let opts = PiRunnerOptions {
-            provider: Some(provider),
-            model: Some(model),
-            api_key: resolved.api.as_ref().and_then(|a| a.key.clone()),
-            thinking,
-            system_prompt: None,
-            working_directory: req.working_dir.map(Path::to_path_buf),
-            tools: req.tools.clone(),
-        };
-        PiRunner::new(opts).stream(req.prompt.to_string(), req.resume.clone())
+    let cwd_string = req.working_dir.map(|p| p.to_string_lossy().into_owned());
+    match resolved.sdk.as_str() {
+        "claude" => {
+            // claude-agent-sdk supports custom tools natively, so `req.tools`
+            // flows straight through. `resolved.model_id` is a plain
+            // `claude --model` name, not a pi model ref.
+            let config = seher::claude_agent::ClaudeAgentRunnerConfig {
+                model: Some(resolved.model_id.clone()),
+                cwd: cwd_string,
+                resume_session_id: req.resume.clone(),
+                tools: req.tools.clone(),
+                ..Default::default()
+            };
+            seher::claude_agent::stream_agent(
+                config,
+                req.prompt.to_string(),
+                resolved.provider.clone(),
+            )
+        }
+        "claude-headless" => {
+            // `claude -p` subprocess. Cannot run custom tools; `require_tools`
+            // in [`run_sdk`] guarantees `req.tools` is empty here.
+            let runner = seher::claude_headless::ClaudeHeadlessRunner::new(
+                seher::claude_headless::ClaudeHeadlessRunnerConfig {
+                    model: Some(resolved.model_id.clone()),
+                    cwd: cwd_string,
+                    resume_session_id: req.resume.clone(),
+                    ..Default::default()
+                },
+            );
+            seher::claude_headless::stream_headless(
+                runner,
+                req.prompt.to_string(),
+                resolved.provider.clone(),
+            )
+        }
+        "claude-terminal" => {
+            // claude-terminal cannot run custom tools; `require_tools` in
+            // [`run_sdk`] guarantees `req.tools` is empty here. `resolved.model_id`
+            // is a plain `claude --model` name, not a pi model ref.
+            let sdk = seher::claude_terminal::new_sdk_with_defaults(
+                None,
+                None,
+                Some(resolved.model_id.clone()),
+                None,
+                None,
+                cwd_string,
+            );
+            seher::claude_terminal::stream_via_thread(
+                sdk,
+                req.prompt.to_string(),
+                resolved.provider.clone(),
+                req.resume.clone(),
+            )
+        }
+        "pi" => {
+            // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
+            // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
+            // config label (e.g. "codex"), which pi does not know about. Split the ref
+            // so pi receives its own provider / model / thinking parts.
+            let (provider, model, thinking) =
+                split_model_ref(&resolved.provider, &resolved.model_id);
+            let opts = PiRunnerOptions {
+                provider: Some(provider),
+                model: Some(model),
+                api_key: resolved.api.as_ref().and_then(|a| a.key.clone()),
+                thinking,
+                system_prompt: None,
+                working_directory: req.working_dir.map(Path::to_path_buf),
+                tools: req.tools.clone(),
+            };
+            PiRunner::new(opts).stream(req.prompt.to_string(), req.resume.clone())
+        }
+        other => unreachable!(
+            "seher resolver returned an unsupported sdk kind: {other:?} \
+             (cruise dispatch is out of sync with the seher version in use)"
+        ),
     }
 }
 
@@ -301,10 +358,11 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         .unwrap_or(DEFAULT_STEP_MODE_KEY)
         .to_string();
     let on_delta = req.stream.and_then(|s| s.on_stdout);
-    // Custom tools only run on the in-process pi engine, and `resume` ids are pi
-    // session ids (every resumable turn in the planning flow starts with a
-    // tool-registering one), so both pin resolution to tool-capable providers.
-    // Tool-less fresh runs may also resolve `sdk: claude-terminal` providers.
+    // Custom tools only run on tool-capable SDKs (`pi`, `claude`), and `resume`
+    // ids belong to whichever SDK started the session — every resumable turn in
+    // the planning flow starts with a tool-registering one — so both pin
+    // resolution to tool-capable providers. Tool-less fresh runs may also
+    // resolve tool-incapable SDKs (`claude-terminal`, `claude-headless`).
     let require_tools = !req.tools.is_empty() || req.resume.is_some();
 
     let mut attempts = 0;
@@ -325,7 +383,7 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
 
         // Bridge the blocking std channel to an async one so we can stream
         // deltas through the borrowed `on_delta` callback without moving it
-        // onto the pi worker thread.
+        // onto the seher backend's worker thread.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
         std::thread::spawn(move || {
             while let Ok(chunk) = rx_std.recv() {
