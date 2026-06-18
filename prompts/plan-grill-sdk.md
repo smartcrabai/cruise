@@ -1,5 +1,7 @@
 Interview the user relentlessly about this task until you both reach a shared understanding, then write the implementation plan.
 
+Conduct the interview and write the final plan in {plan.language}.
+
 Task:
 ---
 {input}

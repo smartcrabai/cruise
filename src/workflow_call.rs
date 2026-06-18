@@ -528,6 +528,7 @@ sdk: ignored-sdk
 model: ignored-model
 plan_model: ignored-plan-model
 pr_language: Japanese
+plan_language: Japanese
 env:
   CALLEE_ONLY: ignored
 llm:
@@ -545,6 +546,7 @@ command: [parent-command]
 model: parent-model
 plan_model: parent-plan-model
 pr_language: English
+plan_language: English
 env:
   PARENT_ONLY: kept
 steps:
@@ -562,6 +564,7 @@ steps:
         assert_eq!(config.model.as_deref(), Some("parent-model"));
         assert_eq!(config.plan_model.as_deref(), Some("parent-plan-model"));
         assert_eq!(config.pr_language, "English");
+        assert_eq!(config.plan_language, "English");
         assert_eq!(
             config.env.get("PARENT_ONLY").map(String::as_str),
             Some("kept")

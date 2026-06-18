@@ -128,8 +128,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input.clone(), plan_path.clone(), &config);
 
     // SDK session id, shared across the plan / fix / ask turns so they resume the
     // same conversation. Stays `None` in command mode.
@@ -598,8 +597,7 @@ async fn generate_plan_for_session(
 ) -> Result<String> {
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input.clone(), plan_path.clone(), &config);
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
@@ -937,8 +935,7 @@ pub async fn replan_session(
     }
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input.clone(), plan_path.clone(), &config);
     vars.set_prev_input(Some(feedback));
     let working_dir = session
         .worktree_path
@@ -1072,8 +1069,7 @@ pub async fn generate_plan_for_draft_session(
     let config = manager.load_config(session)?;
     setup_planning_worktree(manager, session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input.clone(), plan_path.clone(), &config);
 
     // Own the working dir so `ctx` doesn't borrow `session` across the
     // mutable `inspect_err` below.
@@ -1118,6 +1114,52 @@ mod tests {
     use crate::test_support::{init_git_repo, lock_process, make_session};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_setup_plan_vars_sets_configured_plan_language() {
+        // Given: a workflow config with a custom planning language
+        let yaml = r"
+command: [echo]
+plan_language: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planning variables are set up
+        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
+
+        // Then: the plan language variable resolves to the configured value
+        assert_eq!(
+            vars.resolve("{plan.language}")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "Japanese"
+        );
+    }
+
+    #[test]
+    fn test_setup_plan_vars_defaults_blank_plan_language_to_english() {
+        // Given: a workflow config with a blank planning language
+        let yaml = r#"
+command: [echo]
+plan_language: "   "
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planning variables are set up
+        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
+
+        // Then: the plan language variable falls back to English
+        assert_eq!(
+            vars.resolve("{plan.language}")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            crate::config::DEFAULT_PLAN_LANGUAGE
+        );
+    }
 
     #[test]
     fn test_setup_planning_worktree_creates_worktree_and_sets_session_fields() {
