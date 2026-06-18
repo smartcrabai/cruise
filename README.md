@@ -311,6 +311,7 @@ description: |             # one-line summary shown next to the filename in sele
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
+plan_language: English    # language for built-in planning prompts (optional, default: English)
 
 llm:                      # OpenAI-compatible API for session title generation (optional)
   api_key: sk-...         # API key (or set CRUISE_LLM_API_KEY env var)
@@ -397,6 +398,14 @@ The `pr_language` field controls the language used for the auto-generated PR tit
 
 ```yaml
 pr_language: Japanese     # PR title/body will be generated in Japanese
+```
+
+### Plan Language
+
+The `plan_language` field controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Defaults to `"English"` when omitted. The normalized value is available to built-in planning templates as `{plan.language}`.
+
+```yaml
+plan_language: Japanese   # generated/updated plans and plan answers will be in Japanese
 ```
 
 ### Session Title Generation

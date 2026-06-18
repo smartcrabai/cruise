@@ -19,29 +19,13 @@ use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{
     BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
 };
-use crate::planning::{PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template};
+use crate::planning::{
+    PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
+};
 use crate::resolver::ConfigSource;
 use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
-use crate::worktree_pr::PLAN_LANGUAGE_VAR;
-
-fn setup_plan_vars(
-    session_input: String,
-    plan_path: PathBuf,
-    config: &WorkflowConfig,
-) -> VariableStore {
-    let mut vars = VariableStore::new(session_input);
-    vars.set_named_file(PLAN_VAR, plan_path);
-    let lang = config.plan_language.trim();
-    let lang = if lang.is_empty() {
-        crate::config::DEFAULT_PLAN_LANGUAGE
-    } else {
-        lang
-    };
-    vars.set_named_value(PLAN_LANGUAGE_VAR, lang.to_string());
-    vars
-}
 
 /// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
 fn cli_plan_ctx<'a>(
