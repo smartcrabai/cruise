@@ -31,6 +31,11 @@ pub struct Cli {
     #[arg(long, value_name = "OWNER/REPO")]
     pub repo: Option<String>,
 
+    /// Attach an image file (png/jpg/jpeg/webp/gif) to the planning input.
+    /// Forwarded to the `plan` subcommand. Can be repeated.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -60,6 +65,10 @@ pub enum Commands {
 }
 
 #[derive(Parser, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags are naturally boolean"
+)]
 pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
@@ -82,6 +91,13 @@ pub struct PlanArgs {
     #[arg(long, conflicts_with = "skip_planning")]
     pub grill: bool,
 
+    /// Disable interactive planning tools (`submit_plan`/`update_plan`/`ask_user`)
+    /// for this session, even if the workflow config has `interactive_planning: true`.
+    /// The agent writes `plan.md` directly instead. Useful when using
+    /// tool-incapable providers. Conflicts with `--grill`.
+    #[arg(long, conflicts_with = "grill")]
+    pub no_interactive_planning: bool,
+
     /// GitHub repository (owner/repository) to clone into a temporary
     /// directory for planning and execution. The clone is removed after the
     /// plan is approved and again after the PR has been created.
@@ -91,6 +107,12 @@ pub struct PlanArgs {
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
+
+    /// Attach an image file (png/jpg/jpeg/webp/gif) to the planning input.
+    /// Can be repeated. Images are also auto-detected when their paths are
+    /// dragged onto / pasted into the interactive prompt.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -261,6 +283,36 @@ mod tests {
             Some(Commands::Plan(args)) => assert!(args.grill),
             _ => panic!("expected Plan subcommand"),
         }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_defaults_to_false() {
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.no_interactive_planning),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_flag_sets_true() {
+        let cli = Cli::parse_from(["cruise", "plan", "--no-interactive-planning", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.no_interactive_planning),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_interactive_planning_conflicts_with_grill() {
+        let result = Cli::try_parse_from([
+            "cruise",
+            "plan",
+            "--no-interactive-planning",
+            "--grill",
+            "task",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -651,6 +703,41 @@ mod tests {
     }
 
     // -- repo flag --------------------------------------------------------------
+
+    #[test]
+    fn test_plan_image_flag_collects_paths() {
+        let cli = Cli::parse_from([
+            "cruise",
+            "plan",
+            "--image",
+            "/tmp/a.png",
+            "--image",
+            "/tmp/b.jpg",
+            "task",
+        ]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.images, vec!["/tmp/a.png", "/tmp/b.jpg"]);
+                assert_eq!(args.input, Some("task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_root_plan_image_flag_collects_paths() {
+        let cli = Cli::try_parse_from([
+            "cruise",
+            "--plan",
+            "task",
+            "--image",
+            "/tmp/a.png",
+            "--image",
+            "/tmp/b.jpg",
+        ])
+        .unwrap_or_else(|e| panic!("expected --plan --image to parse: {e}"));
+        assert_eq!(cli.images, vec!["/tmp/a.png", "/tmp/b.jpg"]);
+    }
 
     #[test]
     fn test_plan_repo_flag_parses() {

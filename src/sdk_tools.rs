@@ -27,6 +27,10 @@ pub const ASK_USER_TOOL: &str = "ask_user";
 pub const SUBMIT_PLAN_TOOL: &str = "submit_plan";
 /// Tool name for the section find/replace tool.
 pub const UPDATE_PLAN_TOOL: &str = "update_plan";
+/// Tool name for the session title generation tool.
+pub const GENERATE_TITLE_TOOL: &str = "generate_title";
+/// Tool name for the PR metadata submission tool.
+pub const SUBMIT_PR_METADATA_TOOL: &str = "submit_pr_metadata";
 
 /// Build the planning tool set.
 ///
@@ -132,6 +136,77 @@ pub fn update_plan_tool(plan_path: PathBuf) -> SeherTool {
                 }
             },
             "required": ["old", "new"]
+        }),
+        handler,
+    )
+}
+
+/// `generate_title` — captures the session title submitted by the agent.
+#[must_use]
+pub fn generate_title_tool(title_store: Arc<std::sync::Mutex<Option<String>>>) -> SeherTool {
+    let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
+        let title = require_str(&input, "title")?;
+        let truncated: String = title.chars().take(80).collect();
+        *title_store
+            .lock()
+            .map_err(|e| format!("title store lock poisoned: {e}"))? =
+            Some(truncated.trim().to_string());
+        Ok("Title saved.".to_string())
+    });
+    SeherTool::new(
+        GENERATE_TITLE_TOOL,
+        "Submit a concise session title (maximum 80 characters). Call this exactly once.",
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "A concise session title (max 80 characters)."
+                }
+            },
+            "required": ["title"]
+        }),
+        handler,
+    )
+}
+
+/// PR metadata captured by [`submit_pr_metadata_tool`].
+#[derive(Debug, Clone)]
+pub struct PrMetadata {
+    pub title: String,
+    pub body: String,
+}
+
+/// `submit_pr_metadata` — captures PR title and body submitted by the agent.
+#[must_use]
+pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>) -> SeherTool {
+    let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
+        let title = require_str(&input, "title")?;
+        let body = require_str(&input, "body")?;
+        *store
+            .lock()
+            .map_err(|e| format!("PR metadata store lock poisoned: {e}"))? = Some(PrMetadata {
+            title: title.to_string(),
+            body: body.to_string(),
+        });
+        Ok("PR metadata saved.".to_string())
+    });
+    SeherTool::new(
+        SUBMIT_PR_METADATA_TOOL,
+        "Submit the PR title and description. Call this exactly once after reviewing the changes.",
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "A concise PR title."
+                },
+                "body": {
+                    "type": "string",
+                    "description": "The PR description in markdown."
+                }
+            },
+            "required": ["title", "body"]
         }),
         handler,
     )
@@ -296,5 +371,75 @@ mod tests {
         let tools = planning_tools(PathBuf::from("/tmp/plan.md"), ask, false);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec![SUBMIT_PLAN_TOOL]);
+    }
+
+    // -- generate_title tool --------------------------------------------------
+
+    #[test]
+    fn generate_title_stores_title() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = generate_title_tool(Arc::clone(&store));
+        let res = invoke(&tool, json!({"title": "Add session titles"}));
+        assert!(res.is_ok(), "got: {res:?}");
+        assert_eq!(
+            store.lock().unwrap_or_else(|e| panic!("{e:?}")).as_deref(),
+            Some("Add session titles")
+        );
+    }
+
+    #[test]
+    fn generate_title_truncates_long_title() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = generate_title_tool(Arc::clone(&store));
+        let long = "a".repeat(100);
+        let res = invoke(&tool, json!({"title": long}));
+        assert!(res.is_ok(), "got: {res:?}");
+        assert_eq!(
+            store
+                .lock()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected Some"))
+                .len(),
+            80
+        );
+    }
+
+    #[test]
+    fn generate_title_errors_without_title() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = generate_title_tool(store);
+        assert!(invoke(&tool, json!({})).is_err());
+    }
+
+    // -- submit_pr_metadata tool ----------------------------------------------
+
+    #[test]
+    fn submit_pr_metadata_stores_title_and_body() {
+        let store = Arc::new(std::sync::Mutex::new(None::<PrMetadata>));
+        let tool = submit_pr_metadata_tool(Arc::clone(&store));
+        let res = invoke(&tool, json!({"title": "fix: bug", "body": "Fixes #42"}));
+        assert!(res.is_ok(), "got: {res:?}");
+        let meta = store
+            .lock()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .clone()
+            .unwrap_or_else(|| panic!("expected Some"));
+        assert_eq!(meta.title, "fix: bug");
+        assert_eq!(meta.body, "Fixes #42");
+    }
+
+    #[test]
+    fn submit_pr_metadata_errors_without_title() {
+        let store = Arc::new(std::sync::Mutex::new(None::<PrMetadata>));
+        let tool = submit_pr_metadata_tool(store);
+        assert!(invoke(&tool, json!({"body": "x"})).is_err());
+    }
+
+    #[test]
+    fn submit_pr_metadata_errors_without_body() {
+        let store = Arc::new(std::sync::Mutex::new(None::<PrMetadata>));
+        let tool = submit_pr_metadata_tool(store);
+        assert!(invoke(&tool, json!({"title": "x"})).is_err());
     }
 }

@@ -222,6 +222,10 @@ export function createSession(
     useInputAsPlan?: boolean;
     /** "Grill me" planning: interview the user via `ask_user` before writing the plan. Requires the SDK backend. */
     grill?: boolean;
+    /** Disable interactive planning tools for this session, making the agent write plan.md directly. */
+    noInteractivePlanning?: boolean;
+    /** Absolute paths of image files to attach to the planning input. */
+    imageAttachments?: string[];
   },
   channel: Channel<PlanEvent>
 ): Promise<string> {
@@ -233,6 +237,8 @@ export function createSession(
     skippedSteps: params.skippedSteps ?? [],
     useInputAsPlan: params.useInputAsPlan ?? false,
     grill: params.grill ?? false,
+    noInteractivePlanning: params.noInteractivePlanning ?? false,
+    imageAttachments: params.imageAttachments ?? [],
     channel,
   });
 }
@@ -252,6 +258,8 @@ export function createDraftSession(params: {
   /** GitHub repository (owner/repo) to clone instead of using baseDir. */
   repo?: string;
   skippedSteps?: string[];
+  /** Absolute paths of image files to attach to the planning input. */
+  imageAttachments?: string[];
 }): Promise<string> {
   return invoke<string>("create_draft_session", {
     input: params.input,
@@ -259,6 +267,7 @@ export function createDraftSession(params: {
     baseDir: params.baseDir,
     repo: params.repo ?? null,
     skippedSteps: params.skippedSteps ?? [],
+    imageAttachments: params.imageAttachments ?? [],
   });
 }
 

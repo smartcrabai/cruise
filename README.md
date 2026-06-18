@@ -111,6 +111,7 @@ Options:
       --dry-run                    Print the plan step without executing it
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
+      --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          GitHub repository to clone into a temporary directory for planning and execution
       --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
 ```
@@ -120,6 +121,8 @@ Options:
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `AwaitingApproval`, ready for `cruise run`. Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
 
 With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires the SDK backend (`sdk:` in the workflow config) and an interactive terminal; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
+
+With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend. This is useful when using tool-incapable providers (e.g. `sdk: claude-terminal`). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
 With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config found inside the clone is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
@@ -313,11 +316,6 @@ plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
 plan_language: English    # language for built-in planning prompts (optional, default: English)
 
-llm:                      # OpenAI-compatible API for session title generation (optional)
-  api_key: sk-...         # API key (or set CRUISE_LLM_API_KEY env var)
-  endpoint: https://api.openai.com/v1   # default endpoint
-  model: gpt-4o           # model to use for title generation
-
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
   PROJECT: myproject
@@ -381,13 +379,13 @@ In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as sehe
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Because only the in-process `pi` engine can run custom tools, this pins planning to tool-capable providers.
+By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers.
 
-Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). This makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` (the local `claude` CLI) can be used for planning.
+Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). This makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
 
 ```yaml
 sdk: seher
-interactive_planning: false   # tool-less, file-based planning; allows claude-terminal providers
+interactive_planning: false   # tool-less, file-based planning; allows claude-terminal / claude-headless providers
 ```
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
@@ -410,26 +408,12 @@ plan_language: Japanese   # generated/updated plans and plan answers will be in 
 
 ### Session Title Generation
 
-When an API key is configured, cruise calls an OpenAI-compatible API after plan approval to generate a concise session title (up to 80 characters). This title is shown in `cruise list` and the GUI sidebar instead of the raw task input.
+After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the GUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-Configure via the `llm:` block in the config file, or with environment variables:
+- **SDK mode (`sdk:` configured)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same mode key as the plan step (`plan_model` -> `model` -> `plan`). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **Command mode (`command:` configured)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
-| Setting | Config field | Environment variable | Default |
-|---------|-------------|----------------------|---------|
-| API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | *(required)* |
-| Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
-| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o` |
-
-Environment variables take precedence over config file values.
-
-```yaml
-llm:
-  api_key: sk-...
-  endpoint: https://api.openai.com/v1
-  model: gpt-4o
-```
-
-If no API key is configured, the title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
+No additional configuration is required.
 
 ### Environment Variables
 
@@ -780,7 +764,7 @@ steps:
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
-| `{pr.language}` | Language used for PR title/body generation (from `pr_language`). Set only when the PR description is generated via the CLI/SDK prompt path (not the `llm:` API path) |
+| `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
