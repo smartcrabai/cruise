@@ -6085,10 +6085,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "seher-sdk"
-version = "0.0.40"
+name = "seher-claude-agent-sdk"
+version = "0.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4fc5367c8044c0ec58fbe2f3901676e5938960b08db4b66a7748fe23ee0c9f6"
+checksum = "22dc85e767467fc52036c9c842ee70dc1ce8474e9e86e35ec15f5902e75b59dd"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "seher-sdk"
+version = "0.0.41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799cb624c2d9de9f0168228f0d5a2532e7e9790d6ad20ddebf8152eeac588904"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6097,6 +6111,7 @@ dependencies = [
  "indexmap 2.14.0",
  "pi_agent_rust",
  "regex",
+ "seher-claude-agent-sdk",
  "serde",
  "serde_json",
  "serde_yaml",
