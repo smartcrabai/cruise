@@ -123,6 +123,11 @@ pub struct SessionState {
     /// execution and removed after the PR is created.
     #[serde(default)]
     pub repo: Option<String>,
+    /// Absolute paths of image files attached to the planning input. Kept
+    /// separate from `input` so PR titles, branch names, and history records
+    /// stay clean; the augmented prompt is rebuilt on demand for the LLM.
+    #[serde(default)]
+    pub attachments: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +191,16 @@ impl SessionState {
             runner_pid: None,
             runner_started_at: None,
             repo: None,
+            attachments: vec![],
         }
+    }
+
+    /// Return the planning input with attached image paths appended (or the
+    /// raw input unchanged when no attachments are set). This is what the
+    /// LLM sees as `{input}` — `self.input` stays the unaugmented user text.
+    #[must_use]
+    pub fn input_with_attachments(&self) -> String {
+        crate::attachments::format_input_with_attachments(&self.input, &self.attachments)
     }
 
     /// Absolute path to the plan file for this session.

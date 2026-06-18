@@ -1,5 +1,6 @@
 mod app_config;
 mod ask_handler;
+mod attachments;
 mod cancellation;
 mod clean_cmd;
 mod cli;
@@ -56,6 +57,7 @@ async fn run() -> error::Result<()> {
         input,
         skip_planning,
         repo,
+        images,
     } = cli::parse_cli();
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
@@ -70,6 +72,7 @@ async fn run() -> error::Result<()> {
             &plan.unwrap_or_default(),
             skip_planning,
             repo.as_deref(),
+            &images,
         ),
         None => {
             // Backward compat: no subcommand -> treat as `plan`.
@@ -82,6 +85,7 @@ async fn run() -> error::Result<()> {
                 no_interactive_planning: false,
                 repo,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
+                images,
             };
             plan_cmd::run(plan_args).await
         }

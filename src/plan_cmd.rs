@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use console::style;
@@ -53,6 +53,10 @@ fn cli_plan_ctx<'a>(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "plan-creation flow: input + dry-run + attachments + worktree + plan + approve loop"
+)]
 pub async fn run(args: PlanArgs) -> Result<()> {
     // Resolve config first so the path is visible before prompting for input.
     // For repo sessions the config lives in the temporary clone, which doesn't
@@ -75,19 +79,47 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         ));
     }
 
-    let input = read_plan_input(args.input, noninteractive)?;
+    let (raw_input, from_interactive) = read_plan_input(args.input, noninteractive)?;
+    // Auto-detect image paths only from the interactive prompt (Claude-Code-like
+    // drag-and-drop). For arg/stdin input, treat the text as opaque so prose
+    // mentioning a path like "what changed in /tmp/x.png" stays intact.
+    let (input, mut images) = if from_interactive {
+        crate::attachments::extract_image_paths(&raw_input)
+    } else {
+        (raw_input, vec![])
+    };
+    for p in &args.images {
+        images.push(PathBuf::from(p));
+    }
 
     if args.dry_run {
         eprintln!(
             "{}",
             style(format!("Would plan: \"{}\"", input.trim())).dim()
         );
+        if !images.is_empty() {
+            for img in &images {
+                eprintln!(
+                    "{}",
+                    style(format!("  attached image: {}", img.display())).dim()
+                );
+            }
+        }
         return Ok(());
     }
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
+
+    if let Err(e) = attach_images_or_discard(&manager, &mut session, &images) {
+        eprintln!(
+            "\n{} Failed to attach images. Session {} discarded.",
+            style("✗").red().bold(),
+            session.id
+        );
+        return Err(e);
+    }
 
     if args.no_interactive_planning {
         config.interactive_planning = false;
@@ -114,7 +146,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
     // SDK session id, shared across the plan / fix / ask turns so they resume the
@@ -123,7 +155,10 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let interactive = !noninteractive;
 
     if args.skip_planning {
-        if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &session.input) {
+        // Write the augmented input so the saved plan references the attached
+        // images; the LLM running steps will pick those up via plan.md.
+        let plan_content = session.input_with_attachments();
+        if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &plan_content) {
             eprintln!(
                 "\n{} Failed to write input as plan. Session {} discarded.",
                 style("✗").red().bold(),
@@ -177,17 +212,28 @@ pub fn launch_background_plan(
     plan_input: &str,
     skip_planning: bool,
     repo: Option<&str>,
+    images: &[String],
 ) -> Result<()> {
     let target = resolve_plan_target(repo, None)?;
 
+    // Background planning input never comes from the interactive prompt, so
+    // skip text-based path extraction (which would shadow legitimate prose
+    // mentions of file paths) and accept image attachments only via `--image`.
     let input = read_background_plan_input(plan_input)?;
+    let mut detected_images: Vec<PathBuf> = Vec::with_capacity(images.len());
+    for p in images {
+        detected_images.push(PathBuf::from(p));
+    }
+
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (_config, mut session) = create_session_for_target(&manager, target, None, &input)?;
+    attach_images_or_discard(&manager, &mut session, &detected_images)?;
     setup_planning_worktree_or_discard(&manager, &mut session)?;
 
     if skip_planning {
         let plan_path = session.plan_path(&manager.sessions_dir());
-        let write_result = crate::planning::write_input_as_plan(&plan_path, &session.input);
+        let plan_content = session.input_with_attachments();
+        let write_result = crate::planning::write_input_as_plan(&plan_path, &plan_content);
         match write_result {
             Ok(content) => {
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
@@ -256,8 +302,12 @@ pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
     }
 }
 
-/// Read task input from CLI arg, piped stdin, or interactive prompt.
-fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String> {
+/// Read task input from CLI arg, piped stdin, or interactive prompt. The
+/// returned `from_interactive` flag is true only when the text came from the
+/// `reedline` prompt — callers use it to decide whether to auto-detect image
+/// paths in the body (a drag-and-drop UX) versus preserving piped/arg text
+/// verbatim.
+fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<(String, bool)> {
     let stdin_input = if input.is_none() && noninteractive {
         let mut s = String::new();
         std::io::stdin()
@@ -267,7 +317,8 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
     } else {
         None
     };
-    resolve_input(input, stdin_input, || {
+    let from_arg_or_stdin = input.is_some() || stdin_input.is_some();
+    let text = resolve_input(input, stdin_input, || {
         if noninteractive {
             return Err(CruiseError::Other(
                 "no input provided: stdin is not a terminal and no --input flag was given"
@@ -275,7 +326,8 @@ fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<String
             ));
         }
         prompt_for_plan_input()
-    })
+    })?;
+    Ok((text, !from_arg_or_stdin))
 }
 
 fn read_background_plan_input(input: &str) -> Result<String> {
@@ -587,6 +639,35 @@ fn build_repo_planning_session(
     Ok((config, session))
 }
 
+/// Copy `images` into the freshly-created `session`'s attachments directory
+/// and persist the stored paths on `session.attachments`. On any failure the
+/// session (and, for repo-backed sessions, its temporary clone) is removed
+/// before propagating the error so nothing leaks behind a half-attached
+/// session. No-op when `images` is empty.
+fn attach_images_or_discard(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    images: &[PathBuf],
+) -> Result<()> {
+    if images.is_empty() {
+        return Ok(());
+    }
+    let session_dir = manager.sessions_dir().join(&session.id);
+    match crate::attachments::copy_images_into_session(&session_dir, images) {
+        Ok(stored) => {
+            session.attachments = stored;
+            manager.save(session)
+        }
+        Err(e) => {
+            cleanup_discarded_session_workspace(manager, session);
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Best-effort cleanup when a session is discarded before approval: removes
 /// the planning worktree and, for repo-backed sessions, the temporary clone.
 fn cleanup_discarded_session_workspace(manager: &SessionManager, session: &SessionState) {
@@ -620,7 +701,7 @@ async fn generate_plan_for_session(
 ) -> Result<String> {
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
@@ -958,7 +1039,7 @@ pub async fn replan_session(
     }
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
     let working_dir = session
@@ -1093,7 +1174,7 @@ pub async fn generate_plan_for_draft_session(
     let config = manager.load_config(session)?;
     setup_planning_worktree(manager, session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
     // Own the working dir so `ctx` doesn't borrow `session` across the
