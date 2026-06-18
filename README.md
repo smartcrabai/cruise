@@ -315,11 +315,6 @@ model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
 
-llm:                      # OpenAI-compatible API for session title generation (optional)
-  api_key: sk-...         # API key (or set CRUISE_LLM_API_KEY env var)
-  endpoint: https://api.openai.com/v1   # default endpoint
-  model: gpt-4o           # model to use for title generation
-
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
   PROJECT: myproject
@@ -404,26 +399,12 @@ pr_language: Japanese     # PR title/body will be generated in Japanese
 
 ### Session Title Generation
 
-When an API key is configured, cruise calls an OpenAI-compatible API after plan approval to generate a concise session title (up to 80 characters). This title is shown in `cruise list` and the GUI sidebar instead of the raw task input.
+After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the GUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-Configure via the `llm:` block in the config file, or with environment variables:
+- **SDK mode (`sdk:` configured)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same mode key as the plan step (`plan_model` -> `model` -> `plan`). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **Command mode (`command:` configured)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
-| Setting | Config field | Environment variable | Default |
-|---------|-------------|----------------------|---------|
-| API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | *(required)* |
-| Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
-| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o` |
-
-Environment variables take precedence over config file values.
-
-```yaml
-llm:
-  api_key: sk-...
-  endpoint: https://api.openai.com/v1
-  model: gpt-4o
-```
-
-If no API key is configured, the title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
+No additional configuration is required.
 
 ### Environment Variables
 
@@ -774,7 +755,7 @@ steps:
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
-| `{pr.language}` | Language used for PR title/body generation (from `pr_language`). Set only when the PR description is generated via the CLI/SDK prompt path (not the `llm:` API path) |
+| `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
