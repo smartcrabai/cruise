@@ -161,6 +161,34 @@ describe("PhaseBadge", () => {
     });
   });
 
+  describe("Draft planning (in-flight override)", () => {
+    it("renders PLANNING_LABEL when phase is Draft and fixing is true", () => {
+      // Given: a Draft session for which plan generation is now in-flight
+      // When
+      render(<PhaseBadge phase="Draft" fixing={true} />);
+
+      // Then: "Planning" is shown to communicate the in-flight state
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+    });
+
+    it("does not show the blue approval-ready dot when Draft + fixing", () => {
+      // Given / When
+      render(<PhaseBadge phase="Draft" planAvailable={true} fixing={true} />);
+
+      // Then: the approval dot must never appear for a Draft session
+      expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
+    });
+
+    it("renders 'Draft' text when fixing is false (no-op)", () => {
+      // Given / When
+      render(<PhaseBadge phase="Draft" fixing={false} />);
+
+      // Then: non-in-flight Draft session keeps its label
+      expect(screen.getByText("Draft")).toBeTruthy();
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
+    });
+  });
+
   describe("fixing override", () => {
     it("renders 'Fixing' text when fixing is true, overriding the Awaiting Approval label", () => {
       // Given: an Awaiting Approval session with a plan, but fix is currently in progress
