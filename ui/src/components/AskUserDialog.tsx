@@ -60,7 +60,7 @@ export function AskUserDialog() {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
           className="w-full h-28 border border-gray-700 bg-gray-800 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
-          placeholder="Your answer… (⌘/Ctrl+Enter to send)"
+          placeholder="Your answer... (Cmd/Ctrl+Enter to send)"
         />
         <div className="flex justify-end">
           <button
