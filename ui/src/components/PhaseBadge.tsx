@@ -1,6 +1,6 @@
 import type { SessionPhase } from "../types";
 
-/** Display label shown when phase is "Awaiting Approval" but plan isn't ready yet. */
+/** Display label shown when a Draft session has plan generation currently in-flight. */
 export const PLANNING_LABEL = "Planning";
 
 /** Display label shown when a plan fix/regeneration is currently in progress. */
@@ -24,15 +24,18 @@ export function PhaseBadge({
 }: {
   phase: SessionPhase;
   planAvailable?: boolean;
-  /** When true, overrides the label with "Fixing" and suppresses the approval-ready dot. */
+  /** When true, overrides the label: "Planning" for Draft sessions, "Fixing" for Awaiting Approval sessions. */
   fixing?: boolean;
 }) {
   const cls = PHASE_COLORS[phase];
   const isAwaiting = phase === "Awaiting Approval";
+  const isDraftPlanning = phase === "Draft" && !!fixing;
   const showApproveReady = isAwaiting && planAvailable === true && !fixing;
-  const displayLabel = isAwaiting && fixing
-    ? FIXING_LABEL
-    : phase;
+  const displayLabel = isDraftPlanning
+    ? PLANNING_LABEL
+    : isAwaiting && fixing
+      ? FIXING_LABEL
+      : phase;
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
       {showApproveReady && (

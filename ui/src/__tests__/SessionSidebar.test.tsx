@@ -493,16 +493,35 @@ describe("SessionSidebar", () => {
     });
   });
 
-  it("shows 'Planning' label for 'Awaiting Approval' session when planAvailable is false", async () => {
-    // Given: a session that is awaiting approval but plan is not yet generated
+  it("shows PLANNING_LABEL for Draft session when fixInProgress is true (DTO-driven)", async () => {
+    // Given: a Draft session whose backend DTO carries fixInProgress: true
     vi.mocked(commands.listSessions).mockResolvedValue([
-      makeSession({ id: "session-1", phase: "Awaiting Approval", planAvailable: false }),
+      makeSession({ id: "session-1", phase: "Draft", fixInProgress: true }),
     ]);
 
-    // When
+    // When: sidebar is rendered without a fixingSessionIds override
     render(<SessionSidebar {...defaultProps} />);
 
-    // Then: the label shows "Planning" instead of "Awaiting Approval"
+    // Then: the row badge shows "Planning" instead of "Draft"
+    await waitFor(() => {
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+    });
+
+    // And: no blue dot is shown (Draft sessions never show the approval dot)
+    expect(screen.queryByLabelText("plan ready for approval")).toBeNull();
+  });
+
+  it("shows PLANNING_LABEL for Draft session when fixingSessionIds contains the session id (local override)", async () => {
+    // Given: a Draft session and a local in-flight set that includes its id
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Draft" }),
+    ]);
+    const fixingSessionIds = new Set(["session-1"]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} fixingSessionIds={fixingSessionIds} />);
+
+    // Then: the row badge shows "Planning"
     await waitFor(() => {
       expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
     });
