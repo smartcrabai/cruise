@@ -21,7 +21,6 @@ use crate::worktree;
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const PR_LANGUAGE_VAR: &str = "pr.language";
-pub(crate) const PLAN_LANGUAGE_VAR: &str = "plan.language";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
 // --- Types --------------------------------------------------------------------
