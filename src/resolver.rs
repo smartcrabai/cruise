@@ -45,7 +45,8 @@ impl ConfigSource {
 /// 1. `explicit` (`-c` flag) -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
-/// 4. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
+/// 4. `./.cruise/*.yaml` / `*.yml` (sorted by filename).
+/// 5. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
 ///
 /// # Errors
 ///
@@ -70,7 +71,8 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// 1. `explicit` -- error if file does not exist.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
-/// 4. `~/.config/cruise/*.yaml` / `*.yml`.
+/// 4. `.cruise/*.yaml` / `*.yml` under `cwd` (sorted by filename).
+/// 5. `~/.config/cruise/*.yaml` / `*.yml`.
 ///
 /// # Errors
 ///
@@ -102,6 +104,28 @@ enum CandidateKind {
     Local(PathBuf),
     UserDir(PathBuf),
     Builtin,
+}
+
+/// Appends candidates from a YAML directory to `candidates`, resolving each
+/// path to absolute and constructing the `CandidateKind` via `kind`.
+fn push_yaml_dir_candidates(
+    candidates: &mut Vec<ConfigCandidate>,
+    dir: &PathBuf,
+    kind: impl Fn(PathBuf) -> CandidateKind,
+) {
+    for file in collect_yaml_files(dir) {
+        let file = to_absolute(file);
+        let filename = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let label = format!("{filename} ({})", file.display());
+        candidates.push(ConfigCandidate {
+            label,
+            source: kind(file),
+        });
+    }
 }
 
 /// Collect all candidate config files in priority order.
@@ -157,20 +181,18 @@ fn collect_candidates(
         }
     }
 
+    // 2.5. Local .cruise/ directory (./.cruise/*.yaml / *.yml), ASCII-sorted.
+    // Note: only top-level YAML files in .cruise/ are scanned (non-recursive).
+    // Any YAML state file written directly to .cruise/ in the future would be
+    // misidentified as a config candidate; avoid placing YAML data files there.
+    let local_dir = cwd.join(".cruise");
+    if local_dir.is_dir() {
+        push_yaml_dir_candidates(&mut candidates, &local_dir, CandidateKind::Local);
+    }
+
     // 3. User-dir config files (~/.config/cruise/*.yaml / *.yml), ASCII-sorted.
     if let Ok(config_dir) = crate::paths::config_dir() {
-        for file in collect_yaml_files(&config_dir) {
-            let filename = file
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let label = format!("{filename} ({})", file.display());
-            candidates.push(ConfigCandidate {
-                label,
-                source: CandidateKind::UserDir(file),
-            });
-        }
+        push_yaml_dir_candidates(&mut candidates, &config_dir, CandidateKind::UserDir);
     }
 
     // 4. Built-in default — always last.
@@ -307,7 +329,9 @@ fn to_absolute(path: PathBuf) -> PathBuf {
 }
 
 /// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
-/// Subdirectories named `sessions` or `worktrees` are excluded.
+/// Known cruise data subdirectories (`sessions`, `worktrees`, `clones`) are
+/// excluded so they are never mistaken for config files even if they happen to
+/// carry a `.yaml` extension.
 fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
@@ -316,10 +340,10 @@ fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            // Skip sessions/ and worktrees/ subdirectories.
+            // Skip known cruise data subdirectories.
             if p.is_dir() {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name == "sessions" || name == "worktrees" {
+                if matches!(name, "sessions" | "worktrees" | "clones") {
                     return false;
                 }
             }
@@ -1113,4 +1137,271 @@ mod tests {
     }
 
     // ---- builtin roundtrip ----
+
+    // ---- .cruise/ directory as local config source ----
+
+    #[test]
+    fn test_resolve_local_cruise_dir_yaml() {
+        // Given: cwd has only .cruise/foo.yaml; no top-level cruise.yaml etc.
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("foo.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    command: echo",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved non-interactively against that cwd
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, tmp_dir.path(), false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: .cruise/foo.yaml is selected as a Local source
+        assert!(
+            yaml.contains("echo"),
+            "expected foo.yaml content, got: {yaml}"
+        );
+        assert!(
+            matches!(source, ConfigSource::Local(_)),
+            "expected Local, got: {source:?}"
+        );
+        if let ConfigSource::Local(p) = source {
+            assert_eq!(
+                p,
+                cruise_dir.join("foo.yaml"),
+                "resolved path must point to .cruise/foo.yaml"
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_candidates_local_dir_after_single_files_before_userdir() {
+        // Given: cruise.yaml (top-level), .cruise/team.yaml, and ~/.config/cruise/global.yaml
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            tmp_dir.path().join("cruise.yaml"),
+            "command: [top]\nsteps:\n  s:\n    command: top",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("team.yaml"),
+            "command: [team]\nsteps:\n  s:\n    command: team",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let config_cruise = fake_home.path().join(".config").join("cruise");
+        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            config_cruise.join("global.yaml"),
+            "command: [global]\nsteps:\n  s:\n    command: global",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: candidates are collected
+        let candidates =
+            collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: Local(cruise.yaml) < Local(.cruise/team.yaml) < UserDir(global.yaml) < Builtin
+        let local: Vec<&ConfigCandidate> = candidates
+            .iter()
+            .filter(|c| matches!(c.source, CandidateKind::Local(_)))
+            .collect();
+        let user_dir: Vec<&ConfigCandidate> = candidates
+            .iter()
+            .filter(|c| matches!(c.source, CandidateKind::UserDir(_)))
+            .collect();
+
+        assert!(!local.is_empty(), "expected at least one Local candidate");
+        assert!(
+            !user_dir.is_empty(),
+            "expected at least one UserDir candidate"
+        );
+
+        // top-level cruise.yaml must appear before .cruise/team.yaml
+        let top_idx = candidates
+            .iter()
+            .position(|c| match &c.source {
+                CandidateKind::Local(p) => p.file_name().unwrap_or_default() == "cruise.yaml",
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("cruise.yaml candidate not found"));
+        let team_idx = candidates
+            .iter()
+            .position(|c| match &c.source {
+                CandidateKind::Local(p) => p.file_name().unwrap_or_default() == "team.yaml",
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!(".cruise/team.yaml candidate not found"));
+        let user_idx = candidates
+            .iter()
+            .position(|c| matches!(c.source, CandidateKind::UserDir(_)))
+            .unwrap_or_else(|| panic!("UserDir candidate not found"));
+
+        assert!(
+            top_idx < team_idx,
+            "cruise.yaml (idx {top_idx}) must precede .cruise/team.yaml (idx {team_idx})"
+        );
+        assert!(
+            team_idx < user_idx,
+            ".cruise/team.yaml (idx {team_idx}) must precede user-dir (idx {user_idx})"
+        );
+    }
+
+    #[test]
+    fn test_collect_candidates_local_dir_multiple_files_ascii_sorted() {
+        // Given: .cruise/ has b.yaml and a.yml (insertion order is arbitrary)
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("b.yaml"),
+            "command: [beta]\nsteps:\n  s:\n    command: beta",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("a.yml"),
+            "command: [alpha]\nsteps:\n  s:\n    command: alpha",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: candidates are collected
+        let candidates =
+            collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: .cruise/ candidates are ASCII-sorted (a.yml before b.yaml)
+        let dir_locals: Vec<&ConfigCandidate> = candidates
+            .iter()
+            .filter(|c| match &c.source {
+                CandidateKind::Local(p) => p
+                    .parent()
+                    .and_then(|d| d.file_name())
+                    .is_some_and(|n| n == ".cruise"),
+                _ => false,
+            })
+            .collect();
+
+        assert_eq!(
+            dir_locals.len(),
+            2,
+            "expected 2 .cruise/ candidates, got {dir_locals:?}"
+        );
+        let first_name = match &dir_locals[0].source {
+            CandidateKind::Local(p) => p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            _ => panic!("expected Local"),
+        };
+        assert_eq!(
+            first_name, "a.yml",
+            ".cruise/ candidates must be ASCII-sorted (a.yml before b.yaml)"
+        );
+    }
+
+    #[test]
+    fn test_collect_yaml_files_excludes_data_subdirs() {
+        // Given: a dir with known cruise data subdirectories and a valid config.
+        // The explicit filter in collect_yaml_files skips entries named
+        // "sessions", "worktrees", or "clones" even before is_file() would
+        // reject them as non-files. This test verifies both the explicit
+        // directory-name filter and the non-recursive traversal (files nested
+        // inside those subdirs are never surfaced).
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let sessions_dir = tmp_dir.path().join("sessions");
+        let worktrees_dir = tmp_dir.path().join("worktrees");
+        let clones_dir = tmp_dir.path().join("clones");
+        std::fs::create_dir_all(&sessions_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir_all(&worktrees_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir_all(&clones_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        // Nested yaml files — excluded because traversal is non-recursive.
+        std::fs::write(sessions_dir.join("x.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(worktrees_dir.join("y.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(clones_dir.join("z.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            tmp_dir.path().join("valid.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    command: echo",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+
+        // When: collect_yaml_files is called on the directory
+        let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
+
+        // Then: only valid.yaml is returned; data-subdir entries and their
+        // nested files are excluded
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["valid.yaml"],
+            "only valid.yaml should be returned, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_interactive_false_local_dir_picks_ascii_first() {
+        // Given: .cruise/ has b.yaml and a.yaml; no top-level cruise.yaml; interactive=false
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("b.yaml"),
+            "command: [beta]\nsteps:\n  s:\n    command: beta",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("a.yaml"),
+            "command: [alpha]\nsteps:\n  s:\n    command: alpha",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: resolved non-interactively
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, tmp_dir.path(), false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: ASCII-first file (a.yaml) is selected without prompting
+        assert!(
+            yaml.contains("alpha"),
+            "expected a.yaml (alpha) content, got: {yaml}"
+        );
+        if let ConfigSource::Local(ref p) = source {
+            assert_eq!(
+                p.file_name().unwrap_or_default().to_str().unwrap_or(""),
+                "a.yaml",
+                "must pick ASCII-first .cruise/ file when non-interactive"
+            );
+        } else {
+            panic!("expected Local, got: {source:?}");
+        }
+    }
 }
