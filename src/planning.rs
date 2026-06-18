@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use console::style;
 
 use crate::ask_handler::AskHandler;
-use crate::config::WorkflowConfig;
+use crate::config::{DEFAULT_PLAN_LANGUAGE, WorkflowConfig};
 use crate::error::Result;
 use crate::executor::{Executor, PromptRun};
 use crate::step::prompt::{PromptResult, StreamCallbacks};
@@ -25,6 +25,31 @@ pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan
 /// time (via `ask_user`) until every design branch is resolved, then submits the
 /// plan. SDK-only — it relies on the interactive `ask_user` tool.
 pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
+
+const PLAN_LANGUAGE_VAR: &str = "plan.language";
+
+/// Build the variable store used by all plan-related flows.
+///
+/// Registers both `{plan}` (the session plan file path) and `{plan.language}`
+/// (normalized from `plan_language`, defaulting to English if blank) so CLI and
+/// GUI planning prompts resolve the same variables.
+#[must_use]
+pub fn setup_plan_vars(
+    session_input: String,
+    plan_path: PathBuf,
+    config: &WorkflowConfig,
+) -> VariableStore {
+    let mut vars = VariableStore::new(session_input);
+    vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+    let lang = config.plan_language.trim();
+    let lang = if lang.is_empty() {
+        DEFAULT_PLAN_LANGUAGE
+    } else {
+        lang
+    };
+    vars.set_named_value(PLAN_LANGUAGE_VAR, lang.to_string());
+    vars
+}
 
 /// Whether SDK-mode planning should drive the plan through the interactive
 /// custom tools (`submit_plan` / `update_plan` / `ask_user`).

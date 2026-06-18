@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
+pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -47,6 +48,10 @@ pub struct WorkflowConfig {
     /// Language to use for built-in PR title/body generation.
     #[serde(default = "default_pr_language")]
     pub pr_language: String,
+
+    /// Language to use for built-in planning prompts.
+    #[serde(default = "default_plan_language")]
+    pub plan_language: String,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -230,6 +235,10 @@ fn default_pr_language() -> String {
     DEFAULT_PR_LANGUAGE.to_string()
 }
 
+fn default_plan_language() -> String {
+    DEFAULT_PLAN_LANGUAGE.to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -277,6 +286,7 @@ impl WorkflowConfig {
             plan_model: Some("opus".to_string()),
             interactive_planning: true,
             pr_language: default_pr_language(),
+            plan_language: default_plan_language(),
             env: HashMap::new(),
             groups: HashMap::new(),
             steps,
@@ -635,6 +645,7 @@ steps:
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
         assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
+        assert_eq!(config.plan_language, DEFAULT_PLAN_LANGUAGE);
     }
 
     #[test]
@@ -675,6 +686,41 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
+    }
+
+    #[test]
+    fn test_plan_language_field() {
+        // Given: workflow YAML configures a planning language
+        let yaml = r"
+command: [claude, -p]
+plan_language: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the configured planning language is preserved
+        assert_eq!(config.plan_language, "Japanese");
+    }
+
+    #[test]
+    fn test_plan_language_defaults_to_english_when_omitted() {
+        // Given: workflow YAML omits plan_language
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the built-in English default is used
+        assert_eq!(config.plan_language, DEFAULT_PLAN_LANGUAGE);
     }
 
     #[test]
@@ -2083,6 +2129,7 @@ steps:
                 "model",
                 "plan_model",
                 "pr_language",
+                "plan_language",
                 "env",
                 "groups",
                 "steps",

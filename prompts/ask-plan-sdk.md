@@ -1,5 +1,7 @@
 The user has a question about the implementation plan stored at {plan}.
 
+Answer in {plan.language}.
+
 Question:
 ---
 {prev.input}

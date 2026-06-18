@@ -1,5 +1,7 @@
 The user has requested changes to the implementation plan. The current plan is stored at {plan}.
 
+Write the updated plan in {plan.language}.
+
 Requested changes:
 ---
 {prev.input}
