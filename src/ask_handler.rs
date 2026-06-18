@@ -6,7 +6,8 @@
 //! - GUI: a Tauri-backed handler (see `src-tauri`) using events + a channel.
 //!
 //! The handler is invoked from inside a [`crate::sdk_tools`] tool closure, which
-//! runs on seher's dedicated pi worker thread. Implementations may therefore
+//! runs on the seher backend's worker thread (the in-process `pi` engine, or
+//! the `claude-agent-sdk` MCP tool dispatcher). Implementations may therefore
 //! block (read stdin, wait on a channel) — they are never called on the async
 //! runtime thread.
 

@@ -32,7 +32,8 @@ pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-g
 /// True only when the SDK backend is selected *and* `interactive_planning` is
 /// left enabled. When false the planning turns fall back to the file-writing
 /// (`command`-style) templates and register no custom tools, so tool-incapable
-/// providers (e.g. `sdk: claude-terminal`) stay eligible.
+/// providers (e.g. `sdk: claude-terminal`, `sdk: claude-headless`) stay
+/// eligible.
 #[must_use]
 pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
     config.sdk.is_some() && config.interactive_planning
@@ -186,10 +187,11 @@ pub async fn run_plan_prompt_template(
 
     let outcome = outcome?;
     // Carry the seher session id forward only in the tool-based interactive flow,
-    // where plan/fix/ask turns share one pi conversation. The tool-less flow is
-    // stateless (templates read `{plan}` from disk each turn), so leaving `resume`
-    // empty keeps `require_tools` false and tool-incapable providers
-    // (e.g. claude-terminal) eligible for the fix/ask turns too.
+    // where plan/fix/ask turns share one tool-capable conversation (pi or claude).
+    // The tool-less flow is stateless (templates read `{plan}` from disk each
+    // turn), so leaving `resume` empty keeps `require_tools` false and
+    // tool-incapable providers (e.g. claude-terminal, claude-headless) eligible
+    // for the fix/ask turns too.
     if plan_tools_enabled && outcome.session_id.is_some() {
         *resume = outcome.session_id;
     }
