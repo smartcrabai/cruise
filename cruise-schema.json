@@ -34,6 +34,10 @@
       "type": "string",
       "description": "Language for PR descriptions"
     },
+    "plan_language": {
+      "type": "string",
+      "description": "Language for planning prompts"
+    },
     "env": {
       "type": "object",
       "additionalProperties": {

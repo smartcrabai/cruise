@@ -1,5 +1,7 @@
 Analyze the task content, formulate an implementation plan including design policies, and write it in the {plan} file.
 
+Write the plan in {plan.language}.
+
 Task:
 ---
 {input}
