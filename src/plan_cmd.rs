@@ -23,7 +23,7 @@ use crate::planning::{
     PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
 };
 use crate::resolver::ConfigSource;
-use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
+use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
