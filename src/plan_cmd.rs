@@ -10,6 +10,7 @@ use inquire::InquireError;
 use std::sync::Arc;
 
 use crate::ask_handler::{AskHandler, CliAskHandler, NoninteractiveAskHandler};
+use crate::cancellation::CancellationToken;
 use crate::cli::{
     DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs,
 };
@@ -19,9 +20,11 @@ use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{
     BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
 };
-use crate::planning::{PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template};
+use crate::planning::{
+    PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
+};
 use crate::resolver::ConfigSource;
-use crate::session::{PLAN_VAR, SessionManager, SessionPhase, SessionState};
+use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_steps};
 
@@ -33,6 +36,7 @@ fn cli_plan_ctx<'a>(
     interactive: bool,
     rate_limit_retries: usize,
     grill: bool,
+    cancel_token: Option<&'a CancellationToken>,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
     // a handler that errors rather than blocking on stdin (ask_user is not
@@ -50,6 +54,7 @@ fn cli_plan_ctx<'a>(
         rate_limit_retries,
         working_dir,
         grill,
+        cancel_token,
     }
 }
 
@@ -146,8 +151,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // Set up variables with the session plan path.
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
     // SDK session id, shared across the plan / fix / ask turns so they resume the
     // same conversation. Stays `None` in command mode.
@@ -172,6 +176,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         }
     } else {
         let work_dir = plan_working_dir(&session).to_path_buf();
+        let cancel_token = CancellationToken::new();
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -179,8 +184,16 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             interactive,
             args.rate_limit_retries,
             args.grill,
+            Some(&cancel_token),
         );
-        if let Err(e) = generate_plan_markdown(&ctx, &mut vars, &mut resume).await {
+        let plan_result = tokio::select! {
+            result = generate_plan_markdown(&ctx, &mut vars, &mut resume) => result,
+            _ = tokio::signal::ctrl_c() => {
+                cancel_token.cancel();
+                Err(CruiseError::Interrupted)
+            },
+        };
+        if let Err(e) = plan_result {
             eprintln!(
                 "\n{} Plan generation failed. Session {} discarded.",
                 style("✗").red().bold(),
@@ -364,10 +377,12 @@ async fn approve_with_title(
     manager: &SessionManager,
     config: &WorkflowConfig,
     plan_content: &str,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     if config.sdk.is_some() {
-        match generate_title_via_sdk(config, &session.input, plan_content).await {
+        match generate_title_via_sdk(config, &session.input, plan_content, cancel_token).await {
             Ok(title) => session.title = Some(title),
+            Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
             Err(e) => {
                 eprintln!("warning: SDK title generation failed: {e}");
                 crate::metadata::refresh_session_title_from_plan(session, plan_content);
@@ -385,6 +400,7 @@ async fn generate_title_via_sdk(
     config: &WorkflowConfig,
     input: &str,
     plan_content: &str,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<String> {
     let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
@@ -405,7 +421,7 @@ async fn generate_title_via_sdk(
             max_retries: 1,
             env: &env,
             on_retry: None,
-            cancel_token: None,
+            cancel_token,
             working_dir: None,
             stream: None,
             tools: vec![tool],
@@ -701,8 +717,7 @@ async fn generate_plan_for_session(
 ) -> Result<String> {
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
@@ -714,6 +729,7 @@ async fn generate_plan_for_session(
         false,
         rate_limit_retries,
         false,
+        None,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
 }
@@ -917,6 +933,7 @@ async fn run_approve_loop(
     // Fix / Ask turns reuse one planning context. It is only reached on the
     // interactive path — the noninteractive branch auto-approves below.
     // Grill affects only the initial plan template; fix/ask turns are standard.
+    let cancel_token = CancellationToken::new();
     let ctx = cli_plan_ctx(
         config,
         plan_path,
@@ -924,6 +941,7 @@ async fn run_approve_loop(
         !noninteractive,
         rate_limit_retries,
         false,
+        Some(&cancel_token),
     );
 
     // Read the plan once up front; re-read only after Fix modifies it.
@@ -947,7 +965,7 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            approve_with_title(session, manager, config, &plan_content).await?;
+            approve_with_title(session, manager, config, &plan_content, None).await?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("v").green().bold(),
@@ -976,7 +994,18 @@ async fn run_approve_loop(
         match selected {
             "Approve" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
-                approve_with_title(session, manager, config, &plan_content).await?;
+                tokio::select! {
+                    result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel_token.cancel();
+                        eprintln!("\nCancelled. Session {} discarded.", session.id);
+                        cleanup_discarded_session_workspace(manager, session);
+                        if let Err(del_err) = manager.delete(&session.id) {
+                            eprintln!("warning: failed to clean up session: {del_err}");
+                        }
+                        return Err(CruiseError::Interrupted);
+                    },
+                }
                 eprintln!(
                     "\n{} Session {} created.",
                     style("v").green().bold(),
@@ -994,7 +1023,13 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_fix_plan(&ctx, vars, resume).await?;
+                tokio::select! {
+                    result = run_fix_plan(&ctx, vars, resume) => result?,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel_token.cancel();
+                        return Err(CruiseError::Interrupted);
+                    },
+                }
                 plan_content = crate::metadata::read_plan_markdown(plan_path)?;
             }
             "Ask" => {
@@ -1003,11 +1038,28 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                run_ask_plan(&ctx, vars, resume).await?;
+                tokio::select! {
+                    result = run_ask_plan(&ctx, vars, resume) => result?,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel_token.cancel();
+                        return Err(CruiseError::Interrupted);
+                    },
+                }
             }
             "Execute now" => {
                 session.skipped_steps = select_skipped_steps_with_history(session, config)?;
-                approve_with_title(session, manager, config, &plan_content).await?;
+                tokio::select! {
+                    result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel_token.cancel();
+                        eprintln!("\nCancelled. Session {} discarded.", session.id);
+                        cleanup_discarded_session_workspace(manager, session);
+                        if let Err(del_err) = manager.delete(&session.id) {
+                            eprintln!("warning: failed to clean up session: {del_err}");
+                        }
+                        return Err(CruiseError::Interrupted);
+                    },
+                }
                 eprintln!(
                     "\n{} Executing session {}...",
                     style("->").cyan(),
@@ -1039,8 +1091,7 @@ pub async fn replan_session(
     }
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
     vars.set_prev_input(Some(feedback));
     let working_dir = session
         .worktree_path
@@ -1055,6 +1106,7 @@ pub async fn replan_session(
         std::io::stdin().is_terminal(),
         rate_limit_retries,
         false,
+        None,
     );
     run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
@@ -1174,8 +1226,7 @@ pub async fn generate_plan_for_draft_session(
     let config = manager.load_config(session)?;
     setup_planning_worktree(manager, session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
     // Own the working dir so `ctx` doesn't borrow `session` across the
     // mutable `inspect_err` below.
@@ -1190,6 +1241,7 @@ pub async fn generate_plan_for_draft_session(
         std::io::stdin().is_terminal(),
         rate_limit_retries,
         false,
+        None,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume)
         .await
@@ -1220,6 +1272,52 @@ mod tests {
     use crate::test_support::{init_git_repo, lock_process, make_session};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_setup_plan_vars_sets_configured_plan_language() {
+        // Given: a workflow config with a custom planning language
+        let yaml = r"
+command: [echo]
+plan_language: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planning variables are set up
+        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
+
+        // Then: the plan language variable resolves to the configured value
+        assert_eq!(
+            vars.resolve("{plan.language}")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "Japanese"
+        );
+    }
+
+    #[test]
+    fn test_setup_plan_vars_defaults_blank_plan_language_to_english() {
+        // Given: a workflow config with a blank planning language
+        let yaml = r#"
+command: [echo]
+plan_language: "   "
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: planning variables are set up
+        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
+
+        // Then: the plan language variable falls back to English
+        assert_eq!(
+            vars.resolve("{plan.language}")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            crate::config::DEFAULT_PLAN_LANGUAGE
+        );
+    }
 
     #[test]
     fn test_setup_planning_worktree_creates_worktree_and_sets_session_fields() {
@@ -1440,5 +1538,75 @@ mod tests {
         );
         assert_eq!(history.entries[0].working_dir, "/Users/test/project");
         assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
+    }
+
+    // -- generate_title_via_sdk cancellation -----------------------------------
+
+    /// Given: a command-backend config, a pre-cancelled token
+    /// When: `generate_title_via_sdk` is called
+    /// Then: returns `CruiseError::Interrupted` before the 5-second timeout
+    ///
+    /// If this test times out, the `cancel_token` is not forwarded to `PromptRun`
+    /// inside `generate_title_via_sdk`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_title_via_sdk_pre_cancelled_token_returns_interrupted() {
+        use crate::cancellation::CancellationToken;
+        use crate::config::WorkflowConfig;
+        use crate::error::CruiseError;
+
+        let _guard = crate::test_support::lock_process();
+
+        // Given: command backend that blocks indefinitely, pre-cancelled token
+        let yaml = "command: [\"sleep\", \"100\"]\nsteps:\n  s1:\n    prompt: hi\n";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("bad yaml: {e:?}"));
+        let token = CancellationToken::new();
+        token.cancel();
+
+        // When
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token)),
+        )
+        .await;
+
+        // Then: completes before timeout and returns Interrupted
+        assert!(
+            timed.is_ok(),
+            "timed out — cancel_token is not forwarded inside generate_title_via_sdk"
+        );
+        assert!(
+            matches!(
+                timed.unwrap_or_else(|e| panic!("{e:?}")),
+                Err(CruiseError::Interrupted)
+            ),
+            "expected CruiseError::Interrupted"
+        );
+    }
+
+    /// Given: a command-backend config, no cancel token
+    /// When: `generate_title_via_sdk` is called with a fast command (cat)
+    /// Then: returns an error (no title tool called), but does not panic
+    ///       — this is a baseline test to verify no regression in the happy path signature
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_title_via_sdk_no_token_returns_err_without_sdk_tool() {
+        use crate::config::WorkflowConfig;
+
+        let _guard = crate::test_support::lock_process();
+
+        let yaml = "command: [\"cat\"]\nsteps:\n  s1:\n    prompt: hi\n";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("bad yaml: {e:?}"));
+
+        // cat echoes the prompt; the generate_title tool is never called.
+        // With no token, the function should complete (with an Err: None from the store).
+        let result = generate_title_via_sdk(&config, "task", "# Plan", None).await;
+
+        // The title store remains empty because cat doesn't call the tool,
+        // so the function returns Err with "title store returned None".
+        assert!(
+            result.is_err(),
+            "expected Err when title tool was not called"
+        );
     }
 }

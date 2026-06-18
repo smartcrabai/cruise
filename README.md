@@ -314,6 +314,7 @@ description: |             # one-line summary shown next to the filename in sele
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
+plan_language: English    # language for built-in planning prompts (optional, default: English)
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -378,13 +379,13 @@ In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as sehe
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Because only the in-process `pi` engine can run custom tools, this pins planning to tool-capable providers.
+By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers.
 
-Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). This makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` (the local `claude` CLI) can be used for planning.
+Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). This makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
 
 ```yaml
 sdk: seher
-interactive_planning: false   # tool-less, file-based planning; allows claude-terminal providers
+interactive_planning: false   # tool-less, file-based planning; allows claude-terminal / claude-headless providers
 ```
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
@@ -395,6 +396,14 @@ The `pr_language` field controls the language used for the auto-generated PR tit
 
 ```yaml
 pr_language: Japanese     # PR title/body will be generated in Japanese
+```
+
+### Plan Language
+
+The `plan_language` field controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Defaults to `"English"` when omitted. The normalized value is available to built-in planning templates as `{plan.language}`.
+
+```yaml
+plan_language: Japanese   # generated/updated plans and plan answers will be in Japanese
 ```
 
 ### Session Title Generation

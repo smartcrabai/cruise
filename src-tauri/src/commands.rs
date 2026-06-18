@@ -18,7 +18,7 @@ use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 
 use cruise::planning::{
-    ask_plan_template, fix_plan_template, initial_plan_template, plan_template,
+    ask_plan_template, fix_plan_template, initial_plan_template, plan_template, setup_plan_vars,
 };
 
 use crate::events::{PlanEvent, WorkflowEvent};
@@ -636,6 +636,7 @@ impl GuiPlanCtx {
             // Grill is opt-in per command: the initial-plan command (`create_session`)
             // may set it; regenerate/fix always pass `false`.
             grill,
+            cancel_token: None,
         };
         (
             Self {
@@ -755,7 +756,6 @@ pub async fn create_session(
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
     use cruise::session::{SessionManager, SessionState};
-    use cruise::variable::VariableStore;
 
     let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let manager = new_session_manager()?;
@@ -873,8 +873,7 @@ pub async fn create_session(
     );
 
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
     if use_input_as_plan {
         // Emit SessionCreated only after successful write so that form error handling
@@ -1369,8 +1368,7 @@ async fn regenerate_plan(
     let _ = channel.send(PlanEvent::PlanGenerating);
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
-    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(
         session_id.to_string(),
@@ -1538,8 +1536,7 @@ pub async fn fix_session(
     };
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
-    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
     vars.set_prev_input(Some(feedback));
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(
@@ -1636,8 +1633,7 @@ pub(crate) async fn do_ask_session(
     }
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
-    vars.set_named_file(PLAN_VAR, plan_path.clone());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
     vars.set_prev_input(Some(question));
 
     // The Ask flow is request/response (no streaming channel), so `ask_user`
@@ -1653,6 +1649,7 @@ pub(crate) async fn do_ask_session(
         working_dir: Some(&session.base_dir),
         // Grill mode is a CLI-only flag; the GUI uses the standard plan flow.
         grill: false,
+        cancel_token: None,
     };
     let result = cruise::planning::run_plan_prompt_template(
         &ctx,
@@ -1873,6 +1870,7 @@ async fn execute_single_session(
                     &mut session_for_pr,
                     5,
                     10,
+                    None,
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);
