@@ -358,7 +358,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     std::env::set_current_dir(execution_workspace.path())?;
 
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path);
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
     let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>> =

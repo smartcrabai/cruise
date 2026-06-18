@@ -723,6 +723,7 @@ pub async fn create_session(
     use_input_as_plan: bool,
     grill: bool,
     no_interactive_planning: bool,
+    image_attachments: Vec<String>,
     channel: tauri::ipc::Channel<PlanEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
@@ -814,6 +815,27 @@ pub async fn create_session(
             .map_err(|e| format!("failed to write session config: {e}"))?;
     }
 
+    // Copy attached images into the session dir and rewrite session.input so the
+    // planning prompt references them (the agent reads images via its Read tool).
+    if !image_attachments.is_empty() {
+        let sources: Vec<PathBuf> = image_attachments.iter().map(PathBuf::from).collect();
+        match cruise::attachments::copy_images_into_session(&session_dir, &sources) {
+            Ok(stored) => {
+                session.attachments = stored;
+                if let Err(e) = manager.save(&session) {
+                    let _ = manager.delete(&session_id);
+                    remove_session_clone(&manager, &session_id);
+                    return Err(e.to_string());
+                }
+            }
+            Err(e) => {
+                let _ = manager.delete(&session_id);
+                remove_session_clone(&manager, &session_id);
+                return Err(e.to_string());
+            }
+        }
+    }
+
     let plan_logger = plan_logger(
         &manager,
         &session_id,
@@ -825,13 +847,16 @@ pub async fn create_session(
     );
 
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input.clone());
+    let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
     if use_input_as_plan {
         // Emit SessionCreated only after successful write so that form error handling
         // still works if the write fails (formReleased stays false in the frontend).
-        match cruise::planning::write_input_as_plan(&plan_path, &session.input) {
+        // input_with_attachments() so the plan content references images that
+        // executed steps can read.
+        let plan_content = session.input_with_attachments();
+        match cruise::planning::write_input_as_plan(&plan_path, &plan_content) {
             Ok(content) => {
                 cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
                 session.plan_error = None;
@@ -953,6 +978,7 @@ pub(crate) fn create_draft_session_impl(
     base_dir: String,
     repo: Option<String>,
     skipped_steps: Vec<String>,
+    image_attachments: Vec<String>,
 ) -> std::result::Result<String, String> {
     use cruise::config::{WorkflowConfig, validate_config};
 
@@ -1017,12 +1043,31 @@ pub(crate) fn create_draft_session_impl(
     });
     history.save_best_effort();
 
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(&session_id);
-        if let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml) {
-            let _ = manager.delete(&session_id);
-            remove_session_clone(manager, &session_id);
-            return Err(format!("failed to write session config: {e}"));
+    let session_dir = manager.sessions_dir().join(&session_id);
+    if session.config_path.is_none()
+        && let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml)
+    {
+        let _ = manager.delete(&session_id);
+        remove_session_clone(manager, &session_id);
+        return Err(format!("failed to write session config: {e}"));
+    }
+
+    if !image_attachments.is_empty() {
+        let sources: Vec<PathBuf> = image_attachments.iter().map(PathBuf::from).collect();
+        match cruise::attachments::copy_images_into_session(&session_dir, &sources) {
+            Ok(stored) => {
+                session.attachments = stored;
+                if let Err(e) = manager.save(&session) {
+                    let _ = manager.delete(&session_id);
+                    remove_session_clone(manager, &session_id);
+                    return Err(e.to_string());
+                }
+            }
+            Err(e) => {
+                let _ = manager.delete(&session_id);
+                remove_session_clone(manager, &session_id);
+                return Err(e.to_string());
+            }
         }
     }
 
@@ -1040,9 +1085,18 @@ pub fn create_draft_session(
     base_dir: String,
     repo: Option<String>,
     skipped_steps: Vec<String>,
+    image_attachments: Vec<String>,
 ) -> std::result::Result<String, String> {
     let manager = new_session_manager()?;
-    create_draft_session_impl(&manager, input, config_path, base_dir, repo, skipped_steps)
+    create_draft_session_impl(
+        &manager,
+        input,
+        config_path,
+        base_dir,
+        repo,
+        skipped_steps,
+        image_attachments,
+    )
 }
 
 /// Return the latest persisted New Session selections and recent working directories.
@@ -1289,7 +1343,7 @@ async fn regenerate_plan(
     let _ = channel.send(PlanEvent::PlanGenerating);
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
-    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
 
     let (on_stdout, on_stderr) = plan_chunk_callbacks(
@@ -1458,7 +1512,7 @@ pub async fn fix_session(
     };
     let plan_path = session.plan_path(&manager.sessions_dir());
     let base = session.base_dir.clone();
-    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(feedback));
 
@@ -1556,7 +1610,7 @@ pub(crate) async fn do_ask_session(
     }
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = cruise::variable::VariableStore::new(session.input.clone());
+    let mut vars = cruise::variable::VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path.clone());
     vars.set_prev_input(Some(question));
 
@@ -3279,6 +3333,7 @@ mod tests {
             repo.to_string_lossy().into_owned(),
             None,
             vec!["build".to_string()],
+            vec![],
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -3319,6 +3374,7 @@ mod tests {
             None,
             repo.to_string_lossy().into_owned(),
             None,
+            vec![],
             vec![],
         )
         .unwrap_or_else(|e| panic!("{e:?}"));

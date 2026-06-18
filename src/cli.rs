@@ -31,6 +31,11 @@ pub struct Cli {
     #[arg(long, value_name = "OWNER/REPO")]
     pub repo: Option<String>,
 
+    /// Attach an image file (png/jpg/jpeg/webp/gif) to the planning input.
+    /// Forwarded to the `plan` subcommand. Can be repeated.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -102,6 +107,12 @@ pub struct PlanArgs {
     /// Maximum number of rate-limit retries per LLM call.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
+
+    /// Attach an image file (png/jpg/jpeg/webp/gif) to the planning input.
+    /// Can be repeated. Images are also auto-detected when their paths are
+    /// dragged onto / pasted into the interactive prompt.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -692,6 +703,41 @@ mod tests {
     }
 
     // -- repo flag --------------------------------------------------------------
+
+    #[test]
+    fn test_plan_image_flag_collects_paths() {
+        let cli = Cli::parse_from([
+            "cruise",
+            "plan",
+            "--image",
+            "/tmp/a.png",
+            "--image",
+            "/tmp/b.jpg",
+            "task",
+        ]);
+        match cli.command {
+            Some(Commands::Plan(args)) => {
+                assert_eq!(args.images, vec!["/tmp/a.png", "/tmp/b.jpg"]);
+                assert_eq!(args.input, Some("task".to_string()));
+            }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_root_plan_image_flag_collects_paths() {
+        let cli = Cli::try_parse_from([
+            "cruise",
+            "--plan",
+            "task",
+            "--image",
+            "/tmp/a.png",
+            "--image",
+            "/tmp/b.jpg",
+        ])
+        .unwrap_or_else(|e| panic!("expected --plan --image to parse: {e}"));
+        assert_eq!(cli.images, vec!["/tmp/a.png", "/tmp/b.jpg"]);
+    }
 
     #[test]
     fn test_plan_repo_flag_parses() {

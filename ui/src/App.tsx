@@ -42,6 +42,7 @@ import { notifyDesktop } from "./lib/desktopNotifications";
 import { AskUserDialog } from "./components/AskUserDialog";
 import { AskUserPanel } from "./components/AskUserPanel";
 import { DirectoryPicker } from "./components/DirectoryPicker";
+import { ImageAttachments } from "./components/ImageAttachments";
 import { RepoPicker } from "./components/RepoPicker";
 import { isValidRepoSpec } from "./lib/repoSpec";
 import { MarkdownViewer } from "./components/MarkdownViewer";
@@ -1178,6 +1179,8 @@ interface NewSessionDraft {
   grill: boolean;
   /** Disable interactive planning tools; agent writes plan.md directly. */
   noInteractivePlanning: boolean;
+  /** Absolute paths of image files attached to the planning input. */
+  imageAttachments: string[];
   isGenerating: boolean;
   error: string | null;
 }
@@ -1192,6 +1195,7 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     useInputAsPlan: false,
     grill: false,
     noInteractivePlanning: false,
+    imageAttachments: [],
     isGenerating: false,
     error: null,
   };
@@ -1214,7 +1218,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
   const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, noInteractivePlanning, isGenerating, error } = draft;
+  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, noInteractivePlanning, imageAttachments, isGenerating, error } = draft;
   const isRepoMode = sourceKind === "repository";
   // Repository clones don't exist yet at form time, so config lookup falls
   // back to the user-level / builtin configs in repository mode.
@@ -1385,7 +1389,9 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
   }, [onDraftChange, refreshHistorySummary]);
 
   // True when the form has everything it needs to create a session.
-  const canSubmit = input.trim() !== "" && (!isRepoMode || repoSpecValid);
+  // Either a non-empty task description or at least one attached image is required.
+  const canSubmit =
+    (input.trim() !== "" || imageAttachments.length > 0) && (!isRepoMode || repoSpecValid);
 
   async function handleGenerate() {
     if (!canSubmit) return;
@@ -1425,6 +1431,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
           useInputAsPlan,
           grill,
           noInteractivePlanning,
+          imageAttachments,
         },
         channel,
       );
@@ -1447,6 +1454,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
         baseDir: baseDir || ".",
         repo: isRepoMode ? repo.trim() : undefined,
         skippedSteps: Array.from(skippedSteps),
+        imageAttachments,
       });
       onDraftChange((prev) => ({
         ...createInitialNewSessionDraft(),
@@ -1599,6 +1607,13 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             }}
           />
         </div>
+
+        {/* Image attachments */}
+        <ImageAttachments
+          value={imageAttachments}
+          onChange={(next) => set("imageAttachments", next)}
+          disabled={isGenerating}
+        />
 
         <label className="flex items-center gap-2 cursor-pointer">
           <input
