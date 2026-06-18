@@ -7,6 +7,7 @@ use std::path::Path;
 
 use console::style;
 
+use crate::cancellation::CancellationToken;
 use crate::engine::{ExecutionContext, execute_steps};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
@@ -105,6 +106,10 @@ pub fn ensure_gh_available() -> Result<()> {
 ///
 /// Returns an error if the branch has no commits beyond its base, or if an
 /// underlying git or `gh` operation fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all params are needed for PR flow"
+)]
 pub async fn handle_worktree_pr(
     ctx: &worktree::WorktreeContext,
     compiled: &CompiledWorkflow,
@@ -113,8 +118,10 @@ pub async fn handle_worktree_pr(
     session: &mut SessionState,
     rate_limit_retries: usize,
     max_retries: usize,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    let (pr_title, pr_body) = generate_pr_description(compiled, vars, rate_limit_retries).await;
+    let (pr_title, pr_body) =
+        generate_pr_description(compiled, vars, rate_limit_retries, cancel_token).await?;
 
     let pr_attempt = attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body)?;
     pr_attempt.report();
@@ -133,8 +140,9 @@ pub async fn handle_worktree_pr(
                 max_retries,
                 rate_limit_retries,
                 ctx.path.as_path(),
+                cancel_token,
             )
-            .await;
+            .await?;
             Ok(())
         }
         PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
@@ -155,16 +163,18 @@ pub async fn handle_worktree_pr(
     }
 }
 
-/// Generate a PR title and body, returning empty strings on failure.
+/// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation;
+/// all other failures return empty strings (best-effort PR description).
 async fn generate_pr_description(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
-) -> (String, String) {
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(String, String)> {
     let pr_prompt = match build_pr_prompt(vars, compiled) {
         Err(e) => {
             eprintln!("warning: PR prompt resolution failed: {e}");
-            return (String::new(), String::new());
+            return Ok((String::new(), String::new()));
         }
         Ok(p) => p,
     };
@@ -181,6 +191,7 @@ async fn generate_pr_description(
             rate_limit_retries,
             &env,
             &spinner,
+            cancel_token,
         )
         .await;
         drop(spinner);
@@ -196,7 +207,7 @@ async fn generate_pr_description(
                 max_retries: rate_limit_retries,
                 env: &env,
                 on_retry: Some(&on_retry),
-                cancel_token: None,
+                cancel_token,
                 working_dir: None,
                 stream: None,
                 tools: Vec::new(),
@@ -205,6 +216,10 @@ async fn generate_pr_description(
             .await
         {
             Ok(o) => o.result.output,
+            Err(CruiseError::Interrupted) => {
+                drop(spinner);
+                return Err(CruiseError::Interrupted);
+            }
             Err(e) => {
                 eprintln!("warning: PR description generation failed: {e}");
                 String::new()
@@ -221,7 +236,7 @@ async fn generate_pr_description(
             truncated
         );
     }
-    (pr_title, pr_body)
+    Ok((pr_title, pr_body))
 }
 
 async fn generate_pr_via_sdk_tool(
@@ -231,7 +246,8 @@ async fn generate_pr_via_sdk_tool(
     rate_limit_retries: usize,
     env: &std::collections::HashMap<String, String>,
     spinner: &crate::spinner::Spinner,
-) -> (String, String) {
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(String, String)> {
     use std::sync::{Arc, Mutex};
 
     let store = Arc::new(Mutex::new(None::<crate::sdk_tools::PrMetadata>));
@@ -248,7 +264,7 @@ async fn generate_pr_via_sdk_tool(
             max_retries: rate_limit_retries,
             env,
             on_retry: Some(&on_retry),
-            cancel_token: None,
+            cancel_token,
             working_dir: None,
             stream: None,
             tools: vec![tool],
@@ -260,20 +276,22 @@ async fn generate_pr_via_sdk_tool(
             if let Ok(mut guard) = store.lock()
                 && let Some(meta) = guard.take()
             {
-                (meta.title, meta.body)
+                Ok((meta.title, meta.body))
             } else {
                 eprintln!("warning: SDK agent did not call submit_pr_metadata tool");
-                (String::new(), String::new())
+                Ok((String::new(), String::new()))
             }
         }
+        Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
             eprintln!("warning: PR description generation failed: {e}");
-            (String::new(), String::new())
+            Ok((String::new(), String::new()))
         }
     }
 }
 
-/// Run the after-PR workflow steps, logging any errors.
+/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
+/// all other errors are logged as warnings and treated as non-fatal.
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -281,9 +299,10 @@ async fn run_after_pr_steps(
     max_retries: usize,
     rate_limit_retries: usize,
     working_dir: &std::path::Path,
-) {
+    cancel_token: Option<&CancellationToken>,
+) -> Result<()> {
     let Some(first_step) = compiled.after_pr.keys().next() else {
-        return;
+        return Ok(());
     };
     let after_compiled = compiled.to_after_pr_compiled();
     let ctx = ExecutionContext {
@@ -291,7 +310,7 @@ async fn run_after_pr_steps(
         max_retries,
         rate_limit_retries,
         on_step_start: &|_| Ok(()),
-        cancel_token: None,
+        cancel_token,
         option_handler: &CliOptionHandler,
         config_reloader: None,
         working_dir: Some(working_dir),
@@ -299,9 +318,11 @@ async fn run_after_pr_steps(
         on_step_log: None,
     };
     match execute_steps(&ctx, vars, tracker, first_step).await {
-        Ok(_) | Err(CruiseError::StepPaused) => {}
+        Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
+        Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
             eprintln!("warning: after-pr steps failed: {e}");
+            Ok(())
         }
     }
 }
@@ -695,5 +716,90 @@ mod tests {
             err.to_lowercase().contains("gh"),
             "error should mention gh: {err}"
         );
+    }
+
+    // -- generate_pr_description cancellation ---------------------------------
+
+    fn minimal_compiled_workflow(command: Vec<String>) -> CompiledWorkflow {
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+        CompiledWorkflow {
+            command,
+            sdk: None,
+            model: None,
+            plan_model: None,
+            env: HashMap::new(),
+            plan_language: "English".to_string(),
+            pr_language: "English".to_string(),
+            steps: IndexMap::new(),
+            after_pr: IndexMap::new(),
+            invocations: HashMap::new(),
+            after_pr_invocations: HashMap::new(),
+            step_to_invocation: HashMap::new(),
+            after_pr_step_to_invocation: HashMap::new(),
+        }
+    }
+
+    /// Given: a command-backend `CompiledWorkflow` with a blocking command, a pre-cancelled token
+    /// When: `generate_pr_description` is called
+    /// Then: returns `Err(Interrupted)` before the 5-second timeout
+    ///
+    /// If this test times out, the `cancel_token` is not forwarded to `PromptRun`
+    /// inside `generate_pr_description`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_pr_description_pre_cancelled_token_returns_interrupted() {
+        use crate::cancellation::CancellationToken;
+        use crate::error::CruiseError;
+
+        let _guard = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- step 1").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Given: blocking command and pre-cancelled token
+        let compiled = minimal_compiled_workflow(vec!["sleep".to_string(), "100".to_string()]);
+        let mut vars = VariableStore::new("implement feature X".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        // When
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            generate_pr_description(&compiled, &mut vars, 0, Some(&token)),
+        )
+        .await;
+
+        // Then: completes before timeout and propagates Interrupted
+        assert!(
+            timed.is_ok(),
+            "timed out — cancel_token is not forwarded to PromptRun in generate_pr_description"
+        );
+        let result = timed.unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "expected Interrupted on cancellation, got {result:?}"
+        );
+    }
+
+    /// Given: no cancel token and a fast command (cat)
+    /// When: `generate_pr_description` is called
+    /// Then: completes without hanging — baseline regression that None is an accepted value
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_pr_description_no_token_completes_with_cat() {
+        let _guard = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- step 1").unwrap_or_else(|e| panic!("{e:?}"));
+
+        let compiled = minimal_compiled_workflow(vec!["cat".to_string()]);
+        let mut vars = VariableStore::new("implement feature X".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+
+        // cat echoes the prompt; the function should complete without panicking.
+        let _ = generate_pr_description(&compiled, &mut vars, 0, None).await;
+        // No assertion on values — only that the function accepts None and returns without hanging.
     }
 }

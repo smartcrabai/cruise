@@ -417,8 +417,42 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     };
     let session = session_cell.into_inner();
 
-    // Handle Ctrl+C: save as Suspended so the session can be resumed later.
-    if matches!(exec_result, Err(CruiseError::Interrupted)) {
+    let overall_result = match exec_result {
+        Ok(exec) => {
+            logger.write(&format!(
+                "v completed -- run: {}, skipped: {}, failed: {}",
+                exec.run, exec.skipped, exec.failed
+            ));
+            match &execution_workspace {
+                ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
+                ExecutionWorkspace::Worktree { ctx, .. } => {
+                    tokio::select! {
+                        result = crate::worktree_pr::handle_worktree_pr(
+                            ctx,
+                            &compiled,
+                            &mut vars,
+                            &mut tracker,
+                            session,
+                            args.rate_limit_retries,
+                            args.max_retries,
+                            Some(&cancel_token),
+                        ) => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel_token.cancel();
+                            Err(CruiseError::Interrupted)
+                        },
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            logger.write(&format!("x failed: {}", e.detailed_message()));
+            Err(e)
+        }
+    };
+
+    // Handle Ctrl+C (during steps or PR creation): save as Suspended so the session can be resumed.
+    if matches!(overall_result, Err(CruiseError::Interrupted)) {
         logger.write("|| cancelled");
         eprintln!(
             "\n{} Interrupted -- session saved as Suspended.",
@@ -429,34 +463,6 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         manager.save(session)?;
         return Err(CruiseError::Interrupted);
     }
-
-    let overall_result = match exec_result {
-        Ok(exec) => {
-            logger.write(&format!(
-                "v completed -- run: {}, skipped: {}, failed: {}",
-                exec.run, exec.skipped, exec.failed
-            ));
-            match &execution_workspace {
-                ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
-                ExecutionWorkspace::Worktree { ctx, .. } => {
-                    crate::worktree_pr::handle_worktree_pr(
-                        ctx,
-                        &compiled,
-                        &mut vars,
-                        &mut tracker,
-                        session,
-                        args.rate_limit_retries,
-                        args.max_retries,
-                    )
-                    .await
-                }
-            }
-        }
-        Err(e) => {
-            logger.write(&format!("x failed: {}", e.detailed_message()));
-            Err(e)
-        }
-    };
 
     if let Err(e) = &overall_result
         && matches!(
