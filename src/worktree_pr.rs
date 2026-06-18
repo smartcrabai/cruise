@@ -729,6 +729,7 @@ mod tests {
             model: None,
             plan_model: None,
             env: HashMap::new(),
+            plan_language: "English".to_string(),
             pr_language: "English".to_string(),
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
