@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
@@ -1982,8 +1982,10 @@ export default function App() {
     toastTimersRef.current.set(id, timer);
   }, []);
 
-  selectedSessionRef.current = selectedSession;
-  sessionTabMapRef.current = sessionTabMap;
+  useLayoutEffect(() => {
+    selectedSessionRef.current = selectedSession;
+    sessionTabMapRef.current = sessionTabMap;
+  });
 
   const handleDeleteConfirmed = useCallback((sessionId: string) => {
     const prevSession = selectedSessionRef.current;
@@ -2107,7 +2109,7 @@ export default function App() {
         setRunAllState((prev) => {
           if (!prev) return prev;
           const { sessionId, input, phase, error } = event.data;
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
           const { [sessionId]: _finishedSession, ...remainingSessions } = prev.runningSessions;
           return {
             ...prev,
@@ -2212,7 +2214,23 @@ export default function App() {
 
   return (
     <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
-      <AskUserDialog />
+      <AskUserDialog
+        onAnswered={(sessionId) => {
+          if (selectedSessionRef.current?.id === sessionId) {
+            void getSession(sessionId)
+              .then((session) => {
+                // Re-check after the async fetch: user may have switched sessions.
+                if (selectedSessionRef.current?.id === sessionId) {
+                  setSelectedSession(session);
+                }
+              })
+              .catch((e) => {
+                console.error("Failed to refresh session after ask_user answer:", e);
+              });
+          }
+          sidebarRefreshRef.current?.();
+        }}
+      />
       <WorkflowToastStack toasts={toasts} onDismiss={dismissToast} />
       {showSettings && (
         <SettingsModal

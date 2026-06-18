@@ -66,23 +66,66 @@ impl<E: PlanEmitter> AskHandler for GuiAskHandler<E> {
                 .map_err(|e| CruiseError::Other(format!("ask_responder lock poisoned: {e}")))?;
             *guard = Some(tx);
         }
-        if let Ok(mut state) = self.manager.load(&self.session_id) {
-            state.phase = SessionPhase::AwaitingInput;
-            state.pending_ask_question = Some(question.to_string());
-            let _ = self.manager.save(&state);
+        match self.manager.load(&self.session_id) {
+            Ok(mut s)
+                if matches!(
+                    s.phase,
+                    SessionPhase::Draft
+                        | SessionPhase::AwaitingInput
+                        | SessionPhase::AwaitingApproval
+                ) =>
+            {
+                s.phase = SessionPhase::AwaitingInput;
+                s.pending_ask_question = Some(question.to_string());
+                if let Err(e) = self.manager.save(&s) {
+                    eprintln!(
+                        "[cruise] warn: failed to save ask state for {}: {e}",
+                        self.session_id
+                    );
+                }
+            }
+            Ok(_) => {
+                // Session has already terminated (Failed/Cancelled/Suspended/etc.);
+                // don't resurrect it.
+            }
+            Err(e) => {
+                eprintln!(
+                    "[cruise] warn: failed to load session {} to set ask state: {e}",
+                    self.session_id
+                );
+            }
         }
         self.emitter.emit(PlanEvent::AskUserRequired {
             session_id: self.session_id.clone(),
             question: question.to_string(),
         });
-        rx.blocking_recv().map_err(|_| CruiseError::Interrupted)
+        let answer = rx.blocking_recv().map_err(|_| CruiseError::Interrupted)?;
+        // Clear persisted ask state now that the answer has been received.
+        // This runs on the agent thread before the caller can advance the phase,
+        // eliminating the lost-update race that would occur if respond_to_ask_impl
+        // attempted a concurrent load-modify-save.
+        match self.manager.load(&self.session_id) {
+            Ok(mut s) if matches!(s.phase, SessionPhase::AwaitingInput) => {
+                s.pending_ask_question = None;
+                if let Err(e) = self.manager.save(&s) {
+                    eprintln!(
+                        "[cruise] warn: failed to clear ask state for {}: {e}",
+                        self.session_id
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(answer)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cruise::session::SessionState;
     use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
 
     struct RecordingEmitter {
         events: Arc<Mutex<Vec<PlanEvent>>>,
@@ -116,12 +159,23 @@ mod tests {
 
     #[test]
     fn ask_user_emits_event_and_returns_answer() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp.path().join(".cruise");
+        let manager = SessionManager::new(cruise_dir.clone());
+        let session = SessionState::new(
+            "sess-1".to_string(),
+            tmp.path().to_path_buf(),
+            "test".to_string(),
+            "test input".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e}"));
         let events = Arc::new(Mutex::new(Vec::new()));
         let emitter = RecordingEmitter {
             events: Arc::clone(&events),
         };
         let pending: AskResponder = Arc::new(Mutex::new(None));
-        let handler = GuiAskHandler::new(emitter, "sess-1".to_string(), Arc::clone(&pending));
+        let handler =
+            GuiAskHandler::new(emitter, "sess-1".to_string(), manager, Arc::clone(&pending));
 
         let responder = respond_async(Arc::clone(&pending), "JWT".to_string());
         let answer = handler.ask_user("JWT or sessions?");
@@ -140,15 +194,25 @@ mod tests {
             }
             other => panic!("expected AskUserRequired, got {other:?}"),
         }
+        drop(evs);
+        let saved = SessionManager::new(cruise_dir)
+            .load("sess-1")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(saved.phase, SessionPhase::AwaitingInput);
+        // ask_user clears pending_ask_question after the answer is received.
+        assert_eq!(saved.pending_ask_question, None);
     }
 
     #[test]
     fn ask_user_returns_interrupted_when_sender_dropped() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
         let emitter = RecordingEmitter {
             events: Arc::new(Mutex::new(Vec::new())),
         };
         let pending: AskResponder = Arc::new(Mutex::new(None));
-        let handler = GuiAskHandler::new(emitter, "sess-1".to_string(), Arc::clone(&pending));
+        let handler =
+            GuiAskHandler::new(emitter, "sess-1".to_string(), manager, Arc::clone(&pending));
 
         // Drop the sender without sending.
         let dropper = {

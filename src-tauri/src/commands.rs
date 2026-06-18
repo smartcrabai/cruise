@@ -473,11 +473,37 @@ pub fn respond_to_ask(
     session_id: String,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<(), String> {
-    if state.respond_to_ask(&session_id, answer) {
-        Ok(())
-    } else {
-        Err(format!("no pending ask_user for session {session_id}"))
-    }
+    respond_to_ask_impl(&state, &session_id, answer)
+}
+
+/// Testable core of `respond_to_ask`.
+///
+/// Ordering: take sender → send answer.
+///
+/// The sender is taken first so that a concurrent `respond_to_ask` call for the
+/// same session cannot steal it.  Persisted ask state (`pending_ask_question`,
+/// phase) is cleared by `GuiAskHandler::ask_user` once `blocking_recv` returns,
+/// keeping the entire load-modify-save on the agent thread and eliminating the
+/// lost-update race that would otherwise occur if this function and the agent
+/// thread both tried to write session state concurrently.
+///
+/// If `send` fails (the agent thread has already died) the persisted
+/// `pending_ask_question` is left intact — the user will see the question again
+/// on restart rather than entering a permanently-stuck state.
+pub(crate) fn respond_to_ask_impl(
+    state: &AppState,
+    session_id: &str,
+    answer: String,
+) -> std::result::Result<(), String> {
+    let sender = state
+        .take_ask_sender(session_id)
+        .ok_or_else(|| format!("no pending ask_user for session {session_id}"))?;
+
+    sender
+        .send(answer)
+        .map_err(|_| format!("ask_user answer channel closed for session {session_id}"))?;
+
+    Ok(())
 }
 
 /// Remove Completed sessions whose PR is closed or merged.
@@ -3660,5 +3686,64 @@ mod tests {
         assert_eq!(configs[0].name, "alpha.yaml");
         assert_eq!(configs[1].name, "middle.yml");
         assert_eq!(configs[2].name, "zebra.yaml");
+    }
+
+    // --- respond_to_ask_impl --------------------------------------------------
+
+    /// Helper: temp SessionManager with a session in AwaitingInput + pending question.
+    fn setup_awaiting_input_session(session_id: &str) -> (TempDir, SessionManager) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = cruise::session::SessionState::new(
+            session_id.to_string(),
+            repo,
+            "cruise.yaml".to_string(),
+            "test task".to_string(),
+        );
+        session.phase = SessionPhase::AwaitingInput;
+        session.pending_ask_question = Some("Which DB?".into());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        (tmp, manager)
+    }
+
+    #[test]
+    fn test_respond_to_ask_impl_delivers_answer() {
+        // Given: session in AwaitingInput with a registered ask slot and pending sender
+        let (_tmp, _manager) = setup_awaiting_input_session("20260618010000");
+        let state = AppState::new();
+        let responder = state.register_ask_responder("20260618010000");
+        let (tx, mut rx) = oneshot::channel::<String>();
+        *responder.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
+
+        // When: respond_to_ask_impl delivers the answer
+        let result = respond_to_ask_impl(&state, "20260618010000", "Postgres".to_string());
+
+        // Then: the call succeeds and the answer arrives at the waiting agent
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let received = rx
+            .try_recv()
+            .unwrap_or_else(|e| panic!("answer not delivered: {e}"));
+        assert_eq!(received, "Postgres");
+        // Note: clearing pending_ask_question is GuiAskHandler::ask_user's responsibility,
+        // tested separately in gui_ask_handler tests.
+    }
+
+    #[test]
+    fn test_respond_to_ask_impl_returns_error_when_no_pending_sender() {
+        // Given: session in AwaitingInput, responder slot registered but no sender installed
+        let (_tmp, _manager) = setup_awaiting_input_session("20260618010001");
+        let state = AppState::new();
+        state.register_ask_responder("20260618010001"); // slot empty — no oneshot sender
+
+        // When: respond_to_ask_impl is called without a waiting agent
+        let result = respond_to_ask_impl(&state, "20260618010001", "Postgres".to_string());
+
+        // Then: returns an error
+        assert!(
+            result.is_err(),
+            "expected Err when no pending sender, got: {result:?}"
+        );
     }
 }

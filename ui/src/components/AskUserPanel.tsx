@@ -52,7 +52,7 @@ export function AskUserPanel({ sessionId, question, onAnswered }: AskUserPanelPr
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
         }}
         className="w-full h-28 border border-gray-700 bg-gray-900 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
-        placeholder="Your answer… (⌘/Ctrl+Enter to send)"
+        placeholder="Your answer… (Cmd/Ctrl+Enter to send)"
         disabled={submitting}
       />
       {error && <p className="text-sm text-red-400">{error}</p>}

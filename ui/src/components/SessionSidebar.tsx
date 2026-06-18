@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "../lib/updater";
@@ -40,11 +40,17 @@ interface SessionSidebarProps {
 export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, runAllActive, onRefreshRef, onSelectedSessionUpdated: onSelectedSessionUpdatedProp, onSessionsChanged: onSessionsChangedProp, fixingSessionIds, onSettings, onOptimisticRemoveRef }: SessionSidebarProps) {
   // Stable refs so load() can access the latest props without re-creating itself
   const onSelectedSessionUpdatedRef = useRef(onSelectedSessionUpdatedProp);
-  onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
   const onSessionsChangedRef = useRef(onSessionsChangedProp);
-  onSessionsChangedRef.current = onSessionsChangedProp;
   const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
+  // Keep refs in sync with the latest props after every commit so that load()
+  // (which captures these refs in its closure) never sees stale prop values.
+  // Readers are effects and async callbacks — always post-commit — so the
+  // post-render timing of useLayoutEffect is safe here.
+  useLayoutEffect(() => {
+    onSelectedSessionUpdatedRef.current = onSelectedSessionUpdatedProp;
+    onSessionsChangedRef.current = onSessionsChangedProp;
+    selectedIdRef.current = selectedId;
+  });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,9 +69,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
   const load = useCallback(async (silent = false) => {
     if (inflightRef.current) return;
     inflightRef.current = true;
-    if (!silent) {
-      setLoading(true);
-    }
+    if (!silent) setLoading(true);
     try {
       const fetched = await listSessions();
       const sorted = [...fetched].sort((a, b) => {
@@ -102,7 +106,13 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
   }, []);
 
   useEffect(() => {
-    void load();
+    // queueMicrotask defers load() past the current synchronous work so that
+    // React Strict Mode's double-invocation of effects doesn't trigger two
+    // concurrent list fetches: the first invocation starts load(), sets
+    // inflightRef=true, then the effect cleanup runs and the second invocation
+    // schedules a microtask — by that time inflightRef is already true and the
+    // duplicate is dropped.
+    queueMicrotask(() => void load());
   }, [load]);
 
   useEffect(() => {
