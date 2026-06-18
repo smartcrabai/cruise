@@ -610,6 +610,7 @@ impl GuiPlanCtx {
             // Grill is opt-in per command: the initial-plan command (`create_session`)
             // may set it; regenerate/fix always pass `false`.
             grill,
+            cancel_token: None,
         };
         (
             Self {
@@ -1622,6 +1623,7 @@ pub(crate) async fn do_ask_session(
         working_dir: Some(&session.base_dir),
         // Grill mode is a CLI-only flag; the GUI uses the standard plan flow.
         grill: false,
+        cancel_token: None,
     };
     let result = cruise::planning::run_plan_prompt_template(
         &ctx,
@@ -1842,6 +1844,7 @@ async fn execute_single_session(
                     &mut session_for_pr,
                     5,
                     10,
+                    None,
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);
