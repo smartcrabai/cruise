@@ -1359,10 +1359,45 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
     );
   }
 
-  // Load configs and history-backed defaults on mount.
+  // Reactive listConfigs effect: re-fetch when source or working directory changes.
+  // Initial render and isRepoMode changes (in either direction) fire immediately;
+  // subsequent baseDir-only changes are debounced (200 ms) to avoid a round-trip
+  // on every keystroke.
+  const listConfigsIsFirstRef = useRef(true);
+  const listConfigsPrevRepoModeRef = useRef<boolean | null>(null);
   useEffect(() => {
     let active = true;
-    void listConfigs().then(setConfigs).catch(() => {});
+    const fetchConfigs = () => {
+      void listConfigs(isRepoMode ? {} : { baseDir: baseDir || "." })
+        .then((newConfigs) => {
+          if (!active) return;
+          setConfigs(newConfigs);
+          onDraftChange((prev) => {
+            if (prev.configPath !== "" && !newConfigs.some((c) => c.path === prev.configPath)) {
+              return { ...prev, configPath: "" };
+            }
+            return prev;
+          });
+        })
+        .catch(() => {
+          if (active) setConfigs([]);
+        });
+    };
+    const isFirst = listConfigsIsFirstRef.current;
+    const prevRepoMode = listConfigsPrevRepoModeRef.current;
+    listConfigsIsFirstRef.current = false;
+    listConfigsPrevRepoModeRef.current = isRepoMode;
+    if (isFirst || prevRepoMode !== isRepoMode) {
+      fetchConfigs();
+      return () => { active = false; };
+    }
+    const timer = setTimeout(fetchConfigs, 200);
+    return () => { active = false; clearTimeout(timer); };
+  }, [baseDir, isRepoMode, onDraftChange]);
+
+  // Load history-backed defaults on mount.
+  useEffect(() => {
+    let active = true;
     void refreshHistorySummary()
       .then((summary) => {
         if (!active || !summary) return;
@@ -1487,35 +1522,6 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
           </div>
         )}
 
-        {/* Config selector */}
-        <div className="space-y-1.5">
-          <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
-          <select
-            id="config-select"
-            value={configPath}
-            onChange={(e) => set("configPath", e.target.value)}
-            disabled={isGenerating}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
-          >
-            <option value="">Auto (repo / ~/.cruise / builtin)</option>
-            {configs.map((c) => (
-              <option key={c.path} value={c.path}>
-                {c.description ? `${c.name} — ${c.description}` : c.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Skip steps */}
-        {configSteps.length > 0 && (
-          <div className="space-y-1.5">
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</span>
-            <div className="space-y-1">
-              {configSteps.map((node) => renderStepNode(node, false))}
-            </div>
-          </div>
-        )}
-
         {/* Workspace source: local directory or GitHub repository clone */}
         <div className="space-y-1.5">
           <span className="text-xs text-gray-500 uppercase tracking-wide">Source</span>
@@ -1588,6 +1594,35 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Config selector */}
+        <div className="space-y-1.5">
+          <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
+          <select
+            id="config-select"
+            value={configPath}
+            onChange={(e) => set("configPath", e.target.value)}
+            disabled={isGenerating}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+          >
+            <option value="">Auto (repo / ~/.cruise / builtin)</option>
+            {configs.map((c) => (
+              <option key={c.path} value={c.path}>
+                {c.description ? `${c.name} — ${c.description}` : c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Skip steps */}
+        {configSteps.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</span>
+            <div className="space-y-1">
+              {configSteps.map((node) => renderStepNode(node, false))}
+            </div>
           </div>
         )}
 

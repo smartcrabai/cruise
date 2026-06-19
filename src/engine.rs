@@ -2949,7 +2949,7 @@ steps:
 command: [echo]
 steps:
   slow_step:
-    command: "sleep 1"
+    command: "sleep 10"
     timeout: "1"
   next_step:
     command: "echo continued"
