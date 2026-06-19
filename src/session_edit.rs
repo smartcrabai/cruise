@@ -245,7 +245,10 @@ mod tests {
 
         // Then: must reject with an error mentioning the phase
         assert!(result.is_err(), "Running phase should be rejected");
-        let msg = result.err().unwrap_or_else(|| panic!("expected Err")).to_string();
+        let msg = result
+            .err()
+            .unwrap_or_else(|| panic!("expected Err"))
+            .to_string();
         assert!(
             msg.contains("Running") || msg.contains("running"),
             "error should mention phase: {msg}"
@@ -362,7 +365,9 @@ mod tests {
 
         // Then: persisted to disk
         assert!(result.is_ok(), "should succeed: {:?}", result.err());
-        let reloaded = manager.load("20260619000008").unwrap_or_else(|e| panic!("{e:?}"));
+        let reloaded = manager
+            .load("20260619000008")
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             reloaded.skipped_steps,
             vec!["build".to_string(), "test".to_string()],
