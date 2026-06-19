@@ -824,7 +824,7 @@ fn flat_node_default_indices(flat: &[FlatNode], previously_skipped: &[String]) -
         .collect()
 }
 
-enum StepSkipSelection {
+pub(crate) enum StepSkipSelection {
     Confirmed(Vec<String>),
     Cancelled,
 }
@@ -833,7 +833,7 @@ enum StepSkipSelection {
 /// Returns [`StepSkipSelection::Cancelled`] when the user cancels or an
 /// interruption is received so the approve flow can continue unblocked.
 /// Steps that were previously skipped are pre-selected via `previously_skipped`.
-fn select_steps_to_skip(
+pub(crate) fn select_steps_to_skip(
     config: &WorkflowConfig,
     previously_skipped: &[String],
 ) -> Result<StepSkipSelection> {
@@ -1264,6 +1264,94 @@ pub async fn generate_plan_for_draft_session(
     Ok(())
 }
 
+/// Regenerate the plan for a session that is already past the Draft phase.
+///
+/// Unlike [`generate_plan_for_draft_session`], this function accepts sessions in
+/// `Draft | AwaitingInput | AwaitingApproval | Planned` phases. The phase
+/// transition after successful regeneration matches the GUI's `regenerate_plan`
+/// command (`src-tauri/src/commands.rs:1422-1427`):
+///
+/// - `Draft | AwaitingInput` → `AwaitingApproval`
+/// - `AwaitingApproval` → `AwaitingApproval` (no-op)
+/// - `Planned` → `Planned` (preserve approval; do NOT silently un-approve)
+pub async fn regenerate_plan_for_session(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    rate_limit_retries: usize,
+) -> Result<()> {
+    match &session.phase {
+        SessionPhase::Draft
+        | SessionPhase::AwaitingInput
+        | SessionPhase::AwaitingApproval
+        | SessionPhase::Planned => {}
+        other => {
+            return Err(CruiseError::Other(format!(
+                "expected Draft, AwaitingInput, AwaitingApproval, or Planned phase, got {}",
+                other.label()
+            )));
+        }
+    }
+
+    let original_phase = session.phase.clone();
+
+    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+        manager.save(session)?;
+    }
+    let config = manager.load_config(session)?;
+    // Save worktree context before planning; a Planned session already has an
+    // approved worktree that must survive a planning failure.
+    let saved_worktree_path = session.worktree_path.clone();
+    let saved_worktree_branch = session.worktree_branch.clone();
+    setup_planning_worktree(manager, session)?;
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+
+    let work_dir = plan_working_dir(session).to_path_buf();
+    let mut resume: Option<String> = None;
+    let ctx = cli_plan_ctx(
+        &config,
+        &plan_path,
+        Some(&work_dir),
+        std::io::stdin().is_terminal(),
+        rate_limit_retries,
+        false,
+        None,
+    );
+    generate_plan_markdown(&ctx, &mut vars, &mut resume)
+        .await
+        .inspect_err(|e| {
+            session.plan_error = Some(e.to_string());
+            if saved_worktree_path.is_none() {
+                // Worktree was freshly created for this planning attempt; clean it up.
+                cleanup_planning_worktree(session);
+                session.worktree_path = None;
+                session.worktree_branch = None;
+            } else {
+                // Restore the pre-existing approved worktree; do not delete it.
+                session.worktree_path = saved_worktree_path;
+                session.worktree_branch = saved_worktree_branch;
+            }
+            if let Err(save_err) = manager.save(session) {
+                eprintln!("warning: failed to persist plan error state: {save_err}");
+            }
+        })?;
+
+    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+
+    session.plan_error = None;
+    // Phase transition matching GUI's regenerate_plan (src-tauri/src/commands.rs:1422-1427):
+    // - Draft | AwaitingInput → AwaitingApproval
+    // - AwaitingApproval → AwaitingApproval (no-op)
+    // - Planned → Planned (preserve approval; do NOT silently un-approve)
+    session.phase = match original_phase {
+        SessionPhase::Draft | SessionPhase::AwaitingInput => SessionPhase::AwaitingApproval,
+        _ => original_phase,
+    };
+    manager.save(session)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,6 +1695,130 @@ steps:
         assert!(
             result.is_err(),
             "expected Err when title tool was not called"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // regenerate_plan_for_session — phase gate
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_running_phase_fails() {
+        // Given: a Running session — cannot regenerate while executing
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619200001", &repo);
+        session.phase = SessionPhase::Running;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: must return an error (not silently succeed or panic)
+        assert!(
+            result.is_err(),
+            "regenerate_plan_for_session should fail for Running phase"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_completed_phase_fails() {
+        // Given: a Completed session
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619200002", &repo);
+        session.phase = SessionPhase::Completed;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then
+        assert!(
+            result.is_err(),
+            "regenerate_plan_for_session should fail for Completed phase"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_suspended_phase_fails() {
+        // Given: a Suspended session
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619200003", &repo);
+        session.phase = SessionPhase::Suspended;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then
+        assert!(
+            result.is_err(),
+            "regenerate_plan_for_session should fail for Suspended phase"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_failed_phase_fails() {
+        // Given: a Failed session
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619200004", &repo);
+        session.phase = SessionPhase::Failed("prior error".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then
+        assert!(
+            result.is_err(),
+            "regenerate_plan_for_session should fail for Failed phase"
         );
     }
 }
