@@ -28,6 +28,7 @@ mod resolver;
 mod run_cmd;
 mod sdk_tools;
 mod session;
+mod session_edit;
 mod spinner;
 mod step;
 #[cfg(test)]

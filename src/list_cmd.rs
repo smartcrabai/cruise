@@ -239,6 +239,27 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
+                "Edit Settings" => {
+                    match edit_session_settings_interactive(
+                        &manager,
+                        &mut session,
+                        DEFAULT_RATE_LIMIT_RETRIES,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            if let Ok(reloaded) = manager.load(&session.id) {
+                                session = reloaded;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("{} Edit settings failed: {e}", style("✗").red());
+                            if let Ok(reloaded) = manager.load(&session.id) {
+                                session = reloaded;
+                            }
+                        }
+                    }
+                }
                 "Reset to Planned" => {
                     session.reset_to_planned();
                     manager.save(&session)?;
@@ -324,9 +345,11 @@ fn session_actions_with_plan_availability(
             if plan_available && session.plan_error.is_none() {
                 actions.push("Approve");
             }
+            actions.push("Edit Settings");
         }
         SessionPhase::Planned => {
             actions.push("Run");
+            actions.push("Edit Settings");
             actions.push("Replan");
         }
         SessionPhase::Running | SessionPhase::Suspended => {
@@ -352,6 +375,80 @@ fn session_actions_with_plan_availability(
 fn plan_available_for_session(session: &SessionState, manager: &SessionManager) -> bool {
     let plan_path = session.plan_path(&manager.sessions_dir());
     crate::metadata::plan_markdown_available(&plan_path)
+}
+
+async fn edit_session_settings_interactive(
+    manager: &SessionManager,
+    session: &mut crate::session::SessionState,
+    rate_limit_retries: usize,
+) -> crate::error::Result<()> {
+    use crate::session_edit::{SessionSettingsUpdate, update_session_settings};
+
+    // Load config to enumerate available step names for the multi-select.
+    let step_names: Vec<String> = match manager.load_config(session) {
+        Ok(config) => config.steps.keys().cloned().collect(),
+        Err(_) => vec![],
+    };
+
+    let skipped_steps = if step_names.is_empty() {
+        eprintln!("(no steps available from config — skipped_steps unchanged)");
+        session.skipped_steps.clone()
+    } else {
+        let defaults: Vec<usize> = step_names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| session.skipped_steps.contains(*name))
+            .map(|(i, _)| i)
+            .collect();
+        match inquire::MultiSelect::new("Steps to skip:", step_names)
+            .with_default(&defaults)
+            .prompt()
+        {
+            Ok(selected) => selected,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(CruiseError::Other(format!("selection error: {e}")));
+            }
+        }
+    };
+
+    // Keep the current explicit config path; changing config is not yet
+    // supported from the interactive picker.
+    let config_path = session
+        .config_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    let (updated, config_changed) = update_session_settings(
+        manager,
+        &session.id,
+        SessionSettingsUpdate {
+            config_path,
+            skipped_steps,
+        },
+    )?;
+    *session = updated;
+
+    if config_changed {
+        eprintln!("{} Config changed — regenerating plan…", style("->").cyan());
+        crate::platform::reclaim_terminal_foreground();
+        if let Err(e) =
+            crate::plan_cmd::regenerate_plan_for_session(manager, session, rate_limit_retries).await
+        {
+            eprintln!("{} Plan regeneration failed: {e}", style("✗").red());
+            if let Ok(reloaded) = manager.load(&session.id) {
+                *session = reloaded;
+            }
+        } else if let Ok(reloaded) = manager.load(&session.id) {
+            *session = reloaded;
+        }
+    } else {
+        eprintln!("{} Settings updated.", style("v").green());
+    }
+
+    Ok(())
 }
 
 fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
@@ -1009,7 +1106,7 @@ mod tests {
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
         assert_eq!(
             session_actions(&session),
-            vec!["Run", "Replan", "Delete", "Back"]
+            vec!["Run", "Edit Settings", "Replan", "Delete", "Back"]
         );
     }
 
@@ -1192,8 +1289,11 @@ mod tests {
         // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
-        // When / Then: order is Approve -> Delete -> Back
-        assert_eq!(session_actions(&session), vec!["Approve", "Delete", "Back"]);
+        // When / Then: order is Approve -> Edit Settings -> Delete -> Back
+        assert_eq!(
+            session_actions(&session),
+            vec!["Approve", "Edit Settings", "Delete", "Back"]
+        );
     }
 
     #[test]
@@ -1205,8 +1305,8 @@ mod tests {
         // When
         let actions = session_actions(&session);
 
-        // Then: approval stays gated until planning succeeds again
-        assert_eq!(actions, vec!["Delete", "Back"]);
+        // Then: approval stays gated until planning succeeds again; Edit Settings still present
+        assert_eq!(actions, vec!["Edit Settings", "Delete", "Back"]);
     }
 
     #[test]
@@ -1217,8 +1317,8 @@ mod tests {
         // When
         let actions = session_actions_with_plan_availability(&session, false);
 
-        // Then: approval stays hidden until a real plan exists
-        assert_eq!(actions, vec!["Delete", "Back"]);
+        // Then: approval stays hidden until a real plan exists; Edit Settings still present
+        assert_eq!(actions, vec!["Edit Settings", "Delete", "Back"]);
     }
 
     #[test]
@@ -1609,5 +1709,156 @@ mod tests {
         // Then: phase is "Draft" and phase_error is None
         assert_eq!(dto.phase, "Draft");
         assert_eq!(dto.phase_error, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // "Edit Settings" action availability
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_actions_awaiting_approval_includes_edit_settings() {
+        // Given: AwaitingApproval phase with a plan available
+        let session = make_session("20260619100000", "task", SessionPhase::AwaitingApproval);
+
+        // When
+        let actions = session_actions_with_plan_availability(&session, true);
+
+        // Then: "Edit Settings" is present so the user can change config/skip-steps after planning
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "AwaitingApproval should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_awaiting_approval_edit_settings_available_even_without_plan() {
+        // Given: AwaitingApproval phase but plan not yet available (still planning)
+        let session = make_session("20260619100001", "task", SessionPhase::AwaitingApproval);
+
+        // When
+        let actions = session_actions_with_plan_availability(&session, false);
+
+        // Then: "Edit Settings" is still present (skip-steps can be edited without a plan)
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "AwaitingApproval without plan should still have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_planned_includes_edit_settings() {
+        // Given: Planned phase
+        let session = make_session("20260619100002", "task", SessionPhase::Planned);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Planned should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_planned_edit_settings_does_not_replace_run_or_replan() {
+        // Given: Planned phase
+        let session = make_session("20260619100003", "task", SessionPhase::Planned);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" is additive — Run and Replan still exist
+        assert!(
+            actions.contains(&"Run"),
+            "Planned should still have 'Run': {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Replan"),
+            "Planned should still have 'Replan': {actions:?}"
+        );
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Planned should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_running_has_no_edit_settings() {
+        // Given: Running phase — session cannot be edited while executing
+        let session = make_session("20260619100004", "task", SessionPhase::Running);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Running should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_suspended_has_no_edit_settings() {
+        // Given: Suspended phase
+        let session = make_session("20260619100005", "task", SessionPhase::Suspended);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Suspended should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_failed_has_no_edit_settings() {
+        // Given: Failed phase
+        let session = make_session(
+            "20260619100006",
+            "task",
+            SessionPhase::Failed("error".to_string()),
+        );
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Failed should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_completed_has_no_edit_settings() {
+        // Given: Completed phase
+        let session = make_session("20260619100007", "task", SessionPhase::Completed);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Completed should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_draft_has_no_edit_settings() {
+        // Given: Draft phase — config editing is not meaningful before planning starts
+        let session = make_session("20260619100008", "task", SessionPhase::Draft);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Draft should NOT have 'Edit Settings': {actions:?}"
+        );
     }
 }
