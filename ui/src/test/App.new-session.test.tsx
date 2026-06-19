@@ -29,6 +29,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("../lib/commands", () => ({
   listSessions: vi.fn(),
   listConfigs: vi.fn(),
+  listGithubRepos: vi.fn(),
   createSession: vi.fn(),
   approveSession: vi.fn(),
   getSession: vi.fn(),
@@ -70,6 +71,7 @@ function setupNewSessionMocks() {
   vi.clearAllMocks();
   vi.mocked(commands.listSessions).mockResolvedValue([]);
   vi.mocked(commands.listConfigs).mockResolvedValue([]);
+  vi.mocked(commands.listGithubRepos).mockResolvedValue([]);
   vi.mocked(commands.getSessionLog).mockResolvedValue("");
   vi.mocked(commands.getSessionPlan).mockResolvedValue("");
   vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
@@ -1515,5 +1517,170 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     );
 
     vi.useRealTimers();
+  });
+});
+
+// --- listConfigs reactive refetch on source change ----------------------------
+
+describe("App: New Session -- listConfigs reacts to source changes", () => {
+  beforeEach(() => {
+    setupNewSessionMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+  });
+
+  it("calls listConfigs with { baseDir } when working directory is set on mount", async () => {
+    // Given: history provides a last working directory
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastWorkingDir: "/initial/project",
+      recentWorkingDirs: ["/initial/project"],
+    });
+
+    // When: the form is opened and async effects settle
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    vi.advanceTimersByTime(300); // allow debounce to fire
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: listConfigs is called with a baseDir argument
+    expect(commands.listConfigs).toHaveBeenCalledWith(
+      expect.objectContaining({ baseDir: expect.any(String) })
+    );
+  });
+
+  it("re-calls listConfigs with new baseDir after working directory input changes (debounced)", async () => {
+    // Given: form is open with initial baseDir
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastWorkingDir: "/old/project",
+      recentWorkingDirs: [],
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    vi.mocked(commands.listConfigs).mockClear();
+
+    // When: user types a new working directory
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    fireEvent.change(baseDirInput, { target: { value: "/new/project" } });
+
+    // Not called yet (debounce)
+    expect(commands.listConfigs).not.toHaveBeenCalled();
+
+    // After debounce fires
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: listConfigs is called with the new baseDir
+    expect(commands.listConfigs).toHaveBeenCalledWith(
+      expect.objectContaining({ baseDir: "/new/project" })
+    );
+  });
+
+  it("re-calls listConfigs immediately when source switches to repository mode", async () => {
+    // Given: form is open in directory mode
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    vi.mocked(commands.listConfigs).mockClear();
+
+    // When: user switches to repository mode
+    const repoRadio = screen.getByRole("radio", { name: "GitHub Repository" });
+    fireEvent.click(repoRadio);
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: listConfigs is called again (isRepoMode change is not debounced)
+    expect(commands.listConfigs).toHaveBeenCalled();
+  });
+
+  it("resets configPath to '' when the selected config disappears from the updated list", async () => {
+    // Given: form opens with a selected config, listConfigs initially returns that config
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/my/project/cruise.yaml", name: "cruise.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastRequestedConfigPath: "/my/project/cruise.yaml",
+      lastWorkingDir: "/my/project",
+      recentWorkingDirs: [],
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Config should be selected from history; configs list loaded from initial immediate call.
+    expect(screen.getByLabelText("Config")).toHaveValue("/my/project/cruise.yaml");
+
+    // When: working directory changes and the new list no longer contains the selected config
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    fireEvent.change(baseDirInput, { target: { value: "/other/project" } });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: config select is reset to "" (Auto)
+    expect(screen.getByLabelText("Config")).toHaveValue("");
+  });
+});
+
+// --- New Session form DOM order -----------------------------------------------
+
+describe("App: New Session -- form section order", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders Source section before Config section in the form", async () => {
+    // When: the New Session form is open
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Then: the Source radiogroup appears before the Config select in document order
+    const sourceSection = screen.getByRole("radiogroup", { name: "Workspace source" });
+    const configSelect = screen.getByLabelText("Config");
+    const order = sourceSection.compareDocumentPosition(configSelect);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders Working Directory input before Config section in the form", async () => {
+    // When: the New Session form is open in directory mode (default)
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Then: the Working Directory input appears before the Config select in document order
+    const baseDirInput = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    const configSelect = screen.getByLabelText("Config");
+    const order = baseDirInput.compareDocumentPosition(configSelect);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders Config section before Task input in the form", async () => {
+    // When: the New Session form is open
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Then: the Config select appears before the Task textarea in document order
+    const configSelect = screen.getByLabelText("Config");
+    const taskInput = screen.getByPlaceholderText("Describe what you want to implement...");
+    const order = configSelect.compareDocumentPosition(taskInput);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

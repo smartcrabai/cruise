@@ -168,9 +168,16 @@ export function listGithubRepos(): Promise<string[]> {
 
 // ─── Session creation ─────────────────────────────────────────────────────────
 
-/** List workflow config files in ~/.cruise/. */
-export function listConfigs(): Promise<ConfigEntry[]> {
-  return invoke<ConfigEntry[]>("list_configs");
+/** List workflow config files.
+ *
+ * When `baseDir` is provided and `repo` is absent, local configs from the working directory
+ * are included first. When `repo` is provided (repo mode), only user-dir configs are returned.
+ */
+export function listConfigs(params?: { baseDir?: string; repo?: string }): Promise<ConfigEntry[]> {
+  return invoke<ConfigEntry[]>("list_configs", {
+    baseDir: params?.baseDir ?? null,
+    repo: params?.repo ?? null,
+  });
 }
 
 /** Return persisted defaults for the New Session form. */

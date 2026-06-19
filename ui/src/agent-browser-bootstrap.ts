@@ -179,6 +179,8 @@ mockIPC((cmd, payload?: unknown) => {
     case "get_session_log":
       return "";
     case "list_configs":
+      // baseDir and repo are accepted in the payload but ignored in the browser demo;
+      // the fixed list simulates user-dir configs only.
       return [
         {
           name: "team.yaml",

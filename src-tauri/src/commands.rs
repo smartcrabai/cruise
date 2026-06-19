@@ -728,12 +728,96 @@ fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
     configs
 }
 
-/// List available workflow config files in `$XDG_CONFIG_HOME/cruise/`
-/// (defaulting to `~/.config/cruise/`).
+/// Return local config candidates from `base_dir` in resolver priority order:
+/// 1. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` at root (in that order).
+/// 2. All YAML files inside `.cruise/` (ASCII-sorted).
+///
+/// Files that do not exist are silently skipped.
+fn collect_local_configs(base_dir: &std::path::Path) -> Vec<ConfigEntryDto> {
+    let mut configs = Vec::new();
+
+    // 1. Root-level priority files in resolver order.
+    for name in &["cruise.yaml", "cruise.yml", ".cruise.yaml", ".cruise.yml"] {
+        let path = base_dir.join(name);
+        if path.is_file() {
+            let description = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|yaml| cruise::yaml_metadata::extract_one_line_description(&yaml));
+            configs.push(ConfigEntryDto {
+                name: (*name).to_string(),
+                path: path.to_string_lossy().into_owned(),
+                description,
+            });
+        }
+    }
+
+    // 2. Files inside `.cruise/` (ASCII-sorted via read_configs_in).
+    let cruise_dir = base_dir.join(".cruise");
+    if cruise_dir.is_dir() {
+        configs.extend(read_configs_in(&cruise_dir));
+    }
+
+    configs
+}
+
+/// Collect configs for the GUI from all sources in priority order:
+/// local (from `base_dir`) → user-dir.
+///
+/// When `is_repo_mode` is true or `base_dir` is `None`, only user-dir configs are returned.
+/// Duplicate absolute paths (e.g., symlinked files) are removed, keeping the first occurrence.
+fn collect_configs_for_gui(
+    base_dir: Option<&std::path::Path>,
+    is_repo_mode: bool,
+    user_dir: &std::path::Path,
+) -> Vec<ConfigEntryDto> {
+    let local_entries: Vec<ConfigEntryDto> = if !is_repo_mode {
+        base_dir.map(collect_local_configs).unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let user_entries = read_configs_in(user_dir);
+
+    let mut configs = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for entry in local_entries.into_iter().chain(user_entries) {
+        let canonical = std::path::Path::new(&entry.path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&entry.path));
+        if seen.insert(canonical) {
+            configs.push(entry);
+        }
+    }
+
+    configs
+}
+
+/// List available workflow config files.
+///
+/// When `base_dir` is provided and `repo` is `None`, local configs from the working directory
+/// are included first (in resolver priority order), followed by user-dir configs.
+/// When `base_dir` is absent, only user-dir configs are returned.
+///
+/// Note: `repo` is reserved for future repo-mode filtering but the current frontend always
+/// passes `null`; `is_repo_mode` is therefore always `false` in practice.
 #[tauri::command]
-pub fn list_configs() -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let config_dir = paths::config_dir().map_err(|e| e.to_string())?;
-    Ok(read_configs_in(&config_dir))
+pub fn list_configs(
+    base_dir: Option<String>,
+    repo: Option<String>,
+) -> std::result::Result<Vec<ConfigEntryDto>, String> {
+    let user_config_dir = cruise::paths::config_dir().map_err(|e| e.to_string())?;
+    let is_repo_mode = repo.is_some();
+
+    let normalized_base_dir = base_dir
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .map(|d| PathBuf::from(expand_tilde(d)));
+
+    Ok(collect_configs_for_gui(
+        normalized_base_dir.as_deref(),
+        is_repo_mode,
+        &user_config_dir,
+    ))
 }
 
 /// Create a new session and generate a plan, streaming [`PlanEvent`]s over `channel`.
@@ -3684,6 +3768,214 @@ mod tests {
         assert_eq!(configs[0].name, "alpha.yaml");
         assert_eq!(configs[1].name, "middle.yml");
         assert_eq!(configs[2].name, "zebra.yaml");
+    }
+
+    // ---- collect_local_configs ----
+
+    #[test]
+    fn test_collect_local_configs_includes_cruise_yaml_at_root() {
+        // Given: base_dir contains cruise.yaml
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("cruise.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: cruise.yaml is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "cruise.yaml");
+    }
+
+    #[test]
+    fn test_collect_local_configs_includes_cruise_yml_at_root() {
+        // Given: base_dir contains cruise.yml (alternative extension)
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("cruise.yml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: cruise.yml is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "cruise.yml");
+    }
+
+    #[test]
+    fn test_collect_local_configs_includes_files_in_dot_cruise_subdir() {
+        // Given: base_dir has .cruise/foo.yaml
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = dir.path().join(".cruise");
+        fs::create_dir(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            cruise_dir.join("foo.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: foo.yaml from .cruise/ is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "foo.yaml");
+    }
+
+    #[test]
+    fn test_collect_local_configs_ordering_root_file_before_cruise_subdir() {
+        // Given: base_dir has both cruise.yaml at root and .cruise/bar.yaml
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            dir.path().join("cruise.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = dir.path().join(".cruise");
+        fs::create_dir(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            cruise_dir.join("bar.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: root cruise.yaml comes before .cruise/bar.yaml
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "cruise.yaml");
+        assert_eq!(configs[1].name, "bar.yaml");
+    }
+
+    #[test]
+    fn test_collect_local_configs_cruise_subdir_files_sorted_alphabetically() {
+        // Given: .cruise/ contains multiple files in non-alphabetical order
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = dir.path().join(".cruise");
+        fs::create_dir(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        for name in &["zzz.yaml", "aaa.yaml", "mmm.yml"] {
+            fs::write(
+                cruise_dir.join(name),
+                "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: files inside .cruise/ are sorted alphabetically
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].name, "aaa.yaml");
+        assert_eq!(configs[1].name, "mmm.yml");
+        assert_eq!(configs[2].name, "zzz.yaml");
+    }
+
+    #[test]
+    fn test_collect_local_configs_empty_base_dir_returns_empty() {
+        // Given: base_dir has no relevant files
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting local configs
+        let configs = collect_local_configs(dir.path());
+
+        // Then: empty result
+        assert!(configs.is_empty());
+    }
+
+    // ---- collect_configs_for_gui ----
+
+    #[test]
+    fn test_collect_configs_for_gui_local_configs_come_before_user_dir() {
+        // Given: base_dir has cruise.yaml, user_dir has user.yaml
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let user = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            base.path().join("cruise.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            user.path().join("user.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting all configs (non-repo mode)
+        let configs = collect_configs_for_gui(Some(base.path()), false, user.path());
+
+        // Then: local cruise.yaml comes first, then user.yaml
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "cruise.yaml");
+        assert_eq!(configs[1].name, "user.yaml");
+    }
+
+    #[test]
+    fn test_collect_configs_for_gui_repo_mode_skips_local_configs() {
+        // Given: base_dir has cruise.yaml, user_dir has user.yaml, is_repo_mode=true
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let user = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            base.path().join("cruise.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            user.path().join("user.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting configs in repo mode
+        let configs = collect_configs_for_gui(Some(base.path()), true, user.path());
+
+        // Then: only user.yaml is returned (no local configs)
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "user.yaml");
+    }
+
+    #[test]
+    fn test_collect_configs_for_gui_no_base_dir_returns_only_user_dir() {
+        // Given: no base_dir, user_dir has user.yaml
+        let user = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            user.path().join("user.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: collecting configs without a base_dir
+        let configs = collect_configs_for_gui(None, false, user.path());
+
+        // Then: only user.yaml is returned
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "user.yaml");
+    }
+
+    #[test]
+    fn test_collect_configs_for_gui_deduplicates_same_absolute_path() {
+        // Given: base_dir and user_dir are the same directory, containing cruise.yaml
+        let shared = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            shared.path().join("cruise.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: base_dir == user_dir (simulates symlinked user config in project)
+        let configs = collect_configs_for_gui(Some(shared.path()), false, shared.path());
+
+        // Then: cruise.yaml appears only once despite being reachable from both paths
+        let count = configs.iter().filter(|c| c.name == "cruise.yaml").count();
+        let names: Vec<_> = configs.iter().map(|c| &c.name).collect();
+        assert_eq!(count, 1, "duplicate found: {names:?}");
     }
 
     // --- respond_to_ask_impl --------------------------------------------------
