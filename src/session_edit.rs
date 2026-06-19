@@ -14,6 +14,11 @@ pub struct SessionSettingsUpdate {
 /// Returns `(updated_state, config_changed)`. `config_changed` is true only when
 /// the requested config path differs from what was stored before the call — callers
 /// can use this to decide whether to regenerate the plan.
+///
+/// # Errors
+///
+/// Returns an error if the session cannot be loaded, the phase is not editable,
+/// the config path cannot be resolved, or the config YAML is invalid.
 pub fn update_session_settings(
     manager: &SessionManager,
     session_id: &str,
@@ -112,7 +117,7 @@ mod tests {
             dir.join("cruise.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     // --- Phase gating ---
@@ -121,16 +126,16 @@ mod tests {
     fn test_update_session_settings_draft_phase_succeeds() {
         // Given: a Draft session with a config file in its base dir
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000001", &repo);
         session.phase = SessionPhase::Draft;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -154,16 +159,16 @@ mod tests {
     fn test_update_session_settings_awaiting_approval_phase_succeeds() {
         // Given: an AwaitingApproval session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000002", &repo);
         session.phase = SessionPhase::AwaitingApproval;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -187,15 +192,15 @@ mod tests {
     fn test_update_session_settings_planned_phase_succeeds() {
         // Given: a Planned session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let session = make_session("20260619000003", &repo);
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -219,14 +224,14 @@ mod tests {
     fn test_update_session_settings_running_phase_fails_with_phase_message() {
         // Given: a Running session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000004", &repo);
         session.phase = SessionPhase::Running;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -240,7 +245,7 @@ mod tests {
 
         // Then: must reject with an error mentioning the phase
         assert!(result.is_err(), "Running phase should be rejected");
-        let msg = result.unwrap_err().to_string();
+        let msg = result.err().unwrap_or_else(|| panic!("expected Err")).to_string();
         assert!(
             msg.contains("Running") || msg.contains("running"),
             "error should mention phase: {msg}"
@@ -251,14 +256,14 @@ mod tests {
     fn test_update_session_settings_suspended_phase_fails() {
         // Given: a Suspended session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000005", &repo);
         session.phase = SessionPhase::Suspended;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -278,14 +283,14 @@ mod tests {
     fn test_update_session_settings_failed_phase_fails() {
         // Given: a Failed session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000006", &repo);
         session.phase = SessionPhase::Failed("boom".to_string());
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -305,14 +310,14 @@ mod tests {
     fn test_update_session_settings_completed_phase_fails() {
         // Given: a Completed session
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000007", &repo);
         session.phase = SessionPhase::Completed;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -334,16 +339,16 @@ mod tests {
     fn test_update_session_settings_skipped_steps_persisted_on_disk() {
         // Given: a Planned session with no skipped steps
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000008", &repo);
         session.skipped_steps = vec![];
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let result = update_session_settings(
@@ -357,7 +362,7 @@ mod tests {
 
         // Then: persisted to disk
         assert!(result.is_ok(), "should succeed: {:?}", result.err());
-        let reloaded = manager.load("20260619000008").unwrap();
+        let reloaded = manager.load("20260619000008").unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             reloaded.skipped_steps,
             vec!["build".to_string(), "test".to_string()],
@@ -371,16 +376,16 @@ mod tests {
     fn test_update_session_settings_config_changed_false_for_skip_only_edit() {
         // Given: a Planned session whose config_path is already None (builtin)
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000009", &repo);
         session.config_path = None;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: only skipped_steps change, config_path stays None (same auto-resolved result)
         let (_, config_changed) = update_session_settings(
@@ -391,7 +396,7 @@ mod tests {
                 skipped_steps: vec!["lint".to_string()],
             },
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: config did not change — no regen needed
         assert!(
@@ -404,10 +409,10 @@ mod tests {
     fn test_update_session_settings_config_changed_true_when_explicit_path_given() {
         // Given: a Planned session with no explicit config (uses repo local cruise.yaml)
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         // Second config file to switch to
@@ -416,12 +421,12 @@ mod tests {
             &alt_config,
             "command: [local]\nsteps:\n  s:\n    command: echo alt",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000010", &repo);
         session.config_path = None;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: an explicit config path is provided (different from the previously resolved one)
         let (_, config_changed) = update_session_settings(
@@ -432,7 +437,7 @@ mod tests {
                 skipped_steps: vec![],
             },
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: config path changed — caller should regenerate plan
         assert!(
@@ -447,16 +452,16 @@ mod tests {
     fn test_update_session_settings_writes_session_config_yaml_for_builtin_config() {
         // Given: a Planned session using the builtin config (config_path = None)
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000011", &repo);
         session.config_path = None;
-        manager.create(&session).unwrap();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: update with config_path = None (stays builtin / auto-resolved)
         let result = update_session_settings(

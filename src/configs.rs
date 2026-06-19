@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_list_configs_in_empty_directory_returns_empty() {
         // Given: an empty directory
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -116,22 +116,22 @@ mod tests {
     #[test]
     fn test_list_configs_in_returns_yaml_files_sorted_by_name() {
         // Given: a directory with yaml files in non-alphabetical creation order
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("zebra.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo z",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("alpha.yml"),
             "command: [local]\nsteps:\n  s:\n    command: echo a",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("beta.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo b",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -144,15 +144,15 @@ mod tests {
     #[test]
     fn test_list_configs_in_ignores_non_yaml_files() {
         // Given: a directory containing yaml and non-yaml files
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("valid.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
-        fs::write(tmp.path().join("README.md"), "# docs").unwrap();
-        fs::write(tmp.path().join("script.sh"), "#!/bin/bash").unwrap();
-        fs::write(tmp.path().join("config.toml"), "[foo]").unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("README.md"), "# docs").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("script.sh"), "#!/bin/bash").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("config.toml"), "[foo]").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -165,12 +165,12 @@ mod tests {
     #[test]
     fn test_list_configs_in_extracts_description_from_yaml_metadata() {
         // Given: a yaml file with a one-line description comment
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("with-desc.yaml"),
             "# My workflow description\ncommand: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -186,12 +186,12 @@ mod tests {
     #[test]
     fn test_list_configs_in_description_is_none_for_file_without_comment() {
         // Given: a yaml file without a leading comment
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("no-desc.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -207,12 +207,12 @@ mod tests {
     #[test]
     fn test_list_configs_in_path_field_is_absolute() {
         // Given: a directory with a yaml file
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             tmp.path().join("cfg.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_configs_in(tmp.path());
@@ -232,16 +232,16 @@ mod tests {
     fn test_list_user_configs_reads_from_xdg_config_home() {
         // Given: XDG_CONFIG_HOME set to a temp dir with a yaml file
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
 
         let cruise_config_dir = tmp.path().join(".config").join("cruise");
-        fs::create_dir_all(&cruise_config_dir).unwrap();
+        fs::create_dir_all(&cruise_config_dir).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             cruise_config_dir.join("my-workflow.yaml"),
             "command: [local]\nsteps:\n  s:\n    command: echo ok",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When
         let entries = list_user_configs();
@@ -255,7 +255,7 @@ mod tests {
     fn test_list_user_configs_returns_empty_when_config_dir_missing() {
         // Given: a fake HOME with no .config/cruise directory
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
 
         // When
