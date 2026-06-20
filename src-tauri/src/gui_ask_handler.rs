@@ -5,13 +5,19 @@
 //! [`PlanEvent::AskUserRequired`] to the frontend and blocks the calling thread
 //! until the frontend replies via the `respond_to_ask` command.
 //!
-//! The tool closure runs on seher's dedicated pi worker thread, so `blocking_recv`
-//! here does not starve the async runtime that drives the plan command.
+//! Uses [`std::sync::mpsc`] for the answer channel rather than
+//! `tokio::sync::oneshot`. The tool closure may run inside a tokio runtime —
+//! `seher::claude_agent::stream_agent` drives the CLI on a dedicated
+//! current-thread runtime, and the toolbox handler is awaited inline on that
+//! runtime — so `tokio::sync::oneshot::Receiver::blocking_recv()` would panic
+//! with "Cannot block the current thread from within a runtime". `std::sync::mpsc`
+//! has no tokio thread-local dependency and parks the OS thread directly,
+//! which is what we want here: the runtime has nothing else useful to do until
+//! the user answers.
 
 use cruise::ask_handler::AskHandler;
 use cruise::error::{CruiseError, Result};
 use cruise::session::{SessionManager, SessionPhase};
-use tokio::sync::oneshot;
 
 use crate::events::PlanEvent;
 use crate::state::AskResponder;
@@ -58,7 +64,7 @@ impl<E: PlanEmitter> GuiAskHandler<E> {
 
 impl<E: PlanEmitter> AskHandler for GuiAskHandler<E> {
     fn ask_user(&self, question: &str) -> Result<String> {
-        let (tx, rx) = oneshot::channel::<String>();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         {
             let mut guard = self
                 .pending
@@ -99,7 +105,7 @@ impl<E: PlanEmitter> AskHandler for GuiAskHandler<E> {
             session_id: self.session_id.clone(),
             question: question.to_string(),
         });
-        let answer = rx.blocking_recv().map_err(|_| CruiseError::Interrupted)?;
+        let answer = rx.recv().map_err(|_| CruiseError::Interrupted)?;
         // Clear persisted ask state now that the answer has been received.
         // This runs on the agent thread before the caller can advance the phase,
         // eliminating the lost-update race that would occur if respond_to_ask_impl
@@ -201,6 +207,61 @@ mod tests {
         assert_eq!(saved.phase, SessionPhase::AwaitingInput);
         // ask_user clears pending_ask_question after the answer is received.
         assert_eq!(saved.pending_ask_question, None);
+    }
+
+    /// Regression: `ask_user` must not panic when invoked from inside a tokio
+    /// runtime. `seher::claude_agent::stream_agent` drives the CLI on a
+    /// dedicated current-thread runtime and awaits its toolbox handler inline
+    /// on that runtime; the previous implementation called
+    /// `tokio::sync::oneshot::Receiver::blocking_recv()` from the tool closure,
+    /// which panics with "Cannot block the current thread from within a
+    /// runtime" in that context. The user-visible symptom was that the
+    /// planning task aborted before the user answered, the `GuiPlanCtx` was
+    /// dropped, the ask slot got unregistered, and the frontend's eventual
+    /// `respond_to_ask` failed with "no pending ask_user".
+    #[test]
+    fn ask_user_does_not_panic_inside_tokio_runtime() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp.path().join(".cruise");
+        let manager = SessionManager::new(cruise_dir);
+        let session = SessionState::new(
+            "sess-1".to_string(),
+            tmp.path().to_path_buf(),
+            "test".to_string(),
+            "test input".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e}"));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let emitter = RecordingEmitter {
+            events: Arc::clone(&events),
+        };
+        let pending: AskResponder = Arc::new(Mutex::new(None));
+        let handler =
+            GuiAskHandler::new(emitter, "sess-1".to_string(), manager, Arc::clone(&pending));
+
+        // Sender thread lives outside the runtime so the runtime can block.
+        let responder = respond_async(Arc::clone(&pending), "JWT".to_string());
+
+        // Mimic claude_agent: a dedicated thread running a current-thread tokio
+        // runtime whose spawned task drives the sync tool handler inline (the
+        // toolbox's `handle` awaits `(tool.handler)(args)` synchronously).
+        let agent_thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|e| panic!("{e}"));
+            rt.block_on(async move {
+                tokio::spawn(async move { handler.ask_user("q?") })
+                    .await
+                    .unwrap_or_else(|e| panic!("agent task panicked: {e}"))
+            })
+        });
+
+        let answer = agent_thread
+            .join()
+            .unwrap_or_else(|e| panic!("agent thread panicked: {e:?}"));
+        responder.join().unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(answer.unwrap_or_else(|e| panic!("{e}")), "JWT");
     }
 
     #[test]

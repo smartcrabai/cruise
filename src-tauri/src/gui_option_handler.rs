@@ -4,7 +4,6 @@ use cruise::error::Result;
 use cruise::option_handler::OptionHandler;
 use cruise::step::OptionChoice;
 use cruise::step::option::OptionResult;
-use tokio::sync::oneshot;
 
 use crate::events::{ChoiceDto, ChoiceKind, WorkflowEvent};
 
@@ -19,24 +18,30 @@ pub trait EventEmitter: Send + Sync {
 /// GUI implementation of [`OptionHandler`].
 ///
 /// When `select_option` is called by the engine:
-/// 1. Stores a `oneshot::Sender` in `pending_response` (shared with `respond_to_option` command).
+/// 1. Stores a `std::sync::mpsc::Sender` in `pending_response` (shared with the
+///    `respond_to_option` command).
 /// 2. Emits a [`WorkflowEvent::OptionRequired`] to the frontend via the emitter.
 /// 3. Blocks the current thread until the frontend responds via `respond_to_option`.
 ///
-/// The engine must be invoked on a blocking thread (e.g. `tokio::task::spawn_blocking`)
-/// so that `blocking_recv()` does not starve the async runtime.
+/// Uses [`std::sync::mpsc`] rather than `tokio::sync::oneshot`. `select_option`
+/// is invoked synchronously by the async engine, which the GUI drives via
+/// `tokio::runtime::Handle::current().block_on(...)` inside a `spawn_blocking`
+/// task — that enters a tokio runtime context on the thread, so
+/// `tokio::sync::oneshot::Receiver::blocking_recv()` would panic with "Cannot
+/// block the current thread from within a runtime". `std::sync::mpsc::Receiver`
+/// has no tokio thread-local dependency and just parks the OS thread.
 pub struct GuiOptionHandler<E: EventEmitter> {
     emitter: Arc<E>,
     request_id: String,
     /// Shared slot between this handler and the `respond_to_option` IPC command.
-    pub pending_response: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+    pub pending_response: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
 }
 
 impl<E: EventEmitter> GuiOptionHandler<E> {
     pub fn new(
         emitter: Arc<E>,
         request_id: String,
-        pending_response: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+        pending_response: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
     ) -> Self {
         Self {
             emitter,
@@ -78,7 +83,7 @@ fn choices_to_dtos(choices: &[OptionChoice]) -> Vec<ChoiceDto> {
 
 impl<E: EventEmitter> OptionHandler for GuiOptionHandler<E> {
     fn select_option(&self, choices: &[OptionChoice], plan: Option<&str>) -> Result<OptionResult> {
-        let (tx, rx) = oneshot::channel::<OptionResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<OptionResult>();
 
         {
             let mut guard = self
@@ -100,7 +105,7 @@ impl<E: EventEmitter> OptionHandler for GuiOptionHandler<E> {
             plan: plan.map(str::to_owned),
         });
 
-        rx.blocking_recv()
+        rx.recv()
             .map_err(|_| cruise::error::CruiseError::Interrupted)
     }
 }
@@ -142,14 +147,14 @@ mod tests {
 
     fn make_handler(
         emitter: Arc<RecordingEmitter>,
-        pending: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+        pending: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
     ) -> GuiOptionHandler<RecordingEmitter> {
         GuiOptionHandler::new(emitter, "test-req-id".to_string(), pending)
     }
 
     /// Spawns a thread that polls `pending` until a sender is available, then sends `result`.
     fn respond_async(
-        pending: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+        pending: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
         result: OptionResult,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
@@ -170,7 +175,7 @@ mod tests {
     /// Spawns a thread that polls `pending` until a sender is available, then drops it
     /// (simulates a lost connection / cancelled dialog).
     fn drop_sender_async(
-        pending: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+        pending: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             loop {
@@ -300,6 +305,44 @@ mod tests {
         let result = result.unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
         assert_eq!(result.next_step, Some("my_step".to_string()));
         assert_eq!(result.text_input, Some("user input".to_string()));
+    }
+
+    /// Regression: `select_option` must not panic when invoked from inside a
+    /// tokio runtime. The GUI runs the engine inside
+    /// `tokio::task::spawn_blocking` and then `Handle::current().block_on(...)`
+    /// drives `execute_steps`, which puts the thread into a tokio runtime
+    /// context. The previous implementation called
+    /// `tokio::sync::oneshot::Receiver::blocking_recv()` from the sync option
+    /// handler, which panics with "Cannot block the current thread from within
+    /// a runtime" in that context.
+    #[test]
+    fn test_select_option_does_not_panic_inside_tokio_runtime() {
+        let emitter = Arc::new(RecordingEmitter::new());
+        let pending = Arc::new(Mutex::new(None));
+        let handler = make_handler(Arc::clone(&emitter), Arc::clone(&pending));
+        let responder = respond_async(
+            Arc::clone(&pending),
+            OptionResult {
+                next_step: Some("done".to_string()),
+                text_input: None,
+            },
+        );
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|e| panic!("{e}"));
+            rt.block_on(async move {
+                tokio::spawn(async move { handler.select_option(&[], None) })
+                    .await
+                    .unwrap_or_else(|e| panic!("agent task panicked: {e}"))
+            })
+        })
+        .join()
+        .unwrap_or_else(|e| panic!("agent thread panicked: {e:?}"));
+        responder.join().unwrap_or_else(|e| panic!("{e:?}"));
+        let result = result.unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        assert_eq!(result.next_step.as_deref(), Some("done"));
     }
 
     #[test]
