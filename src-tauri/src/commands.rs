@@ -895,6 +895,9 @@ pub async fn create_session(
         source.path().cloned()
     };
     session.skipped_steps = skipped_steps;
+    if !use_input_as_plan {
+        session.phase = SessionPhase::Draft;
+    }
     if let Err(e) = manager.create(&session) {
         remove_session_clone(&manager, &session_id);
         return Err(e.to_string());
@@ -995,6 +998,7 @@ pub async fn create_session(
         }
     }
 
+    let _fixing_guard = FixingGuard::new(&state, session_id.clone());
     let _ = channel.send(PlanEvent::SessionCreated {
         session_id: session_id.clone(),
     });
@@ -1052,6 +1056,24 @@ pub async fn create_session(
                 }
             };
             log_plan_success(&plan_logger, "plan generated");
+            session.phase = SessionPhase::AwaitingApproval;
+            session.plan_error = None;
+            session.pending_ask_question = None;
+            if let Err(e) = manager.save(&session) {
+                let msg = e.to_string();
+                log_plan_failure(
+                    &plan_logger,
+                    &format!("phase transition failed after successful plan: {msg}"),
+                );
+                let _ = manager.delete(&session_id);
+                remove_session_clone(&manager, &session_id);
+                let _ = channel.send(PlanEvent::PlanFailed {
+                    session_id: session_id.clone(),
+                    error: msg.clone(),
+                });
+                return Err(msg);
+            }
+            drop(_fixing_guard);
             let _ = channel.send(PlanEvent::PlanGenerated {
                 session_id: session_id.clone(),
                 content: content.clone(),
