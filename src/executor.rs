@@ -292,14 +292,13 @@ fn spawn_agent_stream(
         "claude-headless" => {
             // `claude -p` subprocess. Cannot run custom tools; `require_tools`
             // in [`run_sdk`] guarantees `req.tools` is empty here.
-            let runner = seher::claude_headless::ClaudeHeadlessRunner::new(
-                seher::claude_headless::ClaudeHeadlessRunnerConfig {
-                    model: Some(resolved.model_id.clone()),
-                    cwd: cwd_string,
-                    resume_session_id: req.resume.clone(),
-                    ..Default::default()
-                },
-            );
+            // ClaudeHeadlessRunnerConfig is #[non_exhaustive] in seher-sdk
+            // 0.0.45+, so we can't use struct-literal syntax across crates.
+            let mut headless_cfg = seher::claude_headless::ClaudeHeadlessRunnerConfig::default();
+            headless_cfg.model = Some(resolved.model_id.clone());
+            headless_cfg.cwd = cwd_string;
+            headless_cfg.resume_session_id = req.resume.clone();
+            let runner = seher::claude_headless::ClaudeHeadlessRunner::new(headless_cfg);
             seher::claude_headless::stream_headless(
                 runner,
                 req.prompt.to_string(),
