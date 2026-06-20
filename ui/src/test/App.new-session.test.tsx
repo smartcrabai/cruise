@@ -1149,9 +1149,9 @@ describe("App: Approval-ready notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // sessionCreated: session appears in sidebar but plan not yet ready (Planning in UI)
+    // sessionCreated: session appears in sidebar in Draft+fixInProgress state (renders as "Planning" badge)
     vi.mocked(commands.listSessions).mockResolvedValue([
-      makeSession({ id: "sess-plan-ready", phase: "Awaiting Approval", planAvailable: false }),
+      makeSession({ id: "sess-plan-ready", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
     await act(async () => { control.emitSessionCreated(); });
     await waitFor(() => {
@@ -1182,9 +1182,9 @@ describe("App: Approval-ready notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // When: sessionCreated fires -> session has planAvailable: false (Planning in UI)
+    // When: sessionCreated fires -> session is Draft+fixInProgress (renders as "Planning" badge)
     vi.mocked(commands.listSessions).mockResolvedValue([
-      makeSession({ id: "sess-planning", phase: "Awaiting Approval", planAvailable: false }),
+      makeSession({ id: "sess-planning", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
     await act(async () => { control.emitSessionCreated(); });
     await waitFor(() => {
@@ -1636,6 +1636,140 @@ describe("App: New Session -- listConfigs reacts to source changes", () => {
 
     // Then: config select is reset to "" (Auto)
     expect(screen.getByLabelText("Config")).toHaveValue("");
+  });
+});
+
+// --- Planning badge during create_session (Draft + FixingGuard flow) ----------
+//
+// These tests document the fix for: GUI shows "Awaiting Approval" during LLM
+// plan generation instead of "Planning".
+//
+// After the fix, create_session (useInputAsPlan=false) persists the session as
+// Draft + starts a FixingGuard before sending SessionCreated.  The sidebar
+// therefore sees phase:"Draft" + fixInProgress:true → PhaseBadge renders
+// "Planning".  On success, the backend promotes to AwaitingApproval before
+// emitting PlanGenerated.
+
+describe("App: Planning badge during plan generation (create_session)", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("shows 'Planning' badge in sidebar immediately after sessionCreated while plan is generating", async () => {
+    // Given: createSession will emit sessionCreated before planGenerated
+    const control = setupTwoPhaseCreateSession("sess-planning-badge");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "plan in progress"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // When: sessionCreated fires -- backend has persisted Draft+FixingGuard
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-planning-badge", phase: "Draft", planAvailable: false, fixInProgress: true }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+
+    // Then: sidebar shows "Planning" (not "Awaiting Approval")
+    await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
+    expect(screen.queryByText("Awaiting Approval")).not.toBeInTheDocument();
+
+    // Cleanup
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
+  it("transitions sidebar badge from 'Planning' to 'Awaiting Approval' when planGenerated fires", async () => {
+    // Given: createSession flow with two phases
+    const control = setupTwoPhaseCreateSession("sess-badge-transition");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "badge transition task"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // sessionCreated: Draft + fixInProgress → "Planning"
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-badge-transition", phase: "Draft", planAvailable: false, fixInProgress: true }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+    await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
+
+    // When: planGenerated fires -- backend promotes to AwaitingApproval
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-badge-transition", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+    await act(async () => { control.emitPlanGenerated(); });
+
+    // Then: badge updates to "Awaiting Approval" (plan is now ready for approval)
+    await waitFor(() => expect(screen.getByText("Awaiting Approval")).toBeInTheDocument());
+    expect(screen.queryByText("Planning")).not.toBeInTheDocument();
+  });
+
+  it("does not show 'Planning' badge when useInputAsPlan is true (synchronous -- bypasses Draft)", async () => {
+    // Given: createSession called with useInputAsPlan: true
+    const control = setupTwoPhaseCreateSession("sess-input-as-plan");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Enable useInputAsPlan
+    const checkbox = await screen.findByRole("checkbox", { name: /use input as plan/i });
+    await userEvent.click(checkbox);
+
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "direct plan content"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create session" }));
+
+    // sessionCreated: for useInputAsPlan the backend writes the plan synchronously
+    // and stays in AwaitingApproval (no Draft phase, no FixingGuard)
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-input-as-plan", phase: "Awaiting Approval", planAvailable: true }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+
+    // Then: badge shows "Awaiting Approval" directly (no "Planning" intermediate state)
+    await waitFor(() => expect(screen.getByText("Awaiting Approval")).toBeInTheDocument());
+    expect(screen.queryByText("Planning")).not.toBeInTheDocument();
+
+    // Cleanup
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
+  it("'Planning' badge disappears from sidebar after planFailed (session is deleted by backend)", async () => {
+    // Given: plan generation fails
+    const control = setupTwoPhaseCreateSession("sess-plan-fail-badge");
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "failing plan"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // sessionCreated: Draft + fixInProgress → "Planning"
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-plan-fail-badge", phase: "Draft", planAvailable: false, fixInProgress: true }),
+    ]);
+    await act(async () => { control.emitSessionCreated(); });
+    await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
+
+    // When: planFailed fires -- backend deletes the session
+    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    await act(async () => { control.emitPlanFailed("model error"); });
+
+    // Then: "Planning" badge (and the session row) disappears from the sidebar
+    await waitFor(() => expect(screen.queryByText("Planning")).not.toBeInTheDocument());
   });
 });
 
