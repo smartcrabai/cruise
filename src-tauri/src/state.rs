@@ -8,10 +8,17 @@ use std::{
 
 use cruise::cancellation::CancellationToken;
 use cruise::step::option::OptionResult;
-use tokio::sync::oneshot;
 
 /// Shared slot holding the pending answer channel for an SDK `ask_user` dialog.
-pub type AskResponder = Arc<Mutex<Option<oneshot::Sender<String>>>>;
+///
+/// Uses [`std::sync::mpsc`] rather than `tokio::sync::oneshot` because the
+/// receive side is called from a sync tool handler that may itself be running
+/// inside a tokio runtime (e.g. the dedicated current-thread runtime that
+/// drives `seher::claude_agent::stream_agent`). `tokio::sync::oneshot`'s
+/// `blocking_recv()` panics with "Cannot block the current thread from within
+/// a runtime" in that case, while `std::sync::mpsc::Receiver::recv()` has no
+/// tokio thread-local dependency and just parks the OS thread.
+pub type AskResponder = Arc<Mutex<Option<std::sync::mpsc::Sender<String>>>>;
 
 /// Per-session runtime state held while a single session is executing.
 #[derive(Debug)]
@@ -20,10 +27,19 @@ pub struct PerSessionState {
     ///
     /// Cancelling this token also cancels every clone, which the engine polls.
     pub cancel_token: CancellationToken,
-    /// Pending oneshot sender waiting for a `respond_to_option` IPC call.
+    /// Pending sender waiting for a `respond_to_option` IPC call.
     ///
-    /// `None` when the session is not waiting for user input.
-    pub option_responder: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+    /// `None` when the session is not waiting for user input. Uses
+    /// [`std::sync::mpsc`] for the same reason as [`AskResponder`]: the option
+    /// handler's [`OptionHandler::select_option`] is invoked synchronously from
+    /// `engine::execute_steps`, which the GUI drives via
+    /// `tokio::runtime::Handle::current().block_on(...)` inside a
+    /// `spawn_blocking` task. That puts the thread into a tokio runtime
+    /// context, so `tokio::sync::oneshot::Receiver::blocking_recv()` would
+    /// panic with "Cannot block the current thread from within a runtime".
+    ///
+    /// [`OptionHandler::select_option`]: cruise::option_handler::OptionHandler::select_option
+    pub option_responder: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
 }
 
 impl PerSessionState {
@@ -119,13 +135,13 @@ impl AppState {
         }
     }
 
-    /// Take the pending oneshot sender for `session_id` out of its slot without
+    /// Take the pending answer sender for `session_id` out of its slot without
     /// sending. Returns `None` if the session has no registered responder or the
     /// slot is empty.
     ///
     /// Used by `respond_to_ask_impl` to atomically claim the sender before
     /// modifying persisted state, avoiding a race with a second `ask_user`.
-    pub fn take_ask_sender(&self, session_id: &str) -> Option<oneshot::Sender<String>> {
+    pub fn take_ask_sender(&self, session_id: &str) -> Option<std::sync::mpsc::Sender<String>> {
         let responder = {
             let map = self.lock_ask_responders();
             map.get(session_id).map(Arc::clone)
@@ -209,7 +225,7 @@ impl AppState {
         &self,
         session_id: String,
     ) -> (
-        Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>,
+        Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>,
         CancellationToken,
     ) {
         let cancel_token = CancellationToken::new();
@@ -229,7 +245,7 @@ impl AppState {
         &self,
         session_id: String,
         cancel_token: CancellationToken,
-    ) -> Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> {
+    ) -> Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>> {
         let state = PerSessionState::with_cancel_token(cancel_token);
         let responder = Arc::clone(&state.option_responder);
         self.lock_sessions().insert(session_id, state);
@@ -328,7 +344,6 @@ impl AppState {
 mod tests {
     use super::*;
     use cruise::step::option::OptionResult;
-    use tokio::sync::oneshot;
 
     fn make_option_result(next_step: &str) -> OptionResult {
         OptionResult {
@@ -452,8 +467,8 @@ mod tests {
         let (responder_1, _) = state.register_session("sess-1".to_string());
         let (responder_2, _) = state.register_session("sess-2".to_string());
 
-        let (tx1, mut rx1) = oneshot::channel::<OptionResult>();
-        let (tx2, mut rx2) = oneshot::channel::<OptionResult>();
+        let (tx1, rx1) = std::sync::mpsc::channel::<OptionResult>();
+        let (tx2, rx2) = std::sync::mpsc::channel::<OptionResult>();
         *responder_1.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx1);
         *responder_2.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx2);
 
@@ -628,8 +643,8 @@ mod tests {
         let state = AppState::new();
         let r1 = state.register_ask_responder("sess-1");
         let r2 = state.register_ask_responder("sess-2");
-        let (tx1, mut rx1) = oneshot::channel::<String>();
-        let (tx2, mut rx2) = oneshot::channel::<String>();
+        let (tx1, rx1) = std::sync::mpsc::channel::<String>();
+        let (tx2, rx2) = std::sync::mpsc::channel::<String>();
         *r1.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx1);
         *r2.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx2);
 
@@ -664,7 +679,7 @@ mod tests {
     fn test_unregister_ask_responder_makes_routing_fail() {
         let state = AppState::new();
         let r = state.register_ask_responder("sess-1");
-        let (tx, _rx) = oneshot::channel::<String>();
+        let (tx, _rx) = std::sync::mpsc::channel::<String>();
         *r.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
 
         state.unregister_ask_responder("sess-1", &r);
@@ -679,7 +694,7 @@ mod tests {
         let state = AppState::new();
         let old = state.register_ask_responder("sess-1");
         let new = state.register_ask_responder("sess-1"); // replaces the slot
-        let (tx, mut rx) = oneshot::channel::<String>();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         *new.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
 
         // Old command finishes and tries to clean up its (stale) slot.

@@ -482,10 +482,10 @@ pub fn respond_to_ask(
 ///
 /// The sender is taken first so that a concurrent `respond_to_ask` call for the
 /// same session cannot steal it.  Persisted ask state (`pending_ask_question`,
-/// phase) is cleared by `GuiAskHandler::ask_user` once `blocking_recv` returns,
-/// keeping the entire load-modify-save on the agent thread and eliminating the
-/// lost-update race that would otherwise occur if this function and the agent
-/// thread both tried to write session state concurrently.
+/// phase) is cleared by `GuiAskHandler::ask_user` once the blocking `recv()`
+/// returns, keeping the entire load-modify-save on the agent thread and
+/// eliminating the lost-update race that would otherwise occur if this function
+/// and the agent thread both tried to write session state concurrently.
 ///
 /// If `send` fails (the agent thread has already died) the persisted
 /// `pending_ask_question` is left intact — the user will see the question again
@@ -2335,10 +2335,9 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
     use tempfile::TempDir;
-    use tokio::sync::oneshot;
 
     /// Polls `pending` until a sender is available, or panics after 5 seconds.
-    fn wait_for_pending(pending: &Arc<Mutex<Option<oneshot::Sender<OptionResult>>>>) {
+    fn wait_for_pending(pending: &Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>>) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let guard = pending.lock().unwrap_or_else(|e| panic!("{e}"));
@@ -2712,7 +2711,8 @@ mod tests {
 
         // Given: a GuiOptionHandler wired to a shared pending_response slot
         let emitter = Arc::new(CapturingEmitter::new());
-        let pending: Arc<Mutex<Option<oneshot::Sender<OptionResult>>>> = Arc::new(Mutex::new(None));
+        let pending: Arc<Mutex<Option<std::sync::mpsc::Sender<OptionResult>>>> =
+            Arc::new(Mutex::new(None));
         let handler = GuiOptionHandler::new(
             Arc::clone(&emitter),
             "integration-req".to_string(),
@@ -4026,7 +4026,7 @@ mod tests {
         let (_tmp, _manager) = setup_awaiting_input_session("20260618010000");
         let state = AppState::new();
         let responder = state.register_ask_responder("20260618010000");
-        let (tx, mut rx) = oneshot::channel::<String>();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         *responder.lock().unwrap_or_else(|e| panic!("{e}")) = Some(tx);
 
         // When: respond_to_ask_impl delivers the answer
@@ -4047,7 +4047,7 @@ mod tests {
         // Given: session in AwaitingInput, responder slot registered but no sender installed
         let (_tmp, _manager) = setup_awaiting_input_session("20260618010001");
         let state = AppState::new();
-        state.register_ask_responder("20260618010001"); // slot empty — no oneshot sender
+        state.register_ask_responder("20260618010001"); // slot empty — no sender installed
 
         // When: respond_to_ask_impl is called without a waiting agent
         let result = respond_to_ask_impl(&state, "20260618010001", "Postgres".to_string());
