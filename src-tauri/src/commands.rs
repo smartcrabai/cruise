@@ -972,6 +972,9 @@ pub async fn create_session(
             Ok(content) => {
                 cruise::metadata::refresh_session_title_from_plan(&mut session, &content);
                 session.plan_error = None;
+                // Transition directly to Planned (same as CLI --skip-planning).
+                session.approve();
+                cruise::repo_clone::cleanup_after_approval(&manager, &mut session);
                 if let Err(e) = manager.save(&session) {
                     log_plan_failure(&plan_logger, &format!("planning failed: {e}"));
                     let _ = manager.delete(&session_id);
