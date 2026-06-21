@@ -250,8 +250,7 @@ pub fn launch_background_plan(
         match write_result {
             Ok(content) => {
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
-                session.phase = SessionPhase::AwaitingApproval;
-                if let Err(e) = manager.save(&session) {
+                if let Err(e) = finalize_skip_planning_session(&manager, &mut session) {
                     cleanup_discarded_session_workspace(&manager, &session);
                     if let Err(del_err) = manager.delete(&session.id) {
                         eprintln!("warning: failed to clean up session: {del_err}");
@@ -272,6 +271,11 @@ pub fn launch_background_plan(
             style("✓").green().bold(),
             session.id
         );
+        eprintln!("  Check status with: {}", style("cruise list").cyan());
+        eprintln!(
+            "  Run with: {}",
+            style(format!("cruise run {}", session.id)).cyan()
+        );
     } else {
         spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
         eprintln!(
@@ -279,13 +283,22 @@ pub fn launch_background_plan(
             style("✓").green().bold(),
             session.id
         );
+        eprintln!("  Check status with: {}", style("cruise list").cyan());
+        eprintln!(
+            "  Run once ready: {}",
+            style(format!("cruise run {}", session.id)).cyan()
+        );
     }
-    eprintln!("  Check status with: {}", style("cruise list").cyan());
-    eprintln!(
-        "  Run once ready: {}",
-        style(format!("cruise run {}", session.id)).cyan()
-    );
     Ok(())
+}
+
+fn finalize_skip_planning_session(
+    manager: &SessionManager,
+    session: &mut SessionState,
+) -> Result<()> {
+    session.approve(); // AwaitingApproval -> Planned, clears plan_error
+    crate::repo_clone::cleanup_after_approval(manager, session);
+    manager.save(session)
 }
 
 pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
@@ -1819,6 +1832,75 @@ steps:
         assert!(
             result.is_err(),
             "regenerate_plan_for_session should fail for Failed phase"
+        );
+    }
+
+    #[test]
+    fn test_finalize_skip_planning_session_lands_in_planned() {
+        // Given: a session manager and a fresh session in AwaitingApproval state
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let base_dir = tmp.path().join("repo");
+        let cruise_home = tmp.path().join(".cruise");
+        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(cruise_home);
+        let mut session = SessionState::new(
+            "20260621100000".to_string(),
+            base_dir,
+            "cruise.yaml".to_string(),
+            "implement the feature".to_string(),
+        );
+        // SessionState::new starts in AwaitingApproval — the default
+        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: finalize_skip_planning_session is called
+        finalize_skip_planning_session(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: phase transitions to Planned (not stuck at AwaitingApproval)
+        assert_eq!(
+            session.phase,
+            SessionPhase::Planned,
+            "skip-planning session should land in Planned, got {:?}",
+            session.phase
+        );
+    }
+
+    #[test]
+    fn test_finalize_skip_planning_session_clears_worktree_for_repo_session() {
+        // Given: a repo-backed session in AwaitingApproval with a worktree_path set.
+        // The "wt" directory is intentionally absent: worktree_context() returns None so
+        // the git-level worktree removal is skipped, but cleanup_after_approval still
+        // clears worktree_path on the session. Actual filesystem deletion is covered by
+        // repo_clone::tests::test_cleanup_after_approval_removes_clone_and_clears_worktree_path.
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let base_dir = tmp.path().join("repo");
+        let cruise_home = tmp.path().join(".cruise");
+        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(cruise_home);
+        let mut session = SessionState::new(
+            "20260621100001".to_string(),
+            base_dir.clone(),
+            "cruise.yaml".to_string(),
+            "implement the feature".to_string(),
+        );
+        session.repo = Some("owner/repo".to_string());
+        session.worktree_path = Some(base_dir.join("wt"));
+        session.worktree_branch = Some("cruise/20260621100001-task".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: finalize_skip_planning_session is called
+        finalize_skip_planning_session(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: phase is Planned and the temporary clone worktree_path is cleared
+        assert_eq!(
+            session.phase,
+            SessionPhase::Planned,
+            "repo session should land in Planned after skip-planning, got {:?}",
+            session.phase
+        );
+        assert!(
+            session.worktree_path.is_none(),
+            "worktree_path should be cleared by cleanup_after_approval for repo session"
         );
     }
 }
