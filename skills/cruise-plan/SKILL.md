@@ -1,6 +1,6 @@
 ---
 name: cruise-plan
-description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, and the exact commands to create the session — background (`cruise --plan … --skip-planning`, lands in AwaitingApproval) vs foreground non-TTY (`cruise plan --skip-planning …`, auto-approved to Planned). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", or "create a cruise session from this plan". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
+description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, and the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately. Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", or "create a cruise session from this plan". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
 ---
 
 cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the downstream workflow (built-in default: write tests → implement, then PR creation) executes against it. This skill is the contract for doing that well.
@@ -58,7 +58,7 @@ Rules:
 
 Run from the **target repository's root** — the session binds to the current directory (worktrees, config resolution).
 
-### Background — session lands in `AwaitingApproval` (human approves later)
+### Background — session lands in `Planned` (ready to run)
 
 ```sh
 cruise --plan stdin --skip-planning <<'EOF'
@@ -67,9 +67,9 @@ cruise --plan stdin --skip-planning <<'EOF'
 EOF
 ```
 
-Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. No LLM is called on this path; the command prints the session ID and returns immediately. A human then approves via `cruise list` (or the GUI) before `cruise run` can pick it up.
+Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step.
 
-**Default to this form** — it keeps a human review gate between your plan and execution.
+**Default to this form** — it lets you queue work from any context (GUI, agent, shell). The session lands in `Planned` and `cruise run` (or `cruise run --all`) will pick it up automatically; no human approval step is required.
 
 ### Foreground non-TTY — auto-approved straight to `Planned`
 
@@ -85,7 +85,7 @@ When stdin is not a TTY (always true for an agent's shell), the approve menu is 
 
 ```sh
 cruise list --json | jq '.[] | select(.id=="<session-id>") | {id, phase, title}'
-# expect phase "AwaitingApproval" (background) or "Planned" (foreground non-TTY)
+# expect phase "Planned" in both cases
 ```
 
 ## Gotchas
