@@ -500,7 +500,7 @@ describe("App: New Session skip-step selection", () => {
     expect(screen.getByRole("checkbox", { name: "build" })).not.toBeChecked();
   });
 
-  it("does not refetch config steps when baseDir changes under an explicit config", async () => {
+  it("refetches with new baseDir when baseDir changes under an explicit config (for history-scope defaults)", async () => {
     vi.mocked(commands.listConfigs).mockResolvedValue([
       { path: "/tmp/custom.yaml", name: "custom.yaml" },
     ]);
@@ -522,13 +522,15 @@ describe("App: New Session skip-step selection", () => {
       { target: { value: "/tmp/new-worktree" } }
     );
 
+    // baseDir is now always passed in directory mode so history-scope defaults
+    // are fetched for the new directory, even when an explicit config is selected.
     await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText("e.g. /Users/you/projects/myapp")
-      ).toHaveValue("/tmp/new-worktree");
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenLastCalledWith(
+        expect.objectContaining({ baseDir: "/tmp/new-worktree", configPath: "/tmp/custom.yaml" })
+      );
     });
     expect(vi.mocked(commands.getNewSessionConfigDefaults).mock.calls).toHaveLength(
-      callCountBeforeBaseDirEdit,
+      callCountBeforeBaseDirEdit + 1,
     );
   });
 });
@@ -1770,6 +1772,70 @@ describe("App: Planning badge during plan generation (create_session)", () => {
 
     // Then: "Planning" badge (and the session row) disappears from the sidebar
     await waitFor(() => expect(screen.queryByText("Planning")).not.toBeInTheDocument());
+  });
+});
+
+// --- Skip Steps defaults in repository mode -----------------------------------
+
+describe("App: New Session skip-step defaults -- repository mode", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("passes repo to getNewSessionConfigDefaults when in repo mode and repo is typed", async () => {
+    // Given: form is open and switched to repo mode
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.click(screen.getByRole("radio", { name: "GitHub Repository" }));
+    vi.mocked(commands.getNewSessionConfigDefaults).mockClear();
+
+    // When: user types a valid repo spec
+    const repoInput = screen.getByLabelText("Repository");
+    fireEvent.change(repoInput, { target: { value: "owner/myrepo" } });
+
+    // Then: getNewSessionConfigDefaults is called with repo included
+    await waitFor(() => {
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenCalledWith(
+        expect.objectContaining({ repo: "owner/myrepo" })
+      );
+    });
+  });
+
+  it("refetches config defaults when switching from directory mode to repo mode", async () => {
+    // Given: form is open in directory mode, initial call has fired
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await waitFor(() => expect(commands.getNewSessionConfigDefaults).toHaveBeenCalled());
+    vi.mocked(commands.getNewSessionConfigDefaults).mockClear();
+
+    // When: user switches to repo mode
+    await userEvent.click(screen.getByRole("radio", { name: "GitHub Repository" }));
+
+    // Then: getNewSessionConfigDefaults fires again (isRepoMode change triggers the useEffect)
+    await waitFor(() => {
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenCalled();
+    });
+  });
+
+  it("refetches config defaults when switching back from repo mode to directory mode", async () => {
+    // Given: form is in repo mode
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.click(screen.getByRole("radio", { name: "GitHub Repository" }));
+    await waitFor(() => expect(commands.getNewSessionConfigDefaults).toHaveBeenCalled());
+    vi.mocked(commands.getNewSessionConfigDefaults).mockClear();
+
+    // When: user switches back to directory mode
+    await userEvent.click(screen.getByRole("radio", { name: "Directory" }));
+
+    // Then: getNewSessionConfigDefaults fires again, and repo is NOT included
+    await waitFor(() => {
+      expect(commands.getNewSessionConfigDefaults).toHaveBeenCalled();
+    });
+    const lastCall = vi.mocked(commands.getNewSessionConfigDefaults).mock.calls.at(-1)?.[0];
+    expect(lastCall).not.toHaveProperty("repo");
   });
 });
 
