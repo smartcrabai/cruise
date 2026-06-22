@@ -422,34 +422,32 @@ async fn edit_session_settings_interactive(
     };
 
     // For Failed/Suspended sessions, allow changing current_step interactively.
-    let current_step_update =
-        if matches!(&session.phase, SessionPhase::Failed(_) | SessionPhase::Suspended)
-            && !step_names.is_empty()
-        {
-            let keep = format!(
-                "Keep ({})",
-                session
-                    .current_step
-                    .as_deref()
-                    .unwrap_or("from beginning")
-            );
-            let clear = "From beginning (clear)".to_string();
-            let mut choices = vec![keep.clone(), clear.clone()];
-            choices.extend(step_names.iter().cloned());
-            match inquire::Select::new("Resume from step:", choices).prompt() {
-                Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
-                Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
-                Ok(step_name) => CurrentStepUpdate::Set(step_name),
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                    return Ok(());
-                }
-                Err(e) => {
-                    return Err(CruiseError::Other(format!("selection error: {e}")));
-                }
+    let current_step_update = if matches!(
+        &session.phase,
+        SessionPhase::Failed(_) | SessionPhase::Suspended
+    ) && !step_names.is_empty()
+    {
+        let keep = format!(
+            "Keep ({})",
+            session.current_step.as_deref().unwrap_or("from beginning")
+        );
+        let clear = "From beginning (clear)".to_string();
+        let mut choices = vec![keep.clone(), clear.clone()];
+        choices.extend(step_names.iter().cloned());
+        match inquire::Select::new("Resume from step:", choices).prompt() {
+            Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
+            Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
+            Ok(step_name) => CurrentStepUpdate::Set(step_name),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(());
             }
-        } else {
-            CurrentStepUpdate::Unchanged
-        };
+            Err(e) => {
+                return Err(CruiseError::Other(format!("selection error: {e}")));
+            }
+        }
+    } else {
+        CurrentStepUpdate::Unchanged
+    };
 
     // Keep the current explicit config path; changing config is not yet
     // supported from the interactive picker.

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use cruise::batch_run::run_all_with_dynamic_parallelism;
 use cruise::new_session_draft::NewSessionDraft;
-use cruise::session_edit::CurrentStepUpdate;
 use cruise::new_session_history::{
     BUILTIN_CONFIG_KEY, NewSessionHistory, NewSessionHistoryEntry, expand_tilde,
     resolved_config_key_for_session,
@@ -14,6 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
     current_iso8601,
 };
+use cruise::session_edit::CurrentStepUpdate;
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -3383,8 +3383,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["build".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_ok(),
@@ -3415,8 +3420,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["build".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_ok(),
@@ -3441,8 +3451,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["build".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_err(),
@@ -3478,8 +3493,13 @@ mod tests {
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: skip-only edit, no current_step change
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["s".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["s".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         // Then: Suspended should now be an allowed phase for skip edits
         assert!(
@@ -3514,8 +3534,13 @@ mod tests {
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: skip-only edit, no current_step change
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["s".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["s".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         // Then: Failed should now be an allowed phase for skip edits
         assert!(
@@ -3542,8 +3567,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["build".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_err(),
@@ -3572,8 +3602,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result =
-            update_session_settings(&manager, session_id, None, vec!["build".to_string()], CurrentStepUpdate::Unchanged);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(result.is_ok());
         let config_yaml_path = manager.sessions_dir().join(session_id).join("config.yaml");
@@ -3760,7 +3795,8 @@ mod tests {
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: clear current_step (Some(None) = from beginning)
-        let result = update_session_settings(&manager, session_id, None, vec![], CurrentStepUpdate::Clear);
+        let result =
+            update_session_settings(&manager, session_id, None, vec![], CurrentStepUpdate::Clear);
 
         // Then: succeeds and current_step is cleared
         assert!(
