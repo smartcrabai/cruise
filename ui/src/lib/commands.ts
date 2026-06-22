@@ -117,12 +117,15 @@ export function resetSession(sessionId: string): Promise<Session> {
  */
 export function updateSessionSettings(
   sessionId: string,
-  params: { configPath?: string; skippedSteps: string[] }
+  params: { configPath?: string; skippedSteps: string[]; currentStep?: string | null }
 ): Promise<Session> {
+  const setCurrentStep = params.currentStep !== undefined;
   return invoke<Session>("update_session", {
     sessionId,
     configPath: params.configPath ?? null,
     skippedSteps: params.skippedSteps,
+    currentStep: params.currentStep ?? null,
+    setCurrentStep,
   });
 }
 

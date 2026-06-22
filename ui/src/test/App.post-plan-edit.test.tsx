@@ -146,8 +146,9 @@ describe("App: Post-plan session editing - UI visibility", () => {
     });
   });
 
-  it("does not show session settings editor for Suspended session", async () => {
-    const session = makeSession({ phase: "Suspended", planAvailable: true });
+  it("shows session settings editor for Suspended session", async () => {
+    // Suspended sessions allow skip/current_step edits before resuming
+    const session = makeSession({ phase: "Suspended", planAvailable: true, currentStep: "step-a" });
     vi.mocked(commands.listSessions).mockResolvedValue([session]);
     vi.mocked(commands.getSession).mockResolvedValue(session);
 
@@ -156,12 +157,13 @@ describe("App: Post-plan session editing - UI visibility", () => {
     await userEvent.click(screen.getByRole("button", { name: /test task/ }));
 
     await waitFor(() => {
-      expect(screen.queryByText("Session Settings")).toBeNull();
+      expect(screen.getByText("Session Settings")).toBeInTheDocument();
     });
   });
 
-  it("does not show session settings editor for Failed session", async () => {
-    const session = makeSession({ phase: "Failed", planAvailable: true, phaseError: "Step 2 failed" });
+  it("shows session settings editor for Failed session", async () => {
+    // Failed sessions allow skip/current_step edits before re-running
+    const session = makeSession({ phase: "Failed", planAvailable: true, phaseError: "Step 2 failed", currentStep: "step-a" });
     vi.mocked(commands.listSessions).mockResolvedValue([session]);
     vi.mocked(commands.getSession).mockResolvedValue(session);
 
@@ -170,7 +172,7 @@ describe("App: Post-plan session editing - UI visibility", () => {
     await userEvent.click(screen.getByRole("button", { name: /test task/ }));
 
     await waitFor(() => {
-      expect(screen.queryByText("Session Settings")).toBeNull();
+      expect(screen.getByText("Session Settings")).toBeInTheDocument();
     });
   });
 

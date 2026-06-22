@@ -11,6 +11,10 @@ interface SessionConfigEditorProps {
   baseDir: string;
   configPath?: string;
   skippedSteps: string[];
+  /** Current session phase — controls which fields are editable. Defaults to "Planned". */
+  phase?: import("../types").SessionPhase;
+  /** Current step the session was on when it Failed/Suspended. */
+  currentStep?: string;
   onSessionUpdated: (session: import("../types").Session) => void;
   onPlanRegenerated: (content: string) => void;
   onRegeneratingChange?: (isRegenerating: boolean) => void;
@@ -23,6 +27,8 @@ export function SessionConfigEditor({
   baseDir,
   configPath,
   skippedSteps,
+  phase = "Planned",
+  currentStep,
   onSessionUpdated,
   onPlanRegenerated,
   onRegeneratingChange,
@@ -33,9 +39,12 @@ export function SessionConfigEditor({
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [selectedConfigPath, setSelectedConfigPath] = useState<string>(configPath ?? "");
   const [selectedSkippedSteps, setSelectedSkippedSteps] = useState<Set<string>>(new Set(skippedSteps));
+  const [selectedCurrentStep, setSelectedCurrentStep] = useState<string>(currentStep ?? "");
   const [isSaving, setIsSaving] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isFailedOrSuspended = phase === "Failed" || phase === "Suspended";
 
   // Ref to read the latest skippedSteps in the config-loading effect without
   // re-triggering it on every parent re-render (array reference changes after save).
@@ -179,11 +188,19 @@ export function SessionConfigEditor({
   const hasSkipChanged =
     selectedSkippedSteps.size !== skippedSteps.length ||
     Array.from(selectedSkippedSteps).some((id) => !skippedSteps.includes(id));
+  const hasCurrentStepChanged =
+    isFailedOrSuspended && selectedCurrentStep !== (currentStep ?? "");
 
-  const buildSettings = () => ({
-    configPath: selectedConfigPath || undefined,
-    skippedSteps: Array.from(selectedSkippedSteps),
-  });
+  const buildSettings = () => {
+    const base: { configPath?: string; skippedSteps: string[]; currentStep?: string | null } = {
+      configPath: selectedConfigPath || undefined,
+      skippedSteps: Array.from(selectedSkippedSteps),
+    };
+    if (hasCurrentStepChanged) {
+      base.currentStep = selectedCurrentStep === "" ? null : selectedCurrentStep;
+    }
+    return base;
+  };
 
   const handleSaveAndRegenerate = async () => {
     setError(null);
@@ -249,7 +266,7 @@ export function SessionConfigEditor({
           id="session-config-select"
           value={selectedConfigPath}
           onChange={(e) => setSelectedConfigPath(e.target.value)}
-          disabled={isDisabled}
+          disabled={isDisabled || isFailedOrSuspended}
           className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
         >
           <option value="">Auto (repo / ~/.cruise / builtin)</option>
@@ -270,6 +287,31 @@ export function SessionConfigEditor({
         </div>
       )}
 
+      {isFailedOrSuspended && configSteps.length > 0 && (
+        <div className="space-y-1.5">
+          <label
+            htmlFor="session-current-step-select"
+            className="text-xs text-gray-500 uppercase tracking-wide"
+          >
+            Current Step
+          </label>
+          <select
+            id="session-current-step-select"
+            value={selectedCurrentStep}
+            onChange={(e) => setSelectedCurrentStep(e.target.value)}
+            disabled={isDisabled}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+          >
+            <option value="">(from beginning)</option>
+            {Array.from(collectExpandedStepIds(configSteps)).map((stepId) => (
+              <option key={stepId} value={stepId}>
+                {stepId}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className="flex gap-2">
         {hasConfigChanged ? (
           <button
@@ -287,7 +329,7 @@ export function SessionConfigEditor({
               "Save & Regenerate Plan"
             )}
           </button>
-        ) : hasSkipChanged ? (
+        ) : (hasSkipChanged || hasCurrentStepChanged) ? (
           <button
             type="button"
             onClick={() => void handleSkipOnlySave()}
@@ -297,12 +339,13 @@ export function SessionConfigEditor({
             {isSaving ? "Saving..." : "Save"}
           </button>
         ) : null}
-        {(hasConfigChanged || hasSkipChanged) && (
+        {(hasConfigChanged || hasSkipChanged || hasCurrentStepChanged) && (
           <button
             type="button"
             onClick={() => {
               setSelectedConfigPath(configPath ?? "");
               setSelectedSkippedSteps(new Set(skippedSteps));
+              setSelectedCurrentStep(currentStep ?? "");
             }}
             disabled={isDisabled}
             className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"

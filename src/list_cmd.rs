@@ -352,12 +352,18 @@ fn session_actions_with_plan_availability(
             actions.push("Edit Settings");
             actions.push("Replan");
         }
-        SessionPhase::Running | SessionPhase::Suspended => {
+        SessionPhase::Running => {
             actions.push("Resume");
+            actions.push("Reset to Planned");
+        }
+        SessionPhase::Suspended => {
+            actions.push("Resume");
+            actions.push("Edit Settings");
             actions.push("Reset to Planned");
         }
         SessionPhase::Failed(_) => {
             actions.push("Run");
+            actions.push("Edit Settings");
             actions.push("Reset to Planned");
         }
         SessionPhase::Completed => {
@@ -427,6 +433,7 @@ async fn edit_session_settings_interactive(
         SessionSettingsUpdate {
             config_path,
             skipped_steps,
+            current_step_update: None,
         },
     )?;
     *session = updated;
@@ -1009,7 +1016,13 @@ mod tests {
         // Given / When / Then: Suspended action list matches expectations
         assert_eq!(
             session_actions(&make_session("test", "test", SessionPhase::Suspended)),
-            vec!["Resume", "Reset to Planned", "Delete", "Back"]
+            vec![
+                "Resume",
+                "Edit Settings",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
         );
     }
 
@@ -1138,7 +1151,7 @@ mod tests {
         );
         assert_eq!(
             session_actions(&session),
-            vec!["Run", "Reset to Planned", "Delete", "Back"]
+            vec!["Run", "Edit Settings", "Reset to Planned", "Delete", "Back"]
         );
     }
 
@@ -1784,55 +1797,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_actions_running_has_no_edit_settings() {
-        // Given: Running phase — session cannot be edited while executing
-        let session = make_session("20260619100004", "task", SessionPhase::Running);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Running should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_suspended_has_no_edit_settings() {
-        // Given: Suspended phase
-        let session = make_session("20260619100005", "task", SessionPhase::Suspended);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Suspended should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_failed_has_no_edit_settings() {
-        // Given: Failed phase
-        let session = make_session(
-            "20260619100006",
-            "task",
-            SessionPhase::Failed("error".to_string()),
-        );
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Failed should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
     fn test_session_actions_completed_has_no_edit_settings() {
         // Given: Completed phase
         let session = make_session("20260619100007", "task", SessionPhase::Completed);
@@ -1859,6 +1823,55 @@ mod tests {
         assert!(
             !actions.contains(&"Edit Settings"),
             "Draft should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_failed_has_edit_settings() {
+        // Given: Failed phase — user should be able to edit skip/current_step and retry
+        let session = make_session(
+            "20260620100001",
+            "task",
+            SessionPhase::Failed("step s failed".to_string()),
+        );
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" is present for Failed phase
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Failed should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_suspended_has_edit_settings() {
+        // Given: Suspended phase — user should be able to adjust skip/current_step before resuming
+        let session = make_session("20260620100002", "task", SessionPhase::Suspended);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" is present for Suspended phase
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Suspended should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_running_has_no_edit_settings() {
+        // Given: Running phase — editing is prohibited while the runner is active
+        let session = make_session("20260620100003", "task", SessionPhase::Running);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" must NOT appear (runner would race with the edit)
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Running should NOT have 'Edit Settings': {actions:?}"
         );
     }
 }
