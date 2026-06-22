@@ -1096,6 +1096,8 @@ async fn run_approve_loop(
                     max_retries: DEFAULT_MAX_RETRIES,
                     rate_limit_retries,
                     dry_run: false,
+                    cleanup_after_pr: false,
+                    no_cleanup_after_pr: false,
                 };
                 return crate::run_cmd::run(run_args).await;
             }

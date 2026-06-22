@@ -208,6 +208,8 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         max_retries: DEFAULT_MAX_RETRIES,
                         rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                         dry_run: false,
+                        cleanup_after_pr: false,
+                        no_cleanup_after_pr: false,
                     };
                     return crate::run_cmd::run(run_args).await;
                 }

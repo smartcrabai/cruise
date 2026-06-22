@@ -266,6 +266,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
 #[expect(clippy::too_many_lines)]
 async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
+    let cleanup_override = args.cleanup_after_pr_override();
     let current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = args
@@ -491,8 +492,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         );
     }
     // Non-repo worktree sessions: remove the worktree and branch when configured.
-    let effective_cleanup = args
-        .cleanup_after_pr_override()
+    let effective_cleanup = cleanup_override
         .or(session.cleanup_after_pr_override)
         .unwrap_or(compiled.cleanup_after_pr);
     if effective_cleanup
@@ -1648,6 +1648,8 @@ Previously, emojis were used as user icons."#;
             max_retries: DEFAULT_MAX_RETRIES,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         };
 
         // When: call run()
@@ -1689,6 +1691,8 @@ Previously, emojis were used as user icons."#;
             max_retries: DEFAULT_MAX_RETRIES,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         };
 
         // When: call run() with 0 planned sessions
@@ -2252,6 +2256,8 @@ steps:
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         })
         .await;
         assert!(result.is_ok(), "expected run --all to succeed: {result:?}");
@@ -2329,6 +2335,8 @@ steps:
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         });
         let mutate_fut = mutate_state_after_first_step(
             &manager,
@@ -3105,6 +3113,8 @@ steps:
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         });
 
         let add_and_unblock_fut = async {
