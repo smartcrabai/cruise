@@ -81,37 +81,59 @@ impl VariableStore {
 
     /// Resolve all `{variable_name}` placeholders in `template`.
     ///
+    /// Literal braces can be escaped with `{{` and `}}`, which are emitted as
+    /// single `{` and `}` respectively.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the template references an undefined variable.
+    /// Returns an error if the template references an undefined variable or
+    /// contains an empty variable reference (`{}`).
     pub fn resolve(&self, template: &str) -> Result<String> {
         let mut result = String::new();
         let mut chars = template.chars().peekable();
 
         while let Some(ch) = chars.next() {
-            if ch == '{' {
-                // Collect the variable name up to the closing brace.
-                let mut var_name = String::new();
-                let mut closed = false;
-
-                for inner_ch in chars.by_ref() {
-                    if inner_ch == '}' {
-                        closed = true;
-                        break;
+            match ch {
+                '{' => {
+                    // Escaped opening brace: `{{` -> `{`.
+                    if chars.peek() == Some(&'{') {
+                        chars.next();
+                        result.push('{');
+                        continue;
                     }
-                    var_name.push(inner_ch);
-                }
 
-                if closed {
-                    let value = self.get_variable(&var_name)?;
-                    result.push_str(&value);
-                } else {
-                    // No closing brace -- emit literally.
-                    result.push('{');
-                    result.push_str(&var_name);
+                    // Collect the variable name up to the closing brace.
+                    let mut var_name = String::new();
+                    let mut closed = false;
+
+                    for inner_ch in chars.by_ref() {
+                        if inner_ch == '}' {
+                            closed = true;
+                            break;
+                        }
+                        var_name.push(inner_ch);
+                    }
+
+                    if closed {
+                        if var_name.is_empty() {
+                            return Err(CruiseError::EmptyVariableReference);
+                        }
+                        let value = self.get_variable(&var_name)?;
+                        result.push_str(&value);
+                    } else {
+                        // No closing brace -- emit literally.
+                        result.push('{');
+                        result.push_str(&var_name);
+                    }
                 }
-            } else {
-                result.push(ch);
+                '}' => {
+                    // Escaped closing brace: `}}` -> `}`.
+                    if chars.peek() == Some(&'}') {
+                        chars.next();
+                    }
+                    result.push('}');
+                }
+                _ => result.push(ch),
             }
         }
 
@@ -340,16 +362,25 @@ mod tests {
 
     #[test]
     fn test_resolve_double_brace() {
-        // Given: template "{{input}}" -- outer `{` opens a var whose name is "{input"
+        // Given: template "{{input}}" -- the doubled braces escape literal braces
         let store = VariableStore::new("hello".to_string());
-        // The parser sees `{` -> starts collecting; collects `{input` until `}` is hit.
-        // Then calls get_variable("{input") which is undefined.
-        let err = store
+        // Then: it resolves to the literal string "{input}"
+        let result = store
             .resolve("{{input}}")
-            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
-        assert!(
-            matches!(err, crate::error::CruiseError::UndefinedVariable(ref n) if n == "{input"),
-            "expected UndefinedVariable(\"{{input\"), got: {err:?}"
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result, "{input}");
+    }
+
+    #[test]
+    fn test_resolve_escaped_braces() {
+        let store = VariableStore::new("hello".to_string());
+        assert_eq!(store.resolve("{{").unwrap_or_else(|e| panic!("{e:?}")), "{");
+        assert_eq!(store.resolve("}}").unwrap_or_else(|e| panic!("{e:?}")), "}");
+        assert_eq!(
+            store
+                .resolve("before {{ input }} after")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "before { input } after"
         );
     }
 
@@ -357,13 +388,13 @@ mod tests {
     fn test_resolve_empty_var_name() {
         // Given: template "{}" -- empty variable name
         let store = VariableStore::new("hello".to_string());
-        // get_variable("") falls through to named lookup, nothing registered -> UndefinedVariable
+        // Then: resolve reports a dedicated empty-reference error
         let err = store
             .resolve("{}")
             .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(
-            matches!(err, crate::error::CruiseError::UndefinedVariable(ref n) if n.is_empty()),
-            "expected UndefinedVariable(\"\"), got: {err:?}"
+            matches!(err, crate::error::CruiseError::EmptyVariableReference),
+            "expected EmptyVariableReference, got: {err:?}"
         );
     }
 
