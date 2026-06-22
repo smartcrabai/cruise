@@ -123,6 +123,10 @@ pub struct SessionState {
     /// execution and removed after the PR is created.
     #[serde(default)]
     pub repo: Option<String>,
+    /// GUI or CLI override for `cleanup_after_pr`. When `Some`, takes
+    /// precedence over the workflow config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_after_pr_override: Option<bool>,
     /// Absolute paths of image files attached to the planning input. Kept
     /// separate from `input` so PR titles, branch names, and history records
     /// stay clean; the augmented prompt is rebuilt on demand for the LLM.
@@ -191,6 +195,7 @@ impl SessionState {
             runner_pid: None,
             runner_started_at: None,
             repo: None,
+            cleanup_after_pr_override: None,
             attachments: vec![],
         }
     }
@@ -1186,6 +1191,73 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(loaded.repo.as_deref(), Some("owner/repo"));
     }
+    #[test]
+    fn test_session_state_cleanup_after_pr_override_roundtrip() {
+        // Given: a session with a GUI/CLI cleanup override set
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260622000000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.cleanup_after_pr_override = Some(true);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reloaded from disk
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the override is preserved
+        assert_eq!(loaded.cleanup_after_pr_override, Some(true));
+    }
+
+    #[test]
+    fn test_session_state_cleanup_after_pr_override_defaults_to_none() {
+        // Given: a newly created session state
+        let state = SessionState::new(
+            "20260622000001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+
+        // Then: no cleanup override is set by default
+        assert_eq!(state.cleanup_after_pr_override, None);
+    }
+
+    #[test]
+    fn test_session_state_backward_compat_missing_cleanup_override() {
+        // Given: an old-format state.json without cleanup_after_pr_override
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260306170001".to_string();
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::json!({
+            "id": id,
+            "base_dir": "/repo",
+            "phase": "Planned",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-03-06T17:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        std::fs::write(session_dir.join("state.json"), json.to_string())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loaded
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the override defaults to None so old sessions remain non-destructive
+        assert_eq!(loaded.cleanup_after_pr_override, None);
+    }
+
+
 
     #[test]
     fn test_clones_dir_is_under_base() {

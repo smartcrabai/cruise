@@ -490,6 +490,38 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             session.id
         );
     }
+    // Non-repo worktree sessions: remove the worktree and branch when configured.
+    let effective_cleanup = args
+        .cleanup_after_pr_override()
+        .or(session.cleanup_after_pr_override)
+        .unwrap_or(compiled.cleanup_after_pr);
+    if effective_cleanup
+        && session.repo.is_none()
+        && matches!(session.phase, SessionPhase::Completed)
+        && session.pr_url.is_some()
+    {
+        if let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace {
+            // Step out of the soon-to-be-removed worktree before deleting it.
+            let _ = std::env::set_current_dir(&current_dir_guard.original);
+            if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
+                eprintln!(
+                    "{} warning: post-PR cleanup failed: {}",
+                    style("!").yellow(),
+                    e
+                );
+            } else {
+                eprintln!(
+                    "{} removed worktree and branch for {}",
+                    style("->").cyan(),
+                    session.id
+                );
+            }
+            session.worktree_path = None;
+            session.worktree_branch = None;
+        }
+    }
+
+
     save_session_state_with_conflict_resolution(&manager, session, session_fingerprint.get())?;
     overall_result
 }
@@ -573,6 +605,8 @@ async fn run_all(args: RunArgs) -> Result<()> {
             max_retries: args.max_retries,
             rate_limit_retries: args.rate_limit_retries,
             dry_run: args.dry_run,
+            cleanup_after_pr: args.cleanup_after_pr,
+            no_cleanup_after_pr: args.no_cleanup_after_pr,
         };
         let run_result = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await;
         let interrupted = matches!(run_result, Err(CruiseError::Interrupted));
@@ -1005,6 +1039,8 @@ mod tests {
             max_retries: 10,
             rate_limit_retries: 0,
             dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
         }
     }
 

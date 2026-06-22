@@ -731,6 +731,7 @@ mod tests {
             env: HashMap::new(),
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),
+            cleanup_after_pr: false,
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

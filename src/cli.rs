@@ -157,7 +157,32 @@ pub struct RunArgs {
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
+    /// Force-enable post-PR worktree+branch cleanup for this run.
+    #[arg(long, conflicts_with = "no_cleanup_after_pr")]
+    pub cleanup_after_pr: bool,
+
+    /// Force-disable post-PR worktree+branch cleanup for this run.
+    #[arg(long, conflicts_with = "cleanup_after_pr")]
+    pub no_cleanup_after_pr: bool,
+
+
 }
+impl RunArgs {
+    /// Convert the CLI cleanup flags into an `Option<bool>` override.
+    /// Both flags default to `false`; when neither is set, returns `None`.
+    #[must_use]
+    pub fn cleanup_after_pr_override(&self) -> Option<bool> {
+        if self.cleanup_after_pr {
+            Some(true)
+        } else if self.no_cleanup_after_pr {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+
 
 #[derive(Parser, Debug)]
 pub struct CleanArgs {}
@@ -366,6 +391,65 @@ mod tests {
             _ => panic!("expected Run subcommand"),
         }
     }
+    #[test]
+    fn test_run_subcommand_cleanup_after_pr_flag_defaults_to_false() {
+        // Given: run subcommand with no cleanup flags
+        let cli = Cli::parse_from(["cruise", "run"]);
+        // When/Then: both flags default to false and override is None
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(!args.cleanup_after_pr);
+                assert!(!args.no_cleanup_after_pr);
+                assert_eq!(args.cleanup_after_pr_override(), None);
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_cleanup_after_pr_flag_sets_override_true() {
+        // Given: --cleanup-after-pr is present
+        let cli = Cli::parse_from(["cruise", "run", "--cleanup-after-pr"]);
+        // When/Then: override is Some(true)
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.cleanup_after_pr);
+                assert!(!args.no_cleanup_after_pr);
+                assert_eq!(args.cleanup_after_pr_override(), Some(true));
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_no_cleanup_after_pr_flag_sets_override_false() {
+        // Given: --no-cleanup-after-pr is present
+        let cli = Cli::parse_from(["cruise", "run", "--no-cleanup-after-pr"]);
+        // When/Then: override is Some(false)
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(!args.cleanup_after_pr);
+                assert!(args.no_cleanup_after_pr);
+                assert_eq!(args.cleanup_after_pr_override(), Some(false));
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_subcommand_cleanup_flags_conflict() {
+        // Given: both cleanup flags are present
+        let result = Cli::try_parse_from([
+            "cruise",
+            "run",
+            "--cleanup-after-pr",
+            "--no-cleanup-after-pr",
+        ]);
+        // Then: parsing fails because the flags are mutually exclusive
+        assert!(result.is_err());
+    }
+
+
 
     #[test]
     fn test_root_plan_flag_with_inline_input_parses() {
