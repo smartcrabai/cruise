@@ -13,6 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
     current_iso8601,
 };
+use cruise::session_edit::CurrentStepUpdate;
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -1319,19 +1320,48 @@ pub fn update_session_settings(
     session_id: &str,
     config_path: Option<String>,
     skipped_steps: Vec<String>,
+    current_step_update: CurrentStepUpdate,
 ) -> std::result::Result<SessionDto, String> {
     use cruise::session::SessionPhase;
 
     let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
 
+    let is_failed_or_suspended = matches!(
+        &session.phase,
+        SessionPhase::Failed(_) | SessionPhase::Suspended
+    );
+
     match &session.phase {
-        SessionPhase::Draft | SessionPhase::AwaitingApproval | SessionPhase::Planned => {}
+        SessionPhase::Draft
+        | SessionPhase::AwaitingApproval
+        | SessionPhase::Planned
+        | SessionPhase::Failed(_)
+        | SessionPhase::Suspended => {}
         other => {
             return Err(format!(
-                "Cannot edit session in '{}' phase. Only 'Draft', 'Awaiting Approval' and 'Planned' sessions are editable.",
+                "Cannot edit session in '{}' phase. Only 'Draft', 'Awaiting Approval', 'Planned', 'Failed' and 'Suspended' sessions are editable.",
                 other.label()
             ));
         }
+    }
+
+    let old_config_path = session
+        .config_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    // Failed/Suspended: config path must stay the same
+    if is_failed_or_suspended && old_config_path != config_path {
+        return Err(
+            "Cannot change config for a Failed or Suspended session. Only skip steps and current step can be edited.".to_string(),
+        );
+    }
+
+    // current_step can only be set for Failed/Suspended
+    if !matches!(current_step_update, CurrentStepUpdate::Unchanged) && !is_failed_or_suspended {
+        return Err(
+            "Cannot update current step for a session that is not Failed or Suspended.".to_string(),
+        );
     }
 
     let (base, yaml, source) =
@@ -1340,9 +1370,38 @@ pub fn update_session_settings(
         .map_err(|e| format!("config parse error: {e}"))?;
     cruise::config::validate_config(&config).map_err(|e| e.to_string())?;
 
+    match current_step_update {
+        CurrentStepUpdate::Unchanged => {}
+        CurrentStepUpdate::Clear => session.current_step = None,
+        CurrentStepUpdate::Set(step_name) => {
+            let nodes = cruise::workflow::list_skippable_steps(&config)
+                .map_err(|e| format!("step expansion error: {e}"))?;
+            let valid_ids: std::collections::HashSet<&str> = nodes
+                .iter()
+                .flat_map(|n| n.expanded_step_ids.iter().map(String::as_str))
+                .collect();
+            if !valid_ids.contains(step_name.as_str()) {
+                return Err(format!(
+                    "Step '{step_name}' does not exist in the workflow config."
+                ));
+            }
+            if skipped_steps.contains(&step_name) {
+                return Err(format!(
+                    "Cannot set current_step to '{step_name}' because it is in skipped_steps."
+                ));
+            }
+            session.current_step = Some(step_name);
+        }
+    }
+
     session.config_source = source.display_string();
-    session.config_path = source.path().cloned();
+    session.config_path = if config_path.is_some() {
+        source.path().cloned()
+    } else {
+        None
+    };
     session.skipped_steps = skipped_steps;
+    session.plan_error = None;
     session.updated_at = Some(current_iso8601());
 
     manager.save(&session).map_err(|e| e.to_string())?;
@@ -1353,27 +1412,29 @@ pub fn update_session_settings(
             .map_err(|e| format!("failed to write session config: {e}"))?;
     }
 
-    let resolved_config_key = source.path().map_or_else(
-        || BUILTIN_CONFIG_KEY.to_string(),
-        |p| resolved_config_key_for_session(p),
-    );
-    let mut history = NewSessionHistory::load_best_effort();
-    history.record_selection(NewSessionHistoryEntry {
-        selected_at: current_iso8601(),
-        input: session.input.clone(),
-        requested_config_path: config_path,
-        // Repo sessions use a temporary clone as base_dir; never expose it as a
-        // recent directory (mirrors the create_session behaviour).
-        working_dir: if session.repo.is_some() {
-            String::new()
-        } else {
-            base.to_string_lossy().into_owned()
-        },
-        repo: session.repo.clone(),
-        resolved_config_key,
-        skipped_steps: session.skipped_steps.clone(),
-    });
-    history.save_best_effort();
+    if !is_failed_or_suspended {
+        let resolved_config_key = source.path().map_or_else(
+            || BUILTIN_CONFIG_KEY.to_string(),
+            |p| resolved_config_key_for_session(p),
+        );
+        let mut history = NewSessionHistory::load_best_effort();
+        history.record_selection(NewSessionHistoryEntry {
+            selected_at: current_iso8601(),
+            input: session.input.clone(),
+            requested_config_path: config_path,
+            // Repo sessions use a temporary clone as base_dir; never expose it as a
+            // recent directory (mirrors the create_session behaviour).
+            working_dir: if session.repo.is_some() {
+                String::new()
+            } else {
+                base.to_string_lossy().into_owned()
+            },
+            repo: session.repo.clone(),
+            resolved_config_key,
+            skipped_steps: session.skipped_steps.clone(),
+        });
+        history.save_best_effort();
+    }
 
     Ok(SessionDto::from_state(session, manager))
 }
@@ -1410,16 +1471,30 @@ pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, Stri
     Ok(SessionDto::from_state(session, &manager))
 }
 
-/// Update session settings (config and/or skipped steps) for a session in
-/// `Awaiting Approval` or `Planned` phase.
+/// Update session settings (config, skipped steps, and/or current_step) for an editable session.
 #[tauri::command]
 pub fn update_session(
     session_id: String,
     config_path: Option<String>,
     skipped_steps: Vec<String>,
+    current_step: Option<String>,
+    set_current_step: bool,
 ) -> std::result::Result<SessionDto, String> {
     let manager = new_session_manager()?;
-    update_session_settings(&manager, &session_id, config_path, skipped_steps)
+    let current_step_update = if !set_current_step {
+        CurrentStepUpdate::Unchanged
+    } else if let Some(step) = current_step {
+        CurrentStepUpdate::Set(step)
+    } else {
+        CurrentStepUpdate::Clear
+    };
+    update_session_settings(
+        &manager,
+        &session_id,
+        config_path,
+        skipped_steps,
+        current_step_update,
+    )
 }
 
 /// Regenerate the plan for a session using its current config,
@@ -3308,7 +3383,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_ok(),
@@ -3339,7 +3420,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_ok(),
@@ -3364,7 +3451,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_err(),
@@ -3378,13 +3471,20 @@ mod tests {
     }
 
     #[test]
-    fn test_update_session_settings_fails_for_suspended_session() {
+    fn test_update_session_settings_succeeds_for_suspended_session() {
+        // Given: a Suspended session with a config file (function now reaches config loading)
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
         let home = tmp.path();
         let manager = SessionManager::new(home.join(".cruise"));
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let session_id = "20260410000004";
         let mut session = make_session(session_id, &repo);
@@ -3392,22 +3492,40 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
-
-        assert!(
-            result.is_err(),
-            "update_session_settings should fail for Suspended"
+        // When: skip-only edit, no current_step change
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["s".to_string()],
+            CurrentStepUpdate::Unchanged,
         );
+
+        // Then: Suspended should now be an allowed phase for skip edits
+        assert!(
+            result.is_ok(),
+            "update_session_settings should succeed for Suspended: {:?}",
+            result.err()
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.skipped_steps, vec!["s"]);
     }
 
     #[test]
-    fn test_update_session_settings_fails_for_failed_session() {
+    fn test_update_session_settings_succeeds_for_failed_session() {
+        // Given: a Failed session with a config file (function now reaches config loading)
         let _lock = cruise::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
         let home = tmp.path();
         let manager = SessionManager::new(home.join(".cruise"));
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         let session_id = "20260410000005";
         let mut session = make_session(session_id, &repo);
@@ -3415,12 +3533,23 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
-
-        assert!(
-            result.is_err(),
-            "update_session_settings should fail for Failed"
+        // When: skip-only edit, no current_step change
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["s".to_string()],
+            CurrentStepUpdate::Unchanged,
         );
+
+        // Then: Failed should now be an allowed phase for skip edits
+        assert!(
+            result.is_ok(),
+            "update_session_settings should succeed for Failed: {:?}",
+            result.err()
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.skipped_steps, vec!["s"]);
     }
 
     #[test]
@@ -3438,7 +3567,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(
             result.is_err(),
@@ -3467,7 +3602,13 @@ mod tests {
         session.skipped_steps = vec![];
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = update_session_settings(&manager, session_id, None, vec!["build".to_string()]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec!["build".to_string()],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(result.is_ok());
         let config_yaml_path = manager.sessions_dir().join(session_id).join("config.yaml");
@@ -3572,13 +3713,179 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
         let external_config = custom_config.to_string_lossy().to_string();
 
-        let result =
-            update_session_settings(&manager, session_id, Some(external_config.clone()), vec![]);
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            Some(external_config.clone()),
+            vec![],
+            CurrentStepUpdate::Unchanged,
+        );
 
         assert!(result.is_ok());
         let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(updated.config_source, format!("config: {external_config}"));
         assert!(updated.config_path.is_some());
+    }
+
+    #[test]
+    fn test_update_session_settings_failed_updates_current_step() {
+        // Given: a Failed session with config
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260620000001";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Failed("s failed".to_string());
+        session.current_step = None;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: set current_step to "s" (exists in compiled workflow)
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec![],
+            CurrentStepUpdate::Set("s".to_string()),
+        );
+
+        // Then: succeeds and current_step is persisted
+        assert!(
+            result.is_ok(),
+            "Failed phase should allow current_step update: {:?}",
+            result.err()
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            updated.current_step,
+            Some("s".to_string()),
+            "current_step should be set to 's'"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_suspended_clears_current_step() {
+        // Given: a Suspended session with current_step set
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260620000002";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Suspended;
+        session.current_step = Some("s".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: clear current_step (Some(None) = from beginning)
+        let result =
+            update_session_settings(&manager, session_id, None, vec![], CurrentStepUpdate::Clear);
+
+        // Then: succeeds and current_step is cleared
+        assert!(
+            result.is_ok(),
+            "Suspended phase should allow current_step clear: {:?}",
+            result.err()
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.current_step, None, "current_step should be cleared");
+    }
+
+    #[test]
+    fn test_update_session_settings_failed_rejects_config_swap() {
+        // Given: a Failed session with its current config
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let alt_config = tmp.path().join("alt.yaml");
+        fs::write(
+            &alt_config,
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260620000003";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Failed("err".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: try to change config_path on a Failed session
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            Some(alt_config.to_string_lossy().into_owned()),
+            vec![],
+            CurrentStepUpdate::Unchanged,
+        );
+
+        // Then: must reject — config swapping is prohibited for Failed/Suspended
+        assert!(
+            result.is_err(),
+            "Failed phase should reject config_path swap"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_planned_rejects_current_step_update() {
+        // Given: a Planned session (current_step editing only valid for Failed/Suspended)
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let home = tmp.path();
+        let manager = SessionManager::new(home.join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo.join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260620000004";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::Planned;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: try to set current_step on a Planned session
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec![],
+            CurrentStepUpdate::Set("s".to_string()),
+        );
+
+        // Then: must reject — Planned never has an in-progress step to resume from
+        assert!(
+            result.is_err(),
+            "Planned phase should reject current_step update"
+        );
     }
 
     #[test]

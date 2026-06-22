@@ -256,4 +256,152 @@ describe("SessionConfigEditor", () => {
       expect(parentCheckbox.indeterminate).toBe(true);
     });
   });
+
+  describe("Failed/Suspended phase — config select disabled", () => {
+    it("Config select is disabled when phase is 'Failed'", async () => {
+      // Given: component rendered with Failed phase
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Failed" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // Then: config select is disabled (config swap not allowed for Failed sessions)
+      const configSelect = screen.getByLabelText("Config") as HTMLSelectElement;
+      expect(configSelect).toBeDisabled();
+    });
+
+    it("Config select is disabled when phase is 'Suspended'", async () => {
+      // Given: component rendered with Suspended phase
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Suspended" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // Then: config select is disabled
+      const configSelect = screen.getByLabelText("Config") as HTMLSelectElement;
+      expect(configSelect).toBeDisabled();
+    });
+
+    it("Config select is enabled when phase is 'Planned'", async () => {
+      // Given: component rendered with Planned phase (default)
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Planned" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // Then: config select is enabled for Planned
+      const configSelect = screen.getByLabelText("Config") as HTMLSelectElement;
+      expect(configSelect).not.toBeDisabled();
+    });
+  });
+
+  describe("Failed/Suspended phase — Current Step selector", () => {
+    it("Current Step selector is shown when phase is 'Failed'", async () => {
+      // Given: a Failed session with steps available
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(<SessionConfigEditor {...defaultProps} phase="Failed" currentStep="step-a" />);
+
+      // Then: a "Current Step" label/select is visible
+      await waitFor(() => {
+        expect(screen.getByLabelText(/current step/i)).toBeInTheDocument();
+      });
+    });
+
+    it("Current Step selector is shown when phase is 'Suspended'", async () => {
+      // Given: a Suspended session with steps available
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(<SessionConfigEditor {...defaultProps} phase="Suspended" currentStep="step-a" />);
+
+      // Then: a "Current Step" label/select is visible
+      await waitFor(() => {
+        expect(screen.getByLabelText(/current step/i)).toBeInTheDocument();
+      });
+    });
+
+    it("Current Step selector is NOT shown for 'Planned' phase", async () => {
+      // Given: a Planned session (no in-progress step to resume from)
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(<SessionConfigEditor {...defaultProps} phase="Planned" />);
+      await waitFor(() => screen.getByLabelText("step-a"));
+
+      // Then: Current Step selector is absent
+      expect(screen.queryByLabelText(/current step/i)).not.toBeInTheDocument();
+    });
+
+    it("Save button appears when Current Step selection changes", async () => {
+      // Given: Failed session with step-a as current step and steps available
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(
+        <SessionConfigEditor
+          {...defaultProps}
+          phase="Failed"
+          currentStep="step-a"
+        />
+      );
+      await waitFor(() => screen.getByLabelText(/current step/i));
+
+      // When: change current step to step-b
+      await userEvent.selectOptions(screen.getByLabelText(/current step/i), "step-b");
+
+      // Then: Save button appears
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /^save$/i })).toBeInTheDocument();
+      });
+    });
+
+    it("updateSessionSettings is called with currentStep when saved", async () => {
+      // Given: Failed session, current step is step-a, steps list available
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(
+        <SessionConfigEditor
+          {...defaultProps}
+          phase="Failed"
+          currentStep="step-a"
+        />
+      );
+      await waitFor(() => screen.getByLabelText(/current step/i));
+
+      // When: select step-b and click Save
+      await userEvent.selectOptions(screen.getByLabelText(/current step/i), "step-b");
+      const saveBtn = await screen.findByRole("button", { name: /^save$/i });
+      await userEvent.click(saveBtn);
+
+      // Then: updateSessionSettings is called with the new currentStep
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(
+          "session-1",
+          expect.objectContaining({ currentStep: "step-b" })
+        );
+      });
+    });
+
+    it("updateSessionSettings is called with currentStep=null when '(from beginning)' is selected", async () => {
+      // Given: Failed session, current step is step-a
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      render(
+        <SessionConfigEditor
+          {...defaultProps}
+          phase="Failed"
+          currentStep="step-a"
+        />
+      );
+      await waitFor(() => screen.getByLabelText(/current step/i));
+
+      // When: select "(from beginning)" (empty value → null)
+      await userEvent.selectOptions(screen.getByLabelText(/current step/i), "");
+      const saveBtn = await screen.findByRole("button", { name: /^save$/i });
+      await userEvent.click(saveBtn);
+
+      // Then: currentStep is null (clear — run from beginning)
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(
+          "session-1",
+          expect.objectContaining({ currentStep: null })
+        );
+      });
+    });
+  });
 });

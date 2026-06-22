@@ -807,6 +807,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     baseDir: session.baseDir,
     configPath: session.configPath,
     skippedSteps: session.skippedSteps,
+    phase: session.phase,
+    currentStep: session.currentStep,
     onSessionUpdated,
     onPlanRegenerated: setPlanContent,
     onRegeneratingChange: setIsConfigRegenerating,
@@ -960,7 +962,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           )}
         </div>
 
-        {session.phase === "Planned" && (
+        {(session.phase === "Planned" || session.phase === "Failed" || session.phase === "Suspended") && (
           <div className="border-b border-gray-800 pb-4">
             <h3 className="text-xs text-gray-500 uppercase tracking-wide mb-3">Session Settings</h3>
             <SessionConfigEditor {...sessionConfigEditorCommonProps} />

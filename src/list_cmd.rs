@@ -352,12 +352,18 @@ fn session_actions_with_plan_availability(
             actions.push("Edit Settings");
             actions.push("Replan");
         }
-        SessionPhase::Running | SessionPhase::Suspended => {
+        SessionPhase::Running => {
             actions.push("Resume");
+            actions.push("Reset to Planned");
+        }
+        SessionPhase::Suspended => {
+            actions.push("Resume");
+            actions.push("Edit Settings");
             actions.push("Reset to Planned");
         }
         SessionPhase::Failed(_) => {
             actions.push("Run");
+            actions.push("Edit Settings");
             actions.push("Reset to Planned");
         }
         SessionPhase::Completed => {
@@ -382,7 +388,8 @@ async fn edit_session_settings_interactive(
     session: &mut crate::session::SessionState,
     rate_limit_retries: usize,
 ) -> crate::error::Result<()> {
-    use crate::session_edit::{SessionSettingsUpdate, update_session_settings};
+    use crate::session::SessionPhase;
+    use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 
     // Load config to enumerate available step names for the multi-select.
     let step_names: Vec<String> = match manager.load_config(session) {
@@ -400,7 +407,7 @@ async fn edit_session_settings_interactive(
             .filter(|(_, name)| session.skipped_steps.contains(*name))
             .map(|(i, _)| i)
             .collect();
-        match inquire::MultiSelect::new("Steps to skip:", step_names)
+        match inquire::MultiSelect::new("Steps to skip:", step_names.clone())
             .with_default(&defaults)
             .prompt()
         {
@@ -412,6 +419,34 @@ async fn edit_session_settings_interactive(
                 return Err(CruiseError::Other(format!("selection error: {e}")));
             }
         }
+    };
+
+    // For Failed/Suspended sessions, allow changing current_step interactively.
+    let current_step_update = if matches!(
+        &session.phase,
+        SessionPhase::Failed(_) | SessionPhase::Suspended
+    ) && !step_names.is_empty()
+    {
+        let keep = format!(
+            "Keep ({})",
+            session.current_step.as_deref().unwrap_or("from beginning")
+        );
+        let clear = "From beginning (clear)".to_string();
+        let mut choices = vec![keep.clone(), clear.clone()];
+        choices.extend(step_names.iter().cloned());
+        match inquire::Select::new("Resume from step:", choices).prompt() {
+            Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
+            Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
+            Ok(step_name) => CurrentStepUpdate::Set(step_name),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(CruiseError::Other(format!("selection error: {e}")));
+            }
+        }
+    } else {
+        CurrentStepUpdate::Unchanged
     };
 
     // Keep the current explicit config path; changing config is not yet
@@ -427,6 +462,7 @@ async fn edit_session_settings_interactive(
         SessionSettingsUpdate {
             config_path,
             skipped_steps,
+            current_step_update,
         },
     )?;
     *session = updated;
@@ -1009,7 +1045,13 @@ mod tests {
         // Given / When / Then: Suspended action list matches expectations
         assert_eq!(
             session_actions(&make_session("test", "test", SessionPhase::Suspended)),
-            vec!["Resume", "Reset to Planned", "Delete", "Back"]
+            vec![
+                "Resume",
+                "Edit Settings",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
         );
     }
 
@@ -1138,7 +1180,7 @@ mod tests {
         );
         assert_eq!(
             session_actions(&session),
-            vec!["Run", "Reset to Planned", "Delete", "Back"]
+            vec!["Run", "Edit Settings", "Reset to Planned", "Delete", "Back"]
         );
     }
 
@@ -1784,55 +1826,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_actions_running_has_no_edit_settings() {
-        // Given: Running phase — session cannot be edited while executing
-        let session = make_session("20260619100004", "task", SessionPhase::Running);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Running should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_suspended_has_no_edit_settings() {
-        // Given: Suspended phase
-        let session = make_session("20260619100005", "task", SessionPhase::Suspended);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Suspended should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_failed_has_no_edit_settings() {
-        // Given: Failed phase
-        let session = make_session(
-            "20260619100006",
-            "task",
-            SessionPhase::Failed("error".to_string()),
-        );
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Failed should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
     fn test_session_actions_completed_has_no_edit_settings() {
         // Given: Completed phase
         let session = make_session("20260619100007", "task", SessionPhase::Completed);
@@ -1859,6 +1852,55 @@ mod tests {
         assert!(
             !actions.contains(&"Edit Settings"),
             "Draft should NOT have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_failed_has_edit_settings() {
+        // Given: Failed phase — user should be able to edit skip/current_step and retry
+        let session = make_session(
+            "20260620100001",
+            "task",
+            SessionPhase::Failed("step s failed".to_string()),
+        );
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" is present for Failed phase
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Failed should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_suspended_has_edit_settings() {
+        // Given: Suspended phase — user should be able to adjust skip/current_step before resuming
+        let session = make_session("20260620100002", "task", SessionPhase::Suspended);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" is present for Suspended phase
+        assert!(
+            actions.contains(&"Edit Settings"),
+            "Suspended should have 'Edit Settings': {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_session_actions_running_has_no_edit_settings() {
+        // Given: Running phase — editing is prohibited while the runner is active
+        let session = make_session("20260620100003", "task", SessionPhase::Running);
+
+        // When
+        let actions = session_actions(&session);
+
+        // Then: "Edit Settings" must NOT appear (runner would race with the edit)
+        assert!(
+            !actions.contains(&"Edit Settings"),
+            "Running should NOT have 'Edit Settings': {actions:?}"
         );
     }
 }
