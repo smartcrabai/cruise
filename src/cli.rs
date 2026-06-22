@@ -137,6 +137,7 @@ pub struct PlanWorkerArgs {
 }
 
 #[derive(Parser, Debug)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct RunArgs {
     /// Session ID to execute (if omitted, picks from pending sessions).
     #[arg(conflicts_with = "all")]
@@ -164,8 +165,6 @@ pub struct RunArgs {
     /// Force-disable post-PR worktree+branch cleanup for this run.
     #[arg(long, conflicts_with = "cleanup_after_pr")]
     pub no_cleanup_after_pr: bool,
-
-
 }
 impl RunArgs {
     /// Convert the CLI cleanup flags into an `Option<bool>` override.
@@ -181,8 +180,6 @@ impl RunArgs {
         }
     }
 }
-
-
 
 #[derive(Parser, Debug)]
 pub struct CleanArgs {}
@@ -448,8 +445,6 @@ mod tests {
         // Then: parsing fails because the flags are mutually exclusive
         assert!(result.is_err());
     }
-
-
 
     #[test]
     fn test_root_plan_flag_with_inline_input_parses() {

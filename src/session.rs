@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{CruiseError, Result};
 
@@ -659,7 +660,12 @@ pub struct CleanupReport {
     pub skipped: usize,
 }
 
-/// Generate a session ID from current UTC time: `YYYYMMDDHHmmssNNN` (NNN = milliseconds).
+/// Generate a unique session ID from current UTC time plus a UUID suffix.
+///
+/// Format: `YYYYMMDDHHmmssNNN_<uuid>` where `YYYYMMDDHHmmssNNN` is the current
+/// UTC timestamp with millisecond precision and `<uuid>` is a UUID v4 rendered
+/// as 32 hexadecimal characters. The timestamp keeps IDs sortable; the UUID
+/// eliminates the small collision risk from rapid creation or clock changes.
 #[must_use]
 pub fn current_timestamp_id() -> String {
     let dur = SystemTime::now()
@@ -668,7 +674,8 @@ pub fn current_timestamp_id() -> String {
     let secs = dur.as_secs();
     let millis = dur.subsec_millis();
     let (year, month, day, h, m, s) = seconds_to_datetime(secs);
-    format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}{millis:03}")
+    let timestamp = format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}{millis:03}");
+    format!("{timestamp}_{}", Uuid::new_v4().simple())
 }
 
 /// Format current UTC time as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -793,9 +800,14 @@ mod tests {
     #[test]
     fn test_timestamp_id_format() {
         let id = current_timestamp_id();
-        // YYYYMMDDHHmmssNNN (14 date/time digits + 3 milliseconds digits = 17)
-        assert_eq!(id.len(), 17);
-        assert!(id.chars().all(|c| c.is_ascii_digit()));
+        // Format: YYYYMMDDHHmmssNNN_<32-hex-uuid>
+        let (timestamp, suffix) = id
+            .split_once('_')
+            .unwrap_or_else(|| panic!("session ID should contain an underscore: {id}"));
+        assert_eq!(timestamp.len(), 17);
+        assert!(timestamp.chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(suffix.len(), 32);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -1256,8 +1268,6 @@ mod tests {
         // Then: the override defaults to None so old sessions remain non-destructive
         assert_eq!(loaded.cleanup_after_pr_override, None);
     }
-
-
 
     #[test]
     fn test_clones_dir_is_under_base() {

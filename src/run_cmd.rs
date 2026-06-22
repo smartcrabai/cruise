@@ -499,28 +499,26 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         && session.repo.is_none()
         && matches!(session.phase, SessionPhase::Completed)
         && session.pr_url.is_some()
+        && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
     {
-        if let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace {
-            // Step out of the soon-to-be-removed worktree before deleting it.
-            let _ = std::env::set_current_dir(&current_dir_guard.original);
-            if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
-                eprintln!(
-                    "{} warning: post-PR cleanup failed: {}",
-                    style("!").yellow(),
-                    e
-                );
-            } else {
-                eprintln!(
-                    "{} removed worktree and branch for {}",
-                    style("->").cyan(),
-                    session.id
-                );
-            }
-            session.worktree_path = None;
-            session.worktree_branch = None;
+        // Step out of the soon-to-be-removed worktree before deleting it.
+        let _ = std::env::set_current_dir(&current_dir_guard.original);
+        if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
+            eprintln!(
+                "{} warning: post-PR cleanup failed: {}",
+                style("!").yellow(),
+                e
+            );
+        } else {
+            eprintln!(
+                "{} removed worktree and branch for {}",
+                style("->").cyan(),
+                session.id
+            );
         }
+        session.worktree_path = None;
+        session.worktree_branch = None;
     }
-
 
     save_session_state_with_conflict_resolution(&manager, session, session_fingerprint.get())?;
     overall_result
