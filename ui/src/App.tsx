@@ -1208,6 +1208,15 @@ interface NewSessionFormProps {
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
 }
 
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
@@ -1222,8 +1231,14 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
   const isRepoMode = sourceKind === "repository";
   // Repository clones don't exist yet at form time, so config lookup falls
   // back to the user-level / builtin configs in repository mode.
-  const configLookupBaseDir = configPath !== "" || isRepoMode ? "." : (baseDir || ".");
+  // Repo clones don't exist at form time; use "." as placeholder so the Rust side
+  // resolves config from user-level / builtin paths. For directory mode, always pass
+  // the actual baseDir so history scope lookups match stored absolute-path entries.
+  const configLookupBaseDir = isRepoMode ? "." : (baseDir || ".");
   const repoSpecValid = isValidRepoSpec(repo);
+  // Delays config-defaults refetch while the user types, preventing skippedSteps
+  // from being reset on every keystroke.
+  const debouncedRepo = useDebounce(repo, 300);
 
   function set<K extends keyof NewSessionDraft>(key: K, value: NewSessionDraft[K]) {
     onDraftChange((prev) => ({ ...prev, [key]: value }));
@@ -1253,10 +1268,11 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
 
   useEffect(() => {
     let active = true;
-    void getNewSessionConfigDefaults({
-      baseDir: configLookupBaseDir,
-      configPath: configPath || undefined,
-    })
+    const params = isRepoMode
+      // baseDir is unused for repo-mode config resolution; "." is a safe placeholder.
+      ? { baseDir: ".", configPath: configPath || undefined, repo: debouncedRepo.trim() || undefined }
+      : { baseDir: configLookupBaseDir, configPath: configPath || undefined };
+    void getNewSessionConfigDefaults(params)
       .then((defaults) => {
         if (active) {
           const validStepIds = collectExpandedStepIds(defaults.steps);
@@ -1273,7 +1289,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
         }
       });
     return () => { active = false; };
-  }, [configLookupBaseDir, configPath]);
+  }, [configLookupBaseDir, configPath, isRepoMode, debouncedRepo]);
 
   useEffect(() => {
     if (isGenerating) return;
