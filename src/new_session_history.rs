@@ -271,11 +271,7 @@ impl NewSessionHistory {
             })
     }
 
-    /// Return the most recently recorded entry whose `resolved_config_key` equals
-    /// `resolved_config_key`, or `None` if no matching entry exists.
-    ///
-    /// Used as a legacy fallback for history entries written before scope-based
-    /// recording was introduced (`working_dir=""`, `repo=None`).
+    #[cfg(test)]
     fn latest_entry_for_config(
         &self,
         resolved_config_key: &str,
@@ -1064,7 +1060,12 @@ mod tests {
             result.is_some(),
             "legacy entry (working_dir='', repo=None) should be returned as a fallback"
         );
-        assert_eq!(result.unwrap().skipped_steps, vec!["step-legacy"]);
+        assert_eq!(
+            result
+                .unwrap_or_else(|| panic!("expected Some, got None"))
+                .skipped_steps,
+            vec!["step-legacy"]
+        );
     }
 
     #[test]
@@ -1084,7 +1085,9 @@ mod tests {
 
         // Then: returns the scoped entry, not the legacy one
         assert_eq!(
-            result.unwrap().skipped_steps,
+            result
+                .unwrap_or_else(|| panic!("expected Some, got None"))
+                .skipped_steps,
             vec!["step-scoped"],
             "scoped entry should take priority over legacy fallback"
         );
@@ -1274,6 +1277,11 @@ mod tests {
             result.is_some(),
             "Repo scope lookup should match regardless of case"
         );
-        assert_eq!(result.unwrap().skipped_steps, vec!["step-x"]);
+        assert_eq!(
+            result
+                .unwrap_or_else(|| panic!("expected Some, got None"))
+                .skipped_steps,
+            vec!["step-x"]
+        );
     }
 }
