@@ -914,6 +914,7 @@ pub async fn create_session(
         } else {
             base.to_string_lossy().into_owned()
         },
+        repo: repo.clone(),
         resolved_config_key: session.config_path.as_deref().map_or_else(
             || BUILTIN_CONFIG_KEY.to_string(),
             resolved_config_key_for_session,
@@ -1166,6 +1167,7 @@ pub(crate) fn create_draft_session_impl(
         } else {
             base.to_string_lossy().into_owned()
         },
+        repo: repo.clone(),
         resolved_config_key: session.config_path.as_deref().map_or_else(
             || BUILTIN_CONFIG_KEY.to_string(),
             resolved_config_key_for_session,
@@ -1267,6 +1269,7 @@ pub fn get_new_session_history_summary() -> std::result::Result<NewSessionHistor
 pub fn get_new_session_config_defaults(
     base_dir: String,
     config_path: Option<String>,
+    repo: Option<String>,
 ) -> std::result::Result<NewSessionConfigDefaultsDto, String> {
     let (_, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
     let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
@@ -1280,8 +1283,22 @@ pub fn get_new_session_config_defaults(
         |p| resolved_config_key_for_session(p),
     );
     let history = NewSessionHistory::load_best_effort();
-    let default_skipped_steps = history
-        .latest_entry_for_config(&resolved_config_key)
+    let scope = repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(cruise::new_session_history::HistoryScope::Repo)
+        .or_else(|| {
+            if base_dir.is_empty() {
+                None
+            } else {
+                Some(cruise::new_session_history::HistoryScope::Directory(
+                    &base_dir,
+                ))
+            }
+        });
+    let default_skipped_steps = scope
+        .and_then(|s| history.latest_entry_for_scope(s, &resolved_config_key))
         .map(|entry| entry.skipped_steps.clone())
         .unwrap_or_default();
     Ok(NewSessionConfigDefaultsDto {
@@ -1342,7 +1359,14 @@ pub fn update_session_settings(
         selected_at: current_iso8601(),
         input: session.input.clone(),
         requested_config_path: config_path,
-        working_dir: base.to_string_lossy().into_owned(),
+        // Repo sessions use a temporary clone as base_dir; never expose it as a
+        // recent directory (mirrors the create_session behaviour).
+        working_dir: if session.repo.is_some() {
+            String::new()
+        } else {
+            base.to_string_lossy().into_owned()
+        },
+        repo: session.repo.clone(),
         resolved_config_key,
         skipped_steps: session.skipped_steps.clone(),
     });
@@ -2511,6 +2535,7 @@ mod tests {
             input: String::new(),
             requested_config_path: Some("/Users/takumi/.cruise/team.yaml".to_string()),
             working_dir: "/Users/takumi/projects/demo".to_string(),
+            repo: None,
             resolved_config_key: "/Users/takumi/.cruise/team.yaml".to_string(),
             skipped_steps: vec!["review".to_string()],
         });
@@ -2519,6 +2544,7 @@ mod tests {
             input: String::new(),
             requested_config_path: None,
             working_dir: "/Users/takumi/projects/another-repo".to_string(),
+            repo: None,
             resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
             skipped_steps: vec!["write-tests".to_string()],
         });
@@ -2552,6 +2578,7 @@ mod tests {
             input: String::new(),
             requested_config_path: None,
             working_dir: "/Users/takumi/projects/cruise".to_string(),
+            repo: None,
             resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
             skipped_steps: vec![],
         });
@@ -2564,6 +2591,7 @@ mod tests {
                 requested_config_path: None,
                 working_dir: "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpXYZ/repo"
                     .to_string(),
+                repo: None,
                 resolved_config_key: BUILTIN_CONFIG_KEY.to_string(),
                 skipped_steps: vec![],
             },

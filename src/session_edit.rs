@@ -85,7 +85,13 @@ pub fn update_session_settings(
         selected_at: current_iso8601(),
         input: session.input.clone(),
         requested_config_path: requested_config_path.clone(),
-        working_dir: session.base_dir.to_string_lossy().into_owned(),
+        // Clone paths are temporary; never expose them as recent directories.
+        working_dir: if session.repo.is_some() {
+            String::new()
+        } else {
+            session.base_dir.to_string_lossy().into_owned()
+        },
+        repo: session.repo.clone(),
         resolved_config_key,
         skipped_steps: session.skipped_steps.clone(),
     });

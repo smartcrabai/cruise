@@ -18,7 +18,7 @@ use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{
-    BUILTIN_CONFIG_KEY, NewSessionHistory, resolved_config_key_for_session,
+    BUILTIN_CONFIG_KEY, HistoryScope, NewSessionHistory, resolved_config_key_for_session,
 };
 use crate::planning::{
     PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
@@ -863,12 +863,17 @@ pub(crate) fn select_steps_to_skip(
 
 fn apply_skip_step_selection(
     history: &mut NewSessionHistory,
+    scope: HistoryScope<'_>,
     resolved_config_key: &str,
     selection: StepSkipSelection,
 ) -> (Vec<String>, bool) {
     match selection {
         StepSkipSelection::Confirmed(skipped_steps) => {
-            history.record_skip_selection_for_config(resolved_config_key, skipped_steps.clone());
+            history.record_skip_selection_for_scope(
+                scope,
+                resolved_config_key,
+                skipped_steps.clone(),
+            );
             (skipped_steps, true)
         }
         StepSkipSelection::Cancelled => (vec![], false),
@@ -891,13 +896,20 @@ fn select_skipped_steps_with_history(
     };
     let mut history = NewSessionHistory::load_best_effort();
 
+    let base_dir_str = session.base_dir.to_string_lossy();
+    let scope = match session.repo.as_deref() {
+        Some(repo) => HistoryScope::Repo(repo),
+        None => HistoryScope::Directory(base_dir_str.as_ref()),
+    };
+
     let previously_skipped = history
-        .latest_entry_for_config(&key)
+        .latest_entry_for_scope(scope, &key)
         .map(|entry| entry.skipped_steps.clone())
         .unwrap_or_default();
 
     let selection = select_steps_to_skip(config, &previously_skipped)?;
-    let (skipped_steps, should_persist) = apply_skip_step_selection(&mut history, &key, selection);
+    let (skipped_steps, should_persist) =
+        apply_skip_step_selection(&mut history, scope, &key, selection);
     if should_persist {
         history.save_best_effort();
     }
@@ -1558,6 +1570,7 @@ steps:
         let mut history = NewSessionHistory::default();
         let (skipped_steps, should_persist) = apply_skip_step_selection(
             &mut history,
+            HistoryScope::Directory("/home/user/proj"),
             "/config/a.yaml",
             StepSkipSelection::Confirmed(vec![]),
         );
@@ -1571,7 +1584,8 @@ steps:
                 selected_at: history.entries[0].selected_at.clone(),
                 input: String::new(),
                 requested_config_path: None,
-                working_dir: String::new(),
+                working_dir: "/home/user/proj".to_string(),
+                repo: None,
                 resolved_config_key: "/config/a.yaml".to_string(),
                 skipped_steps: vec![],
             }
@@ -1586,12 +1600,17 @@ steps:
             input: String::new(),
             requested_config_path: None,
             working_dir: String::new(),
+            repo: None,
             resolved_config_key: "/config/a.yaml".to_string(),
             skipped_steps: vec!["review".to_string()],
         });
 
-        let (skipped_steps, should_persist) =
-            apply_skip_step_selection(&mut history, "/config/a.yaml", StepSkipSelection::Cancelled);
+        let (skipped_steps, should_persist) = apply_skip_step_selection(
+            &mut history,
+            HistoryScope::Directory(""),
+            "/config/a.yaml",
+            StepSkipSelection::Cancelled,
+        );
 
         assert!(!should_persist);
         assert!(skipped_steps.is_empty());
@@ -1607,12 +1626,14 @@ steps:
             input: String::new(),
             requested_config_path: Some("/config/a.yaml".to_string()),
             working_dir: "/Users/test/project".to_string(),
+            repo: None,
             resolved_config_key: "/config/a.yaml".to_string(),
             skipped_steps: vec!["plan".to_string()],
         });
 
         let (skipped_steps, should_persist) = apply_skip_step_selection(
             &mut history,
+            HistoryScope::Directory("/Users/test/project"),
             "/config/a.yaml",
             StepSkipSelection::Confirmed(vec!["review".to_string()]),
         );

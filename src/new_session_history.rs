@@ -29,6 +29,9 @@ pub struct NewSessionHistoryEntry {
     /// The selected working directory after normalization.
     #[serde(default)]
     pub working_dir: String,
+    /// GitHub repository spec ("owner/repo") for repository-mode sessions.
+    #[serde(default)]
+    pub repo: Option<String>,
     /// The effective config key after resolution.
     ///
     /// For file-based configs this is the absolute path string.
@@ -37,6 +40,47 @@ pub struct NewSessionHistoryEntry {
     /// Step names the user explicitly chose to skip.
     #[serde(default)]
     pub skipped_steps: Vec<String>,
+}
+
+/// Scope key used for history lookup and recording.
+///
+/// Directory scope matches on `working_dir`; Repo scope matches on `repo`.
+/// Both are used in combination with `resolved_config_key` as a compound key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryScope<'a> {
+    /// GitHub repository mode — "owner/repo" spec.
+    Repo(&'a str),
+    /// Local directory mode — normalized absolute path.
+    Directory(&'a str),
+}
+
+impl HistoryScope<'_> {
+    /// Return `true` if this scope's key is non-empty and the entry's corresponding
+    /// field matches.  An empty scope string never matches to prevent dead entries.
+    fn matches(self, entry: &NewSessionHistoryEntry) -> bool {
+        match self {
+            HistoryScope::Repo(r) => {
+                !r.is_empty()
+                    && entry
+                        .repo
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(r))
+            }
+            HistoryScope::Directory(d) => {
+                !d.is_empty()
+                    && !entry.working_dir.is_empty()
+                    && normalize_working_dir(&entry.working_dir) == normalize_working_dir(d)
+            }
+        }
+    }
+
+    /// Return `true` if the scope key is non-empty (i.e., safe to record).
+    fn is_non_empty(self) -> bool {
+        match self {
+            HistoryScope::Repo(r) => !r.is_empty(),
+            HistoryScope::Directory(d) => !d.is_empty(),
+        }
+    }
 }
 
 /// Persistent ring-buffer of per-config skip-step selections.
@@ -176,46 +220,118 @@ impl NewSessionHistory {
             entry.working_dir = String::new();
         }
         self.entries.insert(0, entry);
+        // Remove older duplicates with the same compound key so the ring buffer is
+        // not filled by repeated settings-saves for the same session context.
+        let (wd, repo, ck) = {
+            let e = &self.entries[0];
+            (
+                e.working_dir.clone(),
+                e.repo.clone(),
+                e.resolved_config_key.clone(),
+            )
+        };
+        let mut first_seen = false;
+        self.entries.retain(|e| {
+            if e.working_dir == wd && e.repo == repo && e.resolved_config_key == ck {
+                if first_seen {
+                    return false;
+                }
+                first_seen = true;
+            }
+            true
+        });
         self.entries.truncate(Self::MAX_ENTRIES);
     }
 
-    /// Record skipped-step defaults for a config without creating redundant
-    /// skip-only entries when the config already has history.
-    pub fn record_skip_selection_for_config(
-        &mut self,
+    /// Return the most recently recorded entry matching the compound key
+    /// `(scope, resolved_config_key)`, or `None` if no matching entry exists.
+    ///
+    /// Matching rules:
+    /// - `Repo(r)`: `entry.repo == Some(r)` and `r` is non-empty
+    /// - `Directory(d)`: `d` is non-empty and `normalize_working_dir(entry.working_dir) == normalize_working_dir(d)`
+    /// - Additionally: `entry.resolved_config_key == resolved_config_key`
+    #[must_use]
+    pub fn latest_entry_for_scope(
+        &self,
+        scope: HistoryScope<'_>,
         resolved_config_key: &str,
-        skipped_steps: Vec<String>,
-    ) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.resolved_config_key == resolved_config_key)
-        {
-            entry.selected_at = current_iso8601();
-            entry.skipped_steps = skipped_steps;
-            return;
-        }
-
-        self.record_selection(NewSessionHistoryEntry {
-            selected_at: String::new(),
-            input: String::new(),
-            requested_config_path: None,
-            working_dir: String::new(),
-            resolved_config_key: resolved_config_key.to_string(),
-            skipped_steps,
-        });
+    ) -> Option<&NewSessionHistoryEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.resolved_config_key == resolved_config_key && scope.matches(e))
+            .or_else(|| {
+                // Legacy fallback: old history entries (written before scope-based recording
+                // was introduced) have working_dir="" and repo=None. Match them by config
+                // key alone so existing skip preferences survive an upgrade.
+                self.entries.iter().find(|e| {
+                    e.resolved_config_key == resolved_config_key
+                        && e.working_dir.is_empty()
+                        && e.repo.is_none()
+                })
+            })
     }
 
     /// Return the most recently recorded entry whose `resolved_config_key` equals
     /// `resolved_config_key`, or `None` if no matching entry exists.
-    #[must_use]
-    pub fn latest_entry_for_config(
+    ///
+    /// Used as a legacy fallback for history entries written before scope-based
+    /// recording was introduced (`working_dir=""`, `repo=None`).
+    fn latest_entry_for_config(
         &self,
         resolved_config_key: &str,
     ) -> Option<&NewSessionHistoryEntry> {
         self.entries
             .iter()
             .find(|e| e.resolved_config_key == resolved_config_key)
+    }
+
+    /// Record skipped-step defaults using the compound key `(scope, resolved_config_key)`.
+    ///
+    /// Updates an existing matching entry in-place, or inserts a new entry at the front.
+    /// New entries populate `repo` or `working_dir` according to the scope kind.
+    pub fn record_skip_selection_for_scope(
+        &mut self,
+        scope: HistoryScope<'_>,
+        resolved_config_key: &str,
+        skipped_steps: Vec<String>,
+    ) {
+        // Never write a dead entry that can never be looked up again.
+        if !scope.is_non_empty() {
+            return;
+        }
+        // Directory scope: temp paths get cleared to "" by record_selection, which would
+        // create a dead entry that no scope lookup can ever retrieve.
+        if let HistoryScope::Directory(d) = scope
+            && is_temp_working_dir(&normalize_working_dir(d))
+        {
+            return;
+        }
+
+        let found = self
+            .entries
+            .iter_mut()
+            .find(|e| e.resolved_config_key == resolved_config_key && scope.matches(e));
+
+        if let Some(entry) = found {
+            entry.selected_at = current_iso8601();
+            entry.skipped_steps = skipped_steps;
+            return;
+        }
+
+        let (working_dir, repo) = match scope {
+            HistoryScope::Repo(r) => (String::new(), Some(r.to_string())),
+            HistoryScope::Directory(d) => (d.to_string(), None),
+        };
+
+        self.record_selection(NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir,
+            repo,
+            resolved_config_key: resolved_config_key.to_string(),
+            skipped_steps,
+        });
     }
 }
 
@@ -348,6 +464,39 @@ mod tests {
             input: String::new(),
             requested_config_path: None,
             working_dir: "/Users/test/project".to_string(),
+            repo: None,
+            resolved_config_key: resolved_config_key.to_string(),
+            skipped_steps: skipped_steps.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn make_dir_entry(
+        working_dir: &str,
+        resolved_config_key: &str,
+        skipped_steps: Vec<&str>,
+    ) -> NewSessionHistoryEntry {
+        NewSessionHistoryEntry {
+            selected_at: "2026-04-07T00:00:00Z".to_string(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: working_dir.to_string(),
+            repo: None,
+            resolved_config_key: resolved_config_key.to_string(),
+            skipped_steps: skipped_steps.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn make_repo_entry(
+        repo: &str,
+        resolved_config_key: &str,
+        skipped_steps: Vec<&str>,
+    ) -> NewSessionHistoryEntry {
+        NewSessionHistoryEntry {
+            selected_at: "2026-04-07T00:00:00Z".to_string(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: String::new(),
+            repo: Some(repo.to_string()),
             resolved_config_key: resolved_config_key.to_string(),
             skipped_steps: skipped_steps.into_iter().map(String::from).collect(),
         }
@@ -544,6 +693,7 @@ mod tests {
             input: String::new(),
             requested_config_path: Some(String::new()),
             working_dir: "/Users/test/project/".to_string(),
+            repo: None,
             resolved_config_key: "__builtin__".to_string(),
             skipped_steps: vec![],
         });
@@ -557,43 +707,9 @@ mod tests {
     }
 
     #[test]
-    fn test_record_skip_selection_updates_existing_gui_entry_in_place() {
-        let mut history = NewSessionHistory::default();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: "2026-04-07T00:00:00Z".to_string(),
-            input: String::new(),
-            requested_config_path: Some("/config/a.yaml".to_string()),
-            working_dir: "/Users/test/project".to_string(),
-            resolved_config_key: "/config/a.yaml".to_string(),
-            skipped_steps: vec!["plan".to_string()],
-        });
-
-        history.record_skip_selection_for_config("/config/a.yaml", vec!["review".to_string()]);
-
-        assert_eq!(history.entries.len(), 1);
-        assert_eq!(
-            history.entries[0].requested_config_path.as_deref(),
-            Some("/config/a.yaml")
-        );
-        assert_eq!(history.entries[0].working_dir, "/Users/test/project");
-        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
-    }
-
-    #[test]
-    fn test_record_skip_selection_inserts_skip_only_entry_when_config_is_new() {
-        let mut history = NewSessionHistory::default();
-
-        history.record_skip_selection_for_config("/config/a.yaml", vec!["review".to_string()]);
-
-        assert_eq!(history.entries.len(), 1);
-        assert_eq!(history.entries[0].resolved_config_key, "/config/a.yaml");
-        assert_eq!(history.entries[0].requested_config_path, None);
-        assert_eq!(history.entries[0].working_dir, "");
-        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
-    }
-
-    #[test]
-    fn test_builtin_and_path_config_keys_coexist_within_cap() {
+    fn test_builtin_and_path_config_keys_coexist() {
+        // Repeated recordings with the same (working_dir, repo, config) key are deduped,
+        // so both config keys survive rather than one evicting the other.
         let mut history = NewSessionHistory::default();
         for _ in 0..25 {
             history.record_selection(make_entry("__builtin__", vec![]));
@@ -601,7 +717,11 @@ mod tests {
         for _ in 0..25 {
             history.record_selection(make_entry("/config/custom.yaml", vec![]));
         }
-        assert_eq!(history.entries.len(), NewSessionHistory::MAX_ENTRIES);
+        assert_eq!(
+            history.entries.len(),
+            2,
+            "dedup keeps exactly one entry per (working_dir, repo, config) key"
+        );
         assert!(history.latest_entry_for_config("__builtin__").is_some());
         assert!(
             history
@@ -789,6 +909,7 @@ mod tests {
             requested_config_path: None,
             working_dir: "/var/folders/4r/cb2pswws7fsctl8ksr1xpk100000gn/T/.tmpXYZ/repo"
                 .to_string(),
+            repo: None,
             resolved_config_key: "__builtin__".to_string(),
             skipped_steps: vec![],
         });
@@ -810,6 +931,7 @@ mod tests {
             input: String::new(),
             requested_config_path: None,
             working_dir: "/Users/takumi/projects/cruise".to_string(),
+            repo: None,
             resolved_config_key: "__builtin__".to_string(),
             skipped_steps: vec![],
         });
@@ -818,5 +940,340 @@ mod tests {
             .first()
             .unwrap_or_else(|| panic!("expected an entry"));
         assert_eq!(entry.working_dir, "/Users/takumi/projects/cruise");
+    }
+
+    // ---- latest_entry_for_scope ----
+
+    #[test]
+    fn test_latest_entry_for_scope_directory_same_dir_different_configs() {
+        // Given: two entries with the same directory but different configs
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_dir_entry(
+            "/home/user/proj",
+            "/config/a.yaml",
+            vec!["step-a"],
+        ));
+        history.entries.push(make_dir_entry(
+            "/home/user/proj",
+            "/config/b.yaml",
+            vec!["step-b"],
+        ));
+
+        // When: looking up by Directory scope + each config
+        let entry_a = history
+            .latest_entry_for_scope(HistoryScope::Directory("/home/user/proj"), "/config/a.yaml");
+        let entry_b = history
+            .latest_entry_for_scope(HistoryScope::Directory("/home/user/proj"), "/config/b.yaml");
+
+        // Then: each returns the correct skipped_steps (no cross-contamination)
+        let Some(entry_a) = entry_a else {
+            panic!("expected Some for /config/a.yaml");
+        };
+        assert_eq!(entry_a.skipped_steps, vec!["step-a"]);
+        let Some(entry_b) = entry_b else {
+            panic!("expected Some for /config/b.yaml");
+        };
+        assert_eq!(entry_b.skipped_steps, vec!["step-b"]);
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_directory_same_config_different_dirs() {
+        // Given: two entries with the same config but different directories
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_dir_entry(
+            "/home/user/proj-a",
+            "/config/shared.yaml",
+            vec!["step-a"],
+        ));
+        history.entries.push(make_dir_entry(
+            "/home/user/proj-b",
+            "/config/shared.yaml",
+            vec!["step-b"],
+        ));
+
+        // When: looking up by Directory scope + config for each directory
+        let entry_a = history.latest_entry_for_scope(
+            HistoryScope::Directory("/home/user/proj-a"),
+            "/config/shared.yaml",
+        );
+        let entry_b = history.latest_entry_for_scope(
+            HistoryScope::Directory("/home/user/proj-b"),
+            "/config/shared.yaml",
+        );
+
+        // Then: each returns its own skipped_steps — same config does not bleed across dirs
+        let Some(entry_a) = entry_a else {
+            panic!("expected Some for proj-a");
+        };
+        assert_eq!(entry_a.skipped_steps, vec!["step-a"]);
+        let Some(entry_b) = entry_b else {
+            panic!("expected Some for proj-b");
+        };
+        assert_eq!(entry_b.skipped_steps, vec!["step-b"]);
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_repo_same_repo_different_configs() {
+        // Given: two entries with the same repo but different configs
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_repo_entry(
+            "owner/repo",
+            "/config/a.yaml",
+            vec!["step-a"],
+        ));
+        history.entries.push(make_repo_entry(
+            "owner/repo",
+            "/config/b.yaml",
+            vec!["step-b"],
+        ));
+
+        // When: looking up by Repo scope + each config
+        let entry_a =
+            history.latest_entry_for_scope(HistoryScope::Repo("owner/repo"), "/config/a.yaml");
+        let entry_b =
+            history.latest_entry_for_scope(HistoryScope::Repo("owner/repo"), "/config/b.yaml");
+
+        // Then: each returns the correct skipped_steps
+        let Some(entry_a) = entry_a else {
+            panic!("expected Some for /config/a.yaml");
+        };
+        assert_eq!(entry_a.skipped_steps, vec!["step-a"]);
+        let Some(entry_b) = entry_b else {
+            panic!("expected Some for /config/b.yaml");
+        };
+        assert_eq!(entry_b.skipped_steps, vec!["step-b"]);
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_directory_falls_back_to_legacy_entry() {
+        // Given: a legacy entry with empty working_dir and no repo (old format written before
+        // scope-based recording was introduced).
+        let mut history = NewSessionHistory::default();
+        let mut legacy = make_entry("/config/a.yaml", vec!["step-legacy"]);
+        legacy.working_dir = String::new();
+        legacy.repo = None;
+        history.entries.push(legacy);
+
+        // When: looking up by Directory scope with a non-empty directory
+        let result = history
+            .latest_entry_for_scope(HistoryScope::Directory("/home/user/proj"), "/config/a.yaml");
+
+        // Then: returns the legacy entry via the backward-compat fallback so that
+        // skip preferences survive an upgrade from the scopeless history format.
+        assert!(
+            result.is_some(),
+            "legacy entry (working_dir='', repo=None) should be returned as a fallback"
+        );
+        assert_eq!(result.unwrap().skipped_steps, vec!["step-legacy"]);
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_legacy_fallback_not_used_when_scope_match_exists() {
+        // Given: both a scope-matched entry and a legacy entry for the same config
+        let mut history = NewSessionHistory::default();
+        let scoped = make_dir_entry("/home/user/proj", "/config/a.yaml", vec!["step-scoped"]);
+        history.entries.push(scoped);
+        let mut legacy = make_entry("/config/a.yaml", vec!["step-legacy"]);
+        legacy.working_dir = String::new();
+        legacy.repo = None;
+        history.entries.push(legacy);
+
+        // When: looking up by Directory scope
+        let result = history
+            .latest_entry_for_scope(HistoryScope::Directory("/home/user/proj"), "/config/a.yaml");
+
+        // Then: returns the scoped entry, not the legacy one
+        assert_eq!(
+            result.unwrap().skipped_steps,
+            vec!["step-scoped"],
+            "scoped entry should take priority over legacy fallback"
+        );
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_repo_mode_skips_entry_without_repo_field() {
+        // Given: a directory-mode entry with no repo field
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_dir_entry(
+            "/home/user/proj",
+            "/config/a.yaml",
+            vec!["step-dir"],
+        ));
+
+        // When: looking up by Repo scope
+        let result =
+            history.latest_entry_for_scope(HistoryScope::Repo("owner/repo"), "/config/a.yaml");
+
+        // Then: returns None — entry without repo does not match Repo scope
+        assert!(
+            result.is_none(),
+            "directory-mode entry should not match Repo scope lookup"
+        );
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_same_scope_and_config_returns_most_recent() {
+        // Given: two entries with the same (scope, config) — entries are in most-recent-first order
+        let mut history = NewSessionHistory::default();
+        let mut recent = make_dir_entry("/home/user/proj", "/config/a.yaml", vec!["step-new"]);
+        recent.selected_at = "2026-06-01T00:00:00Z".to_string();
+        let mut older = make_dir_entry("/home/user/proj", "/config/a.yaml", vec!["step-old"]);
+        older.selected_at = "2026-01-01T00:00:00Z".to_string();
+        // entries[0] is more recent
+        history.entries.push(recent);
+        history.entries.push(older);
+
+        // When: looking up by scope + config
+        let entry = history
+            .latest_entry_for_scope(HistoryScope::Directory("/home/user/proj"), "/config/a.yaml");
+
+        // Then: returns the most recent entry (the first one in entries)
+        let Some(entry) = entry else {
+            panic!("expected Some");
+        };
+        assert_eq!(
+            entry.skipped_steps,
+            vec!["step-new"],
+            "should return the most-recent-first entry"
+        );
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_repo_empty_string_never_matches() {
+        // Given: an entry with a valid repo
+        let mut history = NewSessionHistory::default();
+        history
+            .entries
+            .push(make_repo_entry("owner/repo", "__builtin__", vec!["step-x"]));
+
+        // When: looking up with an empty string as Repo scope
+        let result = history.latest_entry_for_scope(HistoryScope::Repo(""), "__builtin__");
+
+        // Then: returns None — empty repo string is always a non-match
+        assert!(
+            result.is_none(),
+            "HistoryScope::Repo(\"\") should never match any entry"
+        );
+    }
+
+    // ---- record_skip_selection_for_scope ----
+
+    #[test]
+    fn test_record_skip_selection_for_scope_updates_in_place_on_directory_match() {
+        // Given: history with an existing directory-mode entry
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_dir_entry(
+            "/home/user/proj",
+            "/config/a.yaml",
+            vec!["step-old"],
+        ));
+
+        // When: recording a new skip selection for the same scope + config
+        history.record_skip_selection_for_scope(
+            HistoryScope::Directory("/home/user/proj"),
+            "/config/a.yaml",
+            vec!["step-new".to_string()],
+        );
+
+        // Then: the existing entry is updated in-place (no new entry is added)
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].skipped_steps, vec!["step-new"]);
+    }
+
+    #[test]
+    fn test_record_skip_selection_for_scope_inserts_new_directory_entry_with_working_dir() {
+        // Given: empty history
+        let mut history = NewSessionHistory::default();
+
+        // When: recording a new skip selection for a new directory scope
+        history.record_skip_selection_for_scope(
+            HistoryScope::Directory("/home/user/proj"),
+            "/config/a.yaml",
+            vec!["step-x".to_string()],
+        );
+
+        // Then: a new entry is inserted with working_dir set and repo absent
+        assert_eq!(history.entries.len(), 1);
+        let entry = &history.entries[0];
+        assert_eq!(entry.resolved_config_key, "/config/a.yaml");
+        assert_eq!(entry.skipped_steps, vec!["step-x"]);
+        assert_eq!(
+            entry.repo, None,
+            "Directory scope entry must not have repo set"
+        );
+        assert!(
+            !entry.working_dir.is_empty(),
+            "Directory scope entry must have working_dir set"
+        );
+    }
+
+    #[test]
+    fn test_record_skip_selection_for_scope_inserts_new_repo_entry_with_repo_field() {
+        // Given: empty history
+        let mut history = NewSessionHistory::default();
+
+        // When: recording a new skip selection for a new repo scope
+        history.record_skip_selection_for_scope(
+            HistoryScope::Repo("owner/myrepo"),
+            "__builtin__",
+            vec!["step-y".to_string()],
+        );
+
+        // Then: a new entry is inserted with repo set and working_dir empty
+        assert_eq!(history.entries.len(), 1);
+        let entry = &history.entries[0];
+        assert_eq!(entry.resolved_config_key, "__builtin__");
+        assert_eq!(entry.skipped_steps, vec!["step-y"]);
+        assert_eq!(
+            entry.repo.as_deref(),
+            Some("owner/myrepo"),
+            "Repo scope entry must have repo set"
+        );
+        assert_eq!(
+            entry.working_dir, "",
+            "Repo scope entry must have empty working_dir"
+        );
+    }
+
+    #[test]
+    fn test_record_skip_selection_for_scope_ignores_temp_directory() {
+        // Given: empty history
+        let mut history = NewSessionHistory::default();
+
+        // When: recording skip selection with a temp directory as the Directory scope
+        history.record_skip_selection_for_scope(
+            HistoryScope::Directory("/tmp/some-session"),
+            "/config/a.yaml",
+            vec!["step-x".to_string()],
+        );
+
+        // Then: no entry is written — temp paths get cleared to "" by record_selection,
+        // which would create a dead entry that can never be looked up again.
+        assert!(
+            history.entries.is_empty(),
+            "temp directory scope should not produce any history entry"
+        );
+    }
+
+    #[test]
+    fn test_latest_entry_for_scope_repo_matches_case_insensitively() {
+        // Given: an entry recorded with mixed-case repo name
+        let mut history = NewSessionHistory::default();
+        history.entries.push(make_repo_entry(
+            "Owner/Repo",
+            "/config/a.yaml",
+            vec!["step-x"],
+        ));
+
+        // When: looking up with all-lowercase repo name
+        let result =
+            history.latest_entry_for_scope(HistoryScope::Repo("owner/repo"), "/config/a.yaml");
+
+        // Then: matches because GitHub repo names are case-insensitive
+        assert!(
+            result.is_some(),
+            "Repo scope lookup should match regardless of case"
+        );
+        assert_eq!(result.unwrap().skipped_steps, vec!["step-x"]);
     }
 }

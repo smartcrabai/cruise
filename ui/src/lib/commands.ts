@@ -188,11 +188,12 @@ export function getNewSessionHistorySummary(): Promise<NewSessionHistorySummary>
 /** Resolve the effective config for the New Session form and return the skippable-step
  *  tree together with history-backed default skip selections. */
 export function getNewSessionConfigDefaults(
-  params: { baseDir: string; configPath?: string }
+  params: { baseDir: string; configPath?: string; repo?: string }
 ): Promise<NewSessionConfigDefaults> {
   return invoke<NewSessionConfigDefaults>("get_new_session_config_defaults", {
     baseDir: params.baseDir,
     configPath: params.configPath ?? null,
+    repo: params.repo ?? null,
   });
 }
 

@@ -297,7 +297,7 @@ fn spawn_agent_stream(
             let mut headless_cfg = seher::claude_headless::ClaudeHeadlessRunnerConfig::default();
             headless_cfg.model = Some(resolved.model_id.clone());
             headless_cfg.cwd = cwd_string;
-            headless_cfg.resume_session_id = req.resume.clone();
+            headless_cfg.resume_session_id.clone_from(&req.resume);
             let runner = seher::claude_headless::ClaudeHeadlessRunner::new(headless_cfg);
             seher::claude_headless::stream_headless(
                 runner,
