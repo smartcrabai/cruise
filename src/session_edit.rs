@@ -4,13 +4,20 @@ use crate::new_session_history::{
 };
 use crate::session::{SessionManager, SessionPhase, SessionState, current_iso8601};
 
+/// How the session's `current_step` field should be modified.
+pub enum CurrentStepUpdate {
+    /// Leave `current_step` unchanged.
+    Unchanged,
+    /// Clear `current_step` so execution resumes from the beginning.
+    Clear,
+    /// Set `current_step` to the given step ID.
+    Set(String),
+}
+
 pub struct SessionSettingsUpdate {
     pub config_path: Option<String>,
     pub skipped_steps: Vec<String>,
-    /// `None` = leave `current_step` unchanged.
-    /// `Some(None)` = clear `current_step` (resume from the beginning).
-    /// `Some(Some(step_id))` = set `current_step` to `step_id`.
-    pub current_step_update: Option<Option<String>>,
+    pub current_step_update: CurrentStepUpdate,
 }
 
 /// Update config and skip-step settings for an editable session.
@@ -68,7 +75,7 @@ pub fn update_session_settings(
     }
 
     // current_step can only be set for Failed/Suspended
-    if current_step_update.is_some() && !is_failed_or_suspended {
+    if !matches!(current_step_update, CurrentStepUpdate::Unchanged) && !is_failed_or_suspended {
         return Err(CruiseError::Other(
             "Cannot update current step for a session that is not Failed or Suspended.".to_string(),
         ));
@@ -82,27 +89,13 @@ pub fn update_session_settings(
         .map_err(|e| CruiseError::Other(format!("config parse error: {e}")))?;
     crate::config::validate_config(&config)?;
 
-    // Validate and apply current_step (only reached for Failed/Suspended)
-    if let Some(new_current_step) = current_step_update {
-        if let Some(ref step_name) = new_current_step {
-            let nodes = crate::workflow::list_skippable_steps(&config)
-                .map_err(|e| CruiseError::Other(format!("step expansion error: {e}")))?;
-            let valid_ids: std::collections::HashSet<&str> = nodes
-                .iter()
-                .flat_map(|n| n.expanded_step_ids.iter().map(String::as_str))
-                .collect();
-            if !valid_ids.contains(step_name.as_str()) {
-                return Err(CruiseError::Other(format!(
-                    "Step '{step_name}' does not exist in the workflow config."
-                )));
-            }
-            if skipped_steps.contains(step_name) {
-                return Err(CruiseError::Other(format!(
-                    "Cannot set current_step to '{step_name}' because it is in skipped_steps."
-                )));
-            }
+    match current_step_update {
+        CurrentStepUpdate::Unchanged => {}
+        CurrentStepUpdate::Clear => session.current_step = None,
+        CurrentStepUpdate::Set(step_name) => {
+            validate_current_step_name(&config, &step_name, &skipped_steps)?;
+            session.current_step = Some(step_name);
         }
-        session.current_step = new_current_step;
     }
 
     session.config_source = source.display_string();
@@ -154,6 +147,30 @@ pub fn update_session_settings(
     Ok((session, config_changed))
 }
 
+fn validate_current_step_name(
+    config: &crate::config::WorkflowConfig,
+    step_name: &str,
+    skipped_steps: &[String],
+) -> Result<()> {
+    let nodes = crate::workflow::list_skippable_steps(config)
+        .map_err(|e| CruiseError::Other(format!("step expansion error: {e}")))?;
+    let valid_ids: std::collections::HashSet<&str> = nodes
+        .iter()
+        .flat_map(|n| n.expanded_step_ids.iter().map(String::as_str))
+        .collect();
+    if !valid_ids.contains(step_name) {
+        return Err(CruiseError::Other(format!(
+            "Step '{step_name}' does not exist in the workflow config."
+        )));
+    }
+    if skipped_steps.iter().any(|s| s == step_name) {
+        return Err(CruiseError::Other(format!(
+            "Cannot set current_step to '{step_name}' because it is in skipped_steps."
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +220,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -237,7 +254,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["build".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -270,7 +287,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["test".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -302,7 +319,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -338,7 +355,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -370,7 +387,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["build".to_string(), "test".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -410,7 +427,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["lint".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -452,7 +469,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: Some(alt_config.to_string_lossy().into_owned()),
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -488,7 +505,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -525,7 +542,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["s".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -559,7 +576,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec!["s".to_string()],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -594,7 +611,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: Some(Some("s".to_string())),
+                current_step_update: CurrentStepUpdate::Set("s".to_string()),
             },
         );
 
@@ -637,7 +654,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: Some(None),
+                current_step_update: CurrentStepUpdate::Clear,
             },
         );
 
@@ -685,7 +702,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: Some(alt_config.to_string_lossy().into_owned()),
                 skipped_steps: vec![],
-                current_step_update: None,
+                current_step_update: CurrentStepUpdate::Unchanged,
             },
         );
 
@@ -718,7 +735,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: Some(Some("nonexistent_step".to_string())),
+                current_step_update: CurrentStepUpdate::Set("nonexistent_step".to_string()),
             },
         );
 
@@ -750,7 +767,7 @@ mod tests {
             SessionSettingsUpdate {
                 config_path: None,
                 skipped_steps: vec![],
-                current_step_update: Some(Some("s".to_string())),
+                current_step_update: CurrentStepUpdate::Set("s".to_string()),
             },
         );
 

@@ -388,7 +388,8 @@ async fn edit_session_settings_interactive(
     session: &mut crate::session::SessionState,
     rate_limit_retries: usize,
 ) -> crate::error::Result<()> {
-    use crate::session_edit::{SessionSettingsUpdate, update_session_settings};
+    use crate::session::SessionPhase;
+    use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 
     // Load config to enumerate available step names for the multi-select.
     let step_names: Vec<String> = match manager.load_config(session) {
@@ -406,7 +407,7 @@ async fn edit_session_settings_interactive(
             .filter(|(_, name)| session.skipped_steps.contains(*name))
             .map(|(i, _)| i)
             .collect();
-        match inquire::MultiSelect::new("Steps to skip:", step_names)
+        match inquire::MultiSelect::new("Steps to skip:", step_names.clone())
             .with_default(&defaults)
             .prompt()
         {
@@ -419,6 +420,36 @@ async fn edit_session_settings_interactive(
             }
         }
     };
+
+    // For Failed/Suspended sessions, allow changing current_step interactively.
+    let current_step_update =
+        if matches!(&session.phase, SessionPhase::Failed(_) | SessionPhase::Suspended)
+            && !step_names.is_empty()
+        {
+            let keep = format!(
+                "Keep ({})",
+                session
+                    .current_step
+                    .as_deref()
+                    .unwrap_or("from beginning")
+            );
+            let clear = "From beginning (clear)".to_string();
+            let mut choices = vec![keep.clone(), clear.clone()];
+            choices.extend(step_names.iter().cloned());
+            match inquire::Select::new("Resume from step:", choices).prompt() {
+                Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
+                Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
+                Ok(step_name) => CurrentStepUpdate::Set(step_name),
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(CruiseError::Other(format!("selection error: {e}")));
+                }
+            }
+        } else {
+            CurrentStepUpdate::Unchanged
+        };
 
     // Keep the current explicit config path; changing config is not yet
     // supported from the interactive picker.
@@ -433,7 +464,7 @@ async fn edit_session_settings_interactive(
         SessionSettingsUpdate {
             config_path,
             skipped_steps,
-            current_step_update: None,
+            current_step_update,
         },
     )?;
     *session = updated;
