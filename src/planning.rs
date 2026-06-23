@@ -6,7 +6,7 @@ use console::style;
 
 use crate::ask_handler::AskHandler;
 use crate::cancellation::CancellationToken;
-use crate::config::{DEFAULT_PLAN_LANGUAGE, WorkflowConfig};
+use crate::config::WorkflowConfig;
 use crate::error::Result;
 use crate::executor::{Executor, PromptRun};
 use crate::step::prompt::{PromptResult, StreamCallbacks};
@@ -42,13 +42,7 @@ pub fn setup_plan_vars(
 ) -> VariableStore {
     let mut vars = VariableStore::new(session_input);
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
-    let lang = config.plan_language.trim();
-    let lang = if lang.is_empty() {
-        DEFAULT_PLAN_LANGUAGE
-    } else {
-        lang
-    };
-    vars.set_named_value(PLAN_LANGUAGE_VAR, lang.to_string());
+    vars.set_named_value(PLAN_LANGUAGE_VAR, config.effective_plan_language());
     vars
 }
 
