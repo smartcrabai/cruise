@@ -18,41 +18,41 @@ export function WorkflowInfoPanel({ session, panelInfoId, tabInfoId, className }
     >
       <dl className="space-y-2 text-sm">
         <div>
-          <dt className="text-gray-500">Config</dt>
-          <dd className="text-gray-200">{session.configSource}</dd>
+          <dt className="text-gray-500 dark:text-gray-400">Config</dt>
+          <dd className="text-gray-800 dark:text-gray-200">{session.configSource}</dd>
         </div>
         <div>
-          <dt className="text-gray-500">Base Directory</dt>
-          <dd className="text-gray-200">{session.baseDir}</dd>
+          <dt className="text-gray-500 dark:text-gray-400">Base Directory</dt>
+          <dd className="text-gray-800 dark:text-gray-200">{session.baseDir}</dd>
         </div>
         {session.worktreeBranch && (
           <div>
-            <dt className="text-gray-500">Branch</dt>
-            <dd className="text-gray-200">{session.worktreeBranch}</dd>
+            <dt className="text-gray-500 dark:text-gray-400">Branch</dt>
+            <dd className="text-gray-800 dark:text-gray-200">{session.worktreeBranch}</dd>
           </div>
         )}
         {session.prUrl && (
           <div>
-            <dt className="text-gray-500">Pull Request</dt>
+            <dt className="text-gray-500 dark:text-gray-400">Pull Request</dt>
             <dd>
               {/^https?:\/\//i.test(session.prUrl) ? (
                 <a
                   href={session.prUrl}
                   onClick={(e) => { e.preventDefault(); void openUrl(session.prUrl!); }}
-                  className="text-blue-400 hover:text-blue-300"
+                  className="text-blue-600 dark:text-blue-400 hover:text-blue-500 dark:hover:text-blue-300"
                 >
                   {session.prUrl}
                 </a>
               ) : (
-                <span className="text-gray-200">{session.prUrl}</span>
+                <span className="text-gray-800 dark:text-gray-200">{session.prUrl}</span>
               )}
             </dd>
           </div>
         )}
         {session.phaseError && (
           <div>
-            <dt className="text-gray-500">Error</dt>
-            <dd className="text-red-400">{session.phaseError}</dd>
+            <dt className="text-gray-500 dark:text-gray-400">Error</dt>
+            <dd className="text-red-600 dark:text-red-400">{session.phaseError}</dd>
           </div>
         )}
       </dl>

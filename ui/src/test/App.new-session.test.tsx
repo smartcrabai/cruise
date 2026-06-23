@@ -38,6 +38,7 @@ vi.mock("../lib/commands", () => ({
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
+    afterPrSteps: [],
     defaultSkippedSteps: [],
   }),
   getNewSessionDraft: vi.fn().mockResolvedValue(null),
@@ -77,6 +78,7 @@ function setupNewSessionMocks() {
   vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
   vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
     steps: [],
+    afterPrSteps: [],
     defaultSkippedSteps: [],
   });
   vi.mocked(commands.getNewSessionDraft).mockResolvedValue(null);
@@ -255,6 +257,7 @@ describe("App: New Session draft state persistence", () => {
         { id: "write-tests", expandedStepIds: ["write-tests"], children: [] },
         { id: "implement", expandedStepIds: ["implement"], children: [] },
       ],
+      afterPrSteps: [],
       defaultSkippedSteps: ["write-tests"],
     });
 
@@ -474,10 +477,12 @@ describe("App: New Session skip-step selection", () => {
     vi.mocked(commands.getNewSessionConfigDefaults)
       .mockResolvedValueOnce({
         steps: BUILD_AND_REVIEW_STEPS,
+        afterPrSteps: [],
         defaultSkippedSteps: ["build"],
       })
       .mockResolvedValueOnce({
         steps: BUILD_ONLY_STEP,
+        afterPrSteps: [],
         defaultSkippedSteps: [],
       });
 
@@ -506,6 +511,7 @@ describe("App: New Session skip-step selection", () => {
     ]);
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
       steps: BUILD_ONLY_STEP,
+      afterPrSteps: [],
       defaultSkippedSteps: [],
     });
 
@@ -551,9 +557,9 @@ describe("App: New Session skip-step selection -- Config change", () => {
       { path: "/tmp/configB.yaml", name: "configB.yaml" },
     ]);
     vi.mocked(commands.getNewSessionConfigDefaults)
-      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })               // initial auto
-      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] }) // select configA
-      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] }); // select configB
+      .mockResolvedValueOnce({ steps: [], afterPrSteps: [], defaultSkippedSteps: [] })               // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, afterPrSteps: [], defaultSkippedSteps: ["build"] }) // select configA
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, afterPrSteps: [], defaultSkippedSteps: [] }); // select configB
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
@@ -585,8 +591,8 @@ describe("App: New Session skip-step selection -- Config change", () => {
       { path: "/tmp/custom.yaml", name: "custom.yaml" },
     ]);
     vi.mocked(commands.getNewSessionConfigDefaults)
-      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] }) // initial auto
-      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] });               // select explicit
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, afterPrSteps: [], defaultSkippedSteps: ["build"] }) // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, afterPrSteps: [], defaultSkippedSteps: [] });               // select explicit
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
@@ -616,9 +622,9 @@ describe("App: New Session skip-step selection -- Config change", () => {
       { path: "/tmp/custom.yaml", name: "custom.yaml" },
     ]);
     vi.mocked(commands.getNewSessionConfigDefaults)
-      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })                              // initial auto (no steps)
-      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] })                  // select explicit
-      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: ["build"] });   // back to auto
+      .mockResolvedValueOnce({ steps: [], afterPrSteps: [], defaultSkippedSteps: [] })                              // initial auto (no steps)
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, afterPrSteps: [], defaultSkippedSteps: [] })                  // select explicit
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, afterPrSteps: [], defaultSkippedSteps: ["build"] });   // back to auto
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));
@@ -647,9 +653,9 @@ describe("App: New Session skip-step selection -- Config change", () => {
       { path: "/tmp/configB.yaml", name: "configB.yaml" },
     ]);
     vi.mocked(commands.getNewSessionConfigDefaults)
-      .mockResolvedValueOnce({ steps: [], defaultSkippedSteps: [] })                  // initial auto
-      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, defaultSkippedSteps: [] }) // select configA
-      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, defaultSkippedSteps: [] });       // select configB
+      .mockResolvedValueOnce({ steps: [], afterPrSteps: [], defaultSkippedSteps: [] })                  // initial auto
+      .mockResolvedValueOnce({ steps: BUILD_AND_REVIEW_STEPS, afterPrSteps: [], defaultSkippedSteps: [] }) // select configA
+      .mockResolvedValueOnce({ steps: BUILD_ONLY_STEP, afterPrSteps: [], defaultSkippedSteps: [] });       // select configB
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "+ New" }));

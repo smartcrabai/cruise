@@ -681,6 +681,7 @@ pub struct NewSessionHistorySummaryDto {
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionConfigDefaultsDto {
     pub steps: Vec<cruise::workflow::SkippableStepNode>,
+    pub after_pr_steps: Vec<cruise::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
 }
 
@@ -1282,6 +1283,8 @@ pub fn get_new_session_config_defaults(
         .map_err(|e| format!("Failed to validate config: {e}"))?;
     let steps = cruise::workflow::list_skippable_steps(&config)
         .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
+    let after_pr_steps = cruise::workflow::list_skippable_after_pr_steps(&config)
+        .map_err(|e| format!("Failed to list skippable after-pr steps: {e}"))?;
     let resolved_config_key = source.path().map_or_else(
         || BUILTIN_CONFIG_KEY.to_string(),
         |p| resolved_config_key_for_session(p),
@@ -1307,6 +1310,7 @@ pub fn get_new_session_config_defaults(
         .unwrap_or_default();
     Ok(NewSessionConfigDefaultsDto {
         steps,
+        after_pr_steps,
         default_skipped_steps,
     })
 }
@@ -2070,6 +2074,7 @@ async fn execute_single_session(
                 let mut session_for_pr = manager_for_pr
                     .load(&sid_for_pr)
                     .map_err(|e| cruise::error::CruiseError::Other(e.to_string()))?;
+                let skipped_steps_for_pr = session_for_pr.skipped_steps.clone();
                 let pr_result = handle.block_on(cruise::worktree_pr::handle_worktree_pr(
                     ctx,
                     &compiled,
@@ -2078,6 +2083,7 @@ async fn execute_single_session(
                     &mut session_for_pr,
                     5,
                     10,
+                    &skipped_steps_for_pr,
                     None,
                 ));
                 if pr_result.is_ok() {

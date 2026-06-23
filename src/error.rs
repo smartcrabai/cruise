@@ -19,6 +19,9 @@ pub enum CruiseError {
     #[error("undefined variable: {{{0}}}")]
     UndefinedVariable(String),
 
+    #[error("empty variable reference: {{}}")]
+    EmptyVariableReference,
+
     #[error("command error: {0}")]
     CommandError(String),
 

@@ -37,6 +37,7 @@ export function SessionConfigEditor({
 }: SessionConfigEditorProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
+  const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
   const [selectedConfigPath, setSelectedConfigPath] = useState<string>(configPath ?? "");
   const [selectedSkippedSteps, setSelectedSkippedSteps] = useState<Set<string>>(new Set(skippedSteps));
   const [selectedCurrentStep, setSelectedCurrentStep] = useState<string>(currentStep ?? "");
@@ -76,7 +77,7 @@ export function SessionConfigEditor({
     return () => {
       active = false;
     };
-  }, []);
+  }, [configPath]);
 
   useEffect(() => {
     let active = true;
@@ -86,8 +87,12 @@ export function SessionConfigEditor({
     })
       .then((defaults) => {
         if (active) {
-          const validStepIds = collectExpandedStepIds(defaults.steps);
+          const validStepIds = new Set([
+            ...collectExpandedStepIds(defaults.steps),
+            ...collectExpandedStepIds(defaults.afterPrSteps),
+          ]);
           setConfigSteps(defaults.steps);
+          setAfterPrSteps(defaults.afterPrSteps);
           setSelectedSkippedSteps(
             new Set(skippedStepsRef.current.filter((id) => validStepIds.has(id))),
           );
@@ -97,6 +102,7 @@ export function SessionConfigEditor({
         if (active) {
           console.error("Failed to load config defaults:", e);
           setConfigSteps([]);
+          setAfterPrSteps([]);
           setSelectedSkippedSteps(new Set());
         }
       });
@@ -158,7 +164,7 @@ export function SessionConfigEditor({
               disabled={isDisabled}
               className="accent-blue-500"
             />
-            <span className="text-sm text-gray-300">{label}</span>
+            <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
           </label>
         );
       }
@@ -175,7 +181,7 @@ export function SessionConfigEditor({
               disabled={isDisabled}
               className="accent-blue-500"
             />
-            <span className="text-sm text-gray-300 font-medium">{label}</span>
+            <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">{label}</span>
           </label>
           <div className="space-y-1 ml-4">
             {node.children.map((child) => renderStepNode(child, true))}
@@ -250,7 +256,7 @@ export function SessionConfigEditor({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="bg-red-900/40 border border-red-700 rounded px-4 py-3 text-sm text-red-300">
+        <div className="bg-red-100 dark:bg-red-900/40 border border-red-300 dark:border-red-700 rounded px-4 py-3 text-sm text-red-700 dark:text-red-300">
           {error}
         </div>
       )}
@@ -258,7 +264,7 @@ export function SessionConfigEditor({
       <div className="space-y-1.5">
         <label
           htmlFor="session-config-select"
-          className="text-xs text-gray-500 uppercase tracking-wide"
+          className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide"
         >
           Config
         </label>
@@ -267,7 +273,7 @@ export function SessionConfigEditor({
           value={selectedConfigPath}
           onChange={(e) => setSelectedConfigPath(e.target.value)}
           disabled={isDisabled || isFailedOrSuspended}
-          className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+          className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
         >
           <option value="">Auto (repo / ~/.cruise / builtin)</option>
           {configs.map((c) => (
@@ -278,12 +284,20 @@ export function SessionConfigEditor({
         </select>
       </div>
 
-      {configSteps.length > 0 && (
+      {(configSteps.length > 0 || afterPrSteps.length > 0) && (
         <div className="space-y-1.5">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</div>
-          <div className="space-y-1">
-            {configSteps.map((node) => renderStepNode(node, false))}
-          </div>
+          <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Skip Steps</div>
+          {configSteps.length > 0 && (
+            <div className="space-y-1">
+              {configSteps.map((node) => renderStepNode(node, false))}
+            </div>
+          )}
+          {afterPrSteps.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs text-gray-400 dark:text-gray-500">After PR Steps</div>
+              {afterPrSteps.map((node) => renderStepNode(node, false))}
+            </div>
+          )}
         </div>
       )}
 
@@ -291,7 +305,7 @@ export function SessionConfigEditor({
         <div className="space-y-1.5">
           <label
             htmlFor="session-current-step-select"
-            className="text-xs text-gray-500 uppercase tracking-wide"
+            className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide"
           >
             Current Step
           </label>
@@ -300,7 +314,7 @@ export function SessionConfigEditor({
             value={selectedCurrentStep}
             onChange={(e) => setSelectedCurrentStep(e.target.value)}
             disabled={isDisabled}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
           >
             <option value="">(from beginning)</option>
             {Array.from(collectExpandedStepIds(configSteps)).map((stepId) => (
@@ -348,7 +362,7 @@ export function SessionConfigEditor({
               setSelectedCurrentStep(currentStep ?? "");
             }}
             disabled={isDisabled}
-            className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Reset
           </button>

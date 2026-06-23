@@ -33,11 +33,11 @@ export function SettingsModal({ initialParallelism, onSave, onClose }: SettingsM
 
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-black/60">
-      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-sm w-full space-y-4">
-        <h2 id={titleId} className="text-gray-100 font-semibold text-xl">Settings</h2>
+      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg p-6 max-w-sm w-full space-y-4">
+        <h2 id={titleId} className="text-gray-900 dark:text-gray-100 font-semibold text-xl">Settings</h2>
 
         <div className="space-y-1.5">
-          <label htmlFor="run-all-parallelism" className="text-sm text-gray-300">
+          <label htmlFor="run-all-parallelism" className="text-sm text-gray-700 dark:text-gray-300">
             Run All Parallelism
           </label>
           <input
@@ -46,9 +46,9 @@ export function SettingsModal({ initialParallelism, onSave, onClose }: SettingsM
             value={value}
             onChange={(e) => setValue(e.target.value)}
             disabled={isSaving}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200"
+            className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200"
           />
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
         </div>
 
         <div className="flex gap-2">
@@ -64,7 +64,7 @@ export function SettingsModal({ initialParallelism, onSave, onClose }: SettingsM
             type="button"
             onClick={onClose}
             disabled={isSaving}
-            className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-50"
+            className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm disabled:opacity-50"
           >
             Cancel
           </button>

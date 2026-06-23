@@ -110,6 +110,72 @@ pub fn list_skippable_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStep
         .collect()
 }
 
+/// Build a tree of skippable after-pr steps from a [`WorkflowConfig`].
+///
+/// This is the after-pr counterpart to [`list_skippable_steps`]. It uses the
+/// same group-expansion logic against `config.after_pr` and returns nodes in
+/// the same order as the top-level after-pr steps. Main phase steps are
+/// excluded.
+///
+/// The flattened `expanded_step_ids` are stored in the same `skipped_steps`
+/// field as main-phase steps; the engine's skip logic naturally applies them
+/// when the `after_pr` phase is compiled into the main `steps` slot by
+/// [`CompiledWorkflow::to_after_pr_compiled`].
+///
+/// # Errors
+///
+/// Returns an error if the config references undefined groups or uses
+/// invalid group configurations.
+pub fn list_skippable_after_pr_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStepNode>> {
+    let (expanded_steps, _invocations, step_to_invocation) =
+        expand_steps(&config.after_pr, &config.groups)?;
+    let mut expanded_ids_by_call_site: HashMap<String, Vec<String>> = HashMap::new();
+
+    for expanded_id in expanded_steps.keys() {
+        if let Some(call_site) = step_to_invocation.get(expanded_id) {
+            expanded_ids_by_call_site
+                .entry(call_site.clone())
+                .or_default()
+                .push(expanded_id.clone());
+        }
+    }
+
+    config
+        .after_pr
+        .iter()
+        .map(|(step_name, step_config)| {
+            if step_config.group.is_some() {
+                let expanded_ids =
+                    expanded_ids_by_call_site.remove(step_name).ok_or_else(|| {
+                        crate::error::CruiseError::InvalidStepConfig(format!(
+                            "group call step '{step_name}' produced no expanded steps"
+                        ))
+                    })?;
+                let children = expanded_ids
+                    .iter()
+                    .cloned()
+                    .map(|expanded_id| SkippableStepNode {
+                        id: expanded_id.clone(),
+                        expanded_step_ids: vec![expanded_id],
+                        children: Vec::new(),
+                    })
+                    .collect();
+                Ok(SkippableStepNode {
+                    id: step_name.clone(),
+                    expanded_step_ids: expanded_ids,
+                    children,
+                })
+            } else {
+                Ok(SkippableStepNode {
+                    id: step_name.clone(),
+                    expanded_step_ids: vec![step_name.clone()],
+                    children: Vec::new(),
+                })
+            }
+        })
+        .collect()
+}
+
 /// Flat, executable representation of a workflow after group-call expansion.
 ///
 /// Group call steps (e.g. `review-pass: {group: review}`) are replaced by
@@ -128,6 +194,10 @@ pub struct CompiledWorkflow {
     pub pr_language: String,
     /// Language to use for planning prompts.
     pub plan_language: String,
+    /// Remove the local git worktree and its branch automatically after the PR
+    /// is created. Defaults to `false` (non-destructive). Only applies to
+    /// worktree-mode sessions that successfully created a PR.
+    pub cleanup_after_pr: bool,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -154,6 +224,7 @@ impl CompiledWorkflow {
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
+            cleanup_after_pr: self.cleanup_after_pr,
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -180,14 +251,18 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
         expand_steps(&config.after_pr, &config.groups)?;
 
+    let pr_language = config.effective_pr_language();
+    let plan_language = config.effective_plan_language();
+
     Ok(CompiledWorkflow {
         command: config.command,
         sdk: config.sdk,
         model: config.model,
         plan_model: config.plan_model,
         env: config.env,
-        pr_language: config.pr_language,
-        plan_language: config.plan_language,
+        pr_language,
+        plan_language,
+        cleanup_after_pr: config.cleanup_after_pr,
         steps,
         after_pr,
         invocations,
@@ -349,6 +424,62 @@ after-pr:
 
         // Then: the planning language is preserved
         assert_eq!(after_pr.plan_language, "Japanese");
+    }
+    #[test]
+    fn test_compile_carries_cleanup_after_pr() {
+        // Given: a workflow config that enables post-PR cleanup
+        let yaml = r"
+command: [echo]
+cleanup_after_pr: true
+steps:
+  step1:
+    command: echo hello
+";
+
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: the compiled workflow carries the cleanup flag
+        assert!(c.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_after_pr_compiled_preserves_cleanup_after_pr() {
+        // Given: a compiled workflow with cleanup enabled and after-pr steps
+        let yaml = r"
+command: [echo]
+cleanup_after_pr: true
+steps:
+  main:
+    command: echo main
+after-pr:
+  notify:
+    command: echo done
+";
+        let c = compiled(yaml);
+
+        // When: converting to an after-pr compiled workflow
+        let after_pr = c.to_after_pr_compiled();
+
+        // Then: the cleanup flag is preserved
+        assert!(after_pr.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_compile_cleanup_after_pr_defaults_to_false_when_omitted() {
+        // Given: a workflow config without cleanup_after_pr
+        let yaml = r"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+";
+
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: the compiled workflow defaults to false (non-destructive)
+        assert!(!c.cleanup_after_pr);
     }
 
     // -----------------------------------------------------------------------
@@ -985,6 +1116,107 @@ steps:
         assert!(
             err.to_string().contains("collides"),
             "expected collision error"
+        );
+    }
+
+    #[test]
+    fn test_list_skippable_after_pr_steps_returns_after_pr_only() {
+        // Given: workflow with steps and after-pr containing a group call
+        let yaml = r"
+command: [echo]
+groups:
+  notify:
+    steps:
+      slack:
+        command: echo slack
+steps:
+  build:
+    command: cargo build
+after-pr:
+  post-notify:
+    group: notify
+";
+        // When: list_skippable_after_pr_steps is called
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: only after-pr steps are included, main steps are excluded
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "post-notify");
+        assert_eq!(nodes[0].expanded_step_ids, vec!["post-notify/slack"]);
+        assert_eq!(nodes[0].children.len(), 1);
+        assert_eq!(nodes[0].children[0].id, "post-notify/slack");
+    }
+
+    #[test]
+    fn test_list_skippable_after_pr_steps_group_expansion() {
+        // Given: after-pr with a group containing multiple steps
+        let yaml = r"
+command: [echo]
+groups:
+  cleanup:
+    steps:
+      notify:
+        command: echo notify
+      archive:
+        command: echo archive
+steps: {}
+after-pr:
+  post-merge:
+    group: cleanup
+";
+        // When: list_skippable_after_pr_steps is called
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: group is expanded into parent and children
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "post-merge");
+        assert_eq!(
+            nodes[0].expanded_step_ids,
+            vec!["post-merge/notify", "post-merge/archive"]
+        );
+        assert_eq!(nodes[0].children.len(), 2);
+        assert_eq!(nodes[0].children[0].id, "post-merge/notify");
+        assert_eq!(nodes[0].children[1].id, "post-merge/archive");
+    }
+
+    #[test]
+    fn test_list_skippable_after_pr_steps_empty() {
+        // Given: workflow with no after-pr section
+        let yaml = r"
+command: [echo]
+steps:
+  build:
+    command: cargo build
+";
+        // When: list_skippable_after_pr_steps is called
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: returns an empty list
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn test_list_skippable_after_pr_steps_rejects_old_membership_style() {
+        let yaml = r"
+command: [claude, -p]
+groups:
+  notify:
+    steps:
+      slack:
+        prompt: /slack
+steps: {}
+after-pr:
+  post-notify:
+    group: notify
+    prompt: /legacy
+";
+        let err = list_skippable_after_pr_steps(&parsed(yaml))
+            .err()
+            .unwrap_or_else(|| panic!("expected Err"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("old membership style") || msg.contains("groups.<name>.steps"),
+            "expected migration hint in: {msg}"
         );
     }
 }

@@ -61,6 +61,47 @@ describe("MarkdownViewer", () => {
       // Then
       const wrapper = container.firstChild as HTMLElement;
       expect(wrapper.className).toContain("prose");
+      expect(wrapper.className).not.toContain("prose-invert");
+    });
+
+    it("adds light-mode and dark-mode prose classes for headings", () => {
+      // Given / When
+      const { container } = render(<MarkdownViewer content="text" />);
+      // Then
+      const wrapper = container.firstChild as HTMLElement;
+      expect(wrapper.className).toMatch(/\bprose-headings:text-gray-900\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-headings:text-gray-100\b/);
+    });
+
+    it("adds light-mode and dark-mode prose classes for paragraphs", () => {
+      // Given / When
+      const { container } = render(<MarkdownViewer content="text" />);
+      // Then
+      const wrapper = container.firstChild as HTMLElement;
+      expect(wrapper.className).toMatch(/\bprose-p:text-gray-700\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-p:text-gray-300\b/);
+    });
+
+    it("adds light-mode and dark-mode prose classes for inline code", () => {
+      // Given / When
+      const { container } = render(<MarkdownViewer content="text" />);
+      // Then
+      const wrapper = container.firstChild as HTMLElement;
+      expect(wrapper.className).toMatch(/\bprose-code:text-blue-700\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-code:text-blue-300\b/);
+      expect(wrapper.className).toMatch(/\bprose-code:bg-gray-100\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-code:bg-gray-800\b/);
+    });
+
+    it("adds light-mode and dark-mode prose classes for pre blocks", () => {
+      // Given / When
+      const { container } = render(<MarkdownViewer content="text" />);
+      // Then
+      const wrapper = container.firstChild as HTMLElement;
+      expect(wrapper.className).toMatch(/\bprose-pre:bg-gray-100\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-pre:bg-gray-900\b/);
+      expect(wrapper.className).toMatch(/\bprose-pre:border-gray-300\b/);
+      expect(wrapper.className).toMatch(/\bdark:prose-pre:border-gray-700\b/);
     });
 
     it("additional class is appended to default when className is specified", () => {

@@ -83,11 +83,11 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-lg w-full space-y-4"
+        className="bg-gray-50 dark:bg-gray-900 rounded-lg shadow-xl border border-gray-300 dark:border-gray-700 p-6 max-w-lg w-full space-y-4"
       >
-        <h2 id={titleId} className="text-lg font-semibold text-gray-100">Choose an option</h2>
+        <h2 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-gray-100">Choose an option</h2>
         {plan && (
-          <div className="bg-gray-800 border border-gray-700 rounded overflow-auto max-h-48">
+          <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded overflow-auto max-h-48">
             <MarkdownViewer content={plan} className="p-3" />
           </div>
         )}
@@ -98,13 +98,13 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                 key={choice.label}
                 type="button"
                 onClick={() => onRespond({ nextStep: choice.next })}
-                className="w-full text-left px-4 py-2 border border-gray-700 rounded hover:bg-gray-800 text-sm text-gray-200 transition-colors"
+                className="w-full text-left px-4 py-2 border border-gray-300 dark:border-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-sm text-gray-800 dark:text-gray-200 transition-colors"
               >
                 {choice.label}
               </button>
             ) : (
               <div key={choice.label} className="space-y-1">
-                <label htmlFor={`text-input-${choice.label}`} className="text-sm text-gray-400">{choice.label}</label>
+                <label htmlFor={`text-input-${choice.label}`} className="text-sm text-gray-500 dark:text-gray-400">{choice.label}</label>
                 <div className="flex gap-2">
                   <input
                     id={`text-input-${choice.label}`}
@@ -116,7 +116,7 @@ function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
                         [choice.label]: e.target.value,
                       }))
                     }
-                    className="flex-1 border border-gray-700 bg-gray-800 rounded px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500"
+                    className="flex-1 border border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 rounded px-3 py-1.5 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 outline-none focus:border-blue-500"
                     placeholder="Type here..."
                     onKeyDown={(e) => {
                       if (e.key === "Enter")
@@ -160,10 +160,10 @@ export interface WorkflowToast {
 }
 
 const TOAST_STYLE: Record<ToastKind, string> = {
-  "input-required": "border-amber-700 bg-amber-900/80 text-amber-100",
-  "completed": "border-green-700 bg-green-900/80 text-green-100",
-  "failed": "border-red-700 bg-red-900/80 text-red-100",
-  "plan-ready": "border-blue-700 bg-blue-900/80 text-blue-100",
+  "input-required": "border-amber-300 dark:border-amber-700 bg-amber-100/80 dark:bg-amber-900/80 text-amber-900 dark:text-amber-100",
+  "completed": "border-green-300 dark:border-green-700 bg-green-100/80 dark:bg-green-900/80 text-green-900 dark:text-green-100",
+  "failed": "border-red-300 dark:border-red-700 bg-red-100/80 dark:bg-red-900/80 text-red-900 dark:text-red-100",
+  "plan-ready": "border-blue-300 dark:border-blue-700 bg-blue-100/80 dark:bg-blue-900/80 text-blue-900 dark:text-blue-100",
 };
 
 const TOAST_LABEL: Record<ToastKind, string> = {
@@ -251,11 +251,11 @@ function SettingsModal({ initialParallelism, onSave, onClose }: SettingsModalPro
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-sm w-full space-y-4"
+        className="bg-gray-50 dark:bg-gray-900 rounded-lg shadow-xl border border-gray-300 dark:border-gray-700 p-6 max-w-sm w-full space-y-4"
       >
-        <h2 id={titleId} className="text-lg font-semibold text-gray-100">Settings</h2>
+        <h2 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
         <div className="space-y-1.5">
-          <label htmlFor="run-all-parallelism" className="text-sm text-gray-400">
+          <label htmlFor="run-all-parallelism" className="text-sm text-gray-500 dark:text-gray-400">
             Run All Parallelism
           </label>
           <input
@@ -264,16 +264,16 @@ function SettingsModal({ initialParallelism, onSave, onClose }: SettingsModalPro
             min={1}
             value={Number.isNaN(value) ? "" : value}
             onChange={(e) => setValue(e.target.valueAsNumber)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500"
+            className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-blue-500"
           />
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
         </div>
         <div className="flex gap-2 justify-end">
           <button
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="px-4 py-2 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800 disabled:opacity-50"
+            className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50"
           >
             Cancel
           </button>
@@ -312,13 +312,13 @@ function AskEditor({ question, onQuestionChange, phase, error, onSubmit, onCance
         rows={3}
         autoFocus
         placeholder="Ask a question about the plan..."
-        className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
+        className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void onSubmit();
         }}
       />
       {error && (
-        <p className="text-sm text-red-400">{error}</p>
+        <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
       )}
       <div className="flex gap-2">
         <button
@@ -332,7 +332,7 @@ function AskEditor({ question, onQuestionChange, phase, error, onSubmit, onCance
         <button
           type="button"
           onClick={onCancel}
-          className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
+          className="px-4 py-1.5 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
         >
           Cancel
         </button>
@@ -352,37 +352,37 @@ interface WorkflowInfoPanelProps {
 
 function WorkflowInfoPanel({ session, panelInfoId, tabInfoId, className = "" }: WorkflowInfoPanelProps) {
   return (
-    <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className={`p-6 space-y-3 text-sm text-gray-400 ${className}`}>
+    <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className={`p-6 space-y-3 text-sm text-gray-500 dark:text-gray-400 ${className}`}>
       <div>
-        <span className="text-gray-600 text-xs uppercase tracking-wide">Config</span>
-        <p className="font-mono text-gray-300 mt-0.5">{session.configSource}</p>
+        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Config</span>
+        <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.configSource}</p>
       </div>
       <div>
-        <span className="text-gray-600 text-xs uppercase tracking-wide">
+        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">
           {session.repo ? "Repository" : "Base dir"}
         </span>
-        <p className="font-mono text-gray-300 mt-0.5">{session.repo ?? session.baseDir}</p>
+        <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.repo ?? session.baseDir}</p>
       </div>
       {session.worktreeBranch && (
         <div>
-          <span className="text-gray-600 text-xs uppercase tracking-wide">Branch</span>
-          <p className="font-mono text-gray-300 mt-0.5">{session.worktreeBranch}</p>
+          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Branch</span>
+          <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.worktreeBranch}</p>
         </div>
       )}
       <div>
-        <span className="text-gray-600 text-xs uppercase tracking-wide">Created</span>
-        <p className="text-gray-300 mt-0.5">{formatLocalTime(session.createdAt)}</p>
+        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Created</span>
+        <p className="text-gray-700 dark:text-gray-300 mt-0.5">{formatLocalTime(session.createdAt)}</p>
       </div>
       {session.completedAt && (
         <div>
-          <span className="text-gray-600 text-xs uppercase tracking-wide">Completed</span>
-          <p className="text-gray-300 mt-0.5">{formatLocalTime(session.completedAt)}</p>
+          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Completed</span>
+          <p className="text-gray-700 dark:text-gray-300 mt-0.5">{formatLocalTime(session.completedAt)}</p>
         </div>
       )}
       {session.phaseError && (
         <div>
-          <span className="text-gray-600 text-xs uppercase tracking-wide">Error</span>
-          <p className="text-red-400 mt-0.5 font-mono text-xs">{session.phaseError}</p>
+          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Error</span>
+          <p className="text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{session.phaseError}</p>
         </div>
       )}
     </div>
@@ -402,17 +402,17 @@ function WorkflowPlanPanel({ panelPlanId, tabPlanId, askResponse, planLoading, p
   return (
     <div id={panelPlanId} role="tabpanel" aria-labelledby={tabPlanId} className={className}>
       {askResponse && (
-        <div className="border-b border-gray-800 px-6 py-4 bg-gray-900/50">
-          <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Answer</div>
+        <div className="border-b border-gray-200 dark:border-gray-800 px-6 py-4 bg-gray-50/50 dark:bg-gray-900/50">
+          <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">Answer</div>
           <MarkdownViewer content={askResponse} className="" />
         </div>
       )}
       {planLoading ? (
-        <p className="p-4 text-xs text-gray-500">Loading plan...</p>
+        <p className="p-4 text-xs text-gray-500 dark:text-gray-400">Loading plan...</p>
       ) : planContent ? (
         <MarkdownViewer content={planContent} className="p-6" />
       ) : (
-        <p className="p-4 text-xs text-gray-600">No plan available.</p>
+        <p className="p-4 text-xs text-gray-500 dark:text-gray-400">No plan available.</p>
       )}
     </div>
   );
@@ -433,12 +433,12 @@ export function WorkflowLogPanel({ panelLogId, tabLogId, status, logContent, log
   return (
     <div id={panelLogId} role="tabpanel" aria-labelledby={tabLogId} className={`h-full flex flex-col ${className}`}>
       {logContent ? (
-        <pre ref={preRef} onScroll={onScroll} className="flex-1 text-xs font-mono bg-gray-950 text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
+        <pre ref={preRef} onScroll={onScroll} className="flex-1 text-xs font-mono bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-300 p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
           {logContent}
           <span ref={logEndRef} />
         </pre>
       ) : (
-        <p className="p-4 text-xs text-gray-600">
+        <p className="p-4 text-xs text-gray-500 dark:text-gray-400">
           {status === "idle" ? "Generate a plan or run the session to see logs here." : "No log entries yet."}
         </p>
       )}
@@ -819,9 +819,9 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   return (
     <div className="@container h-full flex flex-col">
       {/* Header */}
-      <div className="px-6 pt-6 pb-4 border-b border-gray-800 space-y-3">
+      <div className="px-6 pt-6 pb-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold font-mono text-gray-100">{session.id}</h2>
+          <h2 className="text-lg font-semibold font-mono text-gray-900 dark:text-gray-100">{session.id}</h2>
           <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} fixing={isFixing} />
         </div>
 
@@ -830,14 +830,14 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             type="button"
             onClick={() => void openUrl(session.prUrl!)}
             aria-label="Open Pull Request in browser"
-            className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 hover:underline"
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-500 dark:hover:text-blue-300 hover:underline"
           >
             PR: {session.prUrl.split("/").slice(-2).join(" #")}
             <span className="text-xs">-&gt;</span>
           </button>
         )}
 
-        <div className="text-sm text-gray-400 italic">{session.input}</div>
+        <div className="text-sm text-gray-500 dark:text-gray-400 italic">{session.input}</div>
 
         {session.phase === "Awaiting Input" && session.pendingAskQuestion && (
           <AskUserPanel
@@ -871,7 +871,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               onClick={() => setReplanPhase("editing")}
-              className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Fix
             </button>
@@ -880,7 +880,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               onClick={() => setAskPhase("editing")}
-              className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Ask
             </button>
@@ -908,7 +908,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
                 <button
                   type="button"
                   onClick={() => void startRun("CurrentBranch")}
-                  className="px-4 py-2 border border-gray-700 text-gray-200 rounded text-sm hover:bg-gray-800"
+                  className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
                 >
                   Use current branch
                 </button>
@@ -937,7 +937,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               onClick={() => void handleReset()}
-              className="px-4 py-2 border border-gray-700 text-orange-400 rounded text-sm hover:bg-gray-800"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-orange-600 dark:text-orange-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Reset to Planned
             </button>
@@ -946,7 +946,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               onClick={() => setReplanPhase("editing")}
-              className="px-4 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Replan
             </button>
@@ -955,7 +955,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               onClick={() => setShowDeleteConfirm(true)}
-              className="px-4 py-2 border border-gray-700 text-red-400 rounded text-sm hover:bg-red-900/30"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-red-600 dark:text-red-400 rounded text-sm hover:bg-red-100/30 dark:hover:bg-red-900/30"
             >
               Delete
             </button>
@@ -963,8 +963,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         </div>
 
         {(session.phase === "Planned" || session.phase === "Failed" || session.phase === "Suspended") && (
-          <div className="border-b border-gray-800 pb-4">
-            <h3 className="text-xs text-gray-500 uppercase tracking-wide mb-3">Session Settings</h3>
+          <div className="border-b border-gray-200 dark:border-gray-800 pb-4">
+            <h3 className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">Session Settings</h3>
             <SessionConfigEditor {...sessionConfigEditorCommonProps} />
           </div>
         )}
@@ -979,13 +979,13 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               rows={3}
               autoFocus
               placeholder="Describe the changes needed..."
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
+              className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleReplan();
               }}
             />
             {replanError && (
-              <p className="text-sm text-red-400">{replanError}</p>
+              <p className="text-sm text-red-600 dark:text-red-400">{replanError}</p>
             )}
             <div className="flex gap-2">
               <button
@@ -999,7 +999,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               <button
                 type="button"
                 onClick={() => { setReplanPhase("idle"); setReplanFeedback(""); setReplanError(""); }}
-                className="px-4 py-1.5 border border-gray-700 text-gray-400 rounded text-sm hover:bg-gray-800"
+                className="px-4 py-1.5 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
               >
                 Cancel
               </button>
@@ -1008,12 +1008,12 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         )}
         {replanPhase === "generating" && (
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm text-gray-400">
+            <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
               <Spinner />
               {session.phase === "Draft" ? "Generating plan..." : "Regenerating plan..."}
             </div>
             {planProgress.length > 0 && (
-              <pre className="text-xs text-gray-500 max-h-48 overflow-auto bg-gray-900 rounded p-2">
+              <pre className="text-xs text-gray-500 dark:text-gray-400 max-h-48 overflow-auto bg-gray-50 dark:bg-gray-900 rounded p-2">
                 {planProgress.join("\n")}
               </pre>
             )}
@@ -1034,9 +1034,9 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
 
         {/* Progress indicator */}
         {status === "running" && currentStep && (
-          <div className="text-sm text-gray-400">
+          <div className="text-sm text-gray-500 dark:text-gray-400">
             Step:{" "}
-            <span className="font-medium text-gray-200">{currentStep}</span>
+            <span className="font-medium text-gray-800 dark:text-gray-200">{currentStep}</span>
           </div>
         )}
       </div>
@@ -1045,15 +1045,15 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
         {isAwaitingApproval && (
           <aside
             aria-label="Session settings"
-            className="@4xl:w-[360px] @4xl:flex-shrink-0 @4xl:border-r @4xl:border-gray-800 @4xl:overflow-auto border-b @4xl:border-b-0 border-gray-800 px-6 py-4 flex flex-col gap-3"
+            className="@4xl:w-[360px] @4xl:flex-shrink-0 @4xl:border-r @4xl:border-gray-800 @4xl:overflow-auto border-b @4xl:border-b-0 border-gray-200 dark:border-gray-800 px-6 py-4 flex flex-col gap-3"
           >
-            <h3 className="text-xs text-gray-500 uppercase tracking-wide">Session Settings</h3>
+            <h3 className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Session Settings</h3>
             <SessionConfigEditor {...sessionConfigEditorCommonProps} />
           </aside>
         )}
 
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <div role="tablist" className="flex border-b border-gray-800">
+          <div role="tablist" className="flex border-b border-gray-200 dark:border-gray-800">
             <button
               type="button"
               role="tab"
@@ -1063,8 +1063,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               onClick={() => onActiveTabChange("info")}
               className={`px-4 py-2 text-xs font-medium transition-colors ${
                 activeTab === "info"
-                  ? "text-blue-400 border-b-2 border-blue-500"
-                  : "text-gray-500 hover:text-gray-300"
+                  ? "text-blue-600 dark:text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
               }`}
             >
               Info
@@ -1078,8 +1078,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               onClick={() => onActiveTabChange("plan")}
               className={`${isAwaitingApproval ? "@4xl:hidden " : ""}px-4 py-2 text-xs font-medium transition-colors ${
                 activeTab === "plan"
-                  ? "text-blue-400 border-b-2 border-blue-500"
-                  : "text-gray-500 hover:text-gray-300"
+                  ? "text-blue-600 dark:text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
               }`}
             >
               Plan
@@ -1093,8 +1093,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               onClick={() => onActiveTabChange("log")}
               className={`px-4 py-2 text-xs font-medium transition-colors ${
                 activeTab === "log"
-                  ? "text-blue-400 border-b-2 border-blue-500"
-                  : "text-gray-500 hover:text-gray-300"
+                  ? "text-blue-600 dark:text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
               }`}
             >
               Log
@@ -1159,7 +1159,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
 function EmptyState() {
   return (
     <div className="h-full flex items-center justify-center">
-      <p className="text-gray-600 text-sm">Select a session from the sidebar</p>
+      <p className="text-gray-500 dark:text-gray-400 text-sm">Select a session from the sidebar</p>
     </div>
   );
 }
@@ -1222,6 +1222,7 @@ function useDebounce<T>(value: T, delay: number): T {
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
+  const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
   // Distinguishes which button is in flight so each shows its own progress
@@ -1277,8 +1278,12 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
     void getNewSessionConfigDefaults(params)
       .then((defaults) => {
         if (active) {
-          const validStepIds = collectExpandedStepIds(defaults.steps);
+          const validStepIds = new Set([
+            ...collectExpandedStepIds(defaults.steps),
+            ...collectExpandedStepIds(defaults.afterPrSteps),
+          ]);
           setConfigSteps(defaults.steps);
+          setAfterPrSteps(defaults.afterPrSteps);
           setSkippedSteps(
             new Set(defaults.defaultSkippedSteps.filter((id) => validStepIds.has(id))),
           );
@@ -1287,6 +1292,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
       .catch(() => {
         if (active) {
           setConfigSteps([]);
+          setAfterPrSteps([]);
           setSkippedSteps(new Set());
         }
       });
@@ -1351,7 +1357,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating}
             className="accent-blue-500"
           />
-          <span className="text-sm text-gray-300">{label}</span>
+          <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
         </label>
       );
     }
@@ -1368,7 +1374,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating}
             className="accent-blue-500"
           />
-          <span className="text-sm text-gray-300 font-medium">{label}</span>
+          <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">{label}</span>
         </label>
         <div className="space-y-1 ml-4">
           {node.children.map((child) => renderStepNode(child, true))}
@@ -1528,21 +1534,21 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-800">
-        <h2 className="text-lg font-semibold text-gray-100">New Session</h2>
+      <div className="px-6 pt-6 pb-4 border-b border-gray-200 dark:border-gray-800">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">New Session</h2>
       </div>
 
       <div className="flex-1 overflow-auto p-6 space-y-5">
         {/* Error banner */}
         {error && (
-          <div className="bg-red-900/40 border border-red-700 rounded px-4 py-3 text-sm text-red-300">
+          <div className="bg-red-100 dark:bg-red-900/40 border border-red-300 dark:border-red-700 rounded px-4 py-3 text-sm text-red-700 dark:text-red-300">
             {error}
           </div>
         )}
 
         {/* Workspace source: local directory or GitHub repository clone */}
         <div className="space-y-1.5">
-          <span className="text-xs text-gray-500 uppercase tracking-wide">Source</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Source</span>
           <div className="flex gap-4" role="radiogroup" aria-label="Workspace source">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -1553,7 +1559,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
                 disabled={isGenerating}
                 className="accent-blue-500"
               />
-              <span className="text-sm text-gray-300">Directory</span>
+              <span className="text-sm text-gray-700 dark:text-gray-300">Directory</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -1564,14 +1570,14 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
                 disabled={isGenerating}
                 className="accent-blue-500"
               />
-              <span className="text-sm text-gray-300">GitHub Repository</span>
+              <span className="text-sm text-gray-700 dark:text-gray-300">GitHub Repository</span>
             </label>
           </div>
         </div>
 
         {isRepoMode ? (
           <div className="space-y-1.5">
-            <label htmlFor="repo-input" className="text-xs text-gray-500 uppercase tracking-wide">Repository</label>
+            <label htmlFor="repo-input" className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Repository</label>
             <RepoPicker
               id="repo-input"
               value={repo}
@@ -1580,16 +1586,16 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
               placeholder="owner/repository"
             />
             {repo.trim() !== "" && !repoSpecValid && (
-              <p className="text-xs text-red-400">Expected format: owner/repository</p>
+              <p className="text-xs text-red-600 dark:text-red-400">Expected format: owner/repository</p>
             )}
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-gray-500 dark:text-gray-400">
               The repository is cloned into a temporary directory for planning and execution; a PR
               is created when the run finishes and the clone is removed.
             </p>
           </div>
         ) : (
           <div className="space-y-1.5">
-            <label htmlFor="base-dir-input" className="text-xs text-gray-500 uppercase tracking-wide">Working Directory</label>
+            <label htmlFor="base-dir-input" className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Working Directory</label>
             <DirectoryPicker
               id="base-dir-input"
               value={baseDir}
@@ -1605,7 +1611,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
                     type="button"
                     onClick={() => set("baseDir", dir)}
                     disabled={isGenerating}
-                    className="px-2.5 py-1 rounded-full border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {dir}
                   </button>
@@ -1617,13 +1623,13 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
 
         {/* Config selector */}
         <div className="space-y-1.5">
-          <label htmlFor="config-select" className="text-xs text-gray-500 uppercase tracking-wide">Config</label>
+          <label htmlFor="config-select" className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Config</label>
           <select
             id="config-select"
             value={configPath}
             onChange={(e) => set("configPath", e.target.value)}
             disabled={isGenerating}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
+            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
           >
             <option value="">Auto (repo / ~/.cruise / builtin)</option>
             {configs.map((c) => (
@@ -1635,18 +1641,26 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
         </div>
 
         {/* Skip steps */}
-        {configSteps.length > 0 && (
+        {(configSteps.length > 0 || afterPrSteps.length > 0) && (
           <div className="space-y-1.5">
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</span>
-            <div className="space-y-1">
-              {configSteps.map((node) => renderStepNode(node, false))}
-            </div>
+            <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Skip Steps</span>
+            {configSteps.length > 0 && (
+              <div className="space-y-1">
+                {configSteps.map((node) => renderStepNode(node, false))}
+              </div>
+            )}
+            {afterPrSteps.length > 0 && (
+              <div className="space-y-1">
+                <span className="text-xs text-gray-400 dark:text-gray-500">After PR Steps</span>
+                {afterPrSteps.map((node) => renderStepNode(node, false))}
+              </div>
+            )}
           </div>
         )}
 
         {/* Task input */}
         <div className="space-y-1.5">
-          <label htmlFor="task-input" className="text-xs text-gray-500 uppercase tracking-wide">Task</label>
+          <label htmlFor="task-input" className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Task</label>
           <textarea
             id="task-input"
             value={input}
@@ -1654,7 +1668,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating}
             rows={4}
             placeholder="Describe what you want to implement..."
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none resize-none disabled:opacity-50"
+            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none resize-none disabled:opacity-50"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void handleGenerate();
             }}
@@ -1683,7 +1697,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating}
             className="accent-blue-500"
           />
-          <span className="text-sm text-gray-300">Use input as plan (skip LLM planning)</span>
+          <span className="text-sm text-gray-700 dark:text-gray-300">Use input as plan (skip LLM planning)</span>
         </label>
 
         <label className="flex items-center gap-2 cursor-pointer">
@@ -1701,7 +1715,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating || useInputAsPlan || noInteractivePlanning}
             className="accent-blue-500"
           />
-          <span className="text-sm text-gray-300">
+          <span className="text-sm text-gray-700 dark:text-gray-300">
             Grill me (interview one question at a time, then write the plan; SDK backend only)
           </span>
         </label>
@@ -1721,7 +1735,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             disabled={isGenerating || useInputAsPlan}
             className="accent-blue-500"
           />
-          <span className="text-sm text-gray-300">
+          <span className="text-sm text-gray-700 dark:text-gray-300">
             Non-interactive planning (agent writes plan.md directly, no planning tools)
           </span>
         </label>
@@ -1747,7 +1761,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
             onClick={() => void handleSaveDraft()}
             disabled={isGenerating || !canSubmit}
             title="Save as a draft without generating a plan; generate the plan later."
-            className="px-5 py-2 border border-gray-700 text-gray-300 rounded text-sm hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {savingDraft ? (
               <>
@@ -1824,12 +1838,12 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
   return (
     <div className="h-full flex flex-col p-6 max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-semibold text-gray-100">Run All</h2>
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Run All</h2>
         {status === "running" ? (
           <button
             type="button"
             onClick={onCancel}
-            className="px-3 py-1.5 text-sm border border-gray-700 text-gray-400 hover:bg-gray-800 rounded"
+            className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded"
           >
             Cancel
           </button>
@@ -1846,20 +1860,20 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
 
       {(total > 0 || status === "error") && (
         <div className="mb-4">
-          <div className="flex justify-between text-xs text-gray-400 mb-1">
+          <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
             {total > 0 && <span>{progressCount} / {displayTotal} sessions</span>}
             {status === "running" && runningEntries.length > 0 && (
-              <span className="text-green-400 animate-pulse">
+              <span className="text-green-600 dark:text-green-400 animate-pulse">
                 Running {runningEntries.length}
                 {parallelism !== null && ` / ${parallelism}`}
               </span>
             )}
-            {status === "completed" && <span className="text-green-400">Completed</span>}
-            {status === "cancelled" && <span className="text-orange-400">Cancelled</span>}
-            {status === "error" && <span className="text-red-400">Error</span>}
+            {status === "completed" && <span className="text-green-600 dark:text-green-400">Completed</span>}
+            {status === "cancelled" && <span className="text-orange-600 dark:text-orange-400">Cancelled</span>}
+            {status === "error" && <span className="text-red-600 dark:text-red-400">Error</span>}
           </div>
           {total > 0 && (
-            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div className="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-600 rounded-full transition-all duration-300"
                 style={{ width: `${(progressCount / displayTotal) * 100}%` }}
@@ -1874,15 +1888,15 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
           {runningEntries.map(([sessionId, sessionState]) => (
             <div
               key={sessionId}
-              className="p-3 bg-gray-900 border border-green-900/50 rounded"
+              className="p-3 bg-gray-50 dark:bg-gray-900 border border-green-300 dark:border-green-900/50 rounded"
             >
               <div className="flex items-center gap-2 mb-1">
                 <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                <span className="text-xs text-gray-400 font-mono">{sessionId}</span>
+                <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{sessionId}</span>
               </div>
-              <p className="text-sm text-gray-200 truncate">{sessionState.input}</p>
+              <p className="text-sm text-gray-800 dark:text-gray-200 truncate">{sessionState.input}</p>
               {sessionState.currentStep && (
-                <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   {sessionState.currentStep}
                 </p>
               )}
@@ -1891,7 +1905,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
         </div>
       )}
 
-      <pre className="mb-4 text-xs font-mono bg-gray-950 text-gray-300 p-4 rounded overflow-auto whitespace-pre-wrap leading-relaxed max-h-80">
+      <pre className="mb-4 text-xs font-mono bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-300 p-4 rounded overflow-auto whitespace-pre-wrap leading-relaxed max-h-80">
         {liveLog.length > 0 ? liveLog.join("\n") : "Waiting for events..."}
         <span ref={logEndRef} />
       </pre>
@@ -1900,7 +1914,7 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
         {results.map((r) => (
           <div
             key={r.sessionId}
-            className="flex items-start gap-2 px-3 py-2 rounded bg-gray-900/50"
+            className="flex items-start gap-2 px-3 py-2 rounded bg-gray-50/50 dark:bg-gray-900/50"
           >
             <span className="mt-0.5 text-sm">
               {r.phase === "Completed" && PHASE_ICON.Completed}
@@ -1908,8 +1922,8 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
               {r.phase === "Suspended" && PHASE_ICON.Suspended}
             </span>
             <div className="flex-1 min-w-0">
-              <p className="text-sm text-gray-300 truncate">{r.input}</p>
-              {r.error && <p className="text-xs text-red-400 mt-0.5 truncate">{r.error}</p>}
+              <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{r.input}</p>
+              {r.error && <p className="text-xs text-red-600 dark:text-red-400 mt-0.5 truncate">{r.error}</p>}
             </div>
             <PhaseBadge phase={r.phase} />
           </div>
@@ -1917,13 +1931,13 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
       </div>
 
       {(status === "completed" || status === "cancelled" || status === "error") && (
-        <div className="mt-4 p-3 bg-gray-900 border border-gray-800 rounded text-sm text-gray-400 flex flex-col gap-1">
+        <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded text-sm text-gray-500 dark:text-gray-400 flex flex-col gap-1">
           <div className="flex gap-4">
-            <span className="text-green-400">{completedCount} completed</span>
-            {failedCount > 0 && <span className="text-red-400">{failedCount} failed</span>}
-            {suspendedCount > 0 && <span className="text-orange-400">{suspendedCount} cancelled</span>}
+            <span className="text-green-600 dark:text-green-400">{completedCount} completed</span>
+            {failedCount > 0 && <span className="text-red-600 dark:text-red-400">{failedCount} failed</span>}
+            {suspendedCount > 0 && <span className="text-orange-600 dark:text-orange-400">{suspendedCount} cancelled</span>}
           </div>
-          {runError && <p className="text-xs text-red-400">{runError}</p>}
+          {runError && <p className="text-xs text-red-600 dark:text-red-400">{runError}</p>}
         </div>
       )}
 
@@ -2266,7 +2280,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex bg-gray-950 text-gray-100 font-sans">
+    <div className="h-screen flex bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans">
       <AskUserDialog
         onAnswered={(sessionId) => {
           if (selectedSessionRef.current?.id === sessionId) {
@@ -2295,7 +2309,7 @@ export default function App() {
       {/* Sidebar */}
       <aside
         style={{ width: sidebarWidth, flexShrink: 0 }}
-        className="border-r border-gray-800 flex flex-col"
+        className="border-r border-gray-200 dark:border-gray-800 flex flex-col"
       >
         <SessionSidebar
           selectedId={selectedSession?.id ?? null}
