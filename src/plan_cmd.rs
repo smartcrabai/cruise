@@ -26,7 +26,7 @@ use crate::planning::{
 use crate::resolver::ConfigSource;
 use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::variable::VariableStore;
-use crate::workflow::{SkippableStepNode, list_skippable_steps};
+use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_skippable_steps};
 
 /// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
 fn cli_plan_ctx<'a>(
@@ -781,16 +781,16 @@ impl fmt::Display for FlatNode {
     }
 }
 
-fn flatten_nodes(nodes: &[SkippableStepNode]) -> Vec<FlatNode> {
+fn flatten_nodes(nodes: &[SkippableStepNode], prefix: &str) -> Vec<FlatNode> {
     let mut flat = Vec::new();
-    flatten_nodes_into(nodes, 0, &mut flat);
+    flatten_nodes_into(nodes, 0, prefix, &mut flat);
     flat
 }
 
-fn flatten_nodes_into(nodes: &[SkippableStepNode], depth: usize, flat: &mut Vec<FlatNode>) {
+fn flatten_nodes_into(nodes: &[SkippableStepNode], depth: usize, prefix: &str, flat: &mut Vec<FlatNode>) {
     for node in nodes {
         let label = if depth == 0 {
-            node.id.clone()
+            format!("{}{}", prefix, node.id)
         } else {
             node.id
                 .rsplit('/')
@@ -802,7 +802,7 @@ fn flatten_nodes_into(nodes: &[SkippableStepNode], depth: usize, flat: &mut Vec<
             label: format!("{}{}", "  ".repeat(depth), label),
             expanded_step_ids: node.expanded_step_ids.clone(),
         });
-        flatten_nodes_into(&node.children, depth + 1, flat);
+        flatten_nodes_into(&node.children, depth + 1, prefix, flat);
     }
 }
 
@@ -850,12 +850,14 @@ pub(crate) fn select_steps_to_skip(
     config: &WorkflowConfig,
     previously_skipped: &[String],
 ) -> Result<StepSkipSelection> {
-    let nodes = list_skippable_steps(config)?;
-    if nodes.is_empty() {
+    let main_nodes = list_skippable_steps(config)?;
+    let after_pr_nodes = list_skippable_after_pr_steps(config)?;
+    if main_nodes.is_empty() && after_pr_nodes.is_empty() {
         return Ok(StepSkipSelection::Confirmed(vec![]));
     }
 
-    let flat = flatten_nodes(&nodes);
+    let mut flat = flatten_nodes(&main_nodes, "");
+    flat.extend(flatten_nodes(&after_pr_nodes, "[after-pr] "));
     let defaults = flat_node_default_indices(&flat, previously_skipped);
 
     crate::platform::reclaim_terminal_foreground();

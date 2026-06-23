@@ -37,6 +37,7 @@ export function SessionConfigEditor({
 }: SessionConfigEditorProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
+  const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
   const [selectedConfigPath, setSelectedConfigPath] = useState<string>(configPath ?? "");
   const [selectedSkippedSteps, setSelectedSkippedSteps] = useState<Set<string>>(new Set(skippedSteps));
   const [selectedCurrentStep, setSelectedCurrentStep] = useState<string>(currentStep ?? "");
@@ -86,8 +87,12 @@ export function SessionConfigEditor({
     })
       .then((defaults) => {
         if (active) {
-          const validStepIds = collectExpandedStepIds(defaults.steps);
+          const validStepIds = new Set([
+            ...collectExpandedStepIds(defaults.steps),
+            ...collectExpandedStepIds(defaults.afterPrSteps),
+          ]);
           setConfigSteps(defaults.steps);
+          setAfterPrSteps(defaults.afterPrSteps);
           setSelectedSkippedSteps(
             new Set(skippedStepsRef.current.filter((id) => validStepIds.has(id))),
           );
@@ -97,6 +102,7 @@ export function SessionConfigEditor({
         if (active) {
           console.error("Failed to load config defaults:", e);
           setConfigSteps([]);
+          setAfterPrSteps([]);
           setSelectedSkippedSteps(new Set());
         }
       });
@@ -278,12 +284,20 @@ export function SessionConfigEditor({
         </select>
       </div>
 
-      {configSteps.length > 0 && (
+      {(configSteps.length > 0 || afterPrSteps.length > 0) && (
         <div className="space-y-1.5">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</div>
-          <div className="space-y-1">
-            {configSteps.map((node) => renderStepNode(node, false))}
-          </div>
+          {configSteps.length > 0 && (
+            <div className="space-y-1">
+              {configSteps.map((node) => renderStepNode(node, false))}
+            </div>
+          )}
+          {afterPrSteps.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs text-gray-400">After PR Steps</div>
+              {afterPrSteps.map((node) => renderStepNode(node, false))}
+            </div>
+          )}
         </div>
       )}
 

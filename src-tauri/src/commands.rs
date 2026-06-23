@@ -681,6 +681,7 @@ pub struct NewSessionHistorySummaryDto {
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionConfigDefaultsDto {
     pub steps: Vec<cruise::workflow::SkippableStepNode>,
+    pub after_pr_steps: Vec<cruise::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
 }
 
@@ -1282,6 +1283,8 @@ pub fn get_new_session_config_defaults(
         .map_err(|e| format!("Failed to validate config: {e}"))?;
     let steps = cruise::workflow::list_skippable_steps(&config)
         .map_err(|e| format!("Failed to list skippable steps: {e}"))?;
+    let after_pr_steps = cruise::workflow::list_skippable_after_pr_steps(&config)
+        .map_err(|e| format!("Failed to list skippable after-pr steps: {e}"))?;
     let resolved_config_key = source.path().map_or_else(
         || BUILTIN_CONFIG_KEY.to_string(),
         |p| resolved_config_key_for_session(p),
@@ -1307,6 +1310,7 @@ pub fn get_new_session_config_defaults(
         .unwrap_or_default();
     Ok(NewSessionConfigDefaultsDto {
         steps,
+        after_pr_steps,
         default_skipped_steps,
     })
 }

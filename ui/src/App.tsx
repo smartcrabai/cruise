@@ -1222,6 +1222,7 @@ function useDebounce<T>(value: T, delay: number): T {
 function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
+  const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
   const [skippedSteps, setSkippedSteps] = useState<Set<string>>(new Set());
   const [recentWorkingDirs, setRecentWorkingDirs] = useState<string[]>([]);
   // Distinguishes which button is in flight so each shows its own progress
@@ -1277,8 +1278,12 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
     void getNewSessionConfigDefaults(params)
       .then((defaults) => {
         if (active) {
-          const validStepIds = collectExpandedStepIds(defaults.steps);
+          const validStepIds = new Set([
+            ...collectExpandedStepIds(defaults.steps),
+            ...collectExpandedStepIds(defaults.afterPrSteps),
+          ]);
           setConfigSteps(defaults.steps);
+          setAfterPrSteps(defaults.afterPrSteps);
           setSkippedSteps(
             new Set(defaults.defaultSkippedSteps.filter((id) => validStepIds.has(id))),
           );
@@ -1287,6 +1292,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
       .catch(() => {
         if (active) {
           setConfigSteps([]);
+          setAfterPrSteps([]);
           setSkippedSteps(new Set());
         }
       });
@@ -1635,12 +1641,20 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
         </div>
 
         {/* Skip steps */}
-        {configSteps.length > 0 && (
+        {(configSteps.length > 0 || afterPrSteps.length > 0) && (
           <div className="space-y-1.5">
             <span className="text-xs text-gray-500 uppercase tracking-wide">Skip Steps</span>
-            <div className="space-y-1">
-              {configSteps.map((node) => renderStepNode(node, false))}
-            </div>
+            {configSteps.length > 0 && (
+              <div className="space-y-1">
+                {configSteps.map((node) => renderStepNode(node, false))}
+              </div>
+            )}
+            {afterPrSteps.length > 0 && (
+              <div className="space-y-1">
+                <span className="text-xs text-gray-400">After PR Steps</span>
+                {afterPrSteps.map((node) => renderStepNode(node, false))}
+              </div>
+            )}
           </div>
         )}
 
