@@ -32,11 +32,15 @@
     },
     "pr_language": {
       "type": "string",
-      "description": "Language for PR descriptions"
+      "description": "Language for PR descriptions (deprecated, use `languages.pr` instead)"
     },
     "plan_language": {
       "type": "string",
-      "description": "Language for planning prompts"
+      "description": "Language for planning prompts (deprecated, use `languages.plan` instead)"
+    },
+    "languages": {
+      "$ref": "#/$defs/LanguagesConfig",
+      "description": "Nested language configuration for PR descriptions and planning prompts"
     },
     "env": {
       "type": "object",
@@ -202,6 +206,20 @@
           "description": "Next step to execute when this option is selected"
         }
       }
+    },
+    "LanguagesConfig": {
+      "type": "object",
+      "properties": {
+        "pr": {
+          "type": "string",
+          "description": "Language for PR descriptions"
+        },
+        "plan": {
+          "type": "string",
+          "description": "Language for planning prompts"
+        }
+      },
+      "additionalProperties": false
     },
     "GroupConfig": {
       "type": "object",

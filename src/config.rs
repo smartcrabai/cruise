@@ -261,10 +261,6 @@ fn normalize_language(value: Option<&str>, default: &str) -> String {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl WorkflowConfig {
     /// Parse a workflow config from a YAML string.
     ///
@@ -273,6 +269,8 @@ impl WorkflowConfig {
     /// Returns an error if the YAML is invalid or does not match the expected schema.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
+    }
+
     /// Resolve the effective PR language.
     ///
     /// Precedence: `languages.pr` > `pr_language` > default (`English`).
@@ -322,9 +320,6 @@ impl WorkflowConfig {
         warnings
     }
 
-
-    }
-
     /// Build the built-in default workflow config in code (no YAML file required).
     #[must_use]
     pub fn default_builtin() -> Self {
@@ -356,6 +351,7 @@ impl WorkflowConfig {
             sdk: None,
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
+            interactive_planning: true,
             pr_language: None,
             plan_language: None,
             languages: None,
@@ -720,6 +716,7 @@ steps:
         assert_eq!(config.plan_language, None);
         assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
         assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
+    }
 
     #[test]
     fn test_plan_model_field() {
@@ -913,8 +910,6 @@ steps:
         assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
         assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
     }
-
-    #[test]
 
     #[test]
     fn test_step_order_preserved() {
@@ -2323,6 +2318,7 @@ steps:
                 "plan_model",
                 "pr_language",
                 "plan_language",
+                "languages",
                 "env",
                 "groups",
                 "steps",
