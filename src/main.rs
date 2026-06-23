@@ -7,6 +7,7 @@ mod cli;
 mod condition;
 mod config;
 mod config_cmd;
+mod dag;
 mod display;
 mod draft_cmd;
 mod engine;
