@@ -35,6 +35,7 @@ vi.mock("../lib/commands", () => ({
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
+    afterPrSteps: [],
     defaultSkippedSteps: [],
   }),
   listDirectory: vi.fn(),
@@ -204,6 +205,7 @@ describe("App: Post-plan session editing - skip-only save", () => {
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
       steps: SKIP_STEPS,
+      afterPrSteps: [],
       defaultSkippedSteps: [],
     });
   });
@@ -326,6 +328,7 @@ describe("App: Post-plan session editing - config change with replan", () => {
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
       steps: SKIP_STEPS,
+      afterPrSteps: [],
       defaultSkippedSteps: [],
     });
   });
@@ -458,6 +461,7 @@ describe("App: Post-plan session editing - repo-local config handling", () => {
     vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
       steps: SKIP_STEPS,
+      afterPrSteps: [],
       defaultSkippedSteps: [],
     });
   });
@@ -499,6 +503,7 @@ describe("App: Post-plan session editing - existing New Session behavior preserv
     vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({ recentWorkingDirs: [] });
     vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
       steps: [],
+      afterPrSteps: [],
       defaultSkippedSteps: [],
     });
     vi.mocked(commands.listDirectory).mockResolvedValue([]);

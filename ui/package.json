@@ -25,12 +25,6 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },
-  "pnpm": {
-    "overrides": {
-      "@asamuzakjp/css-color": "6.0.2",
-      "lru-cache": "11.5.1"
-    }
-  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@tailwindcss/vite": "4.3.1",
