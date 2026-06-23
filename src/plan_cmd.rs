@@ -787,7 +787,12 @@ fn flatten_nodes(nodes: &[SkippableStepNode], prefix: &str) -> Vec<FlatNode> {
     flat
 }
 
-fn flatten_nodes_into(nodes: &[SkippableStepNode], depth: usize, prefix: &str, flat: &mut Vec<FlatNode>) {
+fn flatten_nodes_into(
+    nodes: &[SkippableStepNode],
+    depth: usize,
+    prefix: &str,
+    flat: &mut Vec<FlatNode>,
+) {
     for node in nodes {
         let label = if depth == 0 {
             format!("{}{}", prefix, node.id)

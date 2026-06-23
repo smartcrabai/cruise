@@ -2074,6 +2074,7 @@ async fn execute_single_session(
                 let mut session_for_pr = manager_for_pr
                     .load(&sid_for_pr)
                     .map_err(|e| cruise::error::CruiseError::Other(e.to_string()))?;
+                let skipped_steps_for_pr = session_for_pr.skipped_steps.clone();
                 let pr_result = handle.block_on(cruise::worktree_pr::handle_worktree_pr(
                     ctx,
                     &compiled,
@@ -2082,6 +2083,7 @@ async fn execute_single_session(
                     &mut session_for_pr,
                     5,
                     10,
+                    &skipped_steps_for_pr,
                     None,
                 ));
                 if pr_result.is_ok() {

@@ -32,7 +32,7 @@ vi.mock("../lib/commands", () => ({
   deleteSession: vi.fn(),
   fixSession: vi.fn(),
   getAppConfig: vi.fn().mockResolvedValue({ runAllParallelism: 1 }),
-  getNewSessionConfigDefaults: vi.fn().mockResolvedValue({ steps: [], defaultSkippedSteps: [] }),
+  getNewSessionConfigDefaults: vi.fn().mockResolvedValue({ steps: [], afterPrSteps: [], defaultSkippedSteps: [] }),
   getNewSessionDraft: vi.fn().mockResolvedValue(null),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getSession: vi.fn(),

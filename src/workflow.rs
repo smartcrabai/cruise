@@ -176,7 +176,6 @@ pub fn list_skippable_after_pr_steps(config: &WorkflowConfig) -> Result<Vec<Skip
         .collect()
 }
 
-
 /// Flat, executable representation of a workflow after group-call expansion.
 ///
 /// Group call steps (e.g. `review-pass: {group: review}`) are replaced by
@@ -1135,7 +1134,8 @@ after-pr:
     group: notify
 ";
         // When: list_skippable_after_pr_steps is called
-        let nodes = list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: only after-pr steps are included, main steps are excluded
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, "post-notify");
@@ -1162,7 +1162,8 @@ after-pr:
     group: cleanup
 ";
         // When: list_skippable_after_pr_steps is called
-        let nodes = list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: group is expanded into parent and children
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, "post-merge");
@@ -1185,7 +1186,8 @@ steps:
     command: cargo build
 ";
         // When: list_skippable_after_pr_steps is called
-        let nodes = list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let nodes =
+            list_skippable_after_pr_steps(&parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: returns an empty list
         assert!(nodes.is_empty());
     }
@@ -1204,7 +1206,7 @@ after-pr:
   post-notify:
     group: notify
     prompt: /legacy
-"; 
+";
         let err = list_skippable_after_pr_steps(&parsed(yaml))
             .err()
             .unwrap_or_else(|| panic!("expected Err"));
@@ -1215,4 +1217,3 @@ after-pr:
         );
     }
 }
-

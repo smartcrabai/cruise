@@ -294,6 +294,7 @@ async fn generate_pr_via_sdk_tool(
 
 /// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
 /// all other errors are logged as warnings and treated as non-fatal.
+#[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,

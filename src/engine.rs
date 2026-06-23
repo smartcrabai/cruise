@@ -1162,7 +1162,6 @@ mod tests {
         execute_steps(&ctx, &mut vars, &mut tracker, &first_step).await
     }
 
-
     // Run config with a custom `FileTracker` rooted at `tracker_root`.
     // Use this for tests that need to control file-change detection.
     // max_retries=10 (loop guard), rate_limit_retries=0 (no live API calls in tests).
@@ -2717,7 +2716,10 @@ after-pr:
             "after-pr phase should succeed when step is user-skipped: {result:?}"
         );
         let result = result.unwrap_or_else(|e| panic!("after-pr failed: {e:?}"));
-        assert_eq!(result.skipped, 1, "one after-pr step should be counted as skipped");
+        assert_eq!(
+            result.skipped, 1,
+            "one after-pr step should be counted as skipped"
+        );
         assert_eq!(result.run, 0, "no after-pr steps should run");
     }
 

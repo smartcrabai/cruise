@@ -60,7 +60,7 @@ const defaultProps = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockListConfigs.mockResolvedValue([]);
-  mockGetDefaults.mockResolvedValue({ steps: [], defaultSkippedSteps: [] });
+  mockGetDefaults.mockResolvedValue({ steps: [], afterPrSteps: [], defaultSkippedSteps: [] });
   mockUpdateSettings.mockResolvedValue(makeSession());
   mockRegenerate.mockResolvedValue("");
 });
@@ -83,7 +83,7 @@ describe("SessionConfigEditor", () => {
     it("'Save' button is shown when skip steps are changed", async () => {
       // Given
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(<SessionConfigEditor {...defaultProps} />);
       await waitFor(() => screen.getByLabelText("step-a"));
 
@@ -115,7 +115,7 @@ describe("SessionConfigEditor", () => {
       // Given: re-render with disabled=true after changing skip steps,
       // to simulate state where there are changes but disabled=true
       const steps = [makeStep("step-a")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       const { rerender } = render(
         <SessionConfigEditor {...defaultProps} skippedSteps={["step-a"]} />
       );
@@ -136,7 +136,7 @@ describe("SessionConfigEditor", () => {
     it("updateSessionSettings is called with correct args when Save button is clicked", async () => {
       // Given: skip step-a, then uncheck and save
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -162,7 +162,7 @@ describe("SessionConfigEditor", () => {
     it("onSessionUpdated is called after save", async () => {
       // Given
       const steps = [makeStep("step-a")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       const updatedSession = makeSession({ id: "session-1", phase: "Planned" });
       mockUpdateSettings.mockResolvedValue(updatedSession);
       const onSessionUpdated = vi.fn();
@@ -217,7 +217,7 @@ describe("SessionConfigEditor", () => {
       const child2 = makeStep("parent/child2");
       const parent = makeStep("parent", [child1, child2]);
       parent.expandedStepIds = ["parent/child1", "parent/child2"];
-      mockGetDefaults.mockResolvedValue({ steps: [parent], defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps: [parent], afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -240,7 +240,7 @@ describe("SessionConfigEditor", () => {
       const child2 = makeStep("parent/child2");
       const parent = makeStep("parent", [child1, child2]);
       parent.expandedStepIds = ["parent/child1", "parent/child2"];
-      mockGetDefaults.mockResolvedValue({ steps: [parent], defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps: [parent], afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -296,7 +296,7 @@ describe("SessionConfigEditor", () => {
     it("Current Step selector is shown when phase is 'Failed'", async () => {
       // Given: a Failed session with steps available
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(<SessionConfigEditor {...defaultProps} phase="Failed" currentStep="step-a" />);
 
       // Then: a "Current Step" label/select is visible
@@ -308,7 +308,7 @@ describe("SessionConfigEditor", () => {
     it("Current Step selector is shown when phase is 'Suspended'", async () => {
       // Given: a Suspended session with steps available
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(<SessionConfigEditor {...defaultProps} phase="Suspended" currentStep="step-a" />);
 
       // Then: a "Current Step" label/select is visible
@@ -320,7 +320,7 @@ describe("SessionConfigEditor", () => {
     it("Current Step selector is NOT shown for 'Planned' phase", async () => {
       // Given: a Planned session (no in-progress step to resume from)
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(<SessionConfigEditor {...defaultProps} phase="Planned" />);
       await waitFor(() => screen.getByLabelText("step-a"));
 
@@ -331,7 +331,7 @@ describe("SessionConfigEditor", () => {
     it("Save button appears when Current Step selection changes", async () => {
       // Given: Failed session with step-a as current step and steps available
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -353,7 +353,7 @@ describe("SessionConfigEditor", () => {
     it("updateSessionSettings is called with currentStep when saved", async () => {
       // Given: Failed session, current step is step-a, steps list available
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}
@@ -380,7 +380,7 @@ describe("SessionConfigEditor", () => {
     it("updateSessionSettings is called with currentStep=null when '(from beginning)' is selected", async () => {
       // Given: Failed session, current step is step-a
       const steps = [makeStep("step-a"), makeStep("step-b")];
-      mockGetDefaults.mockResolvedValue({ steps, defaultSkippedSteps: [] });
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(
         <SessionConfigEditor
           {...defaultProps}

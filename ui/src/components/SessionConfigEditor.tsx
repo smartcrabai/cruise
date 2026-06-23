@@ -77,7 +77,7 @@ export function SessionConfigEditor({
     return () => {
       active = false;
     };
-  }, []);
+  }, [configPath]);
 
   useEffect(() => {
     let active = true;

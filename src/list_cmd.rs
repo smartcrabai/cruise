@@ -399,12 +399,13 @@ impl fmt::Display for StepChoice {
     }
 }
 
+/// Edit session settings interactively.
+#[expect(clippy::too_many_lines, reason = "interactive UI with many branches")]
 async fn edit_session_settings_interactive(
     manager: &SessionManager,
     session: &mut crate::session::SessionState,
     rate_limit_retries: usize,
 ) -> crate::error::Result<()> {
-    use crate::session::SessionPhase;
     use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 
     // Load config to enumerate available step names for the multi-select.
