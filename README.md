@@ -153,6 +153,8 @@ Options:
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
+      --cleanup-after-pr           Delete local worktree and branch after PR creation
+      --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
 `--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
@@ -794,6 +796,7 @@ In non-interactive environments (piped stdin) and with `--all`, worktree mode is
 ### Worktree isolation
 
 - The worktree is retained until the PR is closed or merged; run `cruise clean` to delete it.
+- Set `cleanup_after_pr: true` in the config (or pass `--cleanup-after-pr` at runtime) to automatically delete the local worktree and branch immediately after the PR is created. Use `--no-cleanup-after-pr` to override the config setting and keep them.
 
 ### Copying files into the worktree
 
@@ -891,6 +894,8 @@ steps:
 
   review-pass:
     group: review
+
+cleanup_after_pr: true    # delete local worktree and branch after PR is created
 
 after-pr:
   label:
