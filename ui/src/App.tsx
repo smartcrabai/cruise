@@ -37,9 +37,7 @@ import {
   saveNewSessionDraft,
   updateAppConfig,
 } from "./lib/commands";
-import { ASK_USER_EVENT } from "./lib/askUser";
 import { notifyDesktop } from "./lib/desktopNotifications";
-import { AskUserDialog } from "./components/AskUserDialog";
 import { AskUserPanel } from "./components/AskUserPanel";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { ImageAttachments } from "./components/ImageAttachments";
@@ -694,8 +692,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
       } else if (event.event === "planChunk") {
         setPlanProgress((prev) => [...prev, event.data.line]);
       } else if (event.event === "askUserRequired") {
-        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
-        onToast({ kind: "input-required", sessionInput: session.input, detail: event.data.question });
+        void refreshSession();
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -735,8 +732,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
       } else if (event.event === "planChunk") {
         setPlanProgress((prev) => [...prev, event.data.line]);
       } else if (event.event === "askUserRequired") {
-        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
-        onToast({ kind: "input-required", sessionInput: session.input, detail: event.data.question });
+        void refreshSession();
       } else if (event.event === "planGenerated") {
         setPlanContent(event.data.content);
         setReplanPhase("idle");
@@ -813,6 +809,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     onPlanRegenerated: setPlanContent,
     onRegeneratingChange: setIsConfigRegenerating,
     onError: (error: string) => { onToast({ kind: "failed", sessionInput: session.input, detail: error }); },
+    onAskUserRequired: () => void refreshSession(),
     disabled: replanPhase === "generating",
   };
 
@@ -1207,7 +1204,6 @@ interface NewSessionFormProps {
   draft: NewSessionDraft;
   onDraftChange: (updater: (prev: NewSessionDraft) => NewSessionDraft) => void;
   onRefreshSidebar: () => void;
-  onToast: (toast: Omit<WorkflowToast, "id">) => void;
 }
 
 function useDebounce<T>(value: T, delay: number): T {
@@ -1219,7 +1215,7 @@ function useDebounce<T>(value: T, delay: number): T {
   return debounced;
 }
 
-function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: NewSessionFormProps) {
+function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFormProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
@@ -1472,8 +1468,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar, onToast }: New
         void refreshHistorySummary();
         onRefreshSidebar();
       } else if (event.event === "askUserRequired") {
-        window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
-        onToast({ kind: "input-required", sessionInput: input, detail: event.data.question });
+        onRefreshSidebar();
       } else if (event.event === "planGenerated" || event.event === "planFailed") {
         onRefreshSidebar();
       }
@@ -2084,7 +2079,8 @@ export default function App() {
 
   const emitNotification = useCallback((kind: ToastKind, sessionInput: string, detail?: string) => {
     addToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
-    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} -- ${(detail ?? sessionInput).slice(0, 60)}`);
+    const safeText = (detail ?? sessionInput).replace(/[\x00-\x1F\x7F]/g, " ").slice(0, 60);
+    void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} -- ${safeText}`);
   }, [addToast]);
 
   const handleSessionsChanged = useCallback((sessions: Session[]) => {
@@ -2108,6 +2104,11 @@ export default function App() {
       const wasFailed = prev !== undefined && prev.phase === "Failed";
       if (isFailed && !wasFailed) {
         emitNotification("failed", session.input, session.phaseError);
+      }
+      const nowPending = session.pendingAskQuestion;
+      const prevPending = prev?.pendingAskQuestion;
+      if (nowPending && prev !== undefined && nowPending !== prevPending) {
+        emitNotification("input-required", session.input, nowPending);
       }
     }
   }, [emitNotification]);
@@ -2281,23 +2282,6 @@ export default function App() {
 
   return (
     <div className="h-screen flex bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans">
-      <AskUserDialog
-        onAnswered={(sessionId) => {
-          if (selectedSessionRef.current?.id === sessionId) {
-            void getSession(sessionId)
-              .then((session) => {
-                // Re-check after the async fetch: user may have switched sessions.
-                if (selectedSessionRef.current?.id === sessionId) {
-                  setSelectedSession(session);
-                }
-              })
-              .catch((e) => {
-                console.error("Failed to refresh session after ask_user answer:", e);
-              });
-          }
-          sidebarRefreshRef.current?.();
-        }}
-      />
       <WorkflowToastStack toasts={toasts} onDismiss={dismissToast} />
       {showSettings && (
         <SettingsModal
@@ -2351,7 +2335,6 @@ export default function App() {
             draft={newSessionDraft}
             onDraftChange={setNewSessionDraft}
             onRefreshSidebar={() => sidebarRefreshRef.current?.()}
-            onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
           />
         ) : selectedSession ? (
           <WorkflowRunner
