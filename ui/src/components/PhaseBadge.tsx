@@ -29,6 +29,7 @@ export function PhaseBadge({
 }) {
   const cls = PHASE_COLORS[phase];
   const isAwaiting = phase === "Awaiting Approval";
+  const isAwaitingInput = phase === "Awaiting Input";
   const isDraftPlanning = phase === "Draft" && !!fixing;
   const showApproveReady = isAwaiting && planAvailable === true && !fixing;
   const displayLabel = isDraftPlanning
@@ -42,6 +43,13 @@ export function PhaseBadge({
         <span
           role="img"
           aria-label="plan ready for approval"
+          className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
+        />
+      )}
+      {isAwaitingInput && (
+        <span
+          role="img"
+          aria-label="user input required"
           className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
         />
       )}

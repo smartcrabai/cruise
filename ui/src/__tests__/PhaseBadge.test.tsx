@@ -103,12 +103,12 @@ describe("PhaseBadge", () => {
       expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
     });
 
-    it("does not show blue dot for Awaiting Input even when planAvailable is true", () => {
+    it("does not show approval-ready dot for Awaiting Input (it shows its own input-required dot)", () => {
       // Given: the planning agent is blocked on user input rather than ready for approval
       // When
       render(<PhaseBadge phase="Awaiting Input" planAvailable={true} />);
 
-      // Then
+      // Then: the approval-ready indicator is absent; a separate input-required indicator is shown instead
       expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
     });
 
@@ -131,6 +131,43 @@ describe("PhaseBadge", () => {
 
       rerender(<PhaseBadge phase="Suspended" />);
       expect(screen.getByText("Suspended")).toBeTruthy();
+    });
+  });
+
+  describe("Awaiting Input phase", () => {
+    const INPUT_READY_LABEL = "user input required";
+
+    it("shows blue dot for Awaiting Input phase", () => {
+      // Given / When
+      render(<PhaseBadge phase="Awaiting Input" />);
+
+      // Then: the input-required indicator is present
+      expect(screen.getByLabelText(INPUT_READY_LABEL)).toBeTruthy();
+    });
+
+    it("shows blue dot for Awaiting Input regardless of planAvailable", () => {
+      // Given / When
+      render(<PhaseBadge phase="Awaiting Input" planAvailable={false} />);
+
+      // Then: planAvailable does not gate the input-required dot
+      expect(screen.getByLabelText(INPUT_READY_LABEL)).toBeTruthy();
+    });
+
+    it("input-required dot uses distinct aria-label from the approval-ready dot", () => {
+      // Given / When: Awaiting Input session
+      render(<PhaseBadge phase="Awaiting Input" />);
+
+      // Then: aria-label distinguishes the two dots
+      expect(screen.getByLabelText(INPUT_READY_LABEL)).toBeTruthy();
+      expect(screen.queryByLabelText(PLAN_READY_LABEL)).toBeNull();
+    });
+
+    it("renders 'Awaiting Input' text label", () => {
+      // Given / When
+      render(<PhaseBadge phase="Awaiting Input" />);
+
+      // Then
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
     });
   });
 

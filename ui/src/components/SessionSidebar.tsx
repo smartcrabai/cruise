@@ -80,7 +80,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
         const bTime = b.updatedAt ?? b.createdAt;
         return bTime.localeCompare(aTime);
       });
-      const fingerprint = sorted.map(s => `${s.id}:${s.phase}:${s.updatedAt ?? s.createdAt}:${!!s.awaitingInput}:${!!s.planAvailable}:${!!s.fixInProgress}`).join(",");
+      const fingerprint = JSON.stringify(sorted.map(s => [s.id, s.phase, s.updatedAt ?? s.createdAt, !!s.awaitingInput, !!s.planAvailable, !!s.fixInProgress, s.pendingAskQuestion ?? null]));
       if (fingerprint !== lastFingerprintRef.current) {
         lastFingerprintRef.current = fingerprint;
         setSessions(sorted);
