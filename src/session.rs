@@ -133,6 +133,17 @@ pub struct SessionState {
     /// stay clean; the augmented prompt is rebuilt on demand for the LLM.
     #[serde(default)]
     pub attachments: Vec<PathBuf>,
+    /// True once the execution DAG has been built and persisted for this
+    /// session.  When `false`, the session predates DAG support (or the DAG has
+    /// not yet been created on first `cruise run`) and the engine falls back to
+    /// legacy step-name resumption.
+    #[serde(default)]
+    pub has_dag: bool,
+    /// True when `current_step` holds a DAG node id (e.g. `"n0007"`) rather
+    /// than a plain step name.  Always `false` for sessions created before DAG
+    /// support was added.
+    #[serde(default)]
+    pub current_step_is_node_id: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +209,8 @@ impl SessionState {
             repo: None,
             cleanup_after_pr_override: None,
             attachments: vec![],
+            has_dag: false,
+            current_step_is_node_id: false,
         }
     }
 
@@ -241,7 +254,8 @@ impl SessionState {
 
     /// Resets this session back to `Planned` state so it can be re-executed from scratch.
     ///
-    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`, `runner_pid`, `runner_started_at`.
+    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`, `runner_pid`, `runner_started_at`,
+    /// `has_dag`, `current_step_is_node_id`.
     /// Preserves: `worktree_path`, `worktree_branch` (reused on next run).
     pub fn reset_to_planned(&mut self) {
         self.phase = SessionPhase::Planned;
@@ -251,6 +265,8 @@ impl SessionState {
         self.plan_error = None;
         self.runner_pid = None;
         self.runner_started_at = None;
+        self.has_dag = false;
+        self.current_step_is_node_id = false;
     }
 
     /// Returns a `WorktreeContext` if the session has a valid, existing worktree.
@@ -1306,6 +1322,106 @@ mod tests {
         assert_eq!(loaded.title, None);
         assert_eq!(loaded.repo, None);
         assert_eq!(loaded.input, "old task");
+    }
+
+    // -- DAG fields (has_dag / current_step_is_node_id) -----------------------
+
+    #[test]
+    fn test_session_state_dag_fields_default_to_false() {
+        // Given: a freshly created session
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let state = SessionState::new(
+            "20260622000000000".to_string(),
+            tmp.path().to_path_buf(),
+            "cruise.yaml".to_string(),
+            "test task".to_string(),
+        );
+
+        // Then: both DAG fields are false (DAG not yet built)
+        assert!(!state.has_dag, "has_dag should default to false");
+        assert!(
+            !state.current_step_is_node_id,
+            "current_step_is_node_id should default to false"
+        );
+    }
+
+    #[test]
+    fn test_session_state_backward_compat_dag_fields_absent_in_old_json() {
+        // Given: a state.json written without has_dag / current_step_is_node_id
+        // (simulates a session created before DAG support was added)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260622000000001".to_string();
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::json!({
+            "id": id,
+            "base_dir": "/repo",
+            "phase": "Suspended",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": "implement",
+            "created_at": "2026-06-22T00:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        std::fs::write(session_dir.join("state.json"), json.to_string())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the session is loaded
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: both DAG fields default to false and current_step stays a step name
+        assert!(
+            !loaded.has_dag,
+            "old session without has_dag field should read as false"
+        );
+        assert!(
+            !loaded.current_step_is_node_id,
+            "old session without current_step_is_node_id field should read as false"
+        );
+        assert_eq!(
+            loaded.current_step,
+            Some("implement".to_string()),
+            "step name must be preserved as-is"
+        );
+    }
+
+    #[test]
+    fn test_session_state_dag_node_id_round_trips() {
+        // Given: a session where the DAG has been built and current_step is a node id
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260622000000002".to_string();
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "dag task".to_string(),
+        );
+        state.has_dag = true;
+        state.current_step_is_node_id = true;
+        state.current_step = Some("n0007".to_string());
+
+        // When: the session is saved and reloaded
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: both DAG fields and the node id are preserved exactly
+        assert!(loaded.has_dag, "has_dag should round-trip as true");
+        assert!(
+            loaded.current_step_is_node_id,
+            "current_step_is_node_id should round-trip as true"
+        );
+        assert_eq!(
+            loaded.current_step,
+            Some("n0007".to_string()),
+            "node id in current_step must be preserved"
+        );
     }
 
     #[test]

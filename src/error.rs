@@ -40,6 +40,9 @@ pub enum CruiseError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+
     #[error("not a git repository")]
     NotGitRepository,
 
