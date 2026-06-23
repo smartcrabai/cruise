@@ -71,12 +71,12 @@ export function AskUserDialog({ onAnswered }: AskUserDialogProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-gray-900 rounded-lg shadow-xl border border-gray-700 p-6 max-w-lg w-full space-y-4"
+        className="bg-gray-50 dark:bg-gray-900 rounded-lg shadow-xl border border-gray-300 dark:border-gray-700 p-6 max-w-lg w-full space-y-4"
       >
-        <h2 id={titleId} className="text-lg font-semibold text-gray-100">
+        <h2 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           The planning agent has a question
         </h2>
-        <p id={questionId} className="text-sm text-gray-300 whitespace-pre-wrap">
+        <p id={questionId} className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
           {pending.question}
         </p>
         <textarea
@@ -88,12 +88,12 @@ export function AskUserDialog({ onAnswered }: AskUserDialogProps) {
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
-          className="w-full h-28 border border-gray-700 bg-gray-800 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
+          className="w-full h-28 border border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
           placeholder="Your answer... (Cmd/Ctrl+Enter to send)"
           disabled={submitting}
         />
         {submitState.status === "error" && (
-          <p className="text-sm text-red-400">{submitState.message}</p>
+          <p className="text-sm text-red-600 dark:text-red-400">{submitState.message}</p>
         )}
         <div className="flex justify-end">
           <button

@@ -251,14 +251,17 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
         expand_steps(&config.after_pr, &config.groups)?;
 
+    let pr_language = config.effective_pr_language();
+    let plan_language = config.effective_plan_language();
+
     Ok(CompiledWorkflow {
         command: config.command,
         sdk: config.sdk,
         model: config.model,
         plan_model: config.plan_model,
         env: config.env,
-        pr_language: config.pr_language,
-        plan_language: config.plan_language,
+        pr_language,
+        plan_language,
         cleanup_after_pr: config.cleanup_after_pr,
         steps,
         after_pr,

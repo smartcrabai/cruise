@@ -335,13 +335,7 @@ pub(crate) fn build_pr_prompt(
     vars: &mut VariableStore,
     compiled: &CompiledWorkflow,
 ) -> Result<String> {
-    let lang = compiled.pr_language.trim();
-    let lang = if lang.is_empty() {
-        crate::config::DEFAULT_PR_LANGUAGE
-    } else {
-        lang
-    };
-    vars.set_named_value(PR_LANGUAGE_VAR, lang.to_string());
+    vars.set_named_value(PR_LANGUAGE_VAR, compiled.pr_language.clone());
     vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
 }
 

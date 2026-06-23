@@ -119,11 +119,11 @@ export function RepoPicker({
         onKeyDown={handleKeyDown}
         disabled={disabled}
         placeholder={placeholder ?? "owner/repository"}
-        className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none disabled:opacity-50"
+        className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none disabled:opacity-50"
       />
 
       {loadError && (
-        <p className="mt-1 text-xs text-yellow-500">
+        <p className="mt-1 text-xs text-yellow-700 dark:text-yellow-400">
           Could not list repositories via gh ({loadError}); type owner/repository manually.
         </p>
       )}
@@ -132,7 +132,7 @@ export function RepoPicker({
         <ul
           id={listboxId}
           role="listbox"
-          className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-auto"
+          className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded shadow-lg max-h-56 overflow-auto"
         >
           {filtered.map((repo, i) => (
             <li
@@ -145,8 +145,8 @@ export function RepoPicker({
                 selectRepo(repo);
               }}
               onMouseEnter={() => setHighlighted(i)}
-              className={`px-3 py-1.5 text-sm text-gray-200 cursor-pointer ${
-                i === highlighted ? "bg-gray-700" : "hover:bg-gray-800"
+              className={`px-3 py-1.5 text-sm text-gray-800 dark:text-gray-200 cursor-pointer ${
+                i === highlighted ? "bg-gray-200 dark:bg-gray-700" : "hover:bg-gray-200 dark:hover:bg-gray-800"
               }`}
             >
               {repo}
