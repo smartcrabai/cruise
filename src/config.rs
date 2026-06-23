@@ -69,6 +69,12 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
 
+    /// Remove the local git worktree and its branch automatically after the PR
+    /// is created. Defaults to `false` (non-destructive). Only applies to
+    /// worktree-mode sessions that successfully created a PR.
+    #[serde(default)]
+    pub cleanup_after_pr: bool,
+
     /// Environment variables applied to all steps.
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -355,6 +361,7 @@ impl WorkflowConfig {
             pr_language: None,
             plan_language: None,
             languages: None,
+            cleanup_after_pr: false,
             env: HashMap::new(),
             groups: HashMap::new(),
             steps,
@@ -939,6 +946,50 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
         assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
+    }
+
+    #[test]
+    fn test_cleanup_after_pr_field() {
+        // Given: workflow YAML enables post-PR cleanup
+        let yaml = r"
+command: [claude, -p]
+cleanup_after_pr: true
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the field is true
+        assert!(config.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_cleanup_after_pr_defaults_to_false_when_omitted() {
+        // Given: workflow YAML omits cleanup_after_pr
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the field defaults to false (non-destructive)
+        assert!(!config.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_default_builtin_has_cleanup_after_pr_false() {
+        // Given / When: built-in default config is constructed
+        let config = WorkflowConfig::default_builtin();
+
+        // Then: cleanup_after_pr is false so existing behavior is preserved
+        assert!(!config.cleanup_after_pr);
     }
 
     #[test]

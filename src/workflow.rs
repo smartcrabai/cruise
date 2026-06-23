@@ -128,6 +128,10 @@ pub struct CompiledWorkflow {
     pub pr_language: String,
     /// Language to use for planning prompts.
     pub plan_language: String,
+    /// Remove the local git worktree and its branch automatically after the PR
+    /// is created. Defaults to `false` (non-destructive). Only applies to
+    /// worktree-mode sessions that successfully created a PR.
+    pub cleanup_after_pr: bool,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -154,6 +158,7 @@ impl CompiledWorkflow {
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
+            cleanup_after_pr: self.cleanup_after_pr,
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -191,6 +196,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         env: config.env,
         pr_language,
         plan_language,
+        cleanup_after_pr: config.cleanup_after_pr,
         steps,
         after_pr,
         invocations,
@@ -352,6 +358,62 @@ after-pr:
 
         // Then: the planning language is preserved
         assert_eq!(after_pr.plan_language, "Japanese");
+    }
+    #[test]
+    fn test_compile_carries_cleanup_after_pr() {
+        // Given: a workflow config that enables post-PR cleanup
+        let yaml = r"
+command: [echo]
+cleanup_after_pr: true
+steps:
+  step1:
+    command: echo hello
+";
+
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: the compiled workflow carries the cleanup flag
+        assert!(c.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_after_pr_compiled_preserves_cleanup_after_pr() {
+        // Given: a compiled workflow with cleanup enabled and after-pr steps
+        let yaml = r"
+command: [echo]
+cleanup_after_pr: true
+steps:
+  main:
+    command: echo main
+after-pr:
+  notify:
+    command: echo done
+";
+        let c = compiled(yaml);
+
+        // When: converting to an after-pr compiled workflow
+        let after_pr = c.to_after_pr_compiled();
+
+        // Then: the cleanup flag is preserved
+        assert!(after_pr.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_compile_cleanup_after_pr_defaults_to_false_when_omitted() {
+        // Given: a workflow config without cleanup_after_pr
+        let yaml = r"
+command: [echo]
+steps:
+  step1:
+    command: echo hello
+";
+
+        // When: compiled
+        let c = compiled(yaml);
+
+        // Then: the compiled workflow defaults to false (non-destructive)
+        assert!(!c.cleanup_after_pr);
     }
 
     // -----------------------------------------------------------------------

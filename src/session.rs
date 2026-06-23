@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{CruiseError, Result};
 
@@ -123,6 +124,10 @@ pub struct SessionState {
     /// execution and removed after the PR is created.
     #[serde(default)]
     pub repo: Option<String>,
+    /// GUI or CLI override for `cleanup_after_pr`. When `Some`, takes
+    /// precedence over the workflow config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_after_pr_override: Option<bool>,
     /// Absolute paths of image files attached to the planning input. Kept
     /// separate from `input` so PR titles, branch names, and history records
     /// stay clean; the augmented prompt is rebuilt on demand for the LLM.
@@ -191,6 +196,7 @@ impl SessionState {
             runner_pid: None,
             runner_started_at: None,
             repo: None,
+            cleanup_after_pr_override: None,
             attachments: vec![],
         }
     }
@@ -654,7 +660,12 @@ pub struct CleanupReport {
     pub skipped: usize,
 }
 
-/// Generate a session ID from current UTC time: `YYYYMMDDHHmmssNNN` (NNN = milliseconds).
+/// Generate a unique session ID from current UTC time plus a UUID suffix.
+///
+/// Format: `YYYYMMDDHHmmssNNN_<uuid>` where `YYYYMMDDHHmmssNNN` is the current
+/// UTC timestamp with millisecond precision and `<uuid>` is a UUID v4 rendered
+/// as 32 hexadecimal characters. The timestamp keeps IDs sortable; the UUID
+/// eliminates the small collision risk from rapid creation or clock changes.
 #[must_use]
 pub fn current_timestamp_id() -> String {
     let dur = SystemTime::now()
@@ -663,7 +674,8 @@ pub fn current_timestamp_id() -> String {
     let secs = dur.as_secs();
     let millis = dur.subsec_millis();
     let (year, month, day, h, m, s) = seconds_to_datetime(secs);
-    format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}{millis:03}")
+    let timestamp = format!("{year:04}{month:02}{day:02}{h:02}{m:02}{s:02}{millis:03}");
+    format!("{timestamp}_{}", Uuid::new_v4().simple())
 }
 
 /// Format current UTC time as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -788,9 +800,14 @@ mod tests {
     #[test]
     fn test_timestamp_id_format() {
         let id = current_timestamp_id();
-        // YYYYMMDDHHmmssNNN (14 date/time digits + 3 milliseconds digits = 17)
-        assert_eq!(id.len(), 17);
-        assert!(id.chars().all(|c| c.is_ascii_digit()));
+        // Format: YYYYMMDDHHmmssNNN_<32-hex-uuid>
+        let (timestamp, suffix) = id
+            .split_once('_')
+            .unwrap_or_else(|| panic!("session ID should contain an underscore: {id}"));
+        assert_eq!(timestamp.len(), 17);
+        assert!(timestamp.chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(suffix.len(), 32);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -1185,6 +1202,71 @@ mod tests {
 
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(loaded.repo.as_deref(), Some("owner/repo"));
+    }
+    #[test]
+    fn test_session_state_cleanup_after_pr_override_roundtrip() {
+        // Given: a session with a GUI/CLI cleanup override set
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260622000000".to_string();
+        let mut state = SessionState::new(
+            id.clone(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        state.cleanup_after_pr_override = Some(true);
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reloaded from disk
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the override is preserved
+        assert_eq!(loaded.cleanup_after_pr_override, Some(true));
+    }
+
+    #[test]
+    fn test_session_state_cleanup_after_pr_override_defaults_to_none() {
+        // Given: a newly created session state
+        let state = SessionState::new(
+            "20260622000001".to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+
+        // Then: no cleanup override is set by default
+        assert_eq!(state.cleanup_after_pr_override, None);
+    }
+
+    #[test]
+    fn test_session_state_backward_compat_missing_cleanup_override() {
+        // Given: an old-format state.json without cleanup_after_pr_override
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260306170001".to_string();
+        let session_dir = manager.sessions_dir().join(&id);
+        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::json!({
+            "id": id,
+            "base_dir": "/repo",
+            "phase": "Planned",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-03-06T17:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        std::fs::write(session_dir.join("state.json"), json.to_string())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loaded
+        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the override defaults to None so old sessions remain non-destructive
+        assert_eq!(loaded.cleanup_after_pr_override, None);
     }
 
     #[test]

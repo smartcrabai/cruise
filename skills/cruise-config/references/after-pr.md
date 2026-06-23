@@ -37,3 +37,7 @@ Regular variables (`{input}`, `{plan}`, etc.) remain usable.
 - **`if.fail` is forbidden**: rejected for the same reason.
 
 Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed`) work as usual.
+
+## Related: `cleanup_after_pr`
+
+To automatically delete the local git worktree and branch after the PR is created, set `cleanup_after_pr: true` at the top level. This runs after all `after-pr` steps complete. See [top-level.md](top-level.md#cleanup_after_pr) for details.

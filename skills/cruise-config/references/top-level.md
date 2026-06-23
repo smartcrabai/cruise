@@ -41,6 +41,8 @@ steps:                    # Required: workflow steps (declaration order = execut
 after-pr:                 # Optional: steps that run after PR creation (see references/after-pr.md)
   step_name:
     # ...
+
+cleanup_after_pr: false   # Optional: delete local worktree and branch after PR creation (default: false)
 ```
 
 `steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). `steps` is held as an `IndexMap`, so declaration order is the execution order.
@@ -105,6 +107,21 @@ During `cruise run`, the config file's mtime is checked between steps and the fi
 
 - Does not apply to sessions started from the built-in default.
 - The current step must still exist in the new config.
+
+## `cleanup_after_pr`
+
+When set to `true`, cruise deletes the local git worktree and its branch after the PR has been created successfully.
+
+```yaml
+cleanup_after_pr: true   # remove worktree + branch once the PR is open
+```
+
+- Has no effect in **current-branch mode** (no worktree exists to remove).
+- Has no effect for **`--repo` sessions** (the clone is always removed after PR creation regardless of this flag).
+- Errors during cleanup are downgraded to warnings; the session is still marked `Completed`.
+- Override per-run with `--cleanup-after-pr` / `--no-cleanup-after-pr` CLI flags (takes precedence over config and session-level setting).
+
+See [after-pr.md](after-pr.md) for steps that run after PR creation.
 
 ## Rate-limit retry
 

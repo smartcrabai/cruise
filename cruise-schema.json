@@ -69,6 +69,10 @@
         "$ref": "#/$defs/StepConfig"
       },
       "description": "Steps to run after a PR is created"
+    },
+    "cleanup_after_pr": {
+      "type": "boolean",
+      "description": "When true, the local git worktree and branch are deleted after the PR is created. Has no effect in current-branch mode or for --repo sessions. Default: false."
     }
   },
   "$defs": {

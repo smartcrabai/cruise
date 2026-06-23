@@ -33,6 +33,8 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         max_retries: args.max_retries,
         rate_limit_retries: args.rate_limit_retries,
         dry_run: false,
+        cleanup_after_pr: false,
+        no_cleanup_after_pr: false,
     };
 
     crate::run_cmd::run(run_args).await
