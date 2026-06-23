@@ -371,17 +371,16 @@ pub(crate) async fn execute_steps_with_dag(
                         None
                     }
                 });
-                match next_id {
-                    Some(id) => current_node_id = id,
-                    None => {
-                        eprintln!(
-                            "  {} DAG has no successor for '{}' -> '{}'; stopping early",
-                            style("!").yellow(),
-                            current_node_id,
-                            next_step
-                        );
-                        break;
-                    }
+                if let Some(id) = next_id {
+                    current_node_id = id
+                } else {
+                    eprintln!(
+                        "  {} DAG has no successor for '{}' -> '{}'; stopping early",
+                        style("!").yellow(),
+                        current_node_id,
+                        next_step
+                    );
+                    break;
                 }
             }
         }
