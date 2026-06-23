@@ -1122,6 +1122,46 @@ mod tests {
         .await
     }
 
+    /// Run the after-pr phase with user-selected skipped steps.
+    /// Mirrors `run_after_pr_steps` but bypasses PR creation so engine skip
+    /// behavior can be tested in isolation.
+    async fn run_after_pr_config_with_skipped(
+        yaml: &str,
+        input: &str,
+        skipped_steps: &[&str],
+    ) -> Result<ExecutionResult> {
+        let _guard = crate::test_support::lock_process();
+        let skipped: Vec<String> = skipped_steps
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let after_compiled = compiled.to_after_pr_compiled();
+        let mut vars = VariableStore::new(input.to_string());
+        let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut tracker = FileTracker::with_root(tracker_root.clone());
+        let first_step = after_compiled
+            .steps
+            .keys()
+            .next()
+            .unwrap_or_else(|| panic!("unexpected None"))
+            .clone();
+        let ctx = ExecutionContext {
+            compiled: &after_compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(tracker_root.as_path()),
+            skipped_steps: &skipped,
+            on_step_log: None,
+        };
+        execute_steps(&ctx, &mut vars, &mut tracker, &first_step).await
+    }
+
     // Run config with a custom `FileTracker` rooted at `tracker_root`.
     // Use this for tests that need to control file-change detection.
     // max_retries=10 (loop guard), rate_limit_retries=0 (no live API calls in tests).
@@ -2653,6 +2693,34 @@ steps:
             result.is_ok(),
             "workflow should succeed when failing step is user-skipped: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_after_pr_step_is_not_executed() {
+        // Given: a workflow with an after-pr step that would fail if executed
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: "echo build"
+after-pr:
+  notify:
+    command: "exit 1"
+"#;
+        // When: the after-pr failing step is in user-selected skipped_steps
+        let result = run_after_pr_config_with_skipped(yaml, "", &["notify"]).await;
+
+        // Then: the after-pr phase succeeds because the failing step was skipped
+        assert!(
+            result.is_ok(),
+            "after-pr phase should succeed when step is user-skipped: {result:?}"
+        );
+        let result = result.unwrap_or_else(|e| panic!("after-pr failed: {e:?}"));
+        assert_eq!(
+            result.skipped, 1,
+            "one after-pr step should be counted as skipped"
+        );
+        assert_eq!(result.run, 0, "no after-pr steps should run");
     }
 
     #[tokio::test]

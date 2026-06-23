@@ -36,6 +36,7 @@ vi.mock("../lib/commands", () => ({
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
+    afterPrSteps: [],
     defaultSkippedSteps: [],
   }),
   listDirectory: vi.fn(),
@@ -90,6 +91,7 @@ function setupBaseMocks() {
   });
   vi.mocked(commands.getNewSessionConfigDefaults).mockResolvedValue({
     steps: [],
+    afterPrSteps: [],
     defaultSkippedSteps: [],
   });
   vi.mocked(commands.listDirectory).mockResolvedValue([]);

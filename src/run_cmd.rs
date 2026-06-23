@@ -436,6 +436,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                             session,
                             args.rate_limit_retries,
                             args.max_retries,
+                            &skipped_steps,
                             Some(&cancel_token),
                         ) => result,
                         _ = tokio::signal::ctrl_c() => {

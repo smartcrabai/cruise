@@ -118,6 +118,7 @@ pub async fn handle_worktree_pr(
     session: &mut SessionState,
     rate_limit_retries: usize,
     max_retries: usize,
+    skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let (pr_title, pr_body) =
@@ -140,6 +141,7 @@ pub async fn handle_worktree_pr(
                 max_retries,
                 rate_limit_retries,
                 ctx.path.as_path(),
+                skipped_steps,
                 cancel_token,
             )
             .await?;
@@ -292,6 +294,7 @@ async fn generate_pr_via_sdk_tool(
 
 /// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
 /// all other errors are logged as warnings and treated as non-fatal.
+#[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -299,6 +302,7 @@ async fn run_after_pr_steps(
     max_retries: usize,
     rate_limit_retries: usize,
     working_dir: &std::path::Path,
+    skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let Some(first_step) = compiled.after_pr.keys().next() else {
@@ -314,7 +318,7 @@ async fn run_after_pr_steps(
         option_handler: &CliOptionHandler,
         config_reloader: None,
         working_dir: Some(working_dir),
-        skipped_steps: &[],
+        skipped_steps,
         on_step_log: None,
     };
     match execute_steps(&ctx, vars, tracker, first_step).await {

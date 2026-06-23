@@ -153,6 +153,7 @@ export interface NewSessionHistorySummary {
 
 export interface NewSessionConfigDefaults {
   steps: SkippableStepDto[];
+  afterPrSteps: SkippableStepDto[];
   defaultSkippedSteps: string[];
 }
 

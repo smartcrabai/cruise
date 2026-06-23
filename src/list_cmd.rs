@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::Write;
 
 use console::style;
@@ -8,6 +9,7 @@ use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::workflow::{list_skippable_after_pr_steps, list_skippable_steps};
 
 /// CLI-only DTO for JSON output. Stable machine-readable form of `SessionState`.
 /// `phase` is always a plain string; `phase_error` carries the failure message for Failed sessions.
@@ -385,35 +387,75 @@ fn plan_available_for_session(session: &SessionState, manager: &SessionManager) 
     crate::metadata::plan_markdown_available(&plan_path)
 }
 
+/// Displayable choice for a skip-step multi-select.
+struct StepChoice {
+    label: String,
+    expanded_id: String,
+}
+
+impl fmt::Display for StepChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Edit session settings interactively.
+#[expect(clippy::too_many_lines, reason = "interactive UI with many branches")]
 async fn edit_session_settings_interactive(
     manager: &SessionManager,
     session: &mut crate::session::SessionState,
     rate_limit_retries: usize,
 ) -> crate::error::Result<()> {
-    use crate::session::SessionPhase;
     use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 
     // Load config to enumerate available step names for the multi-select.
-    let step_names: Vec<String> = match manager.load_config(session) {
-        Ok(config) => config.steps.keys().cloned().collect(),
-        Err(_) => vec![],
+    // Main-phase steps and after-pr steps are kept separate: after-pr IDs are
+    // labelled so the user can tell them apart, and current_step is restricted
+    // to main-phase expanded IDs (after-pr steps are not valid resume points).
+    let (main_nodes, after_pr_nodes) = match manager.load_config(session) {
+        Ok(config) => {
+            let main = list_skippable_steps(&config).unwrap_or_default();
+            let after = list_skippable_after_pr_steps(&config).unwrap_or_default();
+            (main, after)
+        }
+        Err(_) => (Vec::new(), Vec::new()),
     };
+    let main_ids: Vec<String> = main_nodes
+        .iter()
+        .flat_map(|n| n.expanded_step_ids.clone())
+        .collect();
+    let after_ids: Vec<String> = after_pr_nodes
+        .iter()
+        .flat_map(|n| n.expanded_step_ids.clone())
+        .collect();
 
-    let skipped_steps = if step_names.is_empty() {
+    let choices: Vec<StepChoice> = main_ids
+        .iter()
+        .map(|id| StepChoice {
+            label: id.clone(),
+            expanded_id: id.clone(),
+        })
+        .chain(after_ids.iter().map(|id| StepChoice {
+            label: format!("[after-pr] {id}"),
+            expanded_id: id.clone(),
+        }))
+        .collect();
+
+    let skipped_steps = if choices.is_empty() {
         eprintln!("(no steps available from config — skipped_steps unchanged)");
         session.skipped_steps.clone()
     } else {
-        let defaults: Vec<usize> = step_names
+        let defaults: Vec<usize> = choices
             .iter()
             .enumerate()
-            .filter(|(_, name)| session.skipped_steps.contains(*name))
+            .filter(|(_, choice)| session.skipped_steps.contains(&choice.expanded_id))
             .map(|(i, _)| i)
             .collect();
-        match inquire::MultiSelect::new("Steps to skip:", step_names.clone())
+        match inquire::MultiSelect::new("Steps to skip:", choices)
             .with_default(&defaults)
             .prompt()
         {
-            Ok(selected) => selected,
+            Ok(selected) => selected.into_iter().map(|c| c.expanded_id).collect(),
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 return Ok(());
             }
@@ -424,10 +466,11 @@ async fn edit_session_settings_interactive(
     };
 
     // For Failed/Suspended sessions, allow changing current_step interactively.
+    // Only main-phase expanded IDs are valid resume points.
     let current_step_update = if matches!(
         &session.phase,
         SessionPhase::Failed(_) | SessionPhase::Suspended
-    ) && !step_names.is_empty()
+    ) && !main_ids.is_empty()
     {
         let keep = format!(
             "Keep ({})",
@@ -435,7 +478,7 @@ async fn edit_session_settings_interactive(
         );
         let clear = "From beginning (clear)".to_string();
         let mut choices = vec![keep.clone(), clear.clone()];
-        choices.extend(step_names.iter().cloned());
+        choices.extend(main_ids);
         match inquire::Select::new("Resume from step:", choices).prompt() {
             Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
             Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
