@@ -7,6 +7,7 @@ pub mod cancellation;
 pub mod condition;
 pub mod config;
 pub mod configs;
+pub mod dag;
 pub mod engine;
 pub mod error;
 pub mod executor;

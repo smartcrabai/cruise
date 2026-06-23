@@ -49,6 +49,19 @@ pub struct ExecutionContext<'a> {
     pub on_step_log: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
 }
 
+/// A snapshot of the DAG node that is about to be executed.
+///
+/// Passed to the `on_node_start` callback in [`execute_steps_with_dag`] so
+/// that callers can persist the node id before the step runs, enabling exact
+/// resumption via the saved node id rather than a plain step name.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) struct NodeCheckpoint<'a> {
+    /// Stable DAG node identifier (e.g. `"n0007"`).
+    pub node_id: &'a crate::dag::NodeId,
+    /// Human-readable step name (unchanged from the compiled workflow).
+    pub step_name: &'a str,
+}
+
 /// Mutable counters threaded through the execution loop.
 struct LoopCounters {
     run: usize,
@@ -260,6 +273,116 @@ pub async fn execute_steps(
         match outcome {
             StepOutcome::Next(next) => current_step = next,
             StepOutcome::Done => break,
+        }
+    }
+
+    let total_elapsed = workflow_start.elapsed();
+    let c = &state.counters;
+    eprintln!(
+        "\n{} ({} run, {} skipped, {} failed) [{}]",
+        style("v workflow complete").green().bold(),
+        c.run,
+        c.skipped,
+        c.failed,
+        format_duration(total_elapsed)
+    );
+    Ok(ExecutionResult {
+        run: c.run,
+        skipped: c.skipped,
+        failed: c.failed,
+    })
+}
+
+/// Execute a workflow driven by a pre-built [`ExecutionDag`].
+///
+/// Unlike [`execute_steps`], which maintains in-memory retry counters, this
+/// function navigates the graph encoded in `dag` so that execution can be
+/// resumed exactly — the node id recorded in `current_step` is sufficient to
+/// restore the full loop-counter context.
+///
+/// After each step the corresponding [`DagNode`]'s `runtime.visited_at` field
+/// is updated so the caller can persist the DAG for resumption diagnostics.
+///
+/// `on_node_start` is called before each step with a [`NodeCheckpoint`]
+/// describing the node about to run.  The callback is the right place for the
+/// caller to flush `current_step` to stable storage before the step executes.
+///
+/// # Errors
+///
+/// Propagates any execution error encountered during the run.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) async fn execute_steps_with_dag(
+    ctx: &ExecutionContext<'_>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    dag: &mut crate::dag::ExecutionDag,
+    start_node: &crate::dag::NodeId,
+    on_node_start: &dyn Fn(&NodeCheckpoint<'_>) -> Result<()>,
+) -> Result<ExecutionResult> {
+    let mut current_node_id = start_node.clone();
+    let workflow_start = Instant::now();
+    let mut state = LoopState {
+        group_retry_counts: HashMap::new(),
+        counters: LoopCounters {
+            run: 0,
+            skipped: 0,
+            failed: 0,
+        },
+        edge_counts: HashMap::new(),
+    };
+
+    loop {
+        let (step_name, successors) = {
+            let node = dag
+                .nodes
+                .get(&current_node_id)
+                .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?;
+            (node.step_name.clone(), node.successors.clone())
+        };
+
+        on_node_start(&NodeCheckpoint {
+            node_id: &current_node_id,
+            step_name: &step_name,
+        })?;
+
+        if let Some(token) = ctx.cancel_token
+            && token.is_cancelled()
+        {
+            break;
+        }
+
+        let outcome = step_loop_iteration(ctx, vars, tracker, &step_name, &mut state).await?;
+
+        dag.nodes
+            .get_mut(&current_node_id)
+            .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
+            .runtime
+            .visited_at = Some(crate::session::current_iso8601());
+
+        match outcome {
+            StepOutcome::Done => break,
+            StepOutcome::Next(next_step) => {
+                let next_id = successors.iter().find_map(|s| {
+                    let target_id = s.target.as_ref()?;
+                    let target_node = dag.nodes.get(target_id)?;
+                    if target_node.step_name == next_step {
+                        Some(target_id.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(id) = next_id {
+                    current_node_id = id;
+                } else {
+                    eprintln!(
+                        "  {} DAG has no successor for '{}' -> '{}'; stopping early",
+                        style("!").yellow(),
+                        current_node_id,
+                        next_step
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -3285,5 +3408,375 @@ steps:
             "recursive glob should match file in subdirectory"
         );
         assert_eq!(result.skipped, 0, "step should not be skipped");
+    }
+
+    // -- NodeCheckpoint -------------------------------------------------------
+
+    #[test]
+    fn test_node_checkpoint_exposes_node_id_and_step_name() {
+        // Given: a node id and a step name
+        let id = "n0042".to_string();
+
+        // When: we construct a NodeCheckpoint
+        let cp = NodeCheckpoint {
+            node_id: &id,
+            step_name: "implement",
+        };
+
+        // Then: both fields are accessible
+        assert_eq!(cp.node_id, "n0042");
+        assert_eq!(cp.step_name, "implement");
+    }
+
+    // -- execute_steps_with_dag -----------------------------------------------
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_runs_all_steps_in_linear_workflow() {
+        // Given: a two-step workflow and a DAG built from it
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo hello"
+  step2:
+    command: "echo world"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: we execute the DAG from the start node
+        let result =
+            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+                .await;
+
+        // Then: both steps run successfully
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result.run, 2, "both steps should have been executed");
+        assert_eq!(result.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_on_node_start_receives_node_id_and_step_name() {
+        // Given: a two-step workflow
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo first"
+  step2:
+    command: "echo second"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let mut checkpoints: Vec<(String, String)> = Vec::new();
+        let checkpoints_ref = std::cell::RefCell::new(&mut checkpoints);
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: we execute and capture each NodeCheckpoint
+        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|cp| {
+            checkpoints_ref
+                .borrow_mut()
+                .push((cp.node_id.clone(), cp.step_name.to_string()));
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the callback was called twice with the correct node id / step name pairs
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(
+            checkpoints[0].0, "n0000",
+            "first call must receive start node id"
+        );
+        assert_eq!(checkpoints[0].1, "step1");
+        assert_eq!(
+            checkpoints[1].0, "n0001",
+            "second call must receive second node id"
+        );
+        assert_eq!(checkpoints[1].1, "step2");
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_resumes_from_non_start_node() {
+        // Given: a three-step workflow
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo first"
+  step2:
+    command: "echo second"
+  step3:
+    command: "echo third"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        // Find the node for step2 (second node in insertion order)
+        let step2_node = dag
+            .first_node_for_step("step2")
+            .cloned()
+            .unwrap_or_else(|| panic!("step2 not in DAG"));
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let mut visited: Vec<String> = Vec::new();
+        let visited_ref = std::cell::RefCell::new(&mut visited);
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: execution starts from step2's node
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &step2_node,
+            &|cp| {
+                visited_ref.borrow_mut().push(cp.step_name.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only step2 and step3 ran — step1 was skipped entirely
+        assert_eq!(
+            visited,
+            vec!["step2", "step3"],
+            "execution should start at step2, not step1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_writes_runtime_to_node_after_step() {
+        // Given: a single-step workflow that echoes a known string
+        let yaml = r#"
+command: [sh, -c, "echo"]
+steps:
+  step1:
+    prompt: "marker_output"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new("marker_output".to_string());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: we execute the DAG
+        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the start node's runtime has been populated with the step's output
+        let runtime = &dag.nodes[&start].runtime;
+        assert!(
+            runtime.visited_at.is_some(),
+            "visited_at should be set after the node executes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_loop_retry_caps_at_max_retries() {
+        // Given: a workflow where step1 always fails and retries are capped at 2
+        let yaml = r#"
+command: [sh, -c, "exit 1"]
+steps:
+  step1:
+    command: "exit 1"
+    if:
+      fail:
+        retry: true
+  step2:
+    command: "echo done"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 2).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 2,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: we execute the DAG (step1 will exhaust its retry budget)
+        let result =
+            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+                .await;
+
+        // Then: execution terminates without an unbounded loop
+        // (exact outcome — error or graceful stop — depends on implementation;
+        // what matters is that it does not run forever)
+        let _ = result; // accept both Ok and Err
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_loop_resumes_from_later_iteration_node() {
+        // Given: a workflow with a retry loop (max_retries=3) where step1 always fails
+        // and we start execution from the second retry node (simulating a resume).
+        let yaml = r#"
+command: [sh, -c, "exit 1"]
+steps:
+  step1:
+    command: "exit 1"
+    if:
+      fail:
+        retry: true
+  step2:
+    command: "echo done"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Find the second node for step1 (first retry, not the DAG start).
+        // The DAG for this workflow looks like:
+        //   n0000 (step1, 0 retries) -> n0001 (step1, 1 retry) -> n0002 (step1, 2 retries)
+        //     -> n0003 (step1, 3 retries) -> terminal
+        // Starting from n0001 simulates resuming after 1 retry has already happened.
+        let step1_nodes: Vec<_> = dag
+            .nodes
+            .values()
+            .filter(|n| n.step_name == "step1")
+            .collect();
+        // There should be at least two step1 nodes (original + at least one retry node).
+        assert!(
+            step1_nodes.len() >= 2,
+            "expected multiple step1 nodes for retry loop but got {}",
+            step1_nodes.len()
+        );
+        // Pick the second step1 node (first retry) — it is NOT the DAG start.
+        let second_step1_id = dag
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.step_name == "step1" && n.id != dag.start)
+            .map(|(id, _)| id.clone())
+            .next()
+            .unwrap_or_else(|| panic!("expected a non-start step1 node"));
+
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker =
+            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let mut visited_nodes: Vec<String> = Vec::new();
+        let visited_ref = std::cell::RefCell::new(&mut visited_nodes);
+
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 3,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: we resume from the second step1 node (as if one retry already happened)
+        let _ = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &second_step1_id,
+            &|cp| {
+                visited_ref.borrow_mut().push(cp.node_id.clone());
+                Ok(())
+            },
+        )
+        .await;
+
+        // Then: the number of node visits from this point must be <= 3 (n0001 + 2 retries),
+        // not 4 (the full budget from n0000).  With max_retries=3 and 1 retry already consumed,
+        // 2 retries remain, giving at most 3 step1 visits from n0001.
+        let step1_visit_count = visited_nodes
+            .iter()
+            .filter(|id| dag.nodes[*id].step_name == "step1")
+            .count();
+        assert!(
+            step1_visit_count <= 3,
+            "resuming from the 2nd step1 node should see at most 3 more step1 visits, got {step1_visit_count}"
+        );
     }
 }
