@@ -5,6 +5,19 @@ use std::collections::HashMap;
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
 pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 
+/// Nested language configuration (new style).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct LanguagesConfig {
+    /// Language for built-in PR title/body generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
+
+    /// Language for built-in planning prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
@@ -45,13 +58,17 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub interactive_planning: bool,
 
-    /// Language to use for built-in PR title/body generation.
-    #[serde(default = "default_pr_language")]
-    pub pr_language: String,
+    /// Deprecated: use `languages.pr` instead. Kept for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_language: Option<String>,
 
-    /// Language to use for built-in planning prompts.
-    #[serde(default = "default_plan_language")]
-    pub plan_language: String,
+    /// Deprecated: use `languages.plan` instead. Kept for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_language: Option<String>,
+
+    /// New-style nested language configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub languages: Option<LanguagesConfig>,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -231,12 +248,17 @@ pub struct GroupConfig {
     pub steps: IndexMap<String, StepConfig>,
 }
 
-fn default_pr_language() -> String {
-    DEFAULT_PR_LANGUAGE.to_string()
+fn default_true() -> bool {
+    true
 }
 
-fn default_plan_language() -> String {
-    DEFAULT_PLAN_LANGUAGE.to_string()
+fn normalize_language(value: Option<&str>, default: &str) -> String {
+    let trimmed = value.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn default_true() -> bool {
@@ -251,6 +273,56 @@ impl WorkflowConfig {
     /// Returns an error if the YAML is invalid or does not match the expected schema.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
+    /// Resolve the effective PR language.
+    ///
+    /// Precedence: `languages.pr` > `pr_language` > default (`English`).
+    /// Blank/whitespace values fall back to the default.
+    #[must_use]
+    pub fn effective_pr_language(&self) -> String {
+        let from_new = self.languages.as_ref().and_then(|l| l.pr.as_deref());
+        let from_old = self.pr_language.as_deref();
+        normalize_language(from_new.or(from_old), DEFAULT_PR_LANGUAGE)
+    }
+
+    /// Resolve the effective planning language.
+    ///
+    /// Precedence: `languages.plan` > `plan_language` > default (`English`).
+    /// Blank/whitespace values fall back to the default.
+    #[must_use]
+    pub fn effective_plan_language(&self) -> String {
+        let from_new = self.languages.as_ref().and_then(|l| l.plan.as_deref());
+        let from_old = self.plan_language.as_deref();
+        normalize_language(from_new.or(from_old), DEFAULT_PLAN_LANGUAGE)
+    }
+
+    /// Return warnings for deprecated language fields.
+    ///
+    /// Warnings are returned as plain messages; callers should prefix with
+    /// `warning: ` and emit to stderr (e.g. `eprintln!`). This keeps the method
+    /// testable without side effects.
+    #[must_use]
+    pub fn deprecated_language_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let new_pr = self.languages.as_ref().and_then(|l| l.pr.as_deref());
+        let new_plan = self.languages.as_ref().and_then(|l| l.plan.as_deref());
+
+        if self.pr_language.is_some() {
+            warnings.push("'pr_language' is deprecated; use 'languages.pr' instead".to_string());
+        }
+        if self.plan_language.is_some() {
+            warnings.push("'plan_language' is deprecated; use 'languages.plan' instead".to_string());
+        }
+        if self.pr_language.is_some() && new_pr.is_some() {
+            warnings.push("'pr_language' is ignored because 'languages.pr' is set".to_string());
+        }
+        if self.plan_language.is_some() && new_plan.is_some() {
+            warnings.push("'plan_language' is ignored because 'languages.plan' is set".to_string());
+        }
+
+        warnings
+    }
+
+
     }
 
     /// Build the built-in default workflow config in code (no YAML file required).
@@ -284,9 +356,9 @@ impl WorkflowConfig {
             sdk: None,
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
-            interactive_planning: true,
-            pr_language: default_pr_language(),
-            plan_language: default_plan_language(),
+            pr_language: None,
+            plan_language: None,
+            languages: None,
             env: HashMap::new(),
             groups: HashMap::new(),
             steps,
@@ -644,9 +716,10 @@ steps:
         assert_eq!(config.command, vec!["claude", "-p"]);
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
-        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
-        assert_eq!(config.plan_language, DEFAULT_PLAN_LANGUAGE);
-    }
+        assert_eq!(config.pr_language, None);
+        assert_eq!(config.plan_language, None);
+        assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
+        assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
 
     #[test]
     fn test_plan_model_field() {
@@ -662,7 +735,6 @@ steps:
         assert_eq!(config.model, Some("sonnet".to_string()));
         assert_eq!(config.plan_model, Some("opus".to_string()));
     }
-
     #[test]
     fn test_pr_language_field() {
         let yaml = r"
@@ -673,7 +745,8 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.pr_language, "Japanese");
+        assert_eq!(config.pr_language, Some("Japanese".to_string()));
+        assert_eq!(config.effective_pr_language(), "Japanese");
     }
 
     #[test]
@@ -685,7 +758,8 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.pr_language, DEFAULT_PR_LANGUAGE);
+        assert_eq!(config.pr_language, None);
+        assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
     }
 
     #[test]
@@ -703,7 +777,8 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the configured planning language is preserved
-        assert_eq!(config.plan_language, "Japanese");
+        assert_eq!(config.plan_language, Some("Japanese".to_string()));
+        assert_eq!(config.effective_plan_language(), "Japanese");
     }
 
     #[test]
@@ -720,8 +795,126 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the built-in English default is used
-        assert_eq!(config.plan_language, DEFAULT_PLAN_LANGUAGE);
+        assert_eq!(config.plan_language, None);
+        assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
     }
+    #[test]
+    fn test_languages_pr_field() {
+        let yaml = r"
+command: [claude, -p]
+languages:
+  pr: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.languages.as_ref().unwrap().pr.as_deref(), Some("Japanese"));
+        assert_eq!(config.effective_pr_language(), "Japanese");
+        assert!(config.deprecated_language_warnings().is_empty());
+    }
+
+    #[test]
+    fn test_languages_plan_field() {
+        let yaml = r"
+command: [claude, -p]
+languages:
+  plan: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.languages.as_ref().unwrap().plan.as_deref(), Some("Japanese"));
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        assert!(config.deprecated_language_warnings().is_empty());
+    }
+
+    #[test]
+    fn test_languages_pr_takes_precedence_over_pr_language() {
+        let yaml = r"
+command: [claude, -p]
+pr_language: English
+languages:
+  pr: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.effective_pr_language(), "Japanese");
+        let warnings = config.deprecated_language_warnings();
+        assert!(warnings.iter().any(|w| w.contains("deprecated") && w.contains("pr_language")));
+        assert!(warnings.iter().any(|w| w.contains("ignored") && w.contains("pr_language")));
+    }
+
+    #[test]
+    fn test_languages_plan_takes_precedence_over_plan_language() {
+        let yaml = r"
+command: [claude, -p]
+plan_language: English
+languages:
+  plan: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        let warnings = config.deprecated_language_warnings();
+        assert!(warnings.iter().any(|w| w.contains("deprecated") && w.contains("plan_language")));
+        assert!(warnings.iter().any(|w| w.contains("ignored") && w.contains("plan_language")));
+    }
+
+    #[test]
+    fn test_warn_deprecated_emits_for_legacy_fields() {
+        let yaml = r"
+command: [claude, -p]
+pr_language: Japanese
+plan_language: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let warnings = config.deprecated_language_warnings();
+        assert!(warnings.iter().any(|w| w.contains("pr_language") && w.contains("deprecated")));
+        assert!(warnings.iter().any(|w| w.contains("plan_language") && w.contains("deprecated")));
+        assert!(!warnings.iter().any(|w| w.contains("ignored")));
+    }
+
+    #[test]
+    fn test_warn_deprecated_silent_when_new_keys_only() {
+        let yaml = r"
+command: [claude, -p]
+languages:
+  pr: Japanese
+  plan: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(config.deprecated_language_warnings().is_empty());
+    }
+
+    #[test]
+    fn test_effective_language_trims_and_defaults_blank() {
+        let yaml = r#"
+command: [claude, -p]
+languages:
+  pr: "   "
+  plan: "   "
+steps:
+  s1:
+    command: echo hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
+        assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
+    }
+
+    #[test]
 
     #[test]
     fn test_step_order_preserved() {
