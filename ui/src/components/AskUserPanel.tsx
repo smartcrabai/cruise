@@ -32,13 +32,13 @@ export function AskUserPanel({ sessionId, question, onAnswered }: AskUserPanelPr
   return (
     <section
       aria-labelledby={titleId}
-      className="rounded border border-blue-800/60 bg-blue-950/20 p-4 space-y-3"
+      className="rounded border border-blue-300/60 dark:border-blue-800/60 bg-blue-50/50 dark:bg-blue-950/20 p-4 space-y-3"
     >
       <div>
-        <h3 id={titleId} className="text-sm font-semibold text-blue-200">
+        <h3 id={titleId} className="text-sm font-semibold text-blue-800 dark:text-blue-200">
           The planning agent has a question
         </h3>
-        <p id={questionId} className="mt-1 text-sm text-gray-300 whitespace-pre-wrap">
+        <p id={questionId} className="mt-1 text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
           {question}
         </p>
       </div>
@@ -51,11 +51,11 @@ export function AskUserPanel({ sessionId, question, onAnswered }: AskUserPanelPr
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
         }}
-        className="w-full h-28 border border-gray-700 bg-gray-900 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
+        className="w-full h-28 border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 outline-none focus:border-blue-500 resize-none"
         placeholder="Your answer... (Cmd/Ctrl+Enter to send)"
         disabled={submitting}
       />
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
       <div className="flex justify-end">
         <button
           type="button"
