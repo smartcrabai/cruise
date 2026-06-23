@@ -17,7 +17,6 @@ pub struct LanguagesConfig {
     pub plan: Option<String>,
 }
 
-
 /// Top-level workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
@@ -253,7 +252,7 @@ fn default_true() -> bool {
 }
 
 fn normalize_language(value: Option<&str>, default: &str) -> String {
-    let trimmed = value.map(str::trim).unwrap_or("");
+    let trimmed = value.map_or("", str::trim);
     if trimmed.is_empty() {
         default.to_string()
     } else {
@@ -308,7 +307,8 @@ impl WorkflowConfig {
             warnings.push("'pr_language' is deprecated; use 'languages.pr' instead".to_string());
         }
         if self.plan_language.is_some() {
-            warnings.push("'plan_language' is deprecated; use 'languages.plan' instead".to_string());
+            warnings
+                .push("'plan_language' is deprecated; use 'languages.plan' instead".to_string());
         }
         if self.pr_language.is_some() && new_pr.is_some() {
             warnings.push("'pr_language' is ignored because 'languages.pr' is set".to_string());
@@ -806,7 +806,10 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.languages.as_ref().unwrap().pr.as_deref(), Some("Japanese"));
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
+            Some("Japanese")
+        );
         assert_eq!(config.effective_pr_language(), "Japanese");
         assert!(config.deprecated_language_warnings().is_empty());
     }
@@ -822,7 +825,10 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.languages.as_ref().unwrap().plan.as_deref(), Some("Japanese"));
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.plan.as_deref()),
+            Some("Japanese")
+        );
         assert_eq!(config.effective_plan_language(), "Japanese");
         assert!(config.deprecated_language_warnings().is_empty());
     }
@@ -841,8 +847,16 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.effective_pr_language(), "Japanese");
         let warnings = config.deprecated_language_warnings();
-        assert!(warnings.iter().any(|w| w.contains("deprecated") && w.contains("pr_language")));
-        assert!(warnings.iter().any(|w| w.contains("ignored") && w.contains("pr_language")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("deprecated") && w.contains("pr_language"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("ignored") && w.contains("pr_language"))
+        );
     }
 
     #[test]
@@ -859,8 +873,16 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.effective_plan_language(), "Japanese");
         let warnings = config.deprecated_language_warnings();
-        assert!(warnings.iter().any(|w| w.contains("deprecated") && w.contains("plan_language")));
-        assert!(warnings.iter().any(|w| w.contains("ignored") && w.contains("plan_language")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("deprecated") && w.contains("plan_language"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("ignored") && w.contains("plan_language"))
+        );
     }
 
     #[test]
@@ -875,8 +897,16 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         let warnings = config.deprecated_language_warnings();
-        assert!(warnings.iter().any(|w| w.contains("pr_language") && w.contains("deprecated")));
-        assert!(warnings.iter().any(|w| w.contains("plan_language") && w.contains("deprecated")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("pr_language") && w.contains("deprecated"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("plan_language") && w.contains("deprecated"))
+        );
         assert!(!warnings.iter().any(|w| w.contains("ignored")));
     }
 
