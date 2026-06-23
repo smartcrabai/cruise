@@ -372,7 +372,7 @@ pub(crate) async fn execute_steps_with_dag(
                     }
                 });
                 if let Some(id) = next_id {
-                    current_node_id = id
+                    current_node_id = id;
                 } else {
                     eprintln!(
                         "  {} DAG has no successor for '{}' -> '{}'; stopping early",
