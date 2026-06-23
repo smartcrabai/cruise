@@ -30,7 +30,11 @@ pub struct GitHubWorkflowRef {
 pub fn resolve_workflow_calls_from_path(path: impl Into<PathBuf>) -> Result<WorkflowConfig> {
     let path = path.into();
     let mut stack = CallStack::default();
-    load_local_workflow(&path, &mut stack)
+    let config = load_local_workflow(&path, &mut stack)?;
+    for warning in config.deprecated_language_warnings() {
+        eprintln!("warning: {warning}");
+    }
+    Ok(config)
 }
 
 /// Resolve `workflow_call` steps in an already parsed config using the supplied
@@ -563,8 +567,8 @@ steps:
         assert_eq!(config.sdk, None);
         assert_eq!(config.model.as_deref(), Some("parent-model"));
         assert_eq!(config.plan_model.as_deref(), Some("parent-plan-model"));
-        assert_eq!(config.pr_language, "English");
-        assert_eq!(config.plan_language, "English");
+        assert_eq!(config.pr_language.as_deref(), Some("English"));
+        assert_eq!(config.plan_language.as_deref(), Some("English"));
         assert_eq!(
             config.env.get("PARENT_ONLY").map(String::as_str),
             Some("kept")
