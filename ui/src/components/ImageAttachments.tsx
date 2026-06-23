@@ -113,18 +113,18 @@ export function ImageAttachments({ value, onChange, disabled }: ImageAttachments
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-xs text-gray-500 uppercase tracking-wide">Images</span>
+        <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Images</span>
         <button
           type="button"
           onClick={() => void handleBrowse()}
           disabled={disabled}
-          className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-500 dark:hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Browse…
         </button>
       </div>
       {value.length === 0 ? (
-        <div className="text-xs text-gray-500 border border-dashed border-gray-700 rounded px-3 py-3 text-center">
+        <div className="text-xs text-gray-500 dark:text-gray-400 border border-dashed border-gray-300 dark:border-gray-700 rounded px-3 py-3 text-center">
           Drop image files here, or click Browse…
         </div>
       ) : (
@@ -132,7 +132,7 @@ export function ImageAttachments({ value, onChange, disabled }: ImageAttachments
           {value.map((path) => (
             <li
               key={path}
-              className="relative group border border-gray-700 rounded overflow-hidden bg-gray-900"
+              className="relative group border border-gray-300 dark:border-gray-700 rounded overflow-hidden bg-gray-50 dark:bg-gray-900"
               title={path}
             >
               <img

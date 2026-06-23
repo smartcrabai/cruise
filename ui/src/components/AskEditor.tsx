@@ -41,10 +41,10 @@ export function AskEditor({
         onChange={(e) => onQuestionChange(e.target.value)}
         disabled={isSubmitting}
         onKeyDown={handleKeyDown}
-        className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 resize-none"
+        className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 resize-none"
         rows={4}
       />
-      {error && <p className="text-sm text-red-400 mt-1">{error}</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400 mt-1">{error}</p>}
       <div className="flex gap-2 mt-2">
         <button
           type="button"
@@ -58,7 +58,7 @@ export function AskEditor({
           type="button"
           onClick={onCancel}
           disabled={isSubmitting}
-          className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-50"
+          className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm disabled:opacity-50"
         >
           Cancel
         </button>
