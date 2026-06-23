@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Channel } from "@tauri-apps/api/core";
 import type { ConfigEntry, PlanEvent, SkippableStepDto } from "../types";
 import { getNewSessionConfigDefaults, listConfigs, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";
-import { ASK_USER_EVENT } from "../lib/askUser";
 import { collectExpandedStepIds } from "../lib/stepUtils";
 import { Spinner } from "./Spinner";
 
@@ -19,6 +18,7 @@ interface SessionConfigEditorProps {
   onPlanRegenerated: (content: string) => void;
   onRegeneratingChange?: (isRegenerating: boolean) => void;
   onError: (error: string) => void;
+  onAskUserRequired?: () => void;
   disabled?: boolean;
 }
 
@@ -33,6 +33,7 @@ export function SessionConfigEditor({
   onPlanRegenerated,
   onRegeneratingChange,
   onError,
+  onAskUserRequired,
   disabled = false,
 }: SessionConfigEditorProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
@@ -220,11 +221,11 @@ export function SessionConfigEditor({
       channel.onmessage = (event) => {
         if (event.event === "planGenerated") {
           onPlanRegenerated(event.data.content);
-        } else if (event.event === "askUserRequired") {
-          window.dispatchEvent(new CustomEvent(ASK_USER_EVENT, { detail: event.data }));
         } else if (event.event === "planFailed") {
           setError(event.data.error);
           onError(event.data.error);
+        } else if (event.event === "askUserRequired") {
+          onAskUserRequired?.();
         }
       };
       await regenerateSessionPlan(sessionId, channel);
