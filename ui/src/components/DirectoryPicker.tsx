@@ -209,13 +209,13 @@ export function DirectoryPicker({
           onKeyDown={handleKeyDown}
           disabled={disabled}
           placeholder={placeholder}
-          className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 outline-none disabled:opacity-50"
+          className="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none disabled:opacity-50"
         />
         <button
           type="button"
           onClick={() => void handleBrowse()}
           disabled={disabled}
-          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-300 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+          className="px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
         >
           Browse
         </button>
@@ -225,7 +225,7 @@ export function DirectoryPicker({
         <ul
           id={listboxId}
           role="listbox"
-          className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-auto"
+          className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded shadow-lg max-h-56 overflow-auto"
         >
           {entries.map((entry, i) => (
             <li
@@ -238,8 +238,8 @@ export function DirectoryPicker({
                 selectEntry(entry);
               }}
               onMouseEnter={() => setHighlighted(i)}
-              className={`px-3 py-1.5 text-sm text-gray-200 cursor-pointer ${
-                i === highlighted ? "bg-gray-700" : "hover:bg-gray-800"
+              className={`px-3 py-1.5 text-sm text-gray-800 dark:text-gray-200 cursor-pointer ${
+                i === highlighted ? "bg-gray-200 dark:bg-gray-700" : "hover:bg-gray-200 dark:hover:bg-gray-800"
               }`}
             >
               {entry.name}/

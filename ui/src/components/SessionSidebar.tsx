@@ -221,15 +221,15 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-3 py-3 border-b border-gray-800 space-y-1.5">
+      <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-800 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-gray-200">Sessions</h2>
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Sessions</h2>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => void handleClean()}
               disabled={cleaning}
-              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded disabled:opacity-50 flex items-center gap-1"
+              className="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-800 rounded disabled:opacity-50 flex items-center gap-1"
               title="Clean completed sessions"
             >
               {cleaning ? (
@@ -254,7 +254,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
               className={`px-2 py-1 text-xs rounded ${
                 runAllActive
                   ? "bg-blue-600 text-white hover:bg-blue-700"
-                  : "text-gray-400 hover:text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+                  : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50"
               }`}
               aria-label={runAllActive ? "View running sessions" : "Run all pending sessions"}
               title={runAllActive ? "View running sessions" : "Run all pending sessions"}
@@ -274,7 +274,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
                 onClick={onSettings}
                 aria-label="Settings"
                 title="Settings"
-                className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded"
+                className="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-800 rounded"
               >
                 {'\u2699'}
               </button>
@@ -282,53 +282,53 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           </div>
         </div>
         {cleanMessage && (
-          <p className="text-xs text-gray-400">{cleanMessage}</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">{cleanMessage}</p>
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {loading && (
-          <p className="p-3 text-xs text-gray-500">Loading...</p>
+          <p className="p-3 text-xs text-gray-500 dark:text-gray-400">Loading...</p>
         )}
         {error && (
-          <p className="p-3 text-xs text-red-400">Error: {error}</p>
+          <p className="p-3 text-xs text-red-600 dark:text-red-400">Error: {error}</p>
         )}
         {!loading && !error && sessions.length === 0 && (
-          <p className="p-3 text-xs text-gray-500">No sessions found.</p>
+          <p className="p-3 text-xs text-gray-500 dark:text-gray-400">No sessions found.</p>
         )}
         {sessions.map((s) => (
           <button
             key={s.id}
             type="button"
             onClick={() => onSelect(s)}
-            className={`w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800 transition-colors ${
-              selectedId === s.id ? "bg-gray-800" : ""
+            className={`w-full text-left px-3 py-2.5 border-b border-gray-200/50 dark:border-gray-800/50 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors ${
+              selectedId === s.id ? "bg-gray-100 dark:bg-gray-800" : ""
             }`}
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
-              <span className="text-xs text-gray-500 font-mono truncate">{s.id}</span>
+              <span className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{s.id}</span>
               <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id) || !!s.fixInProgress} />
             </div>
-            <p className="text-sm text-gray-300 truncate">{s.title || s.input}</p>
+            <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{s.title || s.input}</p>
             {s.title && (
-              <p className="text-xs text-gray-500 truncate">{s.input}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{s.input}</p>
             )}
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-xs text-blue-400/70 font-mono truncate">
+              <span className="text-xs text-blue-600/70 dark:text-blue-400/70 font-mono truncate">
                 {s.baseDir.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? s.baseDir}
               </span>
-              <span className="text-xs text-gray-600">{formatLocalTime(s.updatedAt ?? s.createdAt)}</span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">{formatLocalTime(s.updatedAt ?? s.createdAt)}</span>
             </div>
           </button>
         ))}
       </div>
 
       {/* Sidebar footer: version & update */}
-      <div className="flex-shrink-0 border-t border-gray-800 px-3 py-2">
-        <div className="text-xs text-gray-500">{version ? `v${version}` : "..."}</div>
+      <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-800 px-3 py-2">
+        <div className="text-xs text-gray-500 dark:text-gray-400">{version ? `v${version}` : "..."}</div>
         {showAutoUpdate && (
           <div className="mt-1 space-y-1">
-            <div className="text-xs text-green-400">v{update.version} available</div>
+            <div className="text-xs text-green-600 dark:text-green-400">v{update.version} available</div>
             <button
               type="button"
               onClick={() => void handleInstall()}
@@ -339,18 +339,18 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           </div>
         )}
         {updateGuidance && (
-          <div className="mt-1 text-xs text-yellow-400">{updateGuidance}</div>
+          <div className="mt-1 text-xs text-yellow-700 dark:text-yellow-300">{updateGuidance}</div>
         )}
         {updateState === "downloading" && (
-          <div className="mt-1 text-xs text-gray-400">Downloading...</div>
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Downloading...</div>
         )}
         {updateState === "error" && (
           <div className="mt-1 space-y-1">
-            <div className="text-xs text-red-400">{errorMsg}</div>
+            <div className="text-xs text-red-600 dark:text-red-400">{errorMsg}</div>
             <button
               type="button"
               onClick={handleDismissError}
-              className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+              className="px-2 py-0.5 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-xs hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Dismiss
             </button>
@@ -358,26 +358,26 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
         )}
         <div className="mt-1">
           {manualCheck === "checking" ? (
-            <div className="text-xs text-gray-400">Checking...</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">Checking...</div>
           ) : (
             <button
               type="button"
               onClick={() => void handleCheckUpdates()}
-              className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+              className="px-2 py-0.5 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-xs hover:bg-gray-200 dark:hover:bg-gray-800"
             >
               Check Updates
             </button>
           )}
           {manualCheck === "upToDate" && !update && (
-            <div className="mt-0.5 text-xs text-gray-400">Up to date</div>
+            <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Up to date</div>
           )}
           {typeof manualCheck === "object" && (
             <div className="mt-0.5 space-y-1">
-              <div className="text-xs text-red-400">{manualCheck.error}</div>
+              <div className="text-xs text-red-600 dark:text-red-400">{manualCheck.error}</div>
               <button
                 type="button"
                 onClick={() => setManualCheck("idle")}
-                className="px-2 py-0.5 border border-gray-700 text-gray-400 rounded text-xs hover:bg-gray-800"
+                className="px-2 py-0.5 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-xs hover:bg-gray-200 dark:hover:bg-gray-800"
               >
                 Dismiss
               </button>

@@ -31,12 +31,12 @@ export function WorkflowLogPanel({
       onScroll={onScroll}
     >
       {logContent ? (
-        <pre ref={preRef} className="text-xs text-gray-300 whitespace-pre-wrap break-all">
+        <pre ref={preRef} className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-all">
           {logContent}
           <span ref={logEndRef} />
         </pre>
       ) : (
-        <p className="text-sm text-gray-500">
+        <p className="text-sm text-gray-500 dark:text-gray-400">
           {status === "idle"
             ? "Generate a plan or run the session to see logs here."
             : status === "cancelled"
