@@ -252,6 +252,19 @@ fn remove_session_clone(manager: &SessionManager, session_id: &str) {
     }
 }
 
+fn persist_plan_failure(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    error: String,
+) -> std::result::Result<(), String> {
+    session.plan_error = Some(error);
+    session.pending_ask_question = None;
+    if matches!(session.phase, SessionPhase::AwaitingInput) {
+        session.phase = SessionPhase::Draft;
+    }
+    manager.save(session).map_err(|e| e.to_string())
+}
+
 fn prepare_run_session(
     manager: &SessionManager,
     session: &mut SessionState,
@@ -1050,10 +1063,9 @@ pub async fn create_session(
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    log_plan_failure(&plan_logger, &format!("planning failed: {e}"));
-                    let _ = manager.delete(&session_id);
-                    remove_session_clone(&manager, &session_id);
                     let msg = e.to_string();
+                    log_plan_failure(&plan_logger, &format!("planning failed: {msg}"));
+                    let _ = persist_plan_failure(&manager, &mut session, msg.clone());
                     let _ = channel.send(PlanEvent::PlanFailed {
                         session_id: session_id.clone(),
                         error: msg.clone(),
@@ -1071,8 +1083,6 @@ pub async fn create_session(
                     &plan_logger,
                     &format!("phase transition failed after successful plan: {msg}"),
                 );
-                let _ = manager.delete(&session_id);
-                remove_session_clone(&manager, &session_id);
                 let _ = channel.send(PlanEvent::PlanFailed {
                     session_id: session_id.clone(),
                     error: msg.clone(),
@@ -1088,8 +1098,7 @@ pub async fn create_session(
         }
         Err(msg) => {
             log_plan_failure(&plan_logger, &format!("planning failed: {msg}"));
-            let _ = manager.delete(&session_id);
-            remove_session_clone(&manager, &session_id);
+            let _ = persist_plan_failure(&manager, &mut session, msg.clone());
             let _ = channel.send(PlanEvent::PlanFailed {
                 session_id: session_id.clone(),
                 error: msg.clone(),
@@ -1621,9 +1630,7 @@ async fn regenerate_plan(
                         session_id: session_id.to_string(),
                         error: msg.clone(),
                     });
-                    session.plan_error = Some(msg.clone());
-                    session.pending_ask_question = None;
-                    let _ = manager.save(&session);
+                    let _ = persist_plan_failure(manager, &mut session, msg.clone());
                     return Err(msg);
                 }
             };
@@ -1661,9 +1668,7 @@ async fn regenerate_plan(
                 session_id: session_id.to_string(),
                 error: msg.clone(),
             });
-            session.plan_error = Some(msg.clone());
-            session.pending_ask_question = None;
-            let _ = manager.save(&session);
+            let _ = persist_plan_failure(manager, &mut session, msg.clone());
             Err(msg)
         }
     }
@@ -3017,6 +3022,40 @@ mod tests {
         fs::write(session_dir.join("plan.md"), plan_content).unwrap_or_else(|e| panic!("{e}"));
         write_test_config(&session_dir, shell_command);
         (tmp, manager)
+    }
+
+    #[test]
+    fn test_persist_plan_failure_keeps_session_retryable() {
+        // Given: plan generation is waiting for input on an already-persisted Draft session
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = cruise::session::SessionState::new(
+            "20260625190000".to_string(),
+            tmp.path().join("repo"),
+            "cruise.yaml".to_string(),
+            "test task".to_string(),
+        );
+        session.phase = SessionPhase::AwaitingInput;
+        session.pending_ask_question = Some("Question?".to_string());
+        manager
+            .create(&session)
+            .unwrap_or_else(|e| panic!("create failed: {e:?}"));
+
+        // When: planning fails
+        persist_plan_failure(&manager, &mut session, "model error".to_string())
+            .unwrap_or_else(|e| panic!("persist failed: {e}"));
+
+        // Then: the session directory is still present and can be retried as Draft
+        assert!(
+            manager.sessions_dir().join("20260625190000").exists(),
+            "plan failure must not delete the session"
+        );
+        let saved = manager
+            .load("20260625190000")
+            .unwrap_or_else(|e| panic!("load failed: {e:?}"));
+        assert_eq!(saved.phase, SessionPhase::Draft);
+        assert_eq!(saved.plan_error.as_deref(), Some("model error"));
+        assert!(saved.pending_ask_question.is_none());
     }
 
     #[tokio::test]

@@ -933,7 +933,7 @@ describe("App: Non-blocking session creation", () => {
       control.emitPlanFailed("model error");
     });
 
-    // Then: sidebar is refreshed so the backend-deleted failed session disappears promptly
+    // Then: sidebar is refreshed so the persisted failed Draft session is shown promptly
     await waitFor(() => {
       expect(vi.mocked(commands.listSessions).mock.calls.length).toBeGreaterThan(
         callsBeforePlanFailed
@@ -1753,7 +1753,7 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     await act(async () => { control.emitPlanGenerated(); });
   });
 
-  it("'Planning' badge disappears from sidebar after planFailed (session is deleted by backend)", async () => {
+  it("'Planning' badge clears after planFailed while the Draft session remains retryable", async () => {
     // Given: plan generation fails
     const control = setupTwoPhaseCreateSession("sess-plan-fail-badge");
 
@@ -1772,12 +1772,19 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     await act(async () => { control.emitSessionCreated(); });
     await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
 
-    // When: planFailed fires -- backend deletes the session
-    vi.mocked(commands.listSessions).mockResolvedValue([]);
+    // When: planFailed fires -- backend keeps the session as Draft for retry
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "sess-plan-fail-badge", phase: "Draft", planAvailable: false, fixInProgress: false }),
+    ]);
     await act(async () => { control.emitPlanFailed("model error"); });
 
-    // Then: "Planning" badge (and the session row) disappears from the sidebar
+    // Then: "Planning" clears, but the session row remains as Draft
     await waitFor(() => expect(screen.queryByText("Planning")).not.toBeInTheDocument());
+    expect(screen.getByText("Draft")).toBeInTheDocument();
+
+    // And: selecting the retained Draft session exposes Generate Plan for retry
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+    expect(screen.getByRole("button", { name: "Generate Plan" })).toBeInTheDocument();
   });
 });
 
