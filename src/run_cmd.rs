@@ -1119,11 +1119,29 @@ steps:
         process.set_env(TEST_STATE_CONFLICT_LOG_ENV, log_path);
     }
 
+    fn node_id_for_step(manager: &SessionManager, session_id: &str, step: &str) -> String {
+        let config_path = manager.sessions_dir().join(session_id).join("config.yaml");
+        let yaml = fs::read_to_string(&config_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflow_config =
+            crate::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled =
+            crate::workflow::compile(workflow_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        dag.first_node_for_step(step)
+            .unwrap_or_else(|| panic!("step {step} not found in DAG"))
+            .clone()
+    }
+
     async fn wait_for_session_step(manager: &SessionManager, session_id: &str, step: &str) {
-        for _ in 0..200 {
+        // The DAG execution path stores the node id in current_step rather than the
+        // step name, so resolve the expected node id from the session config before
+        // polling.
+        let expected_node_id = node_id_for_step(manager, session_id, step);
+
+        for _ in 0..800 {
             if let Ok(state) = manager.load(session_id)
                 && matches!(state.phase, SessionPhase::Running)
-                && state.current_step.as_deref() == Some(step)
+                && state.current_step.as_deref() == Some(expected_node_id.as_str())
             {
                 return;
             }
@@ -2065,7 +2083,10 @@ steps:
         );
         let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Completed));
-        assert_eq!(loaded.current_step.as_deref(), Some("second"));
+        assert_eq!(
+            loaded.current_step.as_deref(),
+            Some(node_id_for_step(&manager, session_id, "second").as_str())
+        );
         assert!(repo.join("second.txt").exists());
         let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
             panic!("conflict resolution should be logged for overwrite tests: {e:?}")
