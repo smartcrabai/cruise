@@ -1,48 +1,45 @@
-# Incomplete Handoff: languages.pr / languages.plan 設定対応
+# Incomplete Handoff: DAG 駆動実行への完全移行
 
 ## Status
-コア実装とテスト、JSON Schema 更新は完了。残りはドキュメント更新と最終検証（clippy / GUI チェック）。
+`src/engine.rs` の `execute_steps_with_dag` 整理を開始。残りは call site 更新、run_cmd / worktree_pr / session 統合、テスト追加・修正、最終検証。
 
 ## Done
-- `src/config.rs`
-  - `LanguagesConfig` struct (`pr`, `plan`) を追加
-  - `WorkflowConfig.pr_language` / `plan_language` を `Option<String>` に変更
-  - `WorkflowConfig.languages: Option<LanguagesConfig>` を追加
-  - `effective_pr_language()` / `effective_plan_language()` を追加（trim + 空文字 fallback）
-  - `deprecated_language_warnings()` を追加（Vec<String> 返却）
-  - `default_builtin()` の言語フィールドを `None` に変更
-  - 既存テストを `Option<String>` / effective メソッドに対応させ更新
-  - 新規テストを追加: `languages` キー、precedence、後方互換、警告有無、blank fallback
-  - スキーマテスト `test_schema_workflow_config_has_expected_properties` に `"languages"` を追加
-- `src/workflow.rs`
-  - `compile()` で `config.effective_pr_language()` / `config.effective_plan_language()` を使用
-- `src/planning.rs`
-  - `setup_plan_vars` の `config.plan_language.trim()` を `config.effective_plan_language()` に置き換え
-- `src/worktree_pr.rs`
-  - `build_pr_prompt` の `compiled.pr_language.trim()` を削除（解決済み値をそのまま使用）
-- `src/workflow_call.rs`
-  - `resolve_workflow_calls_from_path` で `deprecated_language_warnings()` を取得し `eprintln!("warning: {msg}")` で出力
-  - 既存テストの `config.pr_language` / `config.plan_language` 比較を `Option<String>` に対応
-- `cruise-schema.json`
-  - `languages` プロパティを追加（`LanguagesConfig` 相当）
-  - `pr_language` / `plan_language` の description に deprecated 注記を追加
-- `cargo test` 全 885 件パス
+- `src/engine.rs`
+  - `execute_steps_with_dag` の重複していた `config_reloader` ブロックを整理
+  - `on_node_start` コールバックのシグネチャを `Fn(&NodeCheckpoint, &ExecutionDag)` に変更し、呼び出し側で DAG を永続化できるようにした
+  - 関数内のコメントを更新
+- 現在の作業をコミット: `3d0d86b` (`WIP: DAG execution integration (engine on_node_start signature + reloader cleanup)`)
 
 ## Remaining
-1. ドキュメント更新
-   - `README.md`: Basic Structure サンプル、PR Language / Plan Language 節を `languages` ベースに更新し、旧キーを deprecated 注記付きで残す
-   - `skills/cruise-config/references/top-level.md`: 同様に更新
-   - `skills/cruise-config/SKILL.md`: 目次の `pr_language` 表記を `languages` に更新
-
-2. 最終検証
-   - `cargo clippy -- -D warnings` で警告ゼロ
-   - `cargo check -p cruise-tauri` / `cargo check -p cruise-gui` で GUI 側に影響なしを確認
+1. `src/engine.rs` 内の `execute_steps_with_dag` 呼び出し箇所を新シグネチャに合わせて修正（テスト含む `&|_| Ok(())` → `&|_, _| Ok(())` など）
+2. `src/session.rs`
+   - `dag_path()` ヘルパーを追加
+3. `src/run_cmd.rs`
+   - import を `execute_steps_with_dag, NodeCheckpoint` に変更
+   - `load_or_build_session_dag()` / `resolve_start_node()` を追加
+   - `run_single` で DAG をビルド/ロードし、node id で再開する経路に切り替え
+   - `on_node_start` コールバックで `current_step` に node id を保存し、`dag.json` も永続化
+   - 実行終了時にも `dag.json` を保存
+   - `log_resume_message` を node id ではなく step name を表示するよう更新
+4. `src/worktree_pr.rs`
+   - import を更新
+   - `run_after_pr_steps` を DAG 経由（`build_dag` → `execute_steps_with_dag`）に書き換え
+5. `src/dag.rs`
+   - 先頭の `#![allow(dead_code)]` を削除して未使用警告を健全化
+6. テスト修正・追加
+   - `src/engine.rs` の既存 `execute_steps_with_dag` 呼び出しを新シグネチャに更新
+   - mock ベース停止→再開 E2E テスト追加（linear、retry budget、dag.json round trip）
+   - `src/run_cmd.rs` の resume 系テストを node id ベースに更新
+   - 旧セッションの auto-migration テスト `test_run_migrates_legacy_session_without_dag` を追加
+7. 最終検証
+   - `cargo test --workspace`
+   - `cargo clippy --all-targets`
+   - `rg "execute_steps\\b" src` で旧関数参照がゼロ件であることを確認
 
 ## Next-Agent Starting Position
-- 現在のコミット: `861fcf9` (`WIP: implement languages.pr/languages.plan with legacy deprecation warnings`)
-- ブランチ: `cruise/20260622065653266-pr-language-plan-language-lang`
-- 次は `README.md` と `skills/cruise-config/` のドキュメント更新から着手
-- ドキュメント更新後は `cargo clippy -- -D warnings` と GUI チェックで仕上げ
+- 現在のコミット: `3d0d86b` (`WIP: DAG execution integration (engine on_node_start signature + reloader cleanup)`)
+- ブランチ: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
+- まず `src/engine.rs` 内の `execute_steps_with_dag` 呼び出しを新シグネチャ `|cp, dag|` に修正してコンパイルエラーを解消し、その後 `src/run_cmd.rs` / `src/worktree_pr.rs` / `src/session.rs` の統合に進む
 
 ## Plan Reference
-`/Users/takumi/.local/share/cruise/sessions/20260622065653266/plan.md`
+`/Users/takumi/.local/share/cruise/sessions/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff/plan.md`
