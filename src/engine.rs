@@ -54,8 +54,7 @@ pub struct ExecutionContext<'a> {
 /// Passed to the `on_node_start` callback in [`execute_steps_with_dag`] so
 /// that callers can persist the node id before the step runs, enabling exact
 /// resumption via the saved node id rather than a plain step name.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) struct NodeCheckpoint<'a> {
+pub struct NodeCheckpoint<'a> {
     /// Stable DAG node identifier (e.g. `"n0007"`).
     pub node_id: &'a crate::dag::NodeId,
     /// Human-readable step name (unchanged from the compiled workflow).
@@ -221,81 +220,10 @@ fn resolve_if_next(
     }
 }
 
-/// Execute workflow steps starting from `start_step`.
-///
-/// # Errors
-///
-/// Returns an error if a step fails fatally or an I/O operation fails.
-pub async fn execute_steps(
-    ctx: &ExecutionContext<'_>,
-    vars: &mut VariableStore,
-    tracker: &mut FileTracker,
-    start_step: &str,
-) -> Result<ExecutionResult> {
-    let mut current_step = start_step.to_string();
-    let workflow_start = Instant::now();
-    let mut reloaded: Option<CompiledWorkflow> = None;
-    let mut state = LoopState {
-        group_retry_counts: HashMap::new(),
-        counters: LoopCounters {
-            run: 0,
-            skipped: 0,
-            failed: 0,
-        },
-        edge_counts: HashMap::new(),
-    };
-
-    loop {
-        // Reload config between steps if a reloader is provided.
-        if let Some(reloader) = ctx.config_reloader
-            && let Some(new_compiled) = reloader()?
-            && new_compiled.steps.contains_key(current_step.as_str())
-        {
-            state.group_retry_counts.clear();
-            state.edge_counts.clear();
-            reloaded = Some(new_compiled);
-        }
-        let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
-        let active_ctx = ExecutionContext {
-            compiled: active_compiled,
-            max_retries: ctx.max_retries,
-            rate_limit_retries: ctx.rate_limit_retries,
-            on_step_start: ctx.on_step_start,
-            cancel_token: ctx.cancel_token,
-            option_handler: ctx.option_handler,
-            config_reloader: None,
-            working_dir: ctx.working_dir,
-            skipped_steps: ctx.skipped_steps,
-            on_step_log: ctx.on_step_log,
-        };
-        let outcome =
-            step_loop_iteration(&active_ctx, vars, tracker, &current_step, &mut state).await?;
-        match outcome {
-            StepOutcome::Next(next) => current_step = next,
-            StepOutcome::Done => break,
-        }
-    }
-
-    let total_elapsed = workflow_start.elapsed();
-    let c = &state.counters;
-    eprintln!(
-        "\n{} ({} run, {} skipped, {} failed) [{}]",
-        style("v workflow complete").green().bold(),
-        c.run,
-        c.skipped,
-        c.failed,
-        format_duration(total_elapsed)
-    );
-    Ok(ExecutionResult {
-        run: c.run,
-        skipped: c.skipped,
-        failed: c.failed,
-    })
-}
 
 /// Execute a workflow driven by a pre-built [`ExecutionDag`].
 ///
-/// Unlike [`execute_steps`], which maintains in-memory retry counters, this
+/// Unlike the legacy step-name execution path, which maintained in-memory retry counters, this
 /// function navigates the graph encoded in `dag` so that execution can be
 /// resumed exactly — the node id recorded in `current_step` is sufficient to
 /// restore the full loop-counter context.
@@ -310,17 +238,17 @@ pub async fn execute_steps(
 /// # Errors
 ///
 /// Propagates any execution error encountered during the run.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) async fn execute_steps_with_dag(
+pub async fn execute_steps_with_dag(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     dag: &mut crate::dag::ExecutionDag,
     start_node: &crate::dag::NodeId,
-    on_node_start: &dyn Fn(&NodeCheckpoint<'_>) -> Result<()>,
+    on_node_start: &dyn Fn(&NodeCheckpoint<'_>, &crate::dag::ExecutionDag) -> Result<()>,
 ) -> Result<ExecutionResult> {
     let mut current_node_id = start_node.clone();
     let workflow_start = Instant::now();
+    let mut reloaded: Option<crate::workflow::CompiledWorkflow> = None;
     let mut state = LoopState {
         group_retry_counts: HashMap::new(),
         counters: LoopCounters {
@@ -332,15 +260,51 @@ pub(crate) async fn execute_steps_with_dag(
     };
 
     loop {
-        let (step_name, successors) = {
-            let node = dag
-                .nodes
-                .get(&current_node_id)
-                .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?;
-            (node.step_name.clone(), node.successors.clone())
+        let step_name = dag
+            .nodes
+            .get(&current_node_id)
+            .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
+            .step_name
+            .clone();
+
+        // Reload config between steps if a reloader is provided.  When the
+        // reloaded workflow still contains the current step we rebuild the DAG
+        // and continue from the first node for that step, resetting in-memory
+        // retry counters just like the legacy path did.
+        if let Some(reloader) = ctx.config_reloader {
+            if let Some(new_compiled) = reloader()? {
+                if new_compiled.steps.contains_key(&step_name)
+                    && let Ok(new_dag) = crate::dag::build_dag(&new_compiled, ctx.max_retries)
+                    && let Some(new_node_id) = new_dag.first_node_for_step(&step_name)
+                {
+                    state.group_retry_counts.clear();
+                    state.edge_counts.clear();
+                    reloaded = Some(new_compiled);
+                    *dag = new_dag;
+                    current_node_id = new_node_id.clone();
+                }
+            }
+        }
+
+        let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
+        let active_ctx = ExecutionContext {
+            compiled: active_compiled,
+            max_retries: ctx.max_retries,
+            rate_limit_retries: ctx.rate_limit_retries,
+            on_step_start: ctx.on_step_start,
+            cancel_token: ctx.cancel_token,
+            option_handler: ctx.option_handler,
+            config_reloader: None,
+            working_dir: ctx.working_dir,
+            skipped_steps: ctx.skipped_steps,
+            on_step_log: ctx.on_step_log,
         };
 
         on_node_start(&NodeCheckpoint {
+            node_id: &current_node_id,
+            step_name: &step_name,
+        }, &*dag,
+        )?;
             node_id: &current_node_id,
             step_name: &step_name,
         })?;
@@ -351,7 +315,7 @@ pub(crate) async fn execute_steps_with_dag(
             break;
         }
 
-        let outcome = step_loop_iteration(ctx, vars, tracker, &step_name, &mut state).await?;
+        let outcome = step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?;
 
         dag.nodes
             .get_mut(&current_node_id)
@@ -362,15 +326,21 @@ pub(crate) async fn execute_steps_with_dag(
         match outcome {
             StepOutcome::Done => break,
             StepOutcome::Next(next_step) => {
-                let next_id = successors.iter().find_map(|s| {
-                    let target_id = s.target.as_ref()?;
-                    let target_node = dag.nodes.get(target_id)?;
-                    if target_node.step_name == next_step {
-                        Some(target_id.clone())
-                    } else {
-                        None
-                    }
-                });
+                let next_id = dag
+                    .nodes
+                    .get(&current_node_id)
+                    .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
+                    .successors
+                    .iter()
+                    .find_map(|s| {
+                        let target_id = s.target.as_ref()?;
+                        let target_node = dag.nodes.get(target_id)?;
+                        if target_node.step_name == next_step {
+                            Some(target_id.clone())
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(id) = next_id {
                     current_node_id = id;
                 } else {
@@ -402,6 +372,8 @@ pub(crate) async fn execute_steps_with_dag(
         failed: c.failed,
     })
 }
+
+/// Shared mutable state for the execution loop.
 
 /// Shared mutable state for the execution loop.
 struct LoopState {
@@ -1153,9 +1125,6 @@ mod tests {
         run_config_with_retries(yaml, input, start_step, 10, 0).await
     }
 
-    // Core test helper: compile `yaml`, build an `ExecutionContext`, and run.
-    // `on_step_start` is always a no-op in this helper; tests that need a custom
-    // callback build `ExecutionContext` directly (see `test_on_step_start_callback_called`).
     #[expect(clippy::too_many_arguments)]
     async fn run_config_inner(
         yaml: &str,
@@ -1172,15 +1141,16 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, max_retries).unwrap_or_else(|e| panic!("{e:?}"));
+        let start_node = if let Some(step_name) = start_step {
+            dag.first_node_for_step(step_name)
+                .cloned()
+                .ok_or_else(|| CruiseError::StepNotFound(step_name.to_string()))?
+        } else {
+            dag.start.clone()
+        };
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root.clone());
-        let first_step = compiled
-            .steps
-            .keys()
-            .next()
-            .unwrap_or_else(|| panic!("unexpected None"))
-            .clone();
-        let step = start_step.unwrap_or(&first_step).to_string();
         let ctx = ExecutionContext {
             compiled: &compiled,
             max_retries,
@@ -1193,7 +1163,14 @@ mod tests {
             skipped_steps,
             on_step_log: None,
         };
-        execute_steps(&ctx, &mut vars, &mut tracker, &step).await
+        execute_steps_with_dag(&ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &|_| Ok(()),
+        )
+        .await
     }
 
     async fn run_config_with_retries(
@@ -1261,15 +1238,18 @@ mod tests {
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
         let after_compiled = compiled.to_after_pr_compiled();
+        if after_compiled.steps.is_empty() {
+            return Ok(ExecutionResult {
+                run: 0,
+                skipped: 0,
+                failed: 0,
+            });
+        }
+        let mut dag = crate::dag::build_dag(&after_compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start_node = dag.start.clone();
         let mut vars = VariableStore::new(input.to_string());
         let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
         let mut tracker = FileTracker::with_root(tracker_root.clone());
-        let first_step = after_compiled
-            .steps
-            .keys()
-            .next()
-            .unwrap_or_else(|| panic!("unexpected None"))
-            .clone();
         let ctx = ExecutionContext {
             compiled: &after_compiled,
             max_retries: 10,
@@ -1282,7 +1262,15 @@ mod tests {
             skipped_steps: &skipped,
             on_step_log: None,
         };
-        execute_steps(&ctx, &mut vars, &mut tracker, &first_step).await
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &|_| Ok(()),
+        )
+        .await
     }
 
     // Run config with a custom `FileTracker` rooted at `tracker_root`.
@@ -1823,7 +1811,7 @@ steps:
     }
 
     #[tokio::test]
-    async fn test_on_step_start_callback_called() {
+    async fn test_on_node_start_callback_called() {
         let yaml = r#"
 command: [echo]
 steps:
@@ -1834,6 +1822,8 @@ steps:
 "#;
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
         let mut vars = VariableStore::new(String::new());
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
@@ -1844,10 +1834,7 @@ steps:
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
-            on_step_start: &|step| {
-                called_ref.borrow_mut().push(step.to_string());
-                Ok(())
-            },
+            on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
@@ -1855,7 +1842,18 @@ steps:
             skipped_steps: &[],
             on_step_log: None,
         };
-        let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|cp| {
+                called_ref.borrow_mut().push(cp.step_name.to_string());
+                Ok(())
+            },
+        )
+        .await;
 
         assert!(result.is_ok());
         assert_eq!(called_steps, vec!["step1", "step2"]);
@@ -2596,8 +2594,8 @@ steps:
     }
 
     #[tokio::test]
-    async fn test_execute_steps_cancel_between_steps_stops_at_boundary() {
-        // Given: a three-step workflow where the token is cancelled during on_step_start of step2
+    async fn test_execute_steps_with_dag_cancel_between_steps_stops_at_boundary() {
+        // Given: a three-step workflow where the token is cancelled during on_node_start of step2
         // (i.e. after step1 runs, before step2 executes)
         let yaml = r#"
 command: [echo]
@@ -2612,26 +2610,20 @@ steps:
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
         let mut vars = VariableStore::new(String::new());
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let token = CancellationToken::new();
         let token_clone = token.clone();
-        // on_step_start is called before the cancel check: cancel on the 2nd call (step2)
+        // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
         let call_count = std::cell::Cell::new(0usize);
         let ctx = ExecutionContext {
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
-            on_step_start: &|_step| {
-                let n = call_count.get();
-                if n >= 1 {
-                    // step2 (second call): cancel so the token check fires after on_step_start
-                    token_clone.cancel();
-                }
-                call_count.set(n + 1);
-                Ok(())
-            },
+            on_step_start: &|_| Ok(()),
             cancel_token: Some(&token),
             option_handler: &NoOpOptionHandler,
             config_reloader: None,
@@ -2639,9 +2631,25 @@ steps:
             skipped_steps: &[],
             on_step_log: None,
         };
-        // When: execute_steps runs; step2's on_step_start triggers cancellation
-        let result = execute_steps(&ctx, &mut vars, &mut tracker, "step1").await;
-        // Then: step1 ran (run=1); step2's on_step_start was called but step2 did not execute
+        // When: execute_steps_with_dag runs; step2's on_node_start triggers cancellation
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_cp| {
+                let n = call_count.get();
+                if n >= 1 {
+                    // step2 (second call): cancel so the token check fires after on_node_start
+                    token_clone.cancel();
+                }
+                call_count.set(n + 1);
+                Ok(())
+            },
+        )
+        .await;
+        // Then: step1 ran (run=1); step2's on_node_start was called but step2 did not execute
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
         let result = result.unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
