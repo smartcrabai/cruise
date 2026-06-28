@@ -1,45 +1,35 @@
-# Incomplete Handoff: DAG-Driven Execution Migration
+# Incomplete Handoff: PR #459 CI Fix
 
 ## Status
-Review feedback for the DAG migration has been addressed in `src/engine.rs` and `src/run_cmd.rs`. Code compiles and `cargo clippy --all-targets` is clean. The broader migration tasks (resume UX, `dag.json` persistence, tests) are still outstanding.
+PR #459 の失敗していた CI (`test` / `test-tauri`) の原因を修正し、修正内容を PR ブランチに push 済みです。ローカルでは該当箇所が解消していることを確認しました。実際の GitHub Actions の再実行結果は未確認です。
 
 ## Done (this session)
 - `src/engine.rs`
-  - Added `#[expect(clippy::too_many_lines)]` to `execute_steps_with_dag`
-  - Refactored config reload to avoid cloning the whole DAG (`new_dag.clone()` removed)
-  - Propagated `build_dag` errors during config reload instead of silently ignoring them with `let Ok(...)`
-  - Removed duplicated `LoopState` doc comment
-- `src/run_cmd.rs`
-  - Split the mismatched `on_step_start` closure into:
-    - `on_step_start: Fn(&str) -> Result<()>` for `ExecutionContext` (step-name logging)
-    - `on_node_start: Fn(&NodeCheckpoint, &ExecutionDag) -> Result<()>` passed to `execute_steps_with_dag` (node-id persistence)
-  - Added an explicit warning when the saved node id is missing from the DAG before falling back to the start node
-  - Minor clippy cleanups (`ok_or_else` -> `ok_or`, `to_string()` -> `clone()`)
-- Verification
-  - `cargo check` passes
-  - `cargo clippy --all-targets` passes
-  - `cargo test --lib engine::tests` passes except one pre-existing failure (`test_next_pointing_to_nonexistent_step`) that also fails on `HEAD`
+  - `run_config_inner` 内で `build_dag` のエラーを `panic!` ではなく `?` で伝播するように変更
+  - これにより `engine::tests::test_next_pointing_to_nonexistent_step` がパスするようになった
+- `src-tauri/src/commands.rs`
+  - 存在しなくなった `cruise::engine::execute_steps` の参照を除去
+  - Tauri GUI 側も `execute_steps_with_dag` を使うように移行
+  - セッションの `current_step` / `current_step_is_node_id` / `has_dag` を `on_node_start` コールバックで更新するようにした
+  - `build_dag` のエラーを IPC エラーとして返せるようにした
+- `cargo fmt` を実行（`src/engine.rs` / `src/worktree_pr.rs` にもフォーマット変更が入った）
+- 修正をコミット・push
+  - commit: `555889c`
+  - branch: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
+
+## Verification (local)
+- `cargo test --lib engine::tests::test_next_pointing_to_nonexistent_step` → pass
+- `cargo check --manifest-path src-tauri/Cargo.toml` → pass
+- `cargo fmt -- --check` → pass
+- `cargo test --all-features` → lib テストは全て pass、bin テストで `run_cmd::tests::*` がローカル環境でタイムアウトするものがあるが、stash した元のコードでも同様に失敗するため既存の環境依存のフレーキーと判断
 
 ## Remaining
-1. `src/run_cmd.rs`
-   - Update `log_resume_message` to display step name instead of node id
-   - Persist `dag.json` at the end of execution
-   - Add auto-migration tests for old sessions (`has_dag=false` and only step name saved)
-2. `src/session.rs`
-   - Add a `dag_path()` helper for `run_cmd.rs` to save `dag.json`
-3. `src/dag.rs`
-   - Remove the leading `#![allow(dead_code)]` to surface unused warnings
-4. Test fixes / additions
-   - Add mock-based stop → resume E2E tests (linear, retry budget, `dag.json` round trip)
-   - Update resume tests in `src/run_cmd.rs` to be node-id based
-   - Add `test_run_migrates_legacy_session_without_dag`
-5. Final verification
-   - `cargo test --workspace`
-   - Confirm zero references to the old function with `rg "execute_steps\\b" src`
+1. GitHub Actions の結果確認
+   - `gh pr checks 459` で `test (macos-latest)` / `test (ubuntu-latest)` / `test-tauri` が pass するか確認
+   - まだ失敗している場合はそのログを確認して追加修正
+2. 必要に応じて他の CI ジョブ（`plan` / リリース関連）も確認
 
 ## Next-Agent Starting Position
-- Current commit: `05c9ce8` (`WIP: fix CI compilation errors - engine/worktree_pr/run_cmd DAG migration (incomplete)`)
-- Branch: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
-- First run `cargo check` / `cargo clippy` to confirm the review fixes are in place
-- Then implement `log_resume_message` step-name display and `dag.json` persistence (add `dag_path()` in `src/session.rs`)
-- Proceed to test additions/fixes and final `cargo test --workspace`
+- ブランチはすでに push 済み: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
+- まず `gh pr checks 459` を実行して CI 状況を確認
+- 失敗が残っている場合は `gh run view <run-id> --log-failed` で詳細を確認し、本リポジトリと同様の手順で修正・push する
