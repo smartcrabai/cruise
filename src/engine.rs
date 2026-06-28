@@ -271,11 +271,11 @@ pub async fn execute_steps_with_dag(
         // reloaded workflow still contains the current step we rebuild the DAG
         // and continue from the first node for that step, resetting in-memory
         // retry counters just like the legacy path did.
-        if let Some(reloader) = ctx.config_reloader {
-            if let Some(new_compiled) = reloader()? {
-                if new_compiled.steps.contains_key(&step_name)
+        if let Some(reloader) = ctx.config_reloader
+            && let Some(new_compiled) = reloader()?
+                && new_compiled.steps.contains_key(&step_name)
                     && let Ok(new_dag) = crate::dag::build_dag(&new_compiled, ctx.max_retries)
-                    && let Some(new_node_id) = new_dag.first_node_for_step(&step_name)
+                    && let Some(new_node_id) = new_dag.clone().first_node_for_step(&step_name)
                 {
                     state.group_retry_counts.clear();
                     state.edge_counts.clear();
@@ -283,8 +283,6 @@ pub async fn execute_steps_with_dag(
                     *dag = new_dag;
                     current_node_id = new_node_id.clone();
                 }
-            }
-        }
 
         let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
         let active_ctx = ExecutionContext {
@@ -303,11 +301,7 @@ pub async fn execute_steps_with_dag(
         on_node_start(&NodeCheckpoint {
             node_id: &current_node_id,
             step_name: &step_name,
-        }, &*dag,
-        )?;
-            node_id: &current_node_id,
-            step_name: &step_name,
-        })?;
+        }, &*dag)?;
 
         if let Some(token) = ctx.cancel_token
             && token.is_cancelled()
@@ -1168,7 +1162,7 @@ mod tests {
             &mut tracker,
             &mut dag,
             &start_node,
-            &|_| Ok(()),
+            &|_cp, _dag| Ok(()),
         )
         .await
     }
@@ -1268,7 +1262,7 @@ mod tests {
             &mut tracker,
             &mut dag,
             &start_node,
-            &|_| Ok(()),
+            &|_cp, _dag| Ok(()),
         )
         .await
     }
@@ -1848,7 +1842,7 @@ steps:
             &mut tracker,
             &mut dag,
             &start,
-            &|cp| {
+            &|cp, _dag| {
                 called_ref.borrow_mut().push(cp.step_name.to_string());
                 Ok(())
             },
@@ -2638,7 +2632,7 @@ steps:
             &mut tracker,
             &mut dag,
             &start,
-            &|_cp| {
+            &|_cp, _dag| {
                 let n = call_count.get();
                 if n >= 1 {
                     // step2 (second call): cancel so the token check fires after on_node_start
@@ -3473,7 +3467,7 @@ steps:
 
         // When: we execute the DAG from the start node
         let result =
-            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
                 .await;
 
         // Then: both steps run successfully
@@ -3519,7 +3513,7 @@ steps:
         };
 
         // When: we execute and capture each NodeCheckpoint
-        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|cp| {
+        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|cp, _dag| {
             checkpoints_ref
                 .borrow_mut()
                 .push((cp.node_id.clone(), cp.step_name.to_string()));
@@ -3590,7 +3584,7 @@ steps:
             &mut tracker,
             &mut dag,
             &step2_node,
-            &|cp| {
+            &|cp, _dag| {
                 visited_ref.borrow_mut().push(cp.step_name.to_string());
                 Ok(())
             },
@@ -3638,7 +3632,7 @@ steps:
         };
 
         // When: we execute the DAG
-        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -3688,7 +3682,7 @@ steps:
 
         // When: we execute the DAG (step1 will exhaust its retry budget)
         let result =
-            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_| Ok(()))
+            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
                 .await;
 
         // Then: execution terminates without an unbounded loop
@@ -3768,7 +3762,7 @@ steps:
             &mut tracker,
             &mut dag,
             &second_step1_id,
-            &|cp| {
+            &|cp, _dag| {
                 visited_ref.borrow_mut().push(cp.node_id.clone());
                 Ok(())
             },

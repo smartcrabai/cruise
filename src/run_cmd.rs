@@ -10,7 +10,7 @@ use inquire::InquireError;
 use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
 use crate::config::validate_config;
-use crate::engine::{execute_steps, print_dry_run};
+use crate::engine::{NodeCheckpoint, execute_steps_with_dag, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
@@ -326,16 +326,22 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;
     }
-    let start_step = session.current_step.clone().map_or_else(
-        || {
-            compiled
-                .steps
-                .keys()
-                .next()
-                .ok_or_else(|| CruiseError::Other("config has no steps".to_string()))
-                .cloned()
+    let mut dag = crate::dag::build_dag(&compiled, args.max_retries)?;
+    let start_node = session.current_step.clone().map_or_else(
+        || Ok(dag.start.clone()),
+        |step| {
+            if session.current_step_is_node_id {
+                if dag.nodes.contains_key(&step) {
+                    Ok(step)
+                } else {
+                    Ok(dag.start.clone())
+                }
+            } else {
+                dag.first_node_for_step(&step)
+                    .cloned()
+                    .ok_or_else(|| CruiseError::StepNotFound(step))
+            }
         },
-        Ok,
     )?;
     log_resume_message(&session);
     // Repo-backed sessions execute in a temporary clone; re-create it if the
@@ -384,12 +390,15 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let logger_for_start = logger.clone();
-    let on_step_start = |step: &str| {
-        logger_for_start.write(step);
+    let on_step_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
+        logger_for_start.write(cp.step_name);
         let mut s = session_cell.borrow_mut();
-        s.current_step = Some(step.to_string());
+        s.current_step = Some(cp.node_id.to_string());
+        s.current_step_is_node_id = true;
+        s.has_dag = true;
         let fingerprint =
-            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
+            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get(),
+            )?;
         session_fingerprint.set(fingerprint);
         Ok(())
     };
@@ -410,7 +419,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         skipped_steps: &skipped_steps,
     };
     let exec_result = tokio::select! {
-        result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,
+        result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &on_step_start,
+        ) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel_token.cancel();
             Err(CruiseError::Interrupted)

@@ -8,7 +8,7 @@ use std::path::Path;
 use console::style;
 
 use crate::cancellation::CancellationToken;
-use crate::engine::{ExecutionContext, execute_steps};
+use crate::engine::{ExecutionContext, execute_steps_with_dag};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
@@ -305,10 +305,12 @@ async fn run_after_pr_steps(
     skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    let Some(first_step) = compiled.after_pr.keys().next() else {
+    let Some(_first_step) = compiled.after_pr.keys().next() else {
         return Ok(());
     };
     let after_compiled = compiled.to_after_pr_compiled();
+    let mut dag = crate::dag::build_dag(&after_compiled, max_retries)?;
+    let start = dag.start.clone();
     let ctx = ExecutionContext {
         compiled: &after_compiled,
         max_retries,
@@ -321,7 +323,16 @@ async fn run_after_pr_steps(
         skipped_steps,
         on_step_log: None,
     };
-    match execute_steps(&ctx, vars, tracker, first_step).await {
+    match execute_steps_with_dag(
+        &ctx,
+        vars,
+        tracker,
+        &mut dag,
+        &start,
+        &|_cp, _dag| Ok(()),
+    )
+    .await
+    {
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
