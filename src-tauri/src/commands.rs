@@ -1944,16 +1944,22 @@ async fn execute_single_session(
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
 
-    let start_step = session.current_step.clone().map_or_else(
-        || {
-            compiled
-                .steps
-                .keys()
-                .next()
-                .ok_or_else(|| "config has no steps".to_string())
-                .map(Clone::clone)
+    let mut dag = cruise::dag::build_dag(&compiled, 10).map_err(|e| e.to_string())?;
+    let start_node = session.current_step.clone().map_or_else(
+        || Ok(dag.start.clone()),
+        |step| {
+            if session.current_step_is_node_id {
+                if dag.nodes.contains_key(&step) {
+                    Ok(step)
+                } else {
+                    Ok(dag.start.clone())
+                }
+            } else {
+                dag.first_node_for_step(&step)
+                    .cloned()
+                    .ok_or_else(|| format!("step '{step}' not found in workflow"))
+            }
         },
-        Ok,
     )?;
 
     let exec_root =
@@ -1991,7 +1997,8 @@ async fn execute_single_session(
 
     let join_result = tokio::task::spawn_blocking(
         move || -> cruise::error::Result<cruise::engine::ExecutionResult> {
-            use cruise::engine::{ExecutionContext, execute_steps};
+            use cruise::dag::ExecutionDag;
+            use cruise::engine::{ExecutionContext, NodeCheckpoint, execute_steps_with_dag};
             use cruise::file_tracker::FileTracker;
             use cruise::variable::VariableStore;
 
@@ -2036,6 +2043,19 @@ async fn execute_single_session(
             ));
             let handler = GuiOptionHandler::new(emitter, sid_for_pr.clone(), option_responder);
 
+            let on_node_start =
+                |cp: &NodeCheckpoint<'_>, _dag: &ExecutionDag| -> cruise::error::Result<()> {
+                    if let Ok(mgr) = new_session_manager() {
+                        if let Ok(mut s) = mgr.load(&sid_for_pr) {
+                            s.current_step = Some(cp.node_id.to_string());
+                            s.current_step_is_node_id = true;
+                            s.has_dag = true;
+                            let _ = mgr.save(&s);
+                        }
+                    }
+                    Ok(())
+                };
+
             let mut vars = VariableStore::new(input);
             vars.set_named_file(PLAN_VAR, plan_path);
             let exec_root_path = exec_root.clone();
@@ -2055,7 +2075,14 @@ async fn execute_single_session(
             };
 
             let handle = tokio::runtime::Handle::current();
-            let result = handle.block_on(execute_steps(&ctx, &mut vars, &mut tracker, &start_step));
+            let result = handle.block_on(execute_steps_with_dag(
+                &ctx,
+                &mut vars,
+                &mut tracker,
+                &mut dag,
+                &start_node,
+                &on_node_start,
+            ));
 
             match &result {
                 Ok(exec) => logger.write(&format!(

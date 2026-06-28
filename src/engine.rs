@@ -220,7 +220,6 @@ fn resolve_if_next(
     }
 }
 
-
 /// Execute a workflow driven by a pre-built [`ExecutionDag`].
 ///
 /// Unlike the legacy step-name execution path, which maintained in-memory retry counters, this
@@ -304,10 +303,13 @@ pub async fn execute_steps_with_dag(
             on_step_log: ctx.on_step_log,
         };
 
-        on_node_start(&NodeCheckpoint {
-            node_id: &current_node_id,
-            step_name: &step_name,
-        }, &*dag)?;
+        on_node_start(
+            &NodeCheckpoint {
+                node_id: &current_node_id,
+                step_name: &step_name,
+            },
+            &*dag,
+        )?;
 
         if let Some(token) = ctx.cancel_token
             && token.is_cancelled()
@@ -315,7 +317,8 @@ pub async fn execute_steps_with_dag(
             break;
         }
 
-        let outcome = step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?;
+        let outcome =
+            step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?;
 
         dag.nodes
             .get_mut(&current_node_id)
@@ -1139,7 +1142,7 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
-        let mut dag = crate::dag::build_dag(&compiled, max_retries).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, max_retries)?;
         let start_node = if let Some(step_name) = start_step {
             dag.first_node_for_step(step_name)
                 .cloned()
@@ -1161,7 +1164,8 @@ mod tests {
             skipped_steps,
             on_step_log: None,
         };
-        execute_steps_with_dag(&ctx,
+        execute_steps_with_dag(
+            &ctx,
             &mut vars,
             &mut tracker,
             &mut dag,
@@ -1243,7 +1247,8 @@ mod tests {
                 failed: 0,
             });
         }
-        let mut dag = crate::dag::build_dag(&after_compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag =
+            crate::dag::build_dag(&after_compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
         let start_node = dag.start.clone();
         let mut vars = VariableStore::new(input.to_string());
         let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3470,9 +3475,15 @@ steps:
         };
 
         // When: we execute the DAG from the start node
-        let result =
-            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
-                .await;
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_cp, _dag| Ok(()),
+        )
+        .await;
 
         // Then: both steps run successfully
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
@@ -3517,12 +3528,19 @@ steps:
         };
 
         // When: we execute and capture each NodeCheckpoint
-        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|cp, _dag| {
-            checkpoints_ref
-                .borrow_mut()
-                .push((cp.node_id.clone(), cp.step_name.to_string()));
-            Ok(())
-        })
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|cp, _dag| {
+                checkpoints_ref
+                    .borrow_mut()
+                    .push((cp.node_id.clone(), cp.step_name.to_string()));
+                Ok(())
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -3636,9 +3654,16 @@ steps:
         };
 
         // When: we execute the DAG
-        execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_cp, _dag| Ok(()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the start node's runtime has been populated with the step's output
         let runtime = &dag.nodes[&start].runtime;
@@ -3685,9 +3710,15 @@ steps:
         };
 
         // When: we execute the DAG (step1 will exhaust its retry budget)
-        let result =
-            execute_steps_with_dag(&ctx, &mut vars, &mut tracker, &mut dag, &start, &|_cp, _dag| Ok(()))
-                .await;
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_cp, _dag| Ok(()),
+        )
+        .await;
 
         // Then: execution terminates without an unbounded loop
         // (exact outcome — error or graceful stop — depends on implementation;

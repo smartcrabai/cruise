@@ -323,16 +323,7 @@ async fn run_after_pr_steps(
         skipped_steps,
         on_step_log: None,
     };
-    match execute_steps_with_dag(
-        &ctx,
-        vars,
-        tracker,
-        &mut dag,
-        &start,
-        &|_cp, _dag| Ok(()),
-    )
-    .await
-    {
+    match execute_steps_with_dag(&ctx, vars, tracker, &mut dag, &start, &|_cp, _dag| Ok(())).await {
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
