@@ -10,7 +10,7 @@ use inquire::InquireError;
 use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
 use crate::config::validate_config;
-use crate::engine::{execute_steps, print_dry_run};
+use crate::engine::{NodeCheckpoint, execute_steps_with_dag, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::CliOptionHandler;
@@ -326,16 +326,28 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;
     }
-    let start_step = session.current_step.clone().map_or_else(
-        || {
-            compiled
-                .steps
-                .keys()
-                .next()
-                .ok_or_else(|| CruiseError::Other("config has no steps".to_string()))
-                .cloned()
+    let mut dag = crate::dag::build_dag(&compiled, args.max_retries)?;
+    let start_node = session.current_step.clone().map_or_else(
+        || Ok(dag.start.clone()),
+        |step| {
+            if session.current_step_is_node_id {
+                if dag.nodes.contains_key(&step) {
+                    Ok(step)
+                } else {
+                    eprintln!(
+                        "{} saved node id '{}' not found in DAG; falling back to start node '{}'",
+                        style("!").yellow().bold(),
+                        step,
+                        dag.start
+                    );
+                    Ok(dag.start.clone())
+                }
+            } else {
+                dag.first_node_for_step(&step)
+                    .cloned()
+                    .ok_or(CruiseError::StepNotFound(step))
+            }
         },
-        Ok,
     )?;
     log_resume_message(&session);
     // Repo-backed sessions execute in a temporary clone; re-create it if the
@@ -384,10 +396,17 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let logger_for_start = logger.clone();
+    let logger_for_step_start = logger.clone();
     let on_step_start = |step: &str| {
-        logger_for_start.write(step);
+        logger_for_step_start.write(step);
+        Ok(())
+    };
+    let on_node_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
+        logger_for_start.write(cp.step_name);
         let mut s = session_cell.borrow_mut();
-        s.current_step = Some(step.to_string());
+        s.current_step = Some(cp.node_id.clone());
+        s.current_step_is_node_id = true;
+        s.has_dag = true;
         let fingerprint =
             save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
         session_fingerprint.set(fingerprint);
@@ -410,7 +429,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         skipped_steps: &skipped_steps,
     };
     let exec_result = tokio::select! {
-        result = execute_steps(&ctx, &mut vars, &mut tracker, &start_step) => result,
+        result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &on_node_start,
+        ) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel_token.cancel();
             Err(CruiseError::Interrupted)
@@ -1093,11 +1119,29 @@ steps:
         process.set_env(TEST_STATE_CONFLICT_LOG_ENV, log_path);
     }
 
+    fn node_id_for_step(manager: &SessionManager, session_id: &str, step: &str) -> String {
+        let config_path = manager.sessions_dir().join(session_id).join("config.yaml");
+        let yaml = fs::read_to_string(&config_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflow_config =
+            crate::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled =
+            crate::workflow::compile(workflow_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        dag.first_node_for_step(step)
+            .unwrap_or_else(|| panic!("step {step} not found in DAG"))
+            .clone()
+    }
+
     async fn wait_for_session_step(manager: &SessionManager, session_id: &str, step: &str) {
-        for _ in 0..200 {
+        // The DAG execution path stores the node id in current_step rather than the
+        // step name, so resolve the expected node id from the session config before
+        // polling.
+        let expected_node_id = node_id_for_step(manager, session_id, step);
+
+        for _ in 0..800 {
             if let Ok(state) = manager.load(session_id)
                 && matches!(state.phase, SessionPhase::Running)
-                && state.current_step.as_deref() == Some(step)
+                && state.current_step.as_deref() == Some(expected_node_id.as_str())
             {
                 return;
             }
@@ -2039,7 +2083,10 @@ steps:
         );
         let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Completed));
-        assert_eq!(loaded.current_step.as_deref(), Some("second"));
+        assert_eq!(
+            loaded.current_step.as_deref(),
+            Some(node_id_for_step(&manager, session_id, "second").as_str())
+        );
         assert!(repo.join("second.txt").exists());
         let log = fs::read_to_string(&log_path).unwrap_or_else(|e| {
             panic!("conflict resolution should be logged for overwrite tests: {e:?}")
