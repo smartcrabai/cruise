@@ -238,6 +238,10 @@ fn resolve_if_next(
 /// # Errors
 ///
 /// Propagates any execution error encountered during the run.
+#[expect(
+    clippy::too_many_lines,
+    reason = "DAG-driven execution loop is inherently long"
+)]
 pub async fn execute_steps_with_dag(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
@@ -273,16 +277,18 @@ pub async fn execute_steps_with_dag(
         // retry counters just like the legacy path did.
         if let Some(reloader) = ctx.config_reloader
             && let Some(new_compiled) = reloader()?
-                && new_compiled.steps.contains_key(&step_name)
-                    && let Ok(new_dag) = crate::dag::build_dag(&new_compiled, ctx.max_retries)
-                    && let Some(new_node_id) = new_dag.clone().first_node_for_step(&step_name)
-                {
-                    state.group_retry_counts.clear();
-                    state.edge_counts.clear();
-                    reloaded = Some(new_compiled);
-                    *dag = new_dag;
-                    current_node_id = new_node_id.clone();
-                }
+            && new_compiled.steps.contains_key(&step_name)
+        {
+            let new_dag = crate::dag::build_dag(&new_compiled, ctx.max_retries)?;
+            if let Some(new_node_id) = new_dag.first_node_for_step(&step_name) {
+                let new_node_id = new_node_id.clone();
+                state.group_retry_counts.clear();
+                state.edge_counts.clear();
+                reloaded = Some(new_compiled);
+                *dag = new_dag;
+                current_node_id = new_node_id;
+            }
+        }
 
         let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
         let active_ctx = ExecutionContext {
@@ -366,8 +372,6 @@ pub async fn execute_steps_with_dag(
         failed: c.failed,
     })
 }
-
-/// Shared mutable state for the execution loop.
 
 /// Shared mutable state for the execution loop.
 struct LoopState {

@@ -334,12 +334,18 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                 if dag.nodes.contains_key(&step) {
                     Ok(step)
                 } else {
+                    eprintln!(
+                        "{} saved node id '{}' not found in DAG; falling back to start node '{}'",
+                        style("!").yellow().bold(),
+                        step,
+                        dag.start
+                    );
                     Ok(dag.start.clone())
                 }
             } else {
                 dag.first_node_for_step(&step)
                     .cloned()
-                    .ok_or_else(|| CruiseError::StepNotFound(step))
+                    .ok_or(CruiseError::StepNotFound(step))
             }
         },
     )?;
@@ -390,15 +396,19 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let session_cell = RefCell::new(&mut session);
     let session_fingerprint = Cell::new(initial_fingerprint);
     let logger_for_start = logger.clone();
-    let on_step_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
+    let logger_for_step_start = logger.clone();
+    let on_step_start = |step: &str| {
+        logger_for_step_start.write(step);
+        Ok(())
+    };
+    let on_node_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
         logger_for_start.write(cp.step_name);
         let mut s = session_cell.borrow_mut();
-        s.current_step = Some(cp.node_id.to_string());
+        s.current_step = Some(cp.node_id.clone());
         s.current_step_is_node_id = true;
         s.has_dag = true;
         let fingerprint =
-            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get(),
-            )?;
+            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
         session_fingerprint.set(fingerprint);
         Ok(())
     };
@@ -425,7 +435,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             &mut tracker,
             &mut dag,
             &start_node,
-            &on_step_start,
+            &on_node_start,
         ) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel_token.cancel();
