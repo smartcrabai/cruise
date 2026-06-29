@@ -1,43 +1,90 @@
-# Incomplete Handoff: PR #459 CI Fix
+# Incomplete Handoff: GUI DAG Visualization Feature
 
 ## Status
-PR #459 の失敗していた CI (`test (macos-latest)` / `test (ubuntu-latest)`) の原因を特定し、`src/run_cmd.rs` のテストヘルパーを修正しました。修正はコミット済みですが、まだ push していません。残りの失敗テスト（同じ根因の `test_run_all_preserves_invalid_external_state_without_failing_summary_reload` など）の修正と、全テストのローカル検証、GitHub Actions 再実行が必要です。
+
+Started implementation based on the plan via `/implement-after-tests`. Completed the backend implementation of `build_dag_dto`, the Tauri handler registration fix, frontend types, the command wrapper, the `mermaid` dependency, and the `WorkflowDagPanel` component creation. Tab integration into `App.tsx` and test additions have not been started yet. Handing off here due to tool iteration limits.
 
 ## Done (this session)
-- `gh pr checks 459` で `test (macos-latest)` / `test (ubuntu-latest)` が失敗していることを確認
-- `gh run view 28331763772 --log-failed` で詳細ログを確認
-  - 失敗は `run_cmd::tests::*` の7つのテストで、すべて `src/run_cmd.rs:1133` で `timed out waiting for session ... to reach step first` となっていた
-- 根本原因を特定
-  - DAG 実行移行後、`SessionState.current_step` には step 名ではなく node id（例: `n0000`）が保存されるようになった
-  - `wait_for_session_step` が step 名 "first" を期待していたため、一致せずタイムアウトしていた
-  - 同様に `test_run_current_branch_conflict_overwrite_continues_and_logs_choice` も最終的な `current_step` を step 名 "second" と比較していた
-- `src/run_cmd.rs` を修正
-  - `node_id_for_step` ヘルパーを追加し、セッション設定から DAG をビルドして step 名を node id に解決
-  - `wait_for_session_step` を node id ベースで待機するように変更
-  - `test_run_current_branch_conflict_overwrite_continues_and_logs_choice` のアサーションを node id ベースに変更
-- ローカルで一部テストを検証
-  - `cargo test --bin cruise run_cmd::tests::test_run_all_picks_up_session_added_while_first_session_is_running` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_overwrite_continues_and_logs_choice` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_abort_preserves_external_state` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_noninteractive_returns_error_without_prompt` → pass
-- 修正をコミット
-  - commit: `209497c`
-  - message: `fix(run_cmd): update tests for DAG node ids in current_step`
+
+- Read the plan `/Users/takumi/.local/share/cruise/sessions/20260629065146988_fb6aecb7b2894d64b99b11d310e16eb5/plan.md` and confirmed the implementation approach
+- Investigated related code
+  - `src/dag.rs` (`ExecutionDag`, `DagNode`, `NodeSuccessor`, `TransitionReason`)
+  - `src/workflow.rs` (`CompiledWorkflow`, `compile`)
+  - `src-tauri/src/commands.rs` (`get_session_plan`, `SessionDto`)
+  - `src-tauri/src/lib.rs` (`invoke_handler`)
+  - `ui/src/App.tsx` (`ActiveTab`, `WorkflowRunner`, tab buttons / panels)
+  - `ui/src/types.ts`, `ui/src/lib/commands.ts`, `ui/src/components/WorkflowPlanPanel.tsx`, and related tests
+- `src-tauri/src/commands.rs`
+  - Changed `build_dag_dto` from a stub to a real implementation
+    - Aggregated `ExecutionDag.nodes` by step name
+    - Deduped edges with identical `(from_step, to_step, reason, selector)`
+    - Determined each step's kind from `CompiledWorkflow.steps` (prompt / command / option / unknown)
+    - `is_terminal` is determined by whether an edge with `target == None` exists
+    - `current_step` is resolved to a step name considering `current_step_is_node_id`
+  - Added `step_kind` and `transition_reason` helpers
+- `src-tauri/src/lib.rs`
+  - Removed the duplicate `commands::get_session_plan` in `invoke_handler!` (`get_session_dag` is already registered)
+- Confirmed the backend compiles with `cargo check -p cruise-gui`
+- Frontend types / API
+  - Added `DagDto`, `DagStepDto`, `DagEdgeDto` to `ui/src/types.ts`
+  - Added `getSessionDag(sessionId)` to `ui/src/lib/commands.ts`
+- Added `mermaid` dependency to `ui/package.json` (v11.16.0)
+- Created `ui/src/components/WorkflowDagPanel.tsx`
+  - Calls `getSessionDag` to retrieve DAG data
+  - `mermaid` is loaded via dynamic import (`await import("mermaid")`)
+  - `buildMermaidSource` helper generates Mermaid syntax
+    - Sanitizes step names into Mermaid IDs (sequential prefix + non-alphanumeric replacement)
+    - Terminal edges point to a shared `end[/END/]` node
+    - `currentStep` is highlighted with blue style
+    - `startStep` is highlighted with green style
+  - State management for loading / error / SVG display
+  - Discards stale rendering on session switch (`renderId` counter)
+- Committed the work
+  - commit: `b27aa59`
+  - message: `WIP: implement DAG backend and start frontend panel`
 
 ## Remaining
-1. 同じファイル内の同様の問題を持つ可能性のあるテストを洗い出して修正
-   - 特に `test_run_all_preserves_invalid_external_state_without_failing_summary_reload` は `wait_for_session_step` を使うため、今回の修正で解消されるはず
-   - 他にも `current_step` を step 名として比較している箇所がないか `grep` で確認
-2. ローカルで `cargo test --bin cruise` または `cargo test` を実行し、run_cmd の該当テストがすべて pass することを確認
-3. 修正を push する
-   - `git push origin cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
-4. GitHub Actions の再実行結果を確認
-   - `gh pr checks 459` で `test (macos-latest)` / `test (ubuntu-latest)` / `test-tauri` が pass するか確認
-   - まだ失敗している場合は `gh run view <run-id> --log-failed` で詳細を確認して追加修正
+
+1. **Tab integration into App.tsx**
+   - Add `"dag"` to `ActiveTab` (`ui/src/App.tsx:465`)
+   - Derive `tabDagId` / `panelDagId` from `useId` within `WorkflowRunner`
+   - Place the tab button (`role="tab"`) between Info and Plan
+     - `id={tabDagId}`, `aria-selected={activeTab === "dag"}`, `aria-controls={panelDagId}`, `onClick={() => onActiveTabChange("dag")}`
+   - Add `activeTab === "dag" && <WorkflowDagPanel sessionId={session.id} panelId={panelDagId} tabId={tabDagId} />` to the panel switch
+   - Add the `WorkflowDagPanel` import at the top of `ui/src/App.tsx`
+
+2. **Add / fix tests**
+   - Create `ui/src/components/WorkflowDagPanel.test.tsx`
+     - loading display
+     - `getSessionDag` call
+     - Mermaid SVG rendering (mock `mermaid`)
+     - error display
+     - re-fetch on session switch
+     - verify `buildMermaidSource` output (node id sanitize, terminal edge, current step highlight)
+   - `ui/src/__tests__/WorkflowRunner.test.tsx`
+     - Add `getSessionDag` to the mock
+     - DAG tab is displayed
+     - `WorkflowDagPanel` mounts and `getSessionDag` is called when the DAG tab is selected
+   - Fix existing assertions in `ui/src/test/App.*.test.tsx` that assume tab count or order
+
+3. **Verification / build**
+   - `cargo test -p cruise-gui` (or `cargo test --package cruise-gui`)
+   - `pnpm --dir ui test`
+   - `pnpm --dir ui lint`
+   - `pnpm --dir ui build`
+   - `cargo clippy -p cruise-gui --all-targets`
+
+4. **Manual verification and PR creation**
+   - Launch the GUI with `pnpm --dir ui dev` / `cargo tauri dev`
+   - Open the DAG tab for an existing session and confirm rendering
+   - Confirm edge rendering for a branching workflow
+   - Take a screenshot and attach it to the PR body
+   - Run `/review-all` before creating the PR
 
 ## Next-Agent Starting Position
-- ブランチ: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
-- コミット `209497c` までの変更はステージ済み・コミット済み
-- まず `cargo test --bin cruise` を実行して、まだ失敗している `run_cmd::tests::*` がないか確認
-- 失敗が残っている場合は、今回と同様に `current_step` が node id になっている点を疑い、テスト側を修正
-- 全テスト pass 後、`git push` して `gh pr checks 459` で CI 結果を確認
+
+- Branch: `cruise/20260629065146988_fb6aecb7b2894d64b99b11d310e16eb5-GUI-DAG-PR-DAG`
+- Changes up to commit `b27aa59` are committed
+- Next, start with expanding `ActiveTab` in `ui/src/App.tsx` and integrating the DAG tab button / panel
+- After integration, add and run tests, then pass lint / build / clippy
+- Note the open items in the plan `/Users/takumi/.local/share/cruise/sessions/20260629065146988_fb6aecb7b2894d64b99b11d310e16eb5/plan.md` (whether step-level display is sufficient, tab placement)

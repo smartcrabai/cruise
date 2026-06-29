@@ -196,3 +196,37 @@ export interface NewSessionDraftPersisted {
   skippedSteps: string[];
   updatedAt?: string;
 }
+// --- DAG visualization --------------------------------------------------------
+
+export interface DagDto {
+  startStep: string;
+  steps: DagStepDto[];
+  edges: DagEdgeDto[];
+  currentStep: string | null;
+}
+
+export interface DagStepDto {
+  name: string;
+  kind: "prompt" | "command" | "option" | "unknown";
+  isTerminal: boolean;
+}
+
+export type DagEdgeReason =
+  | "sequential"
+  | "next"
+  | "ifFileChanged"
+  | "ifNoFileChangesRetry"
+  | "ifNoFileChangesFail"
+  | "ifFail"
+  | "ifFailRetry"
+  | "optionChoice"
+  | "groupRetry"
+  | "groupRetryExhausted";
+
+export interface DagEdgeDto {
+  from: string;
+  to: string | null;
+  reason: DagEdgeReason;
+  selector: string | null;
+}
+
