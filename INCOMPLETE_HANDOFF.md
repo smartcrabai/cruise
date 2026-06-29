@@ -1,43 +1,94 @@
-# Incomplete Handoff: PR #459 CI Fix
+# Incomplete Handoff: GUI 版 DAG 描画機能
 
 ## Status
-PR #459 の失敗していた CI (`test (macos-latest)` / `test (ubuntu-latest)`) の原因を特定し、`src/run_cmd.rs` のテストヘルパーを修正しました。修正はコミット済みですが、まだ push していません。残りの失敗テスト（同じ根因の `test_run_all_preserves_invalid_external_state_without_failing_summary_reload` など）の修正と、全テストのローカル検証、GitHub Actions 再実行が必要です。
+`/write-test-first` により計画書に基づくテストファースト実装を開始。バックエンドの DTO と `get_session_dag` コマンドの骨格、並びに Tauri ハンドラ登録まで完了。フロントエンドの型・コマンドラッパー・コンポーネント・タブ統合、および各種テストの追加は未着手。
 
 ## Done (this session)
-- `gh pr checks 459` で `test (macos-latest)` / `test (ubuntu-latest)` が失敗していることを確認
-- `gh run view 28331763772 --log-failed` で詳細ログを確認
-  - 失敗は `run_cmd::tests::*` の7つのテストで、すべて `src/run_cmd.rs:1133` で `timed out waiting for session ... to reach step first` となっていた
-- 根本原因を特定
-  - DAG 実行移行後、`SessionState.current_step` には step 名ではなく node id（例: `n0000`）が保存されるようになった
-  - `wait_for_session_step` が step 名 "first" を期待していたため、一致せずタイムアウトしていた
-  - 同様に `test_run_current_branch_conflict_overwrite_continues_and_logs_choice` も最終的な `current_step` を step 名 "second" と比較していた
-- `src/run_cmd.rs` を修正
-  - `node_id_for_step` ヘルパーを追加し、セッション設定から DAG をビルドして step 名を node id に解決
-  - `wait_for_session_step` を node id ベースで待機するように変更
-  - `test_run_current_branch_conflict_overwrite_continues_and_logs_choice` のアサーションを node id ベースに変更
-- ローカルで一部テストを検証
-  - `cargo test --bin cruise run_cmd::tests::test_run_all_picks_up_session_added_while_first_session_is_running` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_overwrite_continues_and_logs_choice` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_abort_preserves_external_state` → pass
-  - `cargo test --bin cruise run_cmd::tests::test_run_current_branch_conflict_noninteractive_returns_error_without_prompt` → pass
-- 修正をコミット
-  - commit: `209497c`
-  - message: `fix(run_cmd): update tests for DAG node ids in current_step`
+- 計画書 `/Users/takumi/.local/share/cruise/sessions/20260629065146988_fb6aecb7b2894d64b99b11d310e16eb5/plan.md` を読み込み、実装方針を確認
+- 関連コードを調査
+  - `src/dag.rs` (`ExecutionDag`, `DagNode`, `NodeSuccessor`, `TransitionReason`)
+  - `src/workflow.rs` (`CompiledWorkflow`, `compile`)
+  - `src-tauri/src/commands.rs` (`get_session_plan`, `SessionDto`, テストモジュール)
+  - `src-tauri/src/lib.rs` (`invoke_handler`)
+  - `ui/src/App.tsx` (`ActiveTab`, `WorkflowRunner`, タブボタン/パネル)
+  - `ui/src/types.ts`, `ui/src/lib/commands.ts`, `ui/src/components/WorkflowPlanPanel.tsx` およびテスト類
+- `src-tauri/src/commands.rs` に DAG 可視化用 DTO を追加
+  - `DagDto`, `DagStepDto`, `DagEdgeDto`
+- `src-tauri/src/commands.rs` に集約関数 `build_dag_dto` のスタブを追加
+- `src-tauri/src/commands.rs` に `get_session_dag` コマンドを追加（`load_config` → `compile` → `build_dag` → `build_dag_dto` の流れ）
+- `src-tauri/src/lib.rs` の `invoke_handler!` に `commands::get_session_dag` を登録
+- 作業をコミット
+  - commit: `7111c6e`
+  - message: `wip(dag): add backend DTOs, stub get_session_dag command, register handler`
 
 ## Remaining
-1. 同じファイル内の同様の問題を持つ可能性のあるテストを洗い出して修正
-   - 特に `test_run_all_preserves_invalid_external_state_without_failing_summary_reload` は `wait_for_session_step` を使うため、今回の修正で解消されるはず
-   - 他にも `current_step` を step 名として比較している箇所がないか `grep` で確認
-2. ローカルで `cargo test --bin cruise` または `cargo test` を実行し、run_cmd の該当テストがすべて pass することを確認
-3. 修正を push する
-   - `git push origin cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
-4. GitHub Actions の再実行結果を確認
-   - `gh pr checks 459` で `test (macos-latest)` / `test (ubuntu-latest)` / `test-tauri` が pass するか確認
-   - まだ失敗している場合は `gh run view <run-id> --log-failed` で詳細を確認して追加修正
+1. **バックエンド集約ロジックの実装**
+   - `src-tauri/src/commands.rs` の `build_dag_dto` スタブを実装
+     - `ExecutionDag.nodes` を step 名で集約
+     - 同一 `(from_step, to_step, reason, selector)` のエッジを dedupe
+     - 各 step の kind を `CompiledWorkflow.steps` から判定（prompt / command / option）
+     - `is_terminal` は `target == None` のエッジが存在するかで判定
+     - `current_step` は `current_step_is_node_id` を考慮して step 名に解決
+   - `src-tauri/src/commands.rs` のテストモジュールに `build_dag_dto` のテストを追加
+     - 線形 workflow
+     - option 分岐
+     - `if.file-changed` 分岐
+     - `if.fail` retry
+     - group retry
+     - `current_step` の node id / step 名解決
+
+2. **フロントエンド型と API ラッパー**
+   - `ui/src/types.ts` に `DagDto`, `DagStepDto`, `DagEdgeDto` を追加
+   - `ui/src/lib/commands.ts` に `getSessionDag(sessionId)` を追加
+
+3. **描画コンポーネントの実装**
+   - `ui/package.json` に `mermaid` 依存を追加
+   - `ui/src/components/WorkflowDagPanel.tsx` を新規作成
+     - `getSessionDag` を dynamic import せず通常 import で呼び出し
+     - `mermaid` は dynamic import (`await import("mermaid")`)
+     - `buildMermaidSource` ヘルパーで Mermaid 構文を生成
+       - step 名を Mermaid ID に sanitize（連番 prefix + 非英数字置換）
+       - 終端エッジは共通 `end[/END/]` ノードへ
+       - `currentStep` は青色スタイルでハイライト
+     - ローディング / エラー / SVG 表示の状態管理
+     - セッション切替時の古いレンダリング破棄（`renderId` カウンター）
+
+4. **App.tsx へのタブ統合**
+   - `ActiveTab` に `"dag"` を追加
+   - タブボタンとパネルを Info と Plan の間に配置
+   - `WorkflowDagPanel` をレンダリング
+
+5. **テストの追加**
+   - `ui/src/components/WorkflowDagPanel.test.tsx`
+     - loading 表示
+     - `getSessionDag` 呼び出し
+     - Mermaid SVG レンダリング
+     - エラー表示
+     - セッション切替時の再取得
+     - `buildMermaidSource` の出力検証（node id sanitize, 終端エッジ, current step ハイライト）
+   - `ui/src/__tests__/WorkflowRunner.test.tsx`
+     - mock に `getSessionDag` を追加
+     - DAG タブが表示されること
+     - DAG タブ選択時に `WorkflowDagPanel` がマウントされ `getSessionDag` が呼ばれること
+   - 必要に応じて `App.test.tsx` 系のタブ数アサーションを修正
+
+6. **検証・ビルド**
+   - `cargo test -p cruise-gui`（または `cargo test --package cruise-gui`）
+   - `pnpm --dir ui test`
+   - `pnpm --dir ui lint`
+   - `pnpm --dir ui build`
+   - `cargo clippy -p cruise-gui --all-targets`
+
+7. **手動動作確認と PR 作成**
+   - `pnpm --dir ui dev` / `cargo tauri dev` で GUI 起動
+   - 既存セッションの DAG タブを開いて描画確認
+   - 分岐 workflow でのエッジ描画確認
+   - スクリーンショット撮影して PR body に添付
+   - PR 作成前に `/review-all` を実行
 
 ## Next-Agent Starting Position
-- ブランチ: `cruise/20260628172537949_58fda4af44a44f249125b6fec6f3e4ff-DAG-execute-steps-Requirements`
-- コミット `209497c` までの変更はステージ済み・コミット済み
-- まず `cargo test --bin cruise` を実行して、まだ失敗している `run_cmd::tests::*` がないか確認
-- 失敗が残っている場合は、今回と同様に `current_step` が node id になっている点を疑い、テスト側を修正
-- 全テスト pass 後、`git push` して `gh pr checks 459` で CI 結果を確認
+- ブランチ: `cruise/20260629065146988_fb6aecb7b2894d64b99b11d310e16eb5-GUI-DAG-PR-DAG`
+- コミット `7111c6e` までの変更はコミット済み
+- まず `src-tauri/src/commands.rs` の `build_dag_dto` スタブを実装し、テストを追加・実行
+- 次にフロントエンドの型/API/コンポーネント/App.tsx 統合を順に実装
+- 各ステップで計画書を参照し、計画書の未確定事項（step 単位表示で良いか、タブ配置位置）に留意
