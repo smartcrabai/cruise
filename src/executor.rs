@@ -46,7 +46,11 @@ pub struct PromptRun<'a> {
     pub model_or_mode: Option<&'a str>,
     /// Maximum rate-limit retries.
     pub max_retries: usize,
-    /// Environment variables for the spawned process (command mode).
+    /// Environment variables applied to the prompt run.
+    ///
+    /// Command mode passes these to the spawned process. SDK mode forwards them
+    /// to the selected seher backend; the in-process pi backend applies them via
+    /// process environment mutation inside seher.
     pub env: &'a HashMap<String, String>,
     /// Callback invoked with a human-readable message on each rate-limit retry.
     pub on_retry: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -281,6 +285,7 @@ fn spawn_agent_stream(
                 cwd: cwd_string,
                 resume_session_id: req.resume.clone(),
                 tools: req.tools.clone(),
+                env: req.env.clone(),
                 ..Default::default()
             };
             seher::claude_agent::stream_agent(
@@ -298,6 +303,11 @@ fn spawn_agent_stream(
             headless_cfg.model = Some(resolved.model_id.clone());
             headless_cfg.cwd = cwd_string;
             headless_cfg.resume_session_id.clone_from(&req.resume);
+            headless_cfg.env = req
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
             let runner = seher::claude_headless::ClaudeHeadlessRunner::new(headless_cfg);
             seher::claude_headless::stream_headless(
                 runner,
@@ -316,6 +326,7 @@ fn spawn_agent_stream(
                 None,
                 None,
                 cwd_string,
+                req.env.clone(),
             );
             seher::claude_terminal::stream_via_thread(
                 sdk,
@@ -338,6 +349,11 @@ fn spawn_agent_stream(
                 thinking,
                 system_prompt: None,
                 working_directory: req.working_dir.map(Path::to_path_buf),
+                env: req
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
                 tools: req.tools.clone(),
             };
             PiRunner::new(opts).stream(req.prompt.to_string(), req.resume.clone())

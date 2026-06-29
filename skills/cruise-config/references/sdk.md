@@ -35,7 +35,7 @@ Before each SDK prompt run, seher resolves a non-rate-limited provider for the m
 
 ## Differences from command mode
 
-- **`env` does not apply to prompt steps**: there is no spawned process, so top-level and per-step `env:` values are not passed to SDK prompt runs. (`command` steps still spawn a shell and receive `env` as usual.)
+- **`env` applies to prompt steps**: top-level and per-step `env:` values are forwarded to the selected seher SDK backend. Backends that spawn Claude pass them to the child process; the in-process pi backend applies them through process environment mutation inside seher.
 - **`{model}` placeholder is irrelevant**: it only exists for the `command` array.
 - **Interactive planning**: during `cruise plan`, the SDK agent gets custom planning tools — `ask_user` (ask the user a clarifying question), `submit_plan` (write the plan markdown), and `update_plan` (find/replace a section of the existing plan). In non-interactive runs (no TTY), only `submit_plan` is available and the agent proceeds on assumptions. The interview-style `cruise plan --grill` mode is built on `ask_user` and therefore only works with an `sdk:` config (cruise errors out on a command-backend config).
 - **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing.
