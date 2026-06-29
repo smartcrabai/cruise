@@ -1061,7 +1061,7 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
-            max_retries: 10,
+            max_retries: DEFAULT_MAX_RETRIES,
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
