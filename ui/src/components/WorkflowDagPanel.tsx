@@ -2,6 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import type { DagDto, DagEdgeDto } from "../types";
 import { getSessionDag } from "../lib/commands";
 
+// Initialize Mermaid once at module load time; calling initialize() on every
+// render would reset global config and could break concurrent renders.
+let mermaidInitialized = false;
+
+type DagPanelState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "svg"; svg: string }
+  | { kind: "empty" };
+
 interface WorkflowDagPanelProps {
   sessionId: string;
   panelId: string;
@@ -15,61 +25,51 @@ export function WorkflowDagPanel({
   tabId,
   className = "",
 }: WorkflowDagPanelProps) {
-  const [dag, setDag] = useState<DagDto | null>(null);
-  const [svg, setSvg] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState<DagPanelState>({ kind: "loading" });
   const renderIdRef = useRef(0);
 
   useEffect(() => {
     let active = true;
-    setDag(null);
-    setSvg(null);
-    setError(null);
-    setLoading(true);
+    const myRenderId = ++renderIdRef.current;
+    setState({ kind: "loading" });
 
-    void getSessionDag(sessionId)
-      .then((data) => {
-        if (active) setDag(data);
-      })
-      .catch((e) => {
-        if (active) setError(String(e));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void (async () => {
+      try {
+        const data = await getSessionDag(sessionId);
+        if (!active) return;
+
+        if (data.steps.length === 0) {
+          setState({ kind: "empty" });
+          return;
+        }
+
+        const mermaid = (await import("mermaid")).default;
+        if (!mermaidInitialized) {
+          mermaid.initialize({ startOnLoad: false, theme: "default" });
+          mermaidInitialized = true;
+        }
+        const source = buildMermaidSource(data);
+        const { svg: renderedSvg } = await mermaid.render(
+          `dag-${sessionId.replace(/[^a-zA-Z0-9]/g, "-")}-${myRenderId}`,
+          source,
+        );
+        if (active && myRenderId === renderIdRef.current) {
+          setState({ kind: "svg", svg: renderedSvg });
+        }
+      } catch (e) {
+        if (active && myRenderId === renderIdRef.current) {
+          setState({
+            kind: "error",
+            message: `Failed to render DAG: ${String(e)}`,
+          });
+        }
+      }
+    })();
 
     return () => {
       active = false;
     };
   }, [sessionId]);
-
-  useEffect(() => {
-    if (!dag) return;
-
-    const myRenderId = ++renderIdRef.current;
-
-    void (async () => {
-      try {
-        const mermaid = (await import("mermaid")).default;
-        mermaid.initialize({ startOnLoad: false, theme: "default" });
-        const source = buildMermaidSource(dag);
-        const { svg: renderedSvg } = await mermaid.render(
-          `dag-${sessionId.replace(/[^a-zA-Z0-9]/g, "-")}-${myRenderId}`,
-          source,
-        );
-        if (myRenderId === renderIdRef.current) {
-          setSvg(renderedSvg);
-          setError(null);
-        }
-      } catch (e) {
-        if (myRenderId === renderIdRef.current) {
-          setError(`Failed to render DAG: ${String(e)}`);
-          setSvg(null);
-        }
-      }
-    })();
-  }, [dag, sessionId]);
 
   return (
     <div
@@ -78,24 +78,26 @@ export function WorkflowDagPanel({
       aria-labelledby={tabId}
       className={`h-full overflow-auto ${className}`}
     >
-      {error && (
-        <p className="p-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+      {state.kind === "error" && (
+        <p className="p-4 text-sm text-red-600 dark:text-red-400">
+          {state.message}
+        </p>
       )}
-      {loading && !svg && (
+      {state.kind === "loading" && (
         <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
           Loading DAG…
         </p>
       )}
-      {!loading && !error && !svg && !dag && (
+      {state.kind === "empty" && (
         <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
           No DAG available.
         </p>
       )}
-      {svg && (
+      {state.kind === "svg" && (
         <div
           className="dag-svg p-4"
           // eslint-disable-next-line react/no-danger
-          dangerouslySetInnerHTML={{ __html: svg }}
+          dangerouslySetInnerHTML={{ __html: state.svg }}
         />
       )}
     </div>
@@ -112,7 +114,10 @@ function buildMermaidSource(dag: DagDto): string {
   });
 
   const endId = "end_terminal";
-  lines.push(`  ${endId}[/END/]`);
+  const hasTerminalEdge = dag.edges.some((e) => e.to === null);
+  if (hasTerminalEdge) {
+    lines.push(`  ${endId}[/END/]`);
+  }
 
   for (const step of dag.steps) {
     const id = stepIdMap.get(step.name);
@@ -135,6 +140,14 @@ function buildMermaidSource(dag: DagDto): string {
     }
   }
 
+  // startStep style first so currentStep style takes precedence when they coincide.
+  const startId = stepIdMap.get(dag.startStep);
+  if (startId) {
+    lines.push(
+      `  style ${startId} fill:#10b981,color:#fff,stroke:#059669,stroke-width:2px`,
+    );
+  }
+
   if (dag.currentStep) {
     const currentId = stepIdMap.get(dag.currentStep);
     if (currentId) {
@@ -142,13 +155,6 @@ function buildMermaidSource(dag: DagDto): string {
         `  style ${currentId} fill:#3b82f6,color:#fff,stroke:#2563eb,stroke-width:2px`,
       );
     }
-  }
-
-  const startId = stepIdMap.get(dag.startStep);
-  if (startId) {
-    lines.push(
-      `  style ${startId} fill:#10b981,color:#fff,stroke:#059669,stroke-width:2px`,
-    );
   }
 
   return lines.join("\n");
@@ -159,7 +165,12 @@ function sanitizeNodeId(name: string): string {
 }
 
 function escapeMermaidLabel(label: string): string {
-  return label.replace(/"/g, "#quot;");
+  return label
+    .replace(/&/g, "#amp;")
+    .replace(/"/g, "#quot;")
+    .replace(/</g, "#lt;")
+    .replace(/>/g, "#gt;")
+    .replace(/\|/g, "#124;");
 }
 
 function edgeLabel(edge: DagEdgeDto): string | null {
@@ -168,22 +179,20 @@ function edgeLabel(edge: DagEdgeDto): string | null {
     case "next":
       return null;
     case "ifFileChanged":
-      return edge.to ? `if-file-changed: ${edge.to}` : "if-file-changed";
+      return edge.selector ? `if-file-changed: ${edge.selector}` : "if-file-changed";
     case "ifNoFileChangesRetry":
       return "retry (no file changes)";
     case "ifNoFileChangesFail":
       return "fail (no file changes)";
     case "ifFail":
-      return edge.to ? `if-fail: ${edge.to}` : "if-fail";
+      return edge.selector ? `if-fail: ${edge.selector}` : "if-fail";
     case "ifFailRetry":
       return "retry (on fail)";
     case "optionChoice":
       return edge.selector ? `opt: ${edge.selector}` : "opt";
     case "groupRetry":
-      return edge.to ? `group-retry: ${edge.to}` : "group-retry";
+      return edge.selector ? `group-retry: ${edge.selector}` : "group-retry";
     case "groupRetryExhausted":
       return "group-retry exhausted";
-    default:
-      return edge.reason;
   }
 }

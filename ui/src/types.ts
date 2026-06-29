@@ -207,14 +207,26 @@ export interface DagDto {
 
 export interface DagStepDto {
   name: string;
-  kind: "prompt" | "command" | "option";
+  kind: "prompt" | "command" | "option" | "unknown";
   isTerminal: boolean;
 }
+
+export type DagEdgeReason =
+  | "sequential"
+  | "next"
+  | "ifFileChanged"
+  | "ifNoFileChangesRetry"
+  | "ifNoFileChangesFail"
+  | "ifFail"
+  | "ifFailRetry"
+  | "optionChoice"
+  | "groupRetry"
+  | "groupRetryExhausted";
 
 export interface DagEdgeDto {
   from: string;
   to: string | null;
-  reason: string;
+  reason: DagEdgeReason;
   selector: string | null;
 }
 

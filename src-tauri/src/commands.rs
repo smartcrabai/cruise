@@ -147,27 +147,34 @@ pub struct DagEdgeDto {
 ///
 /// Aggregates loop-expanded DAG nodes into step-level nodes and edges,
 /// deduplicating edges that share the same `(from_step, to_step, reason, selector)`.
-pub fn build_dag_dto(
+fn build_dag_dto(
     compiled: &cruise::workflow::CompiledWorkflow,
     dag: &cruise::dag::ExecutionDag,
     current_step: Option<&str>,
     current_step_is_node_id: bool,
-) -> DagDto {
+) -> Result<DagDto, String> {
     let start_step = dag
         .step_name_for_node(&dag.start)
-        .unwrap_or("")
+        .ok_or_else(|| {
+            format!(
+                "start node '{}' does not map to any workflow step",
+                dag.start
+            )
+        })?
         .to_string();
 
     // Resolve current_step to a step name. When persisted as a node id,
     // look it up in the DAG; otherwise assume it is already a step name.
-    let current_step = current_step.map(|step| {
-        if current_step_is_node_id {
-            dag.step_name_for_node(step)
-                .map(std::string::ToString::to_string)
-        } else {
-            Some(step.to_string())
-        }
-    }).flatten();
+    let current_step = current_step
+        .map(|step| {
+            if current_step_is_node_id {
+                dag.step_name_for_node(step)
+                    .map(std::string::ToString::to_string)
+            } else {
+                Some(step.to_string())
+            }
+        })
+        .flatten();
 
     // Collect every step name that actually appears in the execution DAG.
     let dag_step_names: std::collections::HashSet<String> = dag
@@ -207,7 +214,12 @@ pub fn build_dag_dto(
                 .and_then(|id| dag.step_name_for_node(id))
                 .map(std::string::ToString::to_string);
             let (reason, selector) = transition_reason(&succ.reason);
-            let key = (node.step_name.clone(), to.clone(), reason.clone(), selector.clone());
+            let key = (
+                node.step_name.clone(),
+                to.clone(),
+                reason.clone(),
+                selector.clone(),
+            );
             if seen_edges.insert(key) {
                 edges.push(DagEdgeDto {
                     from: node.step_name.clone(),
@@ -219,12 +231,12 @@ pub fn build_dag_dto(
         }
     }
 
-    DagDto {
+    Ok(DagDto {
         start_step,
         steps,
         edges,
         current_step,
-    }
+    })
 }
 
 /// Return a UI-facing step kind label for `config`.
@@ -246,20 +258,20 @@ fn transition_reason(reason: &cruise::dag::TransitionReason) -> (String, Option<
     match reason {
         TransitionReason::Sequential => ("sequential".to_string(), None),
         TransitionReason::Next => ("next".to_string(), None),
-        TransitionReason::IfFileChanged { .. } => ("ifFileChanged".to_string(), None),
+        TransitionReason::IfFileChanged { target } => {
+            ("ifFileChanged".to_string(), Some(target.clone()))
+        }
         TransitionReason::IfNoFileChangesRetry => ("ifNoFileChangesRetry".to_string(), None),
         TransitionReason::IfNoFileChangesFail => ("ifNoFileChangesFail".to_string(), None),
-        TransitionReason::IfFailGoto { .. } => ("ifFail".to_string(), None),
+        TransitionReason::IfFailGoto { target } => ("ifFail".to_string(), Some(target.clone())),
         TransitionReason::IfFailRetry => ("ifFailRetry".to_string(), None),
         TransitionReason::OptionChoice { selector } => {
             ("optionChoice".to_string(), Some(selector.clone()))
         }
-        TransitionReason::GroupRetry { .. } => ("groupRetry".to_string(), None),
+        TransitionReason::GroupRetry { target } => ("groupRetry".to_string(), Some(target.clone())),
         TransitionReason::GroupRetryExhausted => ("groupRetryExhausted".to_string(), None),
     }
 }
-
-
 
 /// A directory entry returned by `list_directory`.
 #[derive(Debug, Serialize)]
@@ -600,15 +612,14 @@ pub fn get_session_dag(session_id: String) -> std::result::Result<DagDto, String
     let session = manager.load(&session_id).map_err(|e| e.to_string())?;
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
-    let dag = cruise::dag::build_dag(&compiled, 10).map_err(|e| e.to_string())?;
-    Ok(build_dag_dto(
+    let dag = cruise::dag::build_dag(&compiled, DEFAULT_MAX_RETRIES).map_err(|e| e.to_string())?;
+    build_dag_dto(
         &compiled,
         &dag,
         session.current_step.as_deref(),
         session.current_step_is_node_id,
-    ))
+    )
 }
-
 
 // --- Write commands ------------------------------------------------------------
 
@@ -2188,6 +2199,9 @@ async fn execute_single_session(
                 if let Ok(mgr) = new_session_manager() {
                     if let Ok(mut s) = mgr.load(&sid_for_pr) {
                         s.current_step = Some(step.to_string());
+                        // on_node_start sets this to true before us; reset it so
+                        // get_session_dag doesn't try to look up a step name as a node ID.
+                        s.current_step_is_node_id = false;
                         let _ = mgr.save(&s);
                     }
                 }
