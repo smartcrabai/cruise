@@ -5,6 +5,7 @@ ARG TARGETARCH=amd64
 ARG GH_VERSION=2.72.0
 
 USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git curl && \
     arch=$(dpkg --print-architecture) && \
