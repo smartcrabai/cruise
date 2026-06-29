@@ -112,6 +112,69 @@ impl From<cruise::session::SessionState> for SessionDto {
     }
 }
 
+/// Serializable DAG representation sent to the frontend for workflow visualization.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DagDto {
+    pub start_step: String,
+    pub steps: Vec<DagStepDto>,
+    pub edges: Vec<DagEdgeDto>,
+    pub current_step: Option<String>,
+}
+
+/// A single step node in the DAG visualization.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DagStepDto {
+    pub name: String,
+    /// "prompt", "command", or "option".
+    pub kind: String,
+    /// True when this step has at least one terminal transition.
+    pub is_terminal: bool,
+}
+
+/// A single edge between steps in the DAG visualization.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct DagEdgeDto {
+    pub from: String,
+    pub to: Option<String>,
+    pub reason: String,
+    pub selector: Option<String>,
+}
+
+/// Build a [`DagDto`] from a compiled workflow and execution DAG.
+///
+/// Aggregates loop-expanded DAG nodes into step-level nodes and edges,
+/// deduplicating edges that share the same `(from_step, to_step, reason, selector)`.
+pub fn build_dag_dto(
+    compiled: &cruise::workflow::CompiledWorkflow,
+    dag: &cruise::dag::ExecutionDag,
+    current_step: Option<&str>,
+    current_step_is_node_id: bool,
+) -> DagDto {
+    let start_step = dag
+        .step_name_for_node(&dag.start)
+        .unwrap_or("")
+        .to_string();
+    let mut steps = Vec::new();
+    let mut edges = Vec::new();
+    let current_step = current_step.map(std::string::ToString::to_string);
+
+    // Stub implementation: return empty DAG for now.
+    let _ = compiled;
+    let _ = current_step_is_node_id;
+
+    DagDto {
+        start_step,
+        steps,
+        edges,
+        current_step,
+    }
+}
+
+
+
 /// A directory entry returned by `list_directory`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -443,6 +506,23 @@ pub fn get_session_plan(session_id: String) -> std::result::Result<String, Strin
     std::fs::read_to_string(&plan_path)
         .map_err(|e| format!("failed to read plan {}: {}", plan_path.display(), e))
 }
+
+/// Return the step-level DAG for a session's workflow.
+#[tauri::command]
+pub fn get_session_dag(session_id: String) -> std::result::Result<DagDto, String> {
+    let manager = new_session_manager()?;
+    let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
+    let dag = cruise::dag::build_dag(&compiled, 10).map_err(|e| e.to_string())?;
+    Ok(build_dag_dto(
+        &compiled,
+        &dag,
+        session.current_step.as_deref(),
+        session.current_step_is_node_id,
+    ))
+}
+
 
 // --- Write commands ------------------------------------------------------------
 

@@ -21,6 +21,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,
             commands::get_session,
+            commands::get_session_dag,
+            commands::get_session_plan,
             commands::get_session_plan,
             commands::get_session_log,
             commands::run_session,
