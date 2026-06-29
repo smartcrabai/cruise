@@ -369,6 +369,60 @@ impl WorkflowConfig {
             description: None,
         }
     }
+
+    /// Apply environment variable overrides to scalar config fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a boolean env var has a value other than
+    /// `true`, `false`, `1`, or `0`.
+    pub fn apply_env_overrides(&mut self) -> crate::error::Result<()> {
+        if let Some(v) = read_env_string("CRUISE_MODEL") {
+            self.model = Some(v);
+        }
+        if let Some(v) = read_env_string("CRUISE_PLAN_MODEL") {
+            self.plan_model = Some(v);
+        }
+        if let Some(v) = read_env_string("CRUISE_SDK") {
+            self.sdk = Some(v);
+            self.command = vec![]; // sdk and command are mutually exclusive; validate_sdk enforces this
+        }
+        if let Some(v) = read_env_string("CRUISE_LANGUAGE_PR") {
+            self.languages
+                .get_or_insert_with(LanguagesConfig::default)
+                .pr = Some(v);
+        }
+        if let Some(v) = read_env_string("CRUISE_LANGUAGE_PLAN") {
+            self.languages
+                .get_or_insert_with(LanguagesConfig::default)
+                .plan = Some(v);
+        }
+        if let Some(v) = read_env_bool("CRUISE_CLEANUP_AFTER_PR")? {
+            self.cleanup_after_pr = v;
+        }
+        if let Some(v) = read_env_bool("CRUISE_INTERACTIVE_PLANNING")? {
+            self.interactive_planning = v;
+        }
+        Ok(())
+    }
+}
+
+fn read_env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn read_env_bool(name: &str) -> crate::error::Result<Option<bool>> {
+    match std::env::var(name).ok().as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("true" | "1") => Ok(Some(true)),
+        Some("false" | "0") => Ok(Some(false)),
+        Some(other) => Err(crate::error::CruiseError::Other(format!(
+            "invalid value for {name}: '{other}' (expected true/false/1/0)"
+        ))),
+    }
 }
 
 /// Validate that `fail-if-no-file-changes` is not used in `after-pr` steps.
@@ -678,7 +732,7 @@ fn validate_group_inner_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::err_string;
+    use crate::test_support::{EnvGuard, err_string, lock_process};
 
     const SAMPLE_YAML: &str = r#"
 command:
@@ -2774,6 +2828,221 @@ steps:
         assert!(
             validate_config(&config).is_err(),
             "validate_config should reject sdk+command"
+        );
+    }
+
+    // --- apply_env_overrides tests ---
+
+    const MINIMAL_YAML: &str = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+
+    fn clear_all_override_envs() -> Vec<EnvGuard> {
+        vec![
+            EnvGuard::remove("CRUISE_MODEL"),
+            EnvGuard::remove("CRUISE_PLAN_MODEL"),
+            EnvGuard::remove("CRUISE_SDK"),
+            EnvGuard::remove("CRUISE_LANGUAGE_PR"),
+            EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
+            EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
+        ]
+    }
+
+    #[test]
+    fn test_apply_env_overrides_sets_model() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _model = EnvGuard::set("CRUISE_MODEL", "opus");
+
+        // Given: config has no model set
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.model, None);
+
+        // When: env overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: model is overridden to the env var value
+        assert_eq!(config.model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_apply_env_overrides_empty_value_is_ignored() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _model = EnvGuard::set("CRUISE_MODEL", "");
+
+        // Given: config has model=sonnet and CRUISE_MODEL is set to empty string
+        let yaml = r"
+command: [claude, -p]
+model: sonnet
+steps:
+  s1:
+    command: echo hi
+";
+        let mut config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.model, Some("sonnet".to_string()));
+
+        // When: env overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: model is unchanged (empty env var is treated as unset)
+        assert_eq!(config.model, Some("sonnet".to_string()));
+    }
+
+    #[test]
+    fn test_apply_env_overrides_language_pr_writes_to_languages_struct() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang_pr = EnvGuard::set("CRUISE_LANGUAGE_PR", "Japanese");
+
+        // Given: config has old-style pr_language=English in YAML
+        let yaml = r"
+command: [claude, -p]
+pr_language: English
+steps:
+  s1:
+    command: echo hi
+";
+        let mut config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.effective_pr_language(), "English");
+
+        // When: CRUISE_LANGUAGE_PR env override is applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: effective_pr_language returns env var value (new-style languages.pr beats old pr_language)
+        assert_eq!(config.effective_pr_language(), "Japanese");
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
+            Some("Japanese")
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_bool_parses_true_false_1_0() {
+        for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            let _lock = lock_process();
+            let _guards = clear_all_override_envs();
+            let _cleanup = EnvGuard::set("CRUISE_CLEANUP_AFTER_PR", value);
+
+            // Given: config with default cleanup_after_pr=false
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+            // When: bool env override is applied
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+
+            // Then: cleanup_after_pr reflects the parsed bool value
+            assert_eq!(
+                config.cleanup_after_pr, expected,
+                "CRUISE_CLEANUP_AFTER_PR={value:?} should parse to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_invalid_bool_returns_error() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _cleanup = EnvGuard::set("CRUISE_CLEANUP_AFTER_PR", "yes");
+
+        // Given: CRUISE_CLEANUP_AFTER_PR is set to an invalid value
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: env overrides are applied
+        let result = config.apply_env_overrides();
+
+        // Then: an error is returned naming the variable and the invalid value
+        assert!(result.is_err(), "invalid bool should return an error");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("CRUISE_CLEANUP_AFTER_PR"),
+            "error should name the env var, got: {msg}"
+        );
+        assert!(
+            msg.contains("yes"),
+            "error should include the invalid value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_no_env_vars_is_noop() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+
+        // Given: a fully configured workflow and no env overrides set
+        let yaml = r"
+command: [claude, -p]
+model: sonnet
+plan_model: opus
+cleanup_after_pr: true
+pr_language: Japanese
+steps:
+  s1:
+    command: echo hi
+";
+        let mut config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let original = config.clone();
+
+        // When: env overrides are applied with no env vars set
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: all fields remain unchanged
+        assert_eq!(config.model, original.model);
+        assert_eq!(config.plan_model, original.plan_model);
+        assert_eq!(config.sdk, original.sdk);
+        assert_eq!(config.cleanup_after_pr, original.cleanup_after_pr);
+        assert_eq!(config.interactive_planning, original.interactive_planning);
+        assert_eq!(
+            config.effective_pr_language(),
+            original.effective_pr_language()
+        );
+        assert_eq!(
+            config.effective_plan_language(),
+            original.effective_plan_language()
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_cruise_sdk_clears_command() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _sdk = EnvGuard::set("CRUISE_SDK", "seher");
+
+        // Given: config has command set (the default case when loaded from YAML)
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!config.command.is_empty(), "precondition: command is set");
+
+        // When: CRUISE_SDK env var is applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: sdk is set and command is cleared so validate_sdk passes
+        assert_eq!(config.sdk, Some("seher".to_string()));
+        assert!(
+            config.command.is_empty(),
+            "command must be cleared when sdk is set via env"
+        );
+        assert!(
+            validate_sdk(&config).is_ok(),
+            "validate_sdk must pass after env override"
         );
     }
 }
