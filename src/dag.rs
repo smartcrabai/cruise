@@ -17,7 +17,9 @@ pub type NodeId = String;
 ///
 /// This protects against pathological workflows where independent branches
 /// combine to produce an exponential number of counter states.
-const DAG_NODE_BUDGET: usize = 10_000;
+/// The fundamental mitigation is lowering `--max-retries`; this budget is a
+/// last-resort safety net.
+const DAG_NODE_BUDGET: usize = 100_000;
 
 /// An execution DAG is a precomputed, fully-resumable graph of every loop
 /// iteration a workflow can take given a `max_retries` budget.
