@@ -540,6 +540,8 @@ steps:
 
     #[test]
     fn test_resolve_workflow_call_ignores_callee_top_level_execution_settings() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
         // Given: the called workflow declares its own execution backend and environment.
         let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
         write_file(
