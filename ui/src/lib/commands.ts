@@ -3,6 +3,7 @@ import type {
   AppConfig,
   CleanupResult,
   ConfigEntry,
+  DagDto,
   DirEntry,
   NewSessionConfigDefaults,
   NewSessionDraftPersisted,
@@ -27,6 +28,11 @@ export function getSession(sessionId: string): Promise<Session> {
 /** Return the plan markdown for a session. */
 export function getSessionPlan(sessionId: string): Promise<string> {
   return invoke<string>("get_session_plan", { sessionId });
+}
+
+/** Return the step-level DAG for a session's workflow. */
+export function getSessionDag(sessionId: string): Promise<DagDto> {
+  return invoke<DagDto>("get_session_dag", { sessionId });
 }
 
 /**
