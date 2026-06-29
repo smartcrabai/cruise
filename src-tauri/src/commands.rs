@@ -157,19 +157,105 @@ pub fn build_dag_dto(
         .step_name_for_node(&dag.start)
         .unwrap_or("")
         .to_string();
-    let mut steps = Vec::new();
-    let mut edges = Vec::new();
-    let current_step = current_step.map(std::string::ToString::to_string);
 
-    // Stub implementation: return empty DAG for now.
-    let _ = compiled;
-    let _ = current_step_is_node_id;
+    // Resolve current_step to a step name. When persisted as a node id,
+    // look it up in the DAG; otherwise assume it is already a step name.
+    let current_step = current_step.map(|step| {
+        if current_step_is_node_id {
+            dag.step_name_for_node(step)
+                .map(std::string::ToString::to_string)
+        } else {
+            Some(step.to_string())
+        }
+    }).flatten();
+
+    // Collect every step name that actually appears in the execution DAG.
+    let dag_step_names: std::collections::HashSet<String> = dag
+        .nodes
+        .values()
+        .map(|node| node.step_name.clone())
+        .collect();
+
+    // Build step metadata in the workflow's declared order.
+    let mut steps = Vec::new();
+    for (name, config) in &compiled.steps {
+        if !dag_step_names.contains(name) {
+            continue;
+        }
+        let kind = step_kind(config);
+        let is_terminal = dag
+            .nodes
+            .values()
+            .filter(|node| node.step_name == *name)
+            .any(|node| node.successors.iter().any(|succ| succ.target.is_none()));
+        steps.push(DagStepDto {
+            name: name.clone(),
+            kind,
+            is_terminal,
+        });
+    }
+
+    // Aggregate edges at step granularity, deduplicating by
+    // (from_step, to_step_or_None, reason, selector).
+    let mut seen_edges = HashSet::new();
+    let mut edges = Vec::new();
+    for node in dag.nodes.values() {
+        for succ in &node.successors {
+            let to = succ
+                .target
+                .as_deref()
+                .and_then(|id| dag.step_name_for_node(id))
+                .map(std::string::ToString::to_string);
+            let (reason, selector) = transition_reason(&succ.reason);
+            let key = (node.step_name.clone(), to.clone(), reason.clone(), selector.clone());
+            if seen_edges.insert(key) {
+                edges.push(DagEdgeDto {
+                    from: node.step_name.clone(),
+                    to,
+                    reason,
+                    selector,
+                });
+            }
+        }
+    }
 
     DagDto {
         start_step,
         steps,
         edges,
         current_step,
+    }
+}
+
+/// Return a UI-facing step kind label for `config`.
+fn step_kind(config: &cruise::config::StepConfig) -> String {
+    if config.prompt.is_some() {
+        "prompt".to_string()
+    } else if config.option.is_some() {
+        "option".to_string()
+    } else if config.command.is_some() {
+        "command".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Flatten a [`cruise::dag::TransitionReason`] into a `(reason, selector)` pair.
+fn transition_reason(reason: &cruise::dag::TransitionReason) -> (String, Option<String>) {
+    use cruise::dag::TransitionReason;
+    match reason {
+        TransitionReason::Sequential => ("sequential".to_string(), None),
+        TransitionReason::Next => ("next".to_string(), None),
+        TransitionReason::IfFileChanged { .. } => ("ifFileChanged".to_string(), None),
+        TransitionReason::IfNoFileChangesRetry => ("ifNoFileChangesRetry".to_string(), None),
+        TransitionReason::IfNoFileChangesFail => ("ifNoFileChangesFail".to_string(), None),
+        TransitionReason::IfFailGoto { .. } => ("ifFail".to_string(), None),
+        TransitionReason::IfFailRetry => ("ifFailRetry".to_string(), None),
+        TransitionReason::OptionChoice { selector } => {
+            ("optionChoice".to_string(), Some(selector.clone()))
+        }
+        TransitionReason::GroupRetry { .. } => ("groupRetry".to_string(), None),
+        TransitionReason::GroupRetryExhausted => ("groupRetryExhausted".to_string(), None),
     }
 }
 

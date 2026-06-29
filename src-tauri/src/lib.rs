@@ -23,7 +23,6 @@ pub fn run() {
             commands::get_session,
             commands::get_session_dag,
             commands::get_session_plan,
-            commands::get_session_plan,
             commands::get_session_log,
             commands::run_session,
             commands::cancel_session,
