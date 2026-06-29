@@ -26,6 +26,7 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::{AppState, AskResponder};
 
+const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 
 // --- DTOs ---------------------------------------------------------------------
@@ -2063,7 +2064,7 @@ async fn execute_single_session(
 
             let ctx = ExecutionContext {
                 compiled: &compiled,
-                max_retries: 10,
+                max_retries: DEFAULT_MAX_RETRIES,
                 rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                 on_step_start: &on_step_start,
                 on_step_log: Some(&on_step_log),

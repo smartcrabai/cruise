@@ -132,7 +132,7 @@ The interactive menu changes with the session's phase:
 - **`cruise clean` skips sessions with no PR URL or an open PR.** A `Completed` session can lack a PR URL if `gh pr create` failed — check session logs or run `gh pr create` manually.
 - **`--all` runs sequentially** in the CLI regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**).
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
-- **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 10).
+- **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
 
 ## Common recipes

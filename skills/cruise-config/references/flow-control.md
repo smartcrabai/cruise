@@ -162,4 +162,4 @@ Cannot be used inside `after-pr` (validation error). Prefer the new `if.no-file-
 
 ## Loop protection
 
-Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 10), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `retry`.
+Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 3), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `retry`.

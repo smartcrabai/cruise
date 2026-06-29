@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-pub(crate) const DEFAULT_MAX_RETRIES: usize = 10;
+pub(crate) const DEFAULT_MAX_RETRIES: usize = 3;
 pub(crate) const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
 

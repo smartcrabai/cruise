@@ -150,7 +150,7 @@ Arguments:
 
 Options:
       --all                        Run all planned sessions sequentially
-      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
+      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
@@ -169,7 +169,7 @@ Arguments:
 
 Options:
   -c, --config <PATH>              Path to the workflow config file
-      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 10]
+      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
