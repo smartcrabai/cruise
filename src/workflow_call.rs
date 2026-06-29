@@ -30,10 +30,11 @@ pub struct GitHubWorkflowRef {
 pub fn resolve_workflow_calls_from_path(path: impl Into<PathBuf>) -> Result<WorkflowConfig> {
     let path = path.into();
     let mut stack = CallStack::default();
-    let config = load_local_workflow(&path, &mut stack)?;
+    let mut config = load_local_workflow(&path, &mut stack)?;
     for warning in config.deprecated_language_warnings() {
         eprintln!("warning: {warning}");
     }
+    config.apply_env_overrides()?;
     Ok(config)
 }
 
@@ -50,7 +51,12 @@ pub fn resolve_workflow_calls(
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut stack = CallStack::default();
-    resolve_workflow_calls_inner(config, &base_dir, &mut stack)
+    let mut config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    for warning in config.deprecated_language_warnings() {
+        eprintln!("warning: {warning}");
+    }
+    config.apply_env_overrides()?;
+    Ok(config)
 }
 
 /// Parse a supported GitHub workflow URL into repository, ref, and path parts.
@@ -448,6 +454,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::config::{FailAction, StringOrVec, WorkflowConfig};
+    use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
 
     fn write_file(dir: &TempDir, relative: &str, contents: &str) -> PathBuf {
@@ -461,6 +468,18 @@ mod tests {
 
     fn resolved_from_path(path: PathBuf) -> WorkflowConfig {
         resolve_workflow_calls_from_path(path).unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
+    }
+
+    fn clear_all_override_envs() -> Vec<EnvGuard> {
+        vec![
+            EnvGuard::remove("CRUISE_MODEL"),
+            EnvGuard::remove("CRUISE_PLAN_MODEL"),
+            EnvGuard::remove("CRUISE_SDK"),
+            EnvGuard::remove("CRUISE_LANGUAGE_PR"),
+            EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
+            EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
+        ]
     }
 
     #[test]
@@ -977,5 +996,58 @@ steps:
             compiled.steps["shared/test"].command,
             Some(StringOrVec::Single(_) | StringOrVec::Multiple(_))
         ));
+    }
+
+    #[test]
+    fn test_resolve_workflow_calls_from_path_applies_env_overrides() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _model = EnvGuard::set("CRUISE_MODEL", "opus");
+
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        let path = write_file(
+            &dir,
+            "cruise.yaml",
+            r"
+command: [claude, -p]
+model: sonnet
+steps:
+  s1:
+    command: echo hi
+",
+        );
+
+        // Given: YAML sets model=sonnet, CRUISE_MODEL env var overrides to opus
+        // When: workflow is loaded via resolve_workflow_calls_from_path
+        let config = resolved_from_path(path);
+
+        // Then: model reflects the env var override, not the YAML value
+        assert_eq!(config.model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_workflow_calls_applies_env_overrides() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _model = EnvGuard::set("CRUISE_MODEL", "opus");
+
+        let config: WorkflowConfig = serde_yaml::from_str(
+            r"
+command: [claude, -p]
+model: sonnet
+steps:
+  s1:
+    command: echo hi
+",
+        )
+        .unwrap_or_else(|e| panic!("yaml parse failed: {e}"));
+
+        // Given: YAML sets model=sonnet, CRUISE_MODEL env var overrides to opus
+        // When: workflow is loaded via resolve_workflow_calls (YAML-string path)
+        let resolved = resolve_workflow_calls(config, PathBuf::from("."))
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+
+        // Then: model reflects the env var override, not the YAML value
+        assert_eq!(resolved.model, Some("opus".to_string()));
     }
 }
