@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use seher::sdk::{
-    CodexBarProbe, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk, poll_for_agent,
-    split_thinking_suffix,
+    CodexBarProbe, EffortLevel, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk,
+    poll_for_agent, split_thinking_suffix,
 };
 
 use crate::cancellation::CancellationToken;
@@ -281,7 +281,8 @@ fn spawn_agent_stream(
             // flows straight through. `resolved.model_id` is a plain
             // `claude --model` name, not a pi model ref.
             let config = seher::claude_agent::ClaudeAgentRunnerConfig {
-                model: Some(resolved.model_id.clone()),
+                model: claude_family_model(&resolved.model_id),
+                effort: claude_family_effort(&resolved.model_id, resolved.effort),
                 cwd: cwd_string,
                 resume_session_id: req.resume.clone(),
                 tools: req.tools.clone(),
@@ -300,7 +301,8 @@ fn spawn_agent_stream(
             // ClaudeHeadlessRunnerConfig is #[non_exhaustive] in seher-sdk
             // 0.0.45+, so we can't use struct-literal syntax across crates.
             let mut headless_cfg = seher::claude_headless::ClaudeHeadlessRunnerConfig::default();
-            headless_cfg.model = Some(resolved.model_id.clone());
+            headless_cfg.model = claude_family_model(&resolved.model_id);
+            headless_cfg.effort = claude_family_effort(&resolved.model_id, resolved.effort);
             headless_cfg.cwd = cwd_string;
             headless_cfg.resume_session_id.clone_from(&req.resume);
             headless_cfg.env = req
@@ -322,8 +324,9 @@ fn spawn_agent_stream(
             let sdk = seher::claude_terminal::new_sdk_with_defaults(
                 None,
                 None,
-                Some(resolved.model_id.clone()),
+                claude_family_model(&resolved.model_id),
                 None,
+                claude_family_effort(&resolved.model_id, resolved.effort),
                 None,
                 cwd_string,
                 req.env.clone(),
@@ -341,7 +344,7 @@ fn spawn_agent_stream(
             // config label (e.g. "codex"), which pi does not know about. Split the ref
             // so pi receives its own provider / model / thinking parts.
             let (provider, model, thinking) =
-                split_model_ref(&resolved.provider, &resolved.model_id);
+                split_model_ref(&resolved.provider, &resolved.model_id, resolved.effort);
             let opts = PiRunnerOptions {
                 provider: Some(provider),
                 model: Some(model),
@@ -621,6 +624,43 @@ pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -
         .to_string()
 }
 
+fn effort_to_thinking(effort: EffortLevel) -> &'static str {
+    match effort {
+        EffortLevel::Low => "low",
+        EffortLevel::Medium => "medium",
+        EffortLevel::High => "high",
+        EffortLevel::XHigh | EffortLevel::Max => "xhigh",
+    }
+}
+
+fn effort_from_suffix(suffix: &str) -> Option<EffortLevel> {
+    match suffix.trim().to_lowercase().as_str() {
+        "minimal" | "min" | "low" | "1" => Some(EffortLevel::Low),
+        "medium" | "med" | "2" => Some(EffortLevel::Medium),
+        "high" | "3" => Some(EffortLevel::High),
+        "xhigh" | "4" => Some(EffortLevel::XHigh),
+        "max" => Some(EffortLevel::Max),
+        _ => None,
+    }
+}
+
+fn claude_family_model(model_id: &str) -> Option<String> {
+    let (model, _) = split_thinking_suffix(model_id);
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
+fn claude_family_effort(
+    model_id: &str,
+    resolved_effort: Option<EffortLevel>,
+) -> Option<EffortLevel> {
+    let (_, suffix_thinking) = split_thinking_suffix(model_id);
+    resolved_effort.or_else(|| suffix_thinking.and_then(effort_from_suffix))
+}
+
 /// Split a seher model ref into the `(provider, model, thinking)` triple
 /// expected by [`PiRunnerOptions`].
 ///
@@ -635,15 +675,22 @@ pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -
 /// pi thinking level (`off`/`low`/`xhigh`/`0`-`4`/…, see
 /// [`split_thinking_suffix`]); any other `:` suffix (e.g. `:free`) stays part
 /// of the model id.
-fn split_model_ref(fallback_provider: &str, model_id: &str) -> (String, String, Option<String>) {
-    let (without_thinking, thinking) = split_thinking_suffix(model_id);
+fn split_model_ref(
+    fallback_provider: &str,
+    model_id: &str,
+    effort: Option<EffortLevel>,
+) -> (String, String, Option<String>) {
+    let (without_thinking, suffix_thinking) = split_thinking_suffix(model_id);
     let (provider, model) = without_thinking
         .split_once('/')
         .unwrap_or((fallback_provider, without_thinking));
     (
         provider.to_string(),
         model.to_string(),
-        thinking.map(str::to_string),
+        effort
+            .map(effort_to_thinking)
+            .map(str::to_string)
+            .or_else(|| suffix_thinking.map(str::to_string)),
     )
 }
 
@@ -688,7 +735,7 @@ mod tests {
     #[test]
     fn split_model_ref_extracts_provider_and_thinking() {
         assert_eq!(
-            split_model_ref("codex", "openai-codex/gpt-5.5:xhigh"),
+            split_model_ref("codex", "openai-codex/gpt-5.5:xhigh", None),
             (
                 "openai-codex".to_string(),
                 "gpt-5.5".to_string(),
@@ -700,7 +747,7 @@ mod tests {
     #[test]
     fn split_model_ref_keeps_slashes_in_model_id() {
         assert_eq!(
-            split_model_ref("openrouter", "openrouter/moonshotai/kimi-k2.6"),
+            split_model_ref("openrouter", "openrouter/moonshotai/kimi-k2.6", None),
             (
                 "openrouter".to_string(),
                 "moonshotai/kimi-k2.6".to_string(),
@@ -712,7 +759,7 @@ mod tests {
     #[test]
     fn split_model_ref_falls_back_to_seher_provider_for_bare_model() {
         assert_eq!(
-            split_model_ref("anthropic", "claude-sonnet-4-5"),
+            split_model_ref("anthropic", "claude-sonnet-4-5", None),
             (
                 "anthropic".to_string(),
                 "claude-sonnet-4-5".to_string(),
@@ -724,13 +771,58 @@ mod tests {
     #[test]
     fn split_model_ref_ignores_non_thinking_colon_suffix() {
         assert_eq!(
-            split_model_ref("openrouter", "openrouter/meta-llama/llama-3-8b:free"),
+            split_model_ref("openrouter", "openrouter/meta-llama/llama-3-8b:free", None),
             (
                 "openrouter".to_string(),
                 "meta-llama/llama-3-8b:free".to_string(),
                 None
             )
         );
+    }
+
+    #[test]
+    fn split_model_ref_prefers_resolved_effort_over_suffix() {
+        assert_eq!(
+            split_model_ref("codex", "openai-codex/gpt-5.5:low", Some(EffortLevel::Max)),
+            (
+                "openai-codex".to_string(),
+                "gpt-5.5".to_string(),
+                Some("xhigh".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn claude_family_model_strips_thinking_suffix() {
+        assert_eq!(
+            claude_family_model("claude-sonnet-4-5:high").as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn claude_family_effort_uses_suffix_when_unresolved() {
+        assert_eq!(
+            claude_family_effort("claude-sonnet-4-5:med", None),
+            Some(EffortLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn claude_family_effort_prefers_resolved_effort_over_suffix() {
+        assert_eq!(
+            claude_family_effort("claude-sonnet-4-5:low", Some(EffortLevel::High)),
+            Some(EffortLevel::High)
+        );
+    }
+
+    #[test]
+    fn claude_family_effort_omits_off_suffix() {
+        assert_eq!(
+            claude_family_model("claude-sonnet-4-5:off").as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(claude_family_effort("claude-sonnet-4-5:off", None), None);
     }
 
     // -- Executor dispatch ----------------------------------------------------
