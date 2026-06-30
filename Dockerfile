@@ -13,11 +13,12 @@ RUN apt-get update && \
         | tar -xz --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_${arch}/bin/gh" && \
     rm -rf /var/lib/apt/lists/* && \
     BUN_INSTALL=/usr/local bun install -g @anthropic-ai/claude-code@2.1.195 && \
-    mkdir -p /work /home/bun/.cruise && \
-    chown -R bun:bun /work /home/bun/.cruise
+    useradd -m -s /bin/bash cruise && \
+    mkdir -p /work /home/cruise/.cruise && \
+    chown -R cruise:cruise /work /home/cruise/.cruise
 
-COPY --chown=bun:bun --chmod=755 bin/${TARGETARCH}/cruise /usr/local/bin/cruise
+COPY --chown=cruise:cruise --chmod=755 bin/${TARGETARCH}/cruise /usr/local/bin/cruise
 
 WORKDIR /work
-USER bun
+USER cruise
 ENTRYPOINT ["cruise"]
