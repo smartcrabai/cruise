@@ -56,7 +56,7 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
 reedline = "0.48"
 reqwest = { version = "0.13", features = ["json"] }
-seher-sdk = "0.0.50"
+seher-sdk = "0.0.51"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9.34"
