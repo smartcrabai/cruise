@@ -129,8 +129,8 @@ function buildMermaidSource(dag: DagDto): string {
     const fromId = stepIdMap.get(edge.from);
     if (!fromId) continue;
 
-    const toId = edge.to ? stepIdMap.get(edge.to) : endId;
-    if (edge.to && !toId) continue;
+    const toId = edge.to === null ? endId : stepIdMap.get(edge.to);
+    if (edge.to !== null && !toId) continue;
 
     const label = edgeLabel(edge);
     if (label) {
@@ -164,13 +164,33 @@ function sanitizeNodeId(name: string): string {
   return name.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
+const MERMAID_LABEL_ESCAPES: Record<string, string> = {
+  "\\": "#92;",
+  "\n": "#10;",
+  "\r": "#10;",
+  "#": "#35;",
+  ";": "#59;",
+  "`": "#96;",
+  "[": "#91;",
+  "]": "#93;",
+  "(": "#40;",
+  ")": "#41;",
+  "{": "#123;",
+  "}": "#125;",
+  "&": "#amp;",
+  '"': "#quot;",
+  "<": "#lt;",
+  ">": "#gt;",
+  "|": "#124;",
+};
+
 function escapeMermaidLabel(label: string): string {
-  return label
-    .replace(/&/g, "#amp;")
-    .replace(/"/g, "#quot;")
-    .replace(/</g, "#lt;")
-    .replace(/>/g, "#gt;")
-    .replace(/\|/g, "#124;");
+  // Single pass over a character class + callback so entity strings we
+  // insert (which themselves contain "#" and ";") are never rescanned.
+  return label.replace(
+    /[\\\n\r#;`[\](){}&"<>|]/g,
+    (ch) => MERMAID_LABEL_ESCAPES[ch] ?? ch,
+  );
 }
 
 function edgeLabel(edge: DagEdgeDto): string | null {
