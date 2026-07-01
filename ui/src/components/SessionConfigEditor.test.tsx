@@ -14,6 +14,7 @@ vi.mock("../lib/commands", () => ({
   getNewSessionConfigDefaults: vi.fn(),
   updateSessionSettings: vi.fn(),
   regenerateSessionPlan: vi.fn(),
+  getSessionDag: vi.fn(),
 }));
 
 import { listConfigs, getNewSessionConfigDefaults, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";

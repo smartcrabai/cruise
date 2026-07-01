@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../lib/commands", () => ({
   listDirectory: vi.fn(),
+  getSessionDag: vi.fn(),
 }));
 
 // Controlled wrapper so that fireEvent.change drives value through the real

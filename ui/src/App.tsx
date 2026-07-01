@@ -48,6 +48,7 @@ import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionConfigEditor } from "./components/SessionConfigEditor";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
+import { WorkflowDagPanel } from "./components/WorkflowDagPanel";
 import { Spinner } from "./components/Spinner";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
 import { collectExpandedStepIds } from "./lib/stepUtils";
@@ -462,14 +463,16 @@ interface PendingOption {
   plan?: string;
 }
 
-type ActiveTab = "info" | "plan" | "log";
+type ActiveTab = "info" | "dag" | "plan" | "log";
 
 export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
+  const tabDagId = `${uid}-tab-dag`;
   const tabPlanId = `${uid}-tab-plan`;
   const tabLogId = `${uid}-tab-log`;
   const panelInfoId = `${uid}-panel-info`;
+  const panelDagId = `${uid}-panel-dag`;
   const panelPlanId = `${uid}-panel-plan`;
   const panelLogId = `${uid}-panel-log`;
 
@@ -1069,6 +1072,21 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
             <button
               type="button"
               role="tab"
+              id={tabDagId}
+              aria-selected={activeTab === "dag"}
+              aria-controls={panelDagId}
+              onClick={() => onActiveTabChange("dag")}
+              className={`px-4 py-2 text-xs font-medium transition-colors ${
+                activeTab === "dag"
+                  ? "text-blue-600 dark:text-blue-400 border-b-2 border-blue-500"
+                  : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+              }`}
+            >
+              DAG
+            </button>
+            <button
+              type="button"
+              role="tab"
               id={tabPlanId}
               aria-selected={activeTab === "plan"}
               aria-controls={panelPlanId}
@@ -1104,6 +1122,10 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           <div className="flex-1 overflow-auto">
             {activeTab === "info" && (
               <WorkflowInfoPanel session={session} panelInfoId={panelInfoId} tabInfoId={tabInfoId} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
+            )}
+
+            {activeTab === "dag" && (
+              <WorkflowDagPanel sessionId={session.id} panelId={panelDagId} tabId={tabDagId} className={isAwaitingApproval ? "@4xl:hidden" : undefined} />
             )}
 
             <WorkflowPlanPanel
