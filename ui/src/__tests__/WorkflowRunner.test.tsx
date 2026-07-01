@@ -36,6 +36,7 @@ vi.mock("../lib/commands", () => ({
   getNewSessionDraft: vi.fn().mockResolvedValue(null),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getSession: vi.fn(),
+  getSessionDag: vi.fn().mockResolvedValue({ startStep: "step1", currentStep: null, steps: [], edges: [] }),
   getSessionLog: vi.fn().mockResolvedValue(""),
   getSessionPlan: vi.fn().mockResolvedValue(""),
   listConfigs: vi.fn().mockResolvedValue([]),
@@ -305,5 +306,81 @@ describe("WorkflowRunner - stick-to-bottom scroll behaviour", () => {
     });
 
     expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+// --- Tests: WorkflowRunner DAG tab entrypoint --------------------------------
+
+describe("WorkflowRunner - DAG tab entrypoint", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows a tab named 'DAG' between the Info and Plan tabs", async () => {
+    // Given / When
+    render(<WorkflowRunner {...defaultRunnerProps()} activeTab="plan" />);
+    await act(() => Promise.resolve());
+
+    // Then
+    const tabNames = screen.getAllByRole("tab").map((el) => el.textContent);
+    const dagIndex = tabNames.findIndex((name) => name?.includes("DAG"));
+    const infoIndex = tabNames.findIndex((name) => name?.includes("Info"));
+    const planIndex = tabNames.findIndex((name) => name?.includes("Plan"));
+
+    expect(dagIndex).toBeGreaterThan(infoIndex);
+    expect(dagIndex).toBeLessThan(planIndex);
+  });
+
+  it("calls onActiveTabChange('dag') exactly once when the DAG tab is clicked", async () => {
+    // Given
+    const onActiveTabChange = vi.fn();
+
+    // When
+    render(
+      <WorkflowRunner
+        {...defaultRunnerProps()}
+        activeTab="plan"
+        onActiveTabChange={onActiveTabChange}
+      />,
+    );
+    await act(() => Promise.resolve());
+    fireEvent.click(screen.getByRole("tab", { name: "DAG" }));
+
+    // Then
+    expect(onActiveTabChange).toHaveBeenCalledTimes(1);
+    expect(onActiveTabChange).toHaveBeenCalledWith("dag");
+  });
+});
+
+// --- Tests: WorkflowRunner DAG panel mounting --------------------------------
+
+describe("WorkflowRunner - DAG panel mounting", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("mounts WorkflowDagPanel and calls getSessionDag('session-1') once when activeTab='dag'", async () => {
+    // Given
+    const commands = await import("../lib/commands");
+
+    // When
+    render(<WorkflowRunner {...defaultRunnerProps()} activeTab="dag" />);
+    await act(() => Promise.resolve());
+
+    // Then
+    expect(vi.mocked(commands.getSessionDag)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(commands.getSessionDag)).toHaveBeenCalledWith("session-1");
+  });
+
+  it("does not start log polling when activeTab='dag'", async () => {
+    // Given
+    const commands = await import("../lib/commands");
+
+    // When
+    render(<WorkflowRunner {...defaultRunnerProps()} activeTab="dag" />);
+    await act(() => Promise.resolve());
+
+    // Then
+    expect(vi.mocked(commands.getSessionLog)).not.toHaveBeenCalled();
   });
 });

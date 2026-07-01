@@ -24,6 +24,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../lib/commands", () => ({
   listSessions: vi.fn(),
+  getSessionDag: vi.fn(),
   listConfigs: vi.fn(),
   createSession: vi.fn(),
   approveSession: vi.fn(),

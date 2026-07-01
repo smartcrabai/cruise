@@ -24,6 +24,7 @@ vi.mock("../lib/updater", () => ({
 vi.mock("../lib/commands", () => ({
   listSessions: vi.fn().mockResolvedValue([]),
   cleanSessions: vi.fn().mockResolvedValue({ deleted: 0, skipped: 0 }),
+  getSessionDag: vi.fn(),
   approveSession: vi.fn(),
   cancelSession: vi.fn(),
   createSession: vi.fn(),
