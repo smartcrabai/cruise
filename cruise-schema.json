@@ -30,6 +30,10 @@
       "type": "string",
       "description": "Model to use for plan generation steps"
     },
+    "interactive_planning": {
+      "type": "boolean",
+      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Has no effect in `command` mode."
+    },
     "pr_language": {
       "type": "string",
       "description": "Language for PR descriptions (deprecated, use `languages.pr` instead)"
@@ -131,6 +135,10 @@
           ],
           "description": "Whether to skip this step (boolean or variable reference)"
         },
+        "when": {
+          "$ref": "#/$defs/WhenCondition",
+          "description": "Pre-execution condition: skip the step unless the workspace satisfies the rule"
+        },
         "if": {
           "$ref": "#/$defs/IfCondition",
           "description": "Condition that must be true for this step to run"
@@ -158,6 +166,15 @@
           "type": "string",
           "pattern": "^[1-9][0-9]*[mh]?$",
           "description": "Step timeout. Plain digits = seconds, suffix 'm' = minutes, 'h' = hours. Example: 30, 5m, 1h."
+        }
+      }
+    },
+    "WhenCondition": {
+      "type": "object",
+      "properties": {
+        "exists": {
+          "type": "string",
+          "description": "Skip the step if no file matches this glob (relative to the workflow working dir). Supports variable references."
         }
       }
     },
