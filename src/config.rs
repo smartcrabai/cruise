@@ -2451,6 +2451,7 @@ steps:
                 "command",
                 "model",
                 "plan_model",
+                "interactive_planning",
                 "pr_language",
                 "plan_language",
                 "languages",
@@ -2513,6 +2514,7 @@ steps:
                 "command",
                 "next",
                 "skip",
+                "when",
                 "if",
                 "env",
                 "group",
@@ -2535,6 +2537,13 @@ steps:
         let schema = load_schema();
         let step_props = def_properties(schema, "StepConfig");
         assert_oneof_types(&step_props["skip"], &["boolean", "string"], "step skip");
+    }
+
+    #[test]
+    fn test_schema_when_condition_has_expected_properties() {
+        let schema = load_schema();
+        let when_props = def_properties(schema, "WhenCondition");
+        assert_has_fields(when_props, &["exists"], "WhenCondition");
     }
 
     #[test]
