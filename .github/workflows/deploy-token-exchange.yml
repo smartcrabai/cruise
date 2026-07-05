@@ -1,0 +1,65 @@
+name: Deploy token-exchange
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "token-exchange/**"
+      - ".github/workflows/deploy-token-exchange.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Test and deploy to Cloudflare Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: token-exchange
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: token-exchange/package-lock.json
+
+      - run: npm ci
+
+      # `wrangler types` (cf-typegen) generates worker-configuration.d.ts,
+      # which is gitignored and therefore absent in CI. It also reads
+      # .dev.vars to add the app's own secret bindings (GITHUB_APP_ID,
+      # GITHUB_APP_PRIVATE_KEY) to the generated Env type -- without it,
+      # typecheck fails with "possibly undefined" / missing-property errors
+      # even once the file exists. .dev.vars.example ships dummy values for
+      # exactly this purpose (never real secrets).
+      - run: cp .dev.vars.example .dev.vars
+
+      - run: npm run cf-typegen
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # Deploys the Worker and syncs its secrets from GitHub Actions secrets
+      # (wrangler-action runs `wrangler secret put` for each name listed under
+      # `secrets:`). The custom domain (cruise-token-exchange.smartcrab.ai) is
+      # deliberately NOT declared in wrangler.jsonc -- it is managed by
+      # Terraform in the terraforms repository, and declaring it in both
+      # places would make each deploy fight the Terraform state.
+      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: token-exchange
+          secrets: |
+            GITHUB_APP_ID
+            GITHUB_APP_PRIVATE_KEY
+        env:
+          GITHUB_APP_ID: ${{ secrets.CRUISE_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.CRUISE_APP_PRIVATE_KEY }}
