@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cruise-token-exchange",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-04",
+  // The public hostname (cruise-token-exchange.smartcrab.ai) is a Workers
+  // custom domain managed by Terraform in the terraforms repository. Do NOT
+  // add `routes` / custom-domain entries here: wrangler re-asserts them on
+  // every deploy and would fight the Terraform-managed binding.
+  "workers_dev": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

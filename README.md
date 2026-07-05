@@ -970,6 +970,50 @@ The desktop GUI persists two pieces of state across sessions:
 - **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
 - **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.
 
+## GitHub Actions
+
+Mention `@cruise` in a GitHub Issue or Pull Request to run cruise inside GitHub Actions -- it plans and implements the request, then opens a draft PR (issue mentions) or pushes straight to the PR branch (PR mentions), posting progress back as a comment.
+
+Setup: (1) install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository, (2) add an `ANTHROPIC_API_KEY` secret, (3) copy the workflow below to `.github/workflows/cruise.yml`. The App lets the action authenticate as `cruise-agent[bot]` via a short-lived, repository-scoped token instead of the default `GITHUB_TOKEN` -- see [`docs/github-actions.md`](docs/github-actions.md#how-authentication-works) for how that works and how to opt out.
+
+```yaml
+# .github/workflows/cruise.yml
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  cruise:
+    # See examples/cruise.yml for the full per-event trigger-phrase filter.
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@cruise')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise'))) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@cruise')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@cruise'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write # for the cruise-agent App token exchange; optional
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: smartcrabai/cruise@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+See [`examples/cruise.yml`](examples/cruise.yml) for the full (per-event) trigger filter and [`docs/github-actions.md`](docs/github-actions.md) for inputs/outputs, security notes, and how to point it at your own workflow config.
+
 ## License
 
 MIT

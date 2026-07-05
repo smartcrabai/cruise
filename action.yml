@@ -1,0 +1,241 @@
+name: "Cruise"
+description: >-
+  Trigger the cruise coding agent from a GitHub Issue or Pull Request comment
+  (e.g. "@cruise fix the flaky test"). Runs cruise's plan -> implement -> PR
+  workflow inside GitHub Actions and reports progress back as a comment.
+author: "smartcrabai"
+
+branding:
+  icon: "anchor"
+  color: "blue"
+
+inputs:
+  anthropic_api_key:
+    description: >-
+      Anthropic API key used by the `claude` CLI that cruise drives. Required.
+    required: true
+  github_token:
+    description: >-
+      Token used for GitHub API calls (permission checks, comments, PRs,
+      pushes). Leave empty (the default) to let cruise obtain a short-lived
+      cruise-agent GitHub App installation token via OIDC token exchange (see
+      `token_exchange_url`), falling back to the workflow's GITHUB_TOKEN when
+      the App isn't installed or the exchange is unavailable. Set this
+      explicitly (e.g. to a PAT or your own App's token) to skip the OIDC
+      exchange entirely and use that token instead.
+    required: false
+    default: ""
+  token_exchange_url:
+    description: >-
+      URL of the cruise-agent token-exchange service used to trade this job's
+      OIDC token for a repository-scoped GitHub App installation token. Empty
+      disables the exchange (the action then always falls back to
+      `github_token`/`GITHUB_TOKEN`). See docs/github-actions.md for
+      self-hosting your own exchange.
+    required: false
+    default: "https://cruise-token-exchange.smartcrab.ai/token"
+  trigger_phrase:
+    description: 'Phrase that must appear in the comment/issue body to trigger cruise.'
+    required: false
+    default: "@cruise"
+  cruise_version:
+    description: >-
+      cruise release to install. "latest" (default) or a specific tag such as
+      "v0.1.66".
+    required: false
+    default: "latest"
+  config:
+    description: >-
+      Path (relative to the repository root, or absolute) to a cruise workflow
+      config YAML to use instead of the built-in default CI config.
+    required: false
+    default: ""
+  skip_planning:
+    description: >-
+      When "true", the mention body is used verbatim as the plan (no LLM
+      planning call) for Issue mentions. Has no effect for PR mentions, which
+      always run `cruise exec` directly. Default "false".
+    required: false
+    default: "false"
+  model:
+    description: 'Overrides CRUISE_MODEL (the model used for implementation steps).'
+    required: false
+    default: ""
+  plan_model:
+    description: 'Overrides CRUISE_PLAN_MODEL (the model used for the planning step).'
+    required: false
+    default: ""
+  claude_args:
+    description: >-
+      Extra space-separated arguments appended to the `claude` invocation in
+      the auto-generated default CI config. Ignored when `config` is set.
+      Split on whitespace only: shell-style quoting is NOT honored, so
+      '--foo "bar baz"' becomes three separate arguments.
+    required: false
+    default: "--dangerously-skip-permissions"
+  allowed_bots:
+    description: >-
+      Comma-separated list of bot logins (without the "[bot]" suffix) allowed
+      to trigger cruise, or "*" to allow any bot. Empty (default) blocks all
+      bot actors.
+    required: false
+    default: ""
+  git_user_name:
+    description: >-
+      git user.name used for commits cruise/this action creates. Defaults to
+      "cruise-agent[bot]" when the run used a cruise-agent App installation
+      token, otherwise "github-actions[bot]".
+    required: false
+    default: ""
+  git_user_email:
+    description: >-
+      git user.email used for commits cruise/this action creates. Defaults to
+      match `git_user_name`'s default (the cruise-agent App's or
+      github-actions[bot]'s noreply address).
+    required: false
+    default: ""
+
+outputs:
+  session_id:
+    description: 'The cruise session ID that was created and run (empty if skipped/failed before creation).'
+    value: ${{ steps.run.outputs.session_id }}
+  pr_url:
+    description: 'URL of the pull request cruise created or pushed to (empty if none).'
+    value: ${{ steps.run.outputs.pr_url }}
+  conclusion:
+    description: '"success", "failure", or "skipped" (mention did not match / actor not authorized).'
+    value: ${{ steps.finalize.outputs.conclusion }}
+  used_app:
+    description: >-
+      "true" if the run authenticated with a cruise-agent GitHub App
+      installation token, "false" if it used `github_token`/`GITHUB_TOKEN`,
+      or an empty string if the gate step skipped the run before the `token`
+      step ran (mention didn't match / actor not authorized).
+    value: ${{ steps.token.outputs.used_app }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Gate (trigger + permission check)
+      id: gate
+      shell: bash
+      env:
+        # This runs before the `token` step resolves an App/exchange token,
+        # so it can only ever see the raw input or the workflow's own token.
+        GH_TOKEN: ${{ inputs.github_token || github.token }}
+        TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+        ALLOWED_BOTS: ${{ inputs.allowed_bots }}
+      run: ${{ github.action_path }}/action/scripts/gate.sh
+
+    - name: Resolve GitHub token (cruise-agent App or fallback)
+      id: token
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN_INPUT: ${{ inputs.github_token }}
+        TOKEN_EXCHANGE_URL: ${{ inputs.token_exchange_url }}
+        WORKFLOW_TOKEN: ${{ github.token }}
+      run: ${{ github.action_path }}/action/scripts/app-token.sh
+
+    - name: Record start time
+      id: timer
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      run: echo "start_ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+    - name: Post tracking comment
+      id: comment_start
+      if: steps.gate.outputs.proceed == 'true'
+      # A failed comment post must not skip the actual cruise run; finalize.sh
+      # already tolerates an empty COMMENT_ID.
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
+        MODE: ${{ steps.gate.outputs.mode }}
+        TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
+      run: ${{ github.action_path }}/action/scripts/comment-start.sh
+
+    - name: Install cruise + claude
+      id: install
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        CRUISE_VERSION: ${{ inputs.cruise_version }}
+      run: ${{ github.action_path }}/action/scripts/install.sh
+
+    - name: Resolve/generate cruise config
+      id: config
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        CONFIG_INPUT: ${{ inputs.config }}
+        CLAUDE_ARGS: ${{ inputs.claude_args }}
+      run: ${{ github.action_path }}/action/scripts/resolve-config.sh
+
+    - name: Build task prompt from GitHub context
+      id: prompt
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        MODE: ${{ steps.gate.outputs.mode }}
+        ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
+        TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
+        TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+        TRIGGER_BODY_FILE: ${{ steps.gate.outputs.trigger_body_file }}
+      run: ${{ github.action_path }}/action/scripts/build-prompt.sh
+
+    - name: Run cruise
+      id: run
+      if: steps.gate.outputs.proceed == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        MODE: ${{ steps.gate.outputs.mode }}
+        ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
+        SKIP_PLANNING: ${{ inputs.skip_planning }}
+        CONFIG_PATH: ${{ steps.config.outputs.config_path }}
+        PR_CONFIG_PATH: ${{ steps.config.outputs.pr_config_path }}
+        TASK_FILE: ${{ steps.prompt.outputs.task_file }}
+        CRUISE_MODEL: ${{ inputs.model }}
+        CRUISE_PLAN_MODEL: ${{ inputs.plan_model }}
+        GIT_USER_NAME_INPUT: ${{ inputs.git_user_name }}
+        GIT_USER_EMAIL_INPUT: ${{ inputs.git_user_email }}
+        USED_APP: ${{ steps.token.outputs.used_app }}
+      run: ${{ github.action_path }}/action/scripts/run.sh
+
+    - name: Finalize tracking comment
+      id: finalize
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        PROCEED: ${{ steps.gate.outputs.proceed }}
+        ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
+        COMMENT_ID: ${{ steps.comment_start.outputs.comment_id }}
+        RUN_OUTCOME: ${{ steps.run.outcome }}
+        START_TS: ${{ steps.timer.outputs.start_ts }}
+        SESSION_ID: ${{ steps.run.outputs.session_id }}
+        PR_URL: ${{ steps.run.outputs.pr_url }}
+        FAIL_REASON: ${{ steps.run.outputs.fail_reason }}
+      run: ${{ github.action_path }}/action/scripts/finalize.sh
+
+    - name: Revoke App installation token
+      id: revoke
+      if: always() && steps.token.outputs.used_app == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        TOKEN: ${{ steps.token.outputs.token }}
+      run: ${{ github.action_path }}/action/scripts/revoke-token.sh
+
+    - name: Fail the job if cruise run failed
+      if: steps.run.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::error::cruise run failed - see the tracking comment and logs above for details." >&2
+        exit 1

@@ -1,0 +1,24 @@
+{
+  "name": "cruise-token-exchange",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "GitHub App installation token exchange service for cruise-agent, backed by GitHub Actions OIDC.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.107.0"
+  }
+}
