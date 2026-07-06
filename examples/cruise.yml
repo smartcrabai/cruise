@@ -5,23 +5,25 @@ on:
     types: [created]
   issues:
     types: [opened]
-  pull_request_review_comment:
-    types: [created]
-  pull_request_review:
-    types: [submitted]
 
 jobs:
   cruise:
     # Coarse pre-filter so unrelated events don't even spin up a runner; the
     # action re-checks the trigger phrase (word-boundary match) and actor
-    # permissions itself before doing anything.
+    # permissions itself before doing anything. This action has no PR mode,
+    # so comments made on a pull request are excluded here too (the action
+    # also re-checks this itself).
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@cruise')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise'))) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@cruise')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@cruise'))
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '@cruise')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Serializes multiple @cruise mentions on the same issue (e.g. a quick
+    # `plan` followed by `fix` followed by `run`) so they don't race each
+    # other's tracking comment/session/git state. Queues rather than
+    # cancels: no `cancel-in-progress`, so an in-flight run always finishes.
+    concurrency:
+      group: cruise-${{ github.event.issue.number || github.run_id }}
     permissions:
       contents: write
       pull-requests: write
