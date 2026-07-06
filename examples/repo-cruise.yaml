@@ -1,0 +1,69 @@
+# Example cruise workflow config for use with the cruise GitHub Action.
+#
+# Copy this file to your repository root as `cruise.yaml` (also accepted:
+# `cruise.yml` / `.cruise.yaml` / `.cruise.yml`, or any `*.yaml`/`*.yml` under
+# a `.cruise/` directory). The action's own config resolution picks it up
+# automatically -- no `config:` input needed, as long as the `config` input
+# is left empty (see "config resolution" in ../docs/github-actions.md).
+#
+# Without a repo config at all, the action generates a similar write-tests ->
+# implement default on the fly (see resolve-config.sh in the action itself),
+# so committing your own copy of this file only matters once you want to:
+# customize the prompts, add the `test` -> `fix-test-error` retry loop below,
+# or pin a specific model.
+#
+# `sdk: pi` matches what the cruise GitHub Action always forces via
+# CRUISE_SDK=pi (the env var wins regardless of what this field says), so
+# this file works there unmodified. It is equally usable outside the Action
+# -- `cruise plan`/`cruise run` on a workstation, with either `CRUISE_SDK=pi`
+# or nothing else needed since `sdk: pi` is already declared here.
+sdk: pi
+
+# Left unset so pi auto-selects a provider/model from whichever of
+# ANTHROPIC_API_KEY / OPENAI_API_KEY / ... is available -- the recommended
+# default when this config is used from the Action (see "Zero-config
+# default" in ../docs/github-actions.md). Uncomment to pin a specific model
+# instead (plain pi model references, not seher mode keys -- see
+# ../docs/github-actions.md#sdk-pi----how-execution-works):
+# model: anthropic/claude-sonnet-4-6
+# plan_model: anthropic/claude-sonnet-4-6
+
+steps:
+  # Planning already produced {plan} (cruise run) before this step runs.
+  # Have the agent write tests first, TDD-style.
+  write-tests:
+    prompt: |
+      Based on the {plan} implementation schedule, write the test code
+      first, then update {plan} if the plan needs adjusting.
+
+  # Implement against the tests written above.
+  implement:
+    prompt: |
+      Tests have been written according to {plan}. Implement the code to
+      make them pass. Update {plan} if necessary.
+    if:
+      no-file-changes:
+        fail: true
+
+  # Verify the implementation. Swap these commands for your own stack's
+  # (e.g. `npm test`, `pytest`, `go test ./...`) -- the ones below are
+  # illustrative of this being a Rust project.
+  test:
+    command:
+      - cargo fmt --all -- --check
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo test --all-features
+    if:
+      fail: fix-test-error # non-zero exit jumps here instead of stopping the run
+
+  # Reached two ways: via the `test` step's `if.fail` jump (tests failed), or
+  # sequentially right after a passing `test` (in which case `skip:
+  # prev.success` skips it and the workflow ends). `next: test` loops back
+  # to re-run the checks after the fix.
+  fix-test-error:
+    skip: prev.success
+    prompt: |
+      The following error occurred while running tests. Please fix it:
+      ---
+      {prev.stderr}
+    next: test

@@ -4,13 +4,21 @@ Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan, implemen
 
 This action has **no pull-request mode**: it only reacts to `issues` (opened) and `issue_comment` (created) events. A comment made on a pull request is always ignored (PRs are "issues" at the GitHub API level, but this action explicitly excludes them).
 
+## Quickstart
+
+1. Install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository (optional -- skip it to fall back to the workflow's `GITHUB_TOKEN`; see [How authentication works](#how-authentication-works)).
+2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` repository secret (Settings -> Secrets and variables -> Actions). pi needs at least one.
+3. Copy [`examples/cruise.yml`](../examples/cruise.yml) to `.github/workflows/cruise.yml`.
+
+Then open an issue, or comment on one, with `@cruise plan <what you want>`. See [Typical workflow](#typical-workflow) for the full plan -> fix -> run -> review loop, [Commands](#commands) below for every mention form, [Providers](#providers) for using something other than Anthropic/OpenAI, and [Setup](#setup) for the detailed walkthrough (full workflow YAML, `permissions:`, version pinning).
+
 ## Commands
 
 The first word after the `@cruise` mention (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. Anything else -- including no word at all -- is treated as `run`.
 
 | Mention | Command | What happens |
 |---|---|---|
-| `@cruise`, `@cruise run <request>`, `@cruise /run` | **run** | Resolve the plan (see below; any text typed after `run` is appended as extra instructions), create a session from it verbatim (no LLM planning call), execute it in a worktree, push a branch, and open a **draft pull request**. |
+| `@cruise`, `@cruise run <request>`, `@cruise /run` | **run** | Resolve the plan (see below; any text typed after `run` is appended as extra instructions), create a session from it verbatim (no LLM planning call), execute it in a worktree, push a branch, and open a **draft** pull request. |
 | `@cruise exec <request>`, `@cruise /exec` | **exec** | Resolve the plan (same as `run`, extra instructions included), then run it directly on the already-checked-out default branch and **push straight to that branch** (no PR). Advanced/opt-in -- see [exec caveats](#exec-caveats). |
 | `@cruise plan <request>`, `@cruise /plan` | **plan** | Run an LLM planning call (`cruise plan`) on the issue's title + body and post the result as a new **plan-tracking comment**. Nothing is executed. (The text typed after `plan` in the triggering comment itself is currently not included -- only the issue's title/body feed the plan.) |
 | `@cruise fix <feedback>`, `@cruise /fix <feedback>` | **fix** | Revise the most recent *trusted* plan-tracking comment using `<feedback>`, then **edit that same comment in place** with the revised plan. Fails with a clear message if there is no existing plan comment. |
@@ -26,26 +34,36 @@ Command parsing is intentionally strict and mechanical, not natural-language und
 - Because matching is purely lexical, a plain-English sentence that happens to start with a command word after the mention is parsed as that command -- e.g. `@cruise fix the flaky test` is parsed as the **`fix` command** with feedback `the flaky test`, not as a free-form request to `run`. If there is no existing plan comment yet, this fails with a message telling you to run `@cruise plan` first, rather than silently doing something else.
 - To avoid this kind of ambiguity, prefer the explicit slash form (`@cruise /run <request>`, `@cruise /exec <request>`) for free-form requests, and reserve the bare word form (`@cruise plan ...` / `@cruise fix ...`) for when you actually mean the `plan`/`fix` commands.
 
-### Typical workflow
+## Typical workflow
 
-```
-@cruise plan add retry logic to the uploader
-    -> posts a plan-tracking comment
+An end-to-end example, planning first:
 
-@cruise fix also add a changelog entry
-    -> edits the same comment with a revised plan
+1. **Open an issue** describing the task. Leave the trigger phrase (`@cruise`) out of the title and body -- see the warning below for why that matters.
 
-@cruise run
-    -> creates a session from the (revised) plan and opens a draft PR
-```
+   > **Add retry logic to the uploader**
+   >
+   > The S3 upload occasionally fails on flaky networks. It should retry with exponential backoff instead of failing the whole job.
 
-You can also skip straight to `@cruise run <request>` (or just `@cruise <request>`) on a fresh issue with no plan comment yet -- the issue's title + body becomes the plan directly (with `<request>`, if any, appended as additional instructions), with no separate planning call.
+2. **Ask for a plan**: comment `@cruise plan`. The action runs an LLM planning call and posts a new plan-tracking comment; nothing is executed yet.
+
+3. **Iterate on the plan** as many times as needed: comment `@cruise fix also add a changelog entry and cover the timeout case`. The action edits the *same* tracking comment in place with the revised plan.
+
+4. **Execute it**: comment `@cruise run`. The action creates a session from the (possibly revised) plan, implements it in a worktree, pushes a branch, and opens a pull request.
+
+5. **Review and ready it**: cruise's pull requests are always opened as **drafts**, regardless of which command created them. Open the PR, review the diff, then mark it "Ready for review" (or `gh pr ready <number>`) before merging like any other PR.
+
+> [!WARNING]
+> If the issue's own title or body already contains the trigger phrase, step 2 never gets a chance to happen on its own -- the `issues: [opened]` trigger fires immediately on creation and defaults to `run`, jumping straight to implementation and a PR (see [command grammar](#command-grammar)). Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
+
+That immediate-run behavior is also a shortcut when you *don't* need a review step: `@cruise run <request>` (or just `@cruise <request>`, or an issue whose body already contains `@cruise`) skips the planning call entirely -- the issue's title + body becomes the plan directly, with `<request>` (if any) appended as additional instructions.
+
+Multiple mentions on the same issue queue rather than race each other: a `plan` comment followed immediately by `fix` and then `run` still runs one at a time, in order (see the `concurrency:` block in [examples/cruise.yml](../examples/cruise.yml)) -- it's safe to keep commenting without waiting for each run to finish first.
 
 ## Setup
 
 1. **Install the `cruise-agent` GitHub App** on your repository: [github.com/apps/cruise-agent/installations/new](https://github.com/apps/cruise-agent/installations/new). This is what lets the action authenticate as a scoped bot identity (`cruise-agent[bot]`) instead of the workflow's own `GITHUB_TOKEN` -- see [How authentication works](#how-authentication-works) below. You can skip this step; the action still runs, but falls back to `GITHUB_TOKEN` with the limitations described there.
 2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` secret to your repository (Settings -> Secrets and variables -> Actions). At least one is required.
-3. Copy [`examples/cruise.yml`](../examples/cruise.yml) to `.github/workflows/cruise.yml`:
+3. Copy [`examples/cruise.yml`](../examples/cruise.yml) to `.github/workflows/cruise.yml` (the version below is a condensed excerpt -- the file in `examples/` has a one-line comment above each section explaining what it's for):
 
    ```yaml
    name: Cruise
@@ -62,17 +80,19 @@ You can also skip straight to `@cruise run <request>` (or just `@cruise <request
          (github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '@cruise')) ||
          (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise')))
        runs-on: ubuntu-latest
-       timeout-minutes: 30
+       # write-tests -> implement each run a full verification pass; 30
+       # minutes (a common default) is too tight for larger repositories --
+       # see the Troubleshooting FAQ below.
+       timeout-minutes: 60
        permissions:
          contents: write
          pull-requests: write
          issues: write
-         id-token: write # needed for the cruise-agent App token exchange; see below
+         id-token: write # needed for the cruise-agent App token exchange; optional
        steps:
          - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
            with:
              fetch-depth: 0
-
          - uses: smartcrabai/cruise@v1
            with:
              anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -84,34 +104,27 @@ The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't 
 
 **Minimum cruise version: v0.1.68** (the first release with `sdk: pi` support, which this action always uses). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
 
-## sdk: pi -- how execution works
+## Providers
 
-This action always forces `CRUISE_SDK=pi` in the environment before invoking cruise, regardless of what any config file says (`command:`/`sdk:` in a repo's own `cruise.yaml` are overridden). This means:
+cruise always executes through `sdk: pi` in this action (see [below](#sdk-pi----how-execution-works)), and pi ships built-in definitions for several dozen providers -- each one just needs its API key, no `pi_models_json` required. Only `anthropic_api_key` and `openai_api_key` have dedicated action inputs; every other provider's key goes through the [`env`](#env-input) input as a `KEY=VALUE` line.
 
-- **No `claude` CLI is installed.** cruise drives `pi_agent_rust` directly, in-process.
-- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > provider API-key env vars (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the dedicated inputs, or any other provider's key -- `KIMI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, ... -- passed through the `env` input). The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, **and** `env` are all empty.
-- **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses pi's model-reference format, not seher mode keys:
-  - `"provider/model"`, optionally with `:thinking` (e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
-  - `"model"` (no `/`) -- pi searches its own model registry for that id.
-  - Empty (default) -- pi auto-selects a provider/model from its built-in preference order, picking the first one with usable credentials.
-- **Custom endpoints / providers** (`pi_models_json` input): paste the raw contents of a pi `models.json` file (OpenAI-compatible endpoints, custom providers, registry overrides). The action writes it to `$RUNNER_TEMP/pi-agent/models.json` and points `PI_CODING_AGENT_DIR` at that directory for the run:
+| Provider | pi provider id | Env var(s) | Example model reference |
+|---|---|---|---|
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` (dedicated `anthropic_api_key` input) | `anthropic/claude-sonnet-4-6` |
+| OpenAI | `openai` | `OPENAI_API_KEY` (dedicated `openai_api_key` input) | `openai/gpt-5.2` |
+| Kimi for Coding | `kimi-for-coding` | `KIMI_API_KEY` (via `env`) | `kimi-for-coding/kimi-for-coding` -- see the [inline example](#kimi-for-coding-example) below |
+| Google Gemini | `google` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` (via `env`) | `google/gemini-3-pro-preview` |
+| Groq | `groq` | `GROQ_API_KEY` (via `env`) | `groq/llama-3.3-70b-versatile` |
+| Mistral AI | `mistral` | `MISTRAL_API_KEY` (via `env`) | `mistral/mistral-large-latest` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` (via `env`) | `deepseek/deepseek-chat` |
+| xAI (Grok) | `xai` | `XAI_API_KEY` (via `env`) | `xai/grok-4` |
+| Moonshot AI | `moonshotai` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` (via `env`) | `moonshotai/kimi-k2-turbo-preview` |
 
-  ```yaml
-  - uses: smartcrabai/cruise@v1
-    with:
-      openai_api_key: ${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}
-      pi_models_json: |
-        {
-          "openai": {
-            "baseUrl": "https://my-openai-compatible-endpoint.example.com/v1",
-            "models": ["my-custom-model"]
-          }
-        }
-  ```
+Model IDs move fast -- treat the examples above as illustrative and check the provider's own docs if a reference stops resolving. Several more providers work the same way with no extra config at all (OpenRouter, Cerebras, Fireworks, Together AI, Perplexity, and others). `pi_models_json` is only needed for an endpoint pi doesn't already know about, such as a self-hosted OpenAI-compatible gateway -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml).
 
-### Third-party providers pi already knows (Kimi example)
+### Kimi for Coding example
 
-pi ships built-in definitions for many providers beyond Anthropic/OpenAI (Google, Groq, Mistral, DeepSeek, xAI, Moonshot/Kimi, MiniMax, OpenRouter, ...), each keyed off its own env var -- for those, no `pi_models_json` is needed at all. Pass the key through the `env` input and select the provider's model explicitly. For example, [Kimi for Coding](https://api.kimi.com/coding/) (an Anthropic-compatible endpoint) is the built-in `kimi-for-coding` provider authenticated by `KIMI_API_KEY`:
+[Kimi for Coding](https://api.kimi.com/coding/) (an Anthropic-compatible endpoint) is what this repository's own dogfood workflow uses (`.github/workflows/cruise.yml`). See [`examples/cruise-kimi.yml`](../examples/cruise-kimi.yml) for the full drop-in workflow; the cruise-specific part is just:
 
 ```yaml
 - uses: smartcrabai/cruise@v1
@@ -124,6 +137,18 @@ pi ships built-in definitions for many providers beyond Anthropic/OpenAI (Google
 
 (`kimi-for-coding` is a virtual model id the Kimi backend remaps to its latest coding model.)
 
+## sdk: pi -- how execution works
+
+This action always forces `CRUISE_SDK=pi` in the environment before invoking cruise, regardless of what any config file says (`command:`/`sdk:` in a repo's own `cruise.yaml` are overridden). This means:
+
+- **No `claude` CLI is installed.** cruise drives `pi_agent_rust` directly, in-process.
+- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > provider API-key env vars (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the dedicated inputs, or any other provider's key -- see [Providers](#providers) -- passed through the `env` input). The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, **and** `env` are all empty.
+- **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses pi's model-reference format, not seher mode keys:
+  - `"provider/model"`, optionally with `:thinking` (e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
+  - `"model"` (no `/`) -- pi searches its own model registry for that id.
+  - Empty (default) -- pi auto-selects a provider/model from its built-in preference order, picking the first one with usable credentials.
+- **Custom endpoints / providers** (`pi_models_json` input): paste the raw contents of a pi `models.json` file (OpenAI-compatible endpoints, custom providers, registry overrides -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml)). The action writes it to `$RUNNER_TEMP/pi-agent/models.json` and points `PI_CODING_AGENT_DIR` at that directory for the run.
+
 ### Zero-config default: pi auto-selects the model
 
 The default (no `model`/`plan_model` input) is pi's own auto-selection -- no model configuration is required to get started. This matters because cruise's *built-in* default workflow (used when no config file exists at all) hardcodes `model: sonnet` / `plan_model: opus` as literal strings, which under `sdk: pi` would be interpreted as bare pi model-registry ids rather than seher mode keys -- and pi has no id named exactly `sonnet`/`opus` (real ids look like `claude-sonnet-4-6`), so relying on that raw built-in default would fail to resolve a model. To avoid this, when `config` is empty **and** the repository has no config of its own, this action generates a default config itself (see [config resolution](#config-resolution) below) that mirrors cruise's `write-tests -> implement` workflow but deliberately omits `model`/`plan_model`, letting pi auto-select based on whichever of `anthropic_api_key`/`openai_api_key` is set. Set the `model`/`plan_model` inputs explicitly (in pi's reference format) if you want a specific model instead.
@@ -131,7 +156,7 @@ The default (no `model`/`plan_model` input) is pi's own auto-selection -- no mod
 ## config resolution
 
 - **`config` input set** -- resolved to an absolute path and exported as `CRUISE_CONFIG`. Used by the `run`/`plan`/`fix` commands.
-- **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or any YAML file under `.cruise/`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up.
+- **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or any YAML file under `.cruise/`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up. See [`examples/repo-cruise.yaml`](../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
 - **`config` input empty, and the repository has no config of its own** -- this action generates a default config (`sdk: pi`, `write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `model`/`plan_model`) and exports it as `CRUISE_CONFIG`. See [above](#zero-config-default-pi-auto-selects-the-model) for why `model`/`plan_model` are omitted.
 - **`exec` always uses its own generated config**, regardless of `config` or the two cases above: a minimal `sdk: pi` config with a single `implement` step whose prompt is `"{input}"` (also without `model`/`plan_model`). `cruise exec` binds the whole plan text to `{input}` and never runs a planning step (`plan.md` stays empty), so a `{plan}`-based config would silently receive an empty prompt.
 
@@ -247,7 +272,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 ## Troubleshooting
 
 - **Nothing happens after mentioning `@cruise`.** Check the workflow run list for a skipped/no-op run: the gate step logs why it declined (event type, action, missing trigger phrase, PR comment, or insufficient actor permission).
-- **"both 'anthropic_api_key' and 'openai_api_key' are empty".** Set at least one as a secret and pass it in.
+- **"'anthropic_api_key', 'openai_api_key', and 'env' are all empty".** Set at least one: `anthropic_api_key`, `openai_api_key`, or a provider key via `env` (e.g. `KIMI_API_KEY=...` -- see [Providers](#providers)). No dummy value is needed for the two you're not using.
 - **"actor has insufficient permission".** The commenter needs `write`, `maintain`, or `admin` access to the repository.
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.
@@ -255,3 +280,11 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 - **Model resolution errors.** With no `config` input and no repository config, this action already generates a `model`/`plan_model`-free default so pi auto-selects (see [zero-config default](#zero-config-default-pi-auto-selects-the-model)). If you *do* have your own `config` and see this, set the `model`/`plan_model` inputs explicitly in pi's reference format, or remove any leftover seher-style mode keys (e.g. `sonnet`/`opus`) from your config's `model:`/`plan_model:`.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).
+
+### FAQ
+
+- **Why did my brand-new issue immediately turn into a PR instead of posting a plan first?** Its title or body already contained the trigger phrase, so the `issues: [opened]` event fired the default `run` command right away -- see the warning in [Typical workflow](#typical-workflow). Leave the trigger phrase out of the issue itself and comment `@cruise plan` afterward if you want to review a plan first.
+- **The pull request cruise opened won't merge / doesn't show up as ready.** All PRs from `run` (and, transitively, `exec`'s equivalent for direct pushes -- though that path has no PR at all) are opened as **drafts**, unconditionally. Mark it "Ready for review" yourself once you've reviewed the diff; see [Typical workflow](#typical-workflow).
+- **My run timed out around 30 minutes.** `write-tests -> implement` (or your own config's equivalent steps) each run a full verification pass (formatting, linting, the whole test suite); on a large repository this measured over 30 minutes end to end during testing. `timeout-minutes: 60` (as used in [`examples/cruise.yml`](../examples/cruise.yml)) is the recommended starting point -- raise it further for slower test suites.
+- **My second `@cruise` comment on the same issue seems stuck, not running.** It's queued, not lost: the `concurrency:` group in the example workflows serializes runs per-issue (no `cancel-in-progress`), so a `plan` -> `fix` -> `run` sequence executes one step at a time in order. Check the Actions run list -- the earlier run is probably still in progress.
+- **cruise's PR didn't trigger my CI workflow.** Expected when running on the `GITHUB_TOKEN` fallback (no App installed) -- see [Security](#security) and [How authentication works](#how-authentication-works).
