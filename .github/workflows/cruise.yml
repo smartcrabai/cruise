@@ -39,4 +39,10 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Kimi for Coding (Anthropic-compatible, https://api.kimi.com/coding/)
+          # is a pi built-in provider: pass its key via `env` and select its
+          # model explicitly for both planning and implementation.
+          model: kimi-for-coding/kimi-for-coding
+          plan_model: kimi-for-coding/kimi-for-coding
+          env: |
+            KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
