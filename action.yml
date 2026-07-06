@@ -14,14 +14,16 @@ inputs:
   anthropic_api_key:
     description: >-
       Anthropic API key used by pi (the sdk: pi backend cruise always drives
-      in this action). At least one of `anthropic_api_key` / `openai_api_key`
-      is required; the gate step fails clearly if both are empty.
+      in this action). Provide an API key through `anthropic_api_key`,
+      `openai_api_key`, or another pi-supported provider's key (e.g.
+      KIMI_API_KEY) via `env` -- the gate step fails clearly when all three
+      inputs are empty.
     required: false
     default: ""
   openai_api_key:
     description: >-
-      OpenAI API key used by pi. At least one of `anthropic_api_key` /
-      `openai_api_key` is required.
+      OpenAI API key used by pi. See `anthropic_api_key` for how the
+      at-least-one-key requirement is checked.
     required: false
     default: ""
   github_token:
@@ -165,6 +167,7 @@ runs:
         ALLOWED_BOTS: ${{ inputs.allowed_bots }}
         ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
         OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
+        ENV_INPUT: ${{ inputs.env }}
       run: ${{ github.action_path }}/action/scripts/gate.sh
 
     - name: Resolve GitHub token (cruise-agent App or fallback)
