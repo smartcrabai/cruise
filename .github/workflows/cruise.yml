@@ -17,7 +17,7 @@ jobs:
       (github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '@cruise')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise')))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     # Serializes multiple @cruise mentions on the same issue (e.g. a quick
     # `plan` followed by `fix` followed by `run`) so they don't race each
     # other's tracking comment/session/git state. Queues rather than
