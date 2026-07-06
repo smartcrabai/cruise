@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # Decides whether cruise should run for this event: strict trigger-phrase
-# match (word boundary, same rule as anthropics/claude-code-action) plus an
-# actor authorization check (collaborator write/admin permission, or an
-# allow-listed bot). Never hard-fails on "this event doesn't apply" -- it
-# always exits 0 and communicates the verdict via `proceed`.
+# match (word boundary, same rule as anthropics/claude-code-action), an actor
+# authorization check (collaborator write/admin permission, or an
+# allow-listed bot), and -- once a run is authorized -- parses which cruise
+# command was requested. Never hard-fails on "this event doesn't apply" -- it
+# always exits 0 and communicates the verdict via `proceed`. Configuration
+# errors (missing tooling, no usable API key) DO hard-fail (non-zero exit)
+# via hard_fail(), which -- unlike deny() -- also records `gate_error` so
+# finalize.sh reports `conclusion=failure` instead of misreporting a real
+# error as `skipped` (PROCEED would otherwise read as empty/false either way).
 #
-# For issue_comment / pull_request_review / pull_request_review_comment
-# events, also writes the raw triggering comment/review body to
-# $RUNNER_TEMP/cruise-trigger-body.txt and reports it as `trigger_body_file`.
-# build-prompt.sh only fetches the issue/PR title+body via the REST API,
-# which does not include a review's or a review comment's own text -- without
-# this, the very "@cruise ..." request that triggered a review/review-comment
-# run would never reach the prompt. `issues` (opened) is deliberately
-# excluded: its body is already the issue body embedded in the Description
-# section, so writing it again here would just duplicate it.
+# Only `issues` (opened) and `issue_comment` (created) are supported. A
+# comment made on a pull request (`.issue.pull_request` present) is always
+# denied: this action no longer has a PR mode.
 set -uo pipefail
 
 TRIGGER_PHRASE="${TRIGGER_PHRASE:-@cruise}"
 ALLOWED_BOTS="${ALLOWED_BOTS:-}"
+ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}"
+OPENAI_API_KEY_INPUT="${OPENAI_API_KEY_INPUT:-}"
 EVENT_NAME="${GITHUB_EVENT_NAME:-}"
 EVENT_PATH="${GITHUB_EVENT_PATH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
@@ -29,12 +30,30 @@ out() {
 deny() {
   echo "cruise: not proceeding - $1"
   out proceed false
-  out mode ""
   out entity_number ""
   out actor ""
   out is_bot false
-  out trigger_body_file ""
+  out command ""
+  out command_rest_file ""
+  out gate_error ""
   exit 0
+}
+
+# Unlike deny() (this event legitimately doesn't apply), hard_fail() is for
+# genuine configuration errors. It still writes `proceed=false` so later
+# steps stay skipped, but also writes `gate_error` (non-empty) so
+# finalize.sh can tell the two apart and report `conclusion=failure` rather
+# than `skipped`.
+hard_fail() {
+  echo "::error::cruise: $1" >&2
+  out proceed false
+  out entity_number ""
+  out actor ""
+  out is_bot false
+  out command ""
+  out command_rest_file ""
+  out gate_error "$1"
+  exit 1
 }
 
 if [ -z "$EVENT_PATH" ] || [ ! -f "$EVENT_PATH" ]; then
@@ -48,8 +67,7 @@ fi
 # Missing python3 is a runner-configuration error, not a "this event doesn't
 # apply" case, so hard-fail instead of silently skipping.
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "::error::python3 is required by the cruise action (GitHub-hosted runners include it; self-hosted runners must install it)" >&2
-  exit 1
+  hard_fail "python3 is required by the cruise action (GitHub-hosted runners include it; self-hosted runners must install it)"
 fi
 
 jqr() {
@@ -57,7 +75,6 @@ jqr() {
 }
 
 action="$(jqr '.action')"
-mode=""
 number=""
 body=""
 actor=""
@@ -68,16 +85,14 @@ case "$EVENT_NAME" in
     if [ "$action" != "created" ]; then
       deny "issue_comment action is '$action', not 'created'"
     fi
+    is_pr="$(jq -r 'if .issue.pull_request then "true" else "false" end' "$EVENT_PATH")"
+    if [ "$is_pr" = "true" ]; then
+      deny "issue_comment is on a pull request -- this action has no PR mode"
+    fi
     body="$(jqr '.comment.body')"
     actor="$(jqr '.comment.user.login')"
     actor_type="$(jqr '.comment.user.type')"
     number="$(jqr '.issue.number')"
-    is_pr="$(jq -r 'if .issue.pull_request then "true" else "false" end' "$EVENT_PATH")"
-    if [ "$is_pr" = "true" ]; then
-      mode="pr"
-    else
-      mode="issue"
-    fi
     ;;
   issues)
     if [ "$action" != "opened" ]; then
@@ -90,35 +105,14 @@ $issue_body"
     actor="$(jqr '.issue.user.login')"
     actor_type="$(jqr '.issue.user.type')"
     number="$(jqr '.issue.number')"
-    mode="issue"
-    ;;
-  pull_request_review_comment)
-    if [ "$action" != "created" ]; then
-      deny "pull_request_review_comment action is '$action', not 'created'"
-    fi
-    body="$(jqr '.comment.body')"
-    actor="$(jqr '.comment.user.login')"
-    actor_type="$(jqr '.comment.user.type')"
-    number="$(jqr '.pull_request.number')"
-    mode="pr"
-    ;;
-  pull_request_review)
-    if [ "$action" != "submitted" ]; then
-      deny "pull_request_review action is '$action', not 'submitted'"
-    fi
-    body="$(jqr '.review.body')"
-    actor="$(jqr '.review.user.login')"
-    actor_type="$(jqr '.review.user.type')"
-    number="$(jqr '.pull_request.number')"
-    mode="pr"
     ;;
   *)
-    deny "unsupported event: $EVENT_NAME"
+    deny "unsupported event: $EVENT_NAME (only issues/issue_comment are supported)"
     ;;
 esac
 
 if [ -z "$number" ] || [ "$number" = "null" ]; then
-  deny "could not determine issue/PR number"
+  deny "could not determine issue number"
 fi
 
 # Strict word-boundary trigger match: (^|\s)<phrase>([\s.,!?;:]|$), the same
@@ -181,19 +175,65 @@ else
   esac
 fi
 
-trigger_body_file=""
-case "$EVENT_NAME" in
-  issue_comment | pull_request_review | pull_request_review_comment)
-    trigger_body_file="${RUNNER_TEMP:-/tmp}/cruise-trigger-body.txt"
-    mkdir -p "$(dirname "$trigger_body_file")"
-    printf '%s' "$body" > "$trigger_body_file"
-    ;;
-esac
+# A missing API key is a configuration error, not a "this event doesn't
+# apply" case -- surface it as a hard failure now (before installing
+# anything) rather than deep inside the run step.
+if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ]; then
+  hard_fail "both 'anthropic_api_key' and 'openai_api_key' are empty -- at least one is required so pi can authenticate"
+fi
+
+# Parse the cruise command: the first whitespace-delimited token immediately
+# following the LAST trigger-phrase mention in the body (optionally prefixed
+# with "/", trailing punctuation stripped, e.g. "plan." -> "plan"),
+# case-insensitively matched against run/exec/plan/fix. Anything else --
+# including no token at all -- defaults to "run" (bare "@cruise <request>"
+# mentions keep working). The remainder of the text after that token
+# (verbatim, may be multi-line) is written to a file and used both for the
+# "fix" command's feedback and (by lib/plan.sh) as extra instructions
+# appended to the resolved plan for "run"/"exec".
+#
+# The LAST mention (not the first) is used so a quoted reply that includes
+# an earlier "@cruise ..." message followed by the replier's own new mention
+# is parsed from the new one, not the quoted one.
+#
+# Command-word matching is intentionally strict (first token only) -- see
+# docs/github-actions.md's "Command grammar" section for the exact rule and
+# its false-positive/negative edge cases (e.g. a sentence that happens to
+# start with "fix").
+command_rest_file="${RUNNER_TEMP:-/tmp}/cruise-command-rest.txt"
+mkdir -p "$(dirname "$command_rest_file")"
+command="$(printf '%s' "$body" | python3 -c '
+import re, sys
+phrase, rest_file = sys.argv[1], sys.argv[2]
+body = sys.stdin.read()
+pattern = re.compile(r"(?:^|(?<=\s))" + re.escape(phrase) + r"(?=[\s.,!?;:]|$)", re.IGNORECASE)
+matches = list(pattern.finditer(body))
+m = matches[-1] if matches else None
+remainder = body[m.end():] if m else ""
+remainder = re.sub(r"^[\s.,!?;:]+", "", remainder)
+known = {"run", "exec", "plan", "fix"}
+command = "run"
+rest = remainder
+first_line, _, tail = remainder.partition("\n")
+tokens = first_line.split(None, 1)
+if tokens:
+    candidate = tokens[0]
+    bare = candidate[1:] if candidate.startswith("/") else candidate
+    bare = bare.rstrip(".,!?;:")
+    if bare.lower() in known:
+        command = bare.lower()
+        after = tokens[1] if len(tokens) > 1 else ""
+        rest = (after + "\n" + tail) if tail else after
+sys.stdout.write(command)
+with open(rest_file, "w", encoding="utf-8") as f:
+    f.write(rest.strip())
+' "$TRIGGER_PHRASE" "$command_rest_file")"
 
 out proceed true
-out mode "$mode"
 out entity_number "$number"
 out actor "$actor"
 out is_bot "$is_bot"
-out trigger_body_file "$trigger_body_file"
-echo "cruise: triggered by @$actor on $mode #$number"
+out command "$command"
+out command_rest_file "$command_rest_file"
+out gate_error ""
+echo "cruise: triggered by @$actor on issue #$number -- command: $command"
