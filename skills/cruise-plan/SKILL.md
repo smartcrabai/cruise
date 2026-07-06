@@ -1,6 +1,6 @@
 ---
 name: cruise-plan
-description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, and the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately. Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", or "create a cruise session from this plan". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
+description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`, or as a GitHub issue for the @cruise Actions integration. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately — and how to file the plan as an issue (plan in the issue body, optional `@cruise run` trigger comment). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", "create a cruise session from this plan", or "file this plan as an issue" / "プランをissueとして登録". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
 ---
 
 cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the downstream workflow (built-in default: write tests → implement, then PR creation) executes against it. This skill is the contract for doing that well.
@@ -87,6 +87,34 @@ When stdin is not a TTY (always true for an agent's shell), the approve menu is 
 cruise list --json | jq '.[] | select(.id=="<session-id>") | {id, phase, title}'
 # expect phase "Planned" in both cases
 ```
+
+## Creating a GitHub issue instead (the @cruise Actions integration)
+
+When the target repository has the cruise GitHub Action installed (`.github/workflows/cruise.yml` + an API-key secret — see `docs/github-actions.md`), a plan can be registered as a **GitHub issue** instead of a local session. Execution then happens on GitHub Actions and ends in a draft PR, with the whole exchange reviewable in the issue thread.
+
+How it maps: for `@cruise run`, the action resolves the plan from (1) the last plan comment posted by the cruise bot, else (2) the **issue title + body**. A locally-authored plan therefore goes in the issue body:
+
+```sh
+gh issue create --repo <owner>/<repo> \
+  --title "<task title — same as the plan's # heading>" \
+  --body-file plan.md
+```
+
+Then either leave it for review (someone with write access comments `@cruise run` when ready), or trigger immediately with a separate comment:
+
+```sh
+gh issue comment <issue#> --repo <owner>/<repo> --body "@cruise run"
+```
+
+Rules specific to this path:
+
+- **Never put the string `@cruise` inside the issue title or body** unless you intend to execute the moment the issue is created — `issues: opened` fires a bare *run* on any body/title mention. Keep the body mention-free and trigger with a separate comment.
+- **Do not post the plan as an issue comment.** The action only trusts `<!-- cruise:plan -->` comments authored by its own bot identities (`cruise-agent[bot]` / `github-actions[bot]`); a hand-posted marker comment is deliberately ignored (plan-spoofing defense). The issue body is the supported channel for pre-authored plans.
+- **Revising the plan = edit the issue body** (`gh issue edit <n> --repo <owner>/<repo> --body-file plan-v2.md`). `@cruise fix` only revises bot-posted plan comments (plans produced by `@cruise plan`), not issue bodies.
+- The trigger comment must come from a user with **write access** (the gate rejects others) and should be exactly `@cruise run` — any extra text in it is appended to the plan as additional instructions.
+- Same quality bar and format contract as above; the plan is consumed verbatim. The issue title duplicating the plan's `#` heading is fine.
+
+Choose by where execution should happen: local session (`cruise run` on this machine, immediate) vs issue (GitHub Actions, async, reviewable thread, draft PR at the end).
 
 ## Gotchas
 
