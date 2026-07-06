@@ -1,7 +1,6 @@
 name: Cruise
 
-# Fires on a new issue (in case its title/body already mentions @cruise) and
-# on every later comment, so `@cruise plan`/`fix`/`run`/`exec` all work.
+# Same trigger set as examples/cruise.yml.
 on:
   issue_comment:
     types: [created]
@@ -19,8 +18,6 @@ jobs:
       (github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '@cruise')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise')))
     runs-on: ubuntu-latest
-    # write-tests -> implement each run a full verification pass; budget
-    # generously (see docs/github-actions.md's Troubleshooting/FAQ notes).
     timeout-minutes: 60
     # Serializes multiple @cruise mentions on the same issue (e.g. a quick
     # `plan` followed by `fix` followed by `run`) so they don't race each
@@ -28,8 +25,6 @@ jobs:
     # cancels: no `cancel-in-progress`, so an in-flight run always finishes.
     concurrency:
       group: cruise-${{ github.event.issue.number || github.run_id }}
-    # contents/pull-requests/issues:write let cruise push branches, open
-    # draft PRs, and post/edit its tracking + plan comments.
     permissions:
       contents: write
       pull-requests: write
@@ -39,16 +34,26 @@ jobs:
       # if you don't use the App (the action falls back to GITHUB_TOKEN).
       id-token: write
     steps:
-      # fetch-depth: 0 gives cruise full history to branch/diff from.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
-      # The baseline setup: Anthropic (or add openai_api_key/both) via the
-      # dedicated inputs, no custom model or config -- see
-      # examples/cruise-kimi.yml and examples/cruise-openai-compatible.yml
-      # for other providers, and examples/repo-cruise.yaml for a config you
-      # can commit instead of relying on the action's generated default.
       - uses: smartcrabai/cruise@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Points pi's "openai" provider slot at a self-hosted OpenAI-
+          # compatible endpoint (vLLM, LiteLLM, an internal gateway, ...)
+          # instead of api.openai.com. `openai_api_key` becomes whatever
+          # bearer token that endpoint expects (use a dummy value if it
+          # doesn't check one). `pi_models_json` is written to
+          # $RUNNER_TEMP/pi-agent/models.json for the run; see "sdk: pi --
+          # how execution works" in docs/github-actions.md.
+          openai_api_key: ${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}
+          model: openai/my-custom-model
+          plan_model: openai/my-custom-model
+          pi_models_json: |
+            {
+              "openai": {
+                "baseUrl": "https://my-openai-compatible-endpoint.example.com/v1",
+                "models": ["my-custom-model"]
+              }
+            }

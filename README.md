@@ -994,41 +994,24 @@ The desktop GUI persists two pieces of state across sessions:
 
 ## GitHub Actions
 
-Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions, always through the `sdk: pi` backend (no `claude` CLI install). There is no PR mode -- comments on pull requests are ignored. The word right after the mention picks a command: `run` (default) plans-and-implements and opens a draft PR, `exec` pushes straight to the default branch (no PR, advanced/opt-in), `plan` posts an LLM-generated plan as a tracking comment, and `fix <feedback>` revises that comment in place. See [`docs/github-actions.md`](docs/github-actions.md) for the full command reference.
+Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions, always through the `sdk: pi` backend (no `claude` CLI install). There is no PR mode -- comments on pull requests are ignored.
 
-Setup: (1) install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository, (2) add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` secret (pi needs at least one), (3) copy the workflow below to `.github/workflows/cruise.yml`. The App lets the action authenticate as `cruise-agent[bot]` via a short-lived, repository-scoped token instead of the default `GITHUB_TOKEN` -- see [`docs/github-actions.md`](docs/github-actions.md#how-authentication-works) for how that works and how to opt out.
+**Quickstart:**
 
-```yaml
-# .github/workflows/cruise.yml
-on:
-  issue_comment:
-    types: [created]
-  issues:
-    types: [opened]
+1. Install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository (optional; falls back to `GITHUB_TOKEN` otherwise).
+2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` repository secret.
+3. Copy [`examples/cruise.yml`](examples/cruise.yml) to `.github/workflows/cruise.yml`.
 
-jobs:
-  cruise:
-    # See examples/cruise.yml for the full per-event trigger-phrase filter.
-    if: |
-      (github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '@cruise')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.title, '@cruise') || contains(github.event.issue.body, '@cruise')))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write # for the cruise-agent App token exchange; optional
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          fetch-depth: 0
-      - uses: smartcrabai/cruise@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-```
+Then open an issue, or comment on one, starting with `@cruise`:
 
-See [`examples/cruise.yml`](examples/cruise.yml) for the full trigger filter and [`docs/github-actions.md`](docs/github-actions.md) for the command reference, inputs/outputs, security notes, and how to point it at your own workflow config.
+| Mention | Command | What happens |
+|---|---|---|
+| `@cruise`, `@cruise run <request>` | **run** | Plan (or resolve the existing plan comment), implement in a worktree, and open a **draft** pull request. |
+| `@cruise exec <request>` | **exec** | Same planning, but pushes straight to the default branch -- no PR. Advanced/opt-in. |
+| `@cruise plan <request>` | **plan** | Post an LLM-generated plan as a tracking comment. Nothing is executed. |
+| `@cruise fix <feedback>` | **fix** | Revise the existing plan-tracking comment in place. |
+
+See [`docs/github-actions.md`](docs/github-actions.md) for the full command grammar, a typical plan -> fix -> run -> review walkthrough, the provider table (Anthropic/OpenAI/Kimi/Google/Groq/DeepSeek/xAI/...), inputs/outputs, security notes, and how to point it at your own workflow config or a self-hosted endpoint. See [`examples/`](examples/) for drop-in workflow files and a sample repo config.
 
 ## License
 
