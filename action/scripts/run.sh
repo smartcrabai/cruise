@@ -85,6 +85,20 @@ if [ -n "${GH_TOKEN:-}" ]; then
   # encryption), so it must be masked in the Actions log exactly like the
   # token itself.
   echo "::add-mask::${auth_b64}"
+  # actions/checkout v7 no longer writes its AUTHORIZATION extraheader into
+  # .git/config directly: it stores it in an external credentials config
+  # wired in via includeIf.gitdir entries (including .git/worktrees/*), so a
+  # plain --unset-all of the extraheader key cannot see it. If both that
+  # include and our own extraheader survive, git sends TWO Authorization
+  # headers and GitHub rejects the push with 400 'Duplicate header'. Drop
+  # every includeIf entry that points at a credentials config first.
+  while IFS=' ' read -r key path; do
+    case "$path" in
+      *git-credentials*)
+        git -C "$WORKSPACE" config --local --unset-all "$key" 2>/dev/null || true
+        ;;
+    esac
+  done < <(git -C "$WORKSPACE" config --local --get-regexp '^includeif\..*\.path$' 2>/dev/null || true)
   git -C "$WORKSPACE" config --local --unset-all "http.${server_url}/.extraheader" 2>/dev/null || true
   git -C "$WORKSPACE" config --local "http.${server_url}/.extraheader" "AUTHORIZATION: basic ${auth_b64}"
 fi
