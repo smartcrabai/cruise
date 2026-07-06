@@ -1,22 +1,34 @@
 #!/usr/bin/env bash
-# Resolves the cruise workflow config(s) to use for this run.
+# Resolves the general workflow config and always generates the minimal
+# `{input}`-only config used by the `exec` command.
 #
-# When the user sets the `config` input, that file is used verbatim for both
-# issue mode and PR mode (the caller is responsible for making it work with
-# both -- see docs/github-actions.md).
+# General config (`run`/`plan`/`fix` commands), in priority order:
+#   1. `config` input set -- resolved to an absolute path and exported as
+#      CRUISE_CONFIG.
+#   2. `config` unset, and the checkout root already has a
+#      cruise.yaml/cruise.yml/.cruise.yaml/.cruise.yml (or a `.cruise/*.yaml`
+#      / `*.yml`) -- CRUISE_CONFIG is left unset entirely and cruise's own
+#      resolver picks that file up.
+#   3. `config` unset and no repo config exists -- this script generates a
+#      default config and exports it as CRUISE_CONFIG. It intentionally does
+#      NOT set `model`/`plan_model`: cruise's *built-in* default (used when
+#      no config is found at all) hardcodes `model: sonnet` / `plan_model:
+#      opus`, which under the `sdk: pi` this action always forces are
+#      interpreted as literal pi model-registry ids -- and pi has no id
+#      named exactly "sonnet"/"opus" (real ids look like
+#      "claude-sonnet-4-6"), so the zero-config path would fail to resolve a
+#      model. Leaving them unset lets pi auto-select a provider/model from
+#      whichever of ANTHROPIC_API_KEY/OPENAI_API_KEY is present. The `model`/
+#      `plan_model` inputs (CRUISE_MODEL/CRUISE_PLAN_MODEL env overrides,
+#      applied by cruise itself) still take priority over this generated
+#      config when set.
 #
-# Otherwise, two auto-generated configs are produced:
-#   - config_path (issue mode): mirrors cruise's own built-in default
-#     workflow (WorkflowConfig::default_builtin() -- command: [claude,
-#     --model, "{model}", -p], steps: write-tests -> implement) with
-#     `claude_args` appended to the command. The step prompts are read
-#     verbatim from prompts/*.md in this repo (see embed_prompt_file below)
-#     so they can't drift from cruise's own built-in prompts.
-#   - pr_config_path (PR mode): a single `implement` step whose prompt is
-#     just `{input}`. PR mode (`cruise exec`) binds the whole task.md built
-#     by build-prompt.sh to `{input}` and leaves `{plan}` empty (there is no
-#     planning step), so a config built around `{plan}` would silently send
-#     the model an empty prompt -- see HIGH-2 in the review this fixed.
+# exec config (`exec` command only): `cruise exec` binds the whole plan text
+# to {input} and never runs a planning step (plan.md stays empty), so this
+# config intentionally has a single step referencing {input} rather than
+# {plan}. Generated unconditionally, regardless of the `config` input --
+# `exec` always uses this file via an explicit `-c`. Like the generated
+# default above, it does not set `model`/`plan_model` either.
 set -euo pipefail
 
 CONFIG_INPUT="${CONFIG_INPUT:-}"
@@ -25,9 +37,10 @@ OUT_DIR="${RUNNER_TEMP:-/tmp}/cruise"
 mkdir -p "$OUT_DIR"
 
 # The action's own checkout (where prompts/*.md live), so the generated
-# config can embed the real prompt files instead of a hand-copied duplicate.
-# GITHUB_ACTION_PATH is set automatically by GitHub Actions for composite
-# actions; fall back to resolving relative to this script for local testing.
+# default config can embed the real prompt files instead of a hand-copied
+# duplicate. GITHUB_ACTION_PATH is set automatically by GitHub Actions for
+# composite actions; fall back to resolving relative to this script for
+# local testing.
 resolve_action_root() {
   if [ -n "${GITHUB_ACTION_PATH:-}" ]; then
     printf '%s\n' "$GITHUB_ACTION_PATH"
@@ -57,21 +70,22 @@ embed_prompt_file() { # $1=file $2=indent
   done < "$file"
 }
 
-write_command_block() {
-  echo "command:"
-  echo "  - claude"
-  echo "  - --model"
-  echo "  - \"{model}\""
-  echo "  - -p"
-  # Intentional word-splitting: claude_args is a space-separated flag list,
-  # not a single shell-quoted value.
-  # shellcheck disable=SC2086
-  set -- ${CLAUDE_ARGS:-}
-  for arg in "$@"; do
-    printf '  - %s\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$arg")"
+# True if the checkout already has a config cruise's own resolver would pick
+# up on its own (the local-file tiers of resolve_config(): the four
+# top-level names, or any YAML file directly under .cruise/).
+repo_has_own_config() {
+  for name in cruise.yaml cruise.yml .cruise.yaml .cruise.yml; do
+    [ -f "$WORKSPACE/$name" ] && return 0
   done
+  if [ -d "$WORKSPACE/.cruise" ]; then
+    for f in "$WORKSPACE"/.cruise/*.yaml "$WORKSPACE"/.cruise/*.yml; do
+      [ -f "$f" ] && return 0
+    done
+  fi
+  return 1
 }
 
+config_path=""
 if [ -n "$CONFIG_INPUT" ]; then
   case "$CONFIG_INPUT" in
     /*) resolved="$CONFIG_INPUT" ;;
@@ -81,20 +95,22 @@ if [ -n "$CONFIG_INPUT" ]; then
     echo "::error::cruise config not found at '$resolved' (input 'config' = '$CONFIG_INPUT')" >&2
     exit 1
   fi
-  echo "cruise: using user-supplied config at $resolved (for both issue and PR mode)"
-  pr_resolved="$resolved"
+  echo "cruise: using user-supplied config at $resolved (sets CRUISE_CONFIG for run/plan/fix)"
+  config_path="$resolved"
+elif repo_has_own_config; then
+  echo "cruise: repository already has its own config -- cruise's own resolver will pick it up (CRUISE_CONFIG left unset)"
 else
-  resolved="$OUT_DIR/ci-default.yaml"
-  pr_resolved="$OUT_DIR/ci-default-pr.yaml"
-  echo "cruise: generating default CI config at $resolved"
-  echo "cruise: generating default PR-mode CI config at $pr_resolved"
-
+  config_path="$OUT_DIR/default-config.yaml"
+  echo "cruise: no 'config' input and no repository config found -- generating a default at $config_path"
   {
-    write_command_block
     cat <<'YAML'
-
-model: sonnet
-plan_model: opus
+# Auto-generated by the cruise GitHub Action: no `config` input was given and
+# the repository has no cruise.yaml/cruise.yml/.cruise.yaml/.cruise.yml of
+# its own. Mirrors cruise's built-in default workflow (write-tests ->
+# implement) under `sdk: pi`, deliberately without `model`/`plan_model` so pi
+# auto-selects a provider/model instead of failing to resolve the built-in
+# default's literal "sonnet"/"opus" as pi model-registry ids.
+sdk: pi
 
 steps:
   write-tests:
@@ -107,22 +123,35 @@ YAML
     prompt: |
 YAML
     embed_prompt_file "$ACTION_ROOT/prompts/implement-after-tests.md" "      "
-  } > "$resolved"
+  } > "$config_path"
+fi
 
-  {
-    write_command_block
-    cat <<'YAML'
-
-model: sonnet
+exec_config_path="$OUT_DIR/exec-config.yaml"
+cat > "$exec_config_path" <<'YAML'
+# Auto-generated by the cruise GitHub Action for the `exec` command.
+# `cruise exec` binds the whole plan text to {input} and never runs a
+# planning step (plan.md stays empty), so this config has a single step
+# referencing {input} rather than {plan}. `sdk: pi` is forced regardless via
+# CRUISE_SDK, but is declared here too so the file is self-sufficient.
+# `model` is deliberately unset too, for the same reason as the generated
+# default config above: it lets pi auto-select instead of failing to
+# resolve a hardcoded literal as a pi model-registry id.
+sdk: pi
 
 steps:
   implement:
     prompt: "{input}"
 YAML
-  } > "$pr_resolved"
+
+# CRUISE_CONFIG must never be *set to an empty string* -- cruise's resolver
+# treats an empty CRUISE_CONFIG as "use this (nonexistent) path" and hard
+# errors, which is different from leaving it unset entirely. Only export it
+# when a real path was resolved.
+if [ -n "$config_path" ]; then
+  echo "CRUISE_CONFIG=$config_path" >> "$GITHUB_ENV"
 fi
 
 {
-  echo "config_path=$resolved"
-  echo "pr_config_path=$pr_resolved"
+  echo "config_path=$config_path"
+  echo "exec_config_path=$exec_config_path"
 } >> "$GITHUB_OUTPUT"

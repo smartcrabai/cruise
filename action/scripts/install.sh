@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Installs the `cruise` and `claude` CLIs if they are not already on PATH.
-# Uses the official cargo-dist installer script for cruise (it already
-# resolves the correct target triple and download URL per-platform) and the
-# official native installer for Claude Code.
+# Installs the `cruise` CLI if it is not already on PATH. Uses the official
+# cargo-dist installer script (it already resolves the correct target triple
+# and download URL per-platform). cruise always runs with `sdk: pi` in this
+# action (see setup-env.sh), so no separate `claude` CLI install is needed.
 set -euo pipefail
 
 CRUISE_VERSION="${CRUISE_VERSION:-latest}"
@@ -33,23 +33,6 @@ if ! command -v cruise >/dev/null 2>&1; then
   exit 1
 fi
 cruise --version
-
-if command -v claude >/dev/null 2>&1; then
-  echo "claude: already installed at $(command -v claude)"
-else
-  echo "claude: installing Claude Code CLI"
-  curl -fsSL https://claude.ai/install.sh | bash
-  if [ -d "$HOME/.local/bin" ]; then
-    echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-    export PATH="$HOME/.local/bin:$PATH"
-  fi
-fi
-
-if ! command -v claude >/dev/null 2>&1; then
-  echo "::error::claude CLI installation failed (not found on PATH)" >&2
-  exit 1
-fi
-claude --version
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "::error::gh CLI not found on PATH (GitHub-hosted runners include it by default; self-hosted runners must install it)" >&2

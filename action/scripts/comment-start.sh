@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# Posts the initial "cruise is working..." tracking comment on the
-# issue/PR. Works for both issues and PRs: GitHub's Issues API comment
-# endpoint accepts a PR number too (a PR is an issue under the hood).
+# Posts the initial "cruise is working..." tracking comment on the issue.
 set -euo pipefail
 
 REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 ENTITY_NUMBER="${ENTITY_NUMBER:?ENTITY_NUMBER is required}"
-MODE="${MODE:-issue}"
+COMMAND="${COMMAND:-run}"
 TRIGGER_ACTOR="${TRIGGER_ACTOR:-someone}"
 
 job_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_RUN_ID:-}"
 
+case "$COMMAND" in
+  run) verb="planning and opening a pull request" ;;
+  exec) verb="executing directly on the default branch (no PR)" ;;
+  plan) verb="drafting a plan" ;;
+  fix) verb="revising the plan" ;;
+  *) verb="working on this" ;;
+esac
+
 body="$(cat <<EOF
-🧭 **cruise** is on it, @${TRIGGER_ACTOR} -- working on this ${MODE}... [View run](${job_url})
+🧭 **cruise** is on it, @${TRIGGER_ACTOR} -- ${verb}... [View run](${job_url})
 EOF
 )"
 

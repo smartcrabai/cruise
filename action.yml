@@ -1,8 +1,9 @@
 name: "Cruise"
 description: >-
-  Trigger the cruise coding agent from a GitHub Issue or Pull Request comment
-  (e.g. "@cruise fix the flaky test"). Runs cruise's plan -> implement -> PR
-  workflow inside GitHub Actions and reports progress back as a comment.
+  Trigger the cruise coding agent from a GitHub Issue (@cruise plan / run /
+  exec / fix). Runs cruise's plan -> implement -> PR workflow (or a direct
+  exec push) inside GitHub Actions, driving pi_agent_rust directly (sdk: pi),
+  and reports progress back as a comment.
 author: "smartcrabai"
 
 branding:
@@ -12,8 +13,17 @@ branding:
 inputs:
   anthropic_api_key:
     description: >-
-      Anthropic API key used by the `claude` CLI that cruise drives. Required.
-    required: true
+      Anthropic API key used by pi (the sdk: pi backend cruise always drives
+      in this action). At least one of `anthropic_api_key` / `openai_api_key`
+      is required; the gate step fails clearly if both are empty.
+    required: false
+    default: ""
+  openai_api_key:
+    description: >-
+      OpenAI API key used by pi. At least one of `anthropic_api_key` /
+      `openai_api_key` is required.
+    required: false
+    default: ""
   github_token:
     description: >-
       Token used for GitHub API calls (permission checks, comments, PRs,
@@ -41,38 +51,57 @@ inputs:
   cruise_version:
     description: >-
       cruise release to install. "latest" (default) or a specific tag such as
-      "v0.1.66".
+      "v0.1.68". Requires cruise v0.1.68 or later (the first release with
+      `sdk: pi` support, which this action always uses).
     required: false
     default: "latest"
   config:
     description: >-
-      Path (relative to the repository root, or absolute) to a cruise workflow
-      config YAML to use instead of the built-in default CI config.
+      Path (relative to the repository root, or absolute) to a cruise
+      workflow config YAML, used by the `run`/`plan`/`fix` commands (sets
+      CRUISE_CONFIG). Empty (default) lets cruise's own resolver pick
+      cruise.yaml/cruise.yml/.cruise.yaml/.cruise.yml from the checkout, or
+      its built-in default if none exists. Has no effect on `exec`, which
+      always uses its own generated `{input}`-only config.
     required: false
     default: ""
-  skip_planning:
-    description: >-
-      When "true", the mention body is used verbatim as the plan (no LLM
-      planning call) for Issue mentions. Has no effect for PR mentions, which
-      always run `cruise exec` directly. Default "false".
-    required: false
-    default: "false"
   model:
-    description: 'Overrides CRUISE_MODEL (the model used for implementation steps).'
+    description: >-
+      Overrides CRUISE_MODEL (the model used for implementation steps), in
+      pi's model-reference format: "provider/model[:thinking]" (e.g.
+      "openai-codex/gpt-5.5:xhigh"), a bare model id ("claude-sonnet-4-6"), or
+      empty to let pi auto-select a provider/model from its built-in
+      preference order.
     required: false
     default: ""
   plan_model:
-    description: 'Overrides CRUISE_PLAN_MODEL (the model used for the planning step).'
+    description: >-
+      Overrides CRUISE_PLAN_MODEL (the model used by the `plan`/`fix`
+      commands' planning step), same format as `model`.
     required: false
     default: ""
-  claude_args:
+  pi_models_json:
     description: >-
-      Extra space-separated arguments appended to the `claude` invocation in
-      the auto-generated default CI config. Ignored when `config` is set.
-      Split on whitespace only: shell-style quoting is NOT honored, so
-      '--foo "bar baz"' becomes three separate arguments.
+      Raw contents of a pi `models.json` file (custom providers / OpenAI-
+      compatible endpoints / model registry overrides -- see pi's own model
+      docs for the schema). When set, this is written to
+      `$RUNNER_TEMP/pi-agent/models.json` and `PI_CODING_AGENT_DIR` is
+      pointed at that directory for the duration of the run. Empty (default)
+      leaves pi's model resolution untouched.
     required: false
-    default: "--dangerously-skip-permissions"
+    default: ""
+  env:
+    description: >-
+      Extra environment variables to export into the cruise process, one
+      `KEY=VALUE` per line (blank lines and lines starting with "#" are
+      ignored). Each value is masked in the log before being exported.
+      Reserved names (GITHUB_TOKEN, GH_TOKEN, ANTHROPIC_API_KEY,
+      OPENAI_API_KEY, CRUISE_SDK, CRUISE_CONFIG, PI_CODING_AGENT_DIR, PATH,
+      HOME, git identity vars, XDG_* vars, and anything prefixed
+      GITHUB_/ACTIONS_/RUNNER_) are skipped with a warning instead of being
+      overridden.
+    required: false
+    default: ""
   allowed_bots:
     description: >-
       Comma-separated list of bot logins (without the "[bot]" suffix) allowed
@@ -96,12 +125,21 @@ inputs:
     default: ""
 
 outputs:
+  command:
+    description: '"run", "exec", "plan", or "fix" -- the command parsed from the mention (empty if the gate skipped the run).'
+    value: ${{ steps.gate.outputs.command }}
   session_id:
-    description: 'The cruise session ID that was created and run (empty if skipped/failed before creation).'
+    description: 'The cruise session ID that was created (empty if skipped/failed before creation).'
     value: ${{ steps.run.outputs.session_id }}
   pr_url:
-    description: 'URL of the pull request cruise created or pushed to (empty if none).'
+    description: 'URL of the pull request cruise created (the `run` command only; empty otherwise).'
     value: ${{ steps.run.outputs.pr_url }}
+  commit_url:
+    description: 'URL of the commit cruise pushed directly to the default branch (the `exec` command only; empty otherwise).'
+    value: ${{ steps.run.outputs.commit_url }}
+  plan_comment_url:
+    description: 'URL of the plan-tracking comment cruise posted or edited (the `plan`/`fix` commands only; empty otherwise).'
+    value: ${{ steps.run.outputs.plan_comment_url }}
   conclusion:
     description: '"success", "failure", or "skipped" (mention did not match / actor not authorized).'
     value: ${{ steps.finalize.outputs.conclusion }}
@@ -116,7 +154,7 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Gate (trigger + permission check)
+    - name: Gate (trigger + permission + command parsing)
       id: gate
       shell: bash
       env:
@@ -125,6 +163,8 @@ runs:
         GH_TOKEN: ${{ inputs.github_token || github.token }}
         TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
         ALLOWED_BOTS: ${{ inputs.allowed_bots }}
+        ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
+        OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
       run: ${{ github.action_path }}/action/scripts/gate.sh
 
     - name: Resolve GitHub token (cruise-agent App or fallback)
@@ -136,6 +176,19 @@ runs:
         TOKEN_EXCHANGE_URL: ${{ inputs.token_exchange_url }}
         WORKFLOW_TOKEN: ${{ github.token }}
       run: ${{ github.action_path }}/action/scripts/app-token.sh
+
+    - name: Set up cruise/pi environment
+      id: setup_env
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
+        OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
+        MODEL_INPUT: ${{ inputs.model }}
+        PLAN_MODEL_INPUT: ${{ inputs.plan_model }}
+        PI_MODELS_JSON: ${{ inputs.pi_models_json }}
+        ENV_INPUT: ${{ inputs.env }}
+      run: ${{ github.action_path }}/action/scripts/setup-env.sh
 
     - name: Record start time
       id: timer
@@ -153,11 +206,11 @@ runs:
       env:
         GH_TOKEN: ${{ steps.token.outputs.token }}
         ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
-        MODE: ${{ steps.gate.outputs.mode }}
+        COMMAND: ${{ steps.gate.outputs.command }}
         TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
       run: ${{ github.action_path }}/action/scripts/comment-start.sh
 
-    - name: Install cruise + claude
+    - name: Install cruise
       id: install
       if: steps.gate.outputs.proceed == 'true'
       shell: bash
@@ -165,44 +218,25 @@ runs:
         CRUISE_VERSION: ${{ inputs.cruise_version }}
       run: ${{ github.action_path }}/action/scripts/install.sh
 
-    - name: Resolve/generate cruise config
+    - name: Resolve cruise config
       id: config
       if: steps.gate.outputs.proceed == 'true'
       shell: bash
       env:
         CONFIG_INPUT: ${{ inputs.config }}
-        CLAUDE_ARGS: ${{ inputs.claude_args }}
       run: ${{ github.action_path }}/action/scripts/resolve-config.sh
 
-    - name: Build task prompt from GitHub context
-      id: prompt
-      if: steps.gate.outputs.proceed == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ steps.token.outputs.token }}
-        MODE: ${{ steps.gate.outputs.mode }}
-        ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
-        TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
-        TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
-        TRIGGER_BODY_FILE: ${{ steps.gate.outputs.trigger_body_file }}
-      run: ${{ github.action_path }}/action/scripts/build-prompt.sh
-
-    - name: Run cruise
+    - name: Run cruise command
       id: run
       if: steps.gate.outputs.proceed == 'true'
       continue-on-error: true
       shell: bash
       env:
         GH_TOKEN: ${{ steps.token.outputs.token }}
-        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
-        MODE: ${{ steps.gate.outputs.mode }}
+        COMMAND: ${{ steps.gate.outputs.command }}
         ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
-        SKIP_PLANNING: ${{ inputs.skip_planning }}
-        CONFIG_PATH: ${{ steps.config.outputs.config_path }}
-        PR_CONFIG_PATH: ${{ steps.config.outputs.pr_config_path }}
-        TASK_FILE: ${{ steps.prompt.outputs.task_file }}
-        CRUISE_MODEL: ${{ inputs.model }}
-        CRUISE_PLAN_MODEL: ${{ inputs.plan_model }}
+        COMMAND_REST_FILE: ${{ steps.gate.outputs.command_rest_file }}
+        EXEC_CONFIG_PATH: ${{ steps.config.outputs.exec_config_path }}
         GIT_USER_NAME_INPUT: ${{ inputs.git_user_name }}
         GIT_USER_EMAIL_INPUT: ${{ inputs.git_user_email }}
         USED_APP: ${{ steps.token.outputs.used_app }}
@@ -215,12 +249,16 @@ runs:
       env:
         GH_TOKEN: ${{ steps.token.outputs.token }}
         PROCEED: ${{ steps.gate.outputs.proceed }}
+        GATE_ERROR: ${{ steps.gate.outputs.gate_error }}
+        COMMAND: ${{ steps.gate.outputs.command }}
         ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
         COMMENT_ID: ${{ steps.comment_start.outputs.comment_id }}
         RUN_OUTCOME: ${{ steps.run.outcome }}
         START_TS: ${{ steps.timer.outputs.start_ts }}
         SESSION_ID: ${{ steps.run.outputs.session_id }}
         PR_URL: ${{ steps.run.outputs.pr_url }}
+        COMMIT_URL: ${{ steps.run.outputs.commit_url }}
+        PLAN_COMMENT_URL: ${{ steps.run.outputs.plan_comment_url }}
         FAIL_REASON: ${{ steps.run.outputs.fail_reason }}
       run: ${{ github.action_path }}/action/scripts/finalize.sh
 
