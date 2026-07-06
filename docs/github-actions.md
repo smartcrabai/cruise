@@ -89,7 +89,7 @@ The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't 
 This action always forces `CRUISE_SDK=pi` in the environment before invoking cruise, regardless of what any config file says (`command:`/`sdk:` in a repo's own `cruise.yaml` are overridden). This means:
 
 - **No `claude` CLI is installed.** cruise drives `pi_agent_rust` directly, in-process.
-- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > the `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env vars this action sets from the `anthropic_api_key`/`openai_api_key` inputs. At least one of the two inputs is required -- the gate step fails clearly if both are empty.
+- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > provider API-key env vars (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the dedicated inputs, or any other provider's key -- `KIMI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, ... -- passed through the `env` input). The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, **and** `env` are all empty.
 - **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses pi's model-reference format, not seher mode keys:
   - `"provider/model"`, optionally with `:thinking` (e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
   - `"model"` (no `/`) -- pi searches its own model registry for that id.
@@ -108,6 +108,21 @@ This action always forces `CRUISE_SDK=pi` in the environment before invoking cru
           }
         }
   ```
+
+### Third-party providers pi already knows (Kimi example)
+
+pi ships built-in definitions for many providers beyond Anthropic/OpenAI (Google, Groq, Mistral, DeepSeek, xAI, Moonshot/Kimi, MiniMax, OpenRouter, ...), each keyed off its own env var -- for those, no `pi_models_json` is needed at all. Pass the key through the `env` input and select the provider's model explicitly. For example, [Kimi for Coding](https://api.kimi.com/coding/) (an Anthropic-compatible endpoint) is the built-in `kimi-for-coding` provider authenticated by `KIMI_API_KEY`:
+
+```yaml
+- uses: smartcrabai/cruise@v1
+  with:
+    model: kimi-for-coding/kimi-for-coding
+    plan_model: kimi-for-coding/kimi-for-coding
+    env: |
+      KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
+```
+
+(`kimi-for-coding` is a virtual model id the Kimi backend remaps to its latest coding model.)
 
 ### Zero-config default: pi auto-selects the model
 

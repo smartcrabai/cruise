@@ -19,6 +19,7 @@ TRIGGER_PHRASE="${TRIGGER_PHRASE:-@cruise}"
 ALLOWED_BOTS="${ALLOWED_BOTS:-}"
 ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}"
 OPENAI_API_KEY_INPUT="${OPENAI_API_KEY_INPUT:-}"
+ENV_INPUT="${ENV_INPUT:-}"
 EVENT_NAME="${GITHUB_EVENT_NAME:-}"
 EVENT_PATH="${GITHUB_EVENT_PATH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
@@ -177,9 +178,13 @@ fi
 
 # A missing API key is a configuration error, not a "this event doesn't
 # apply" case -- surface it as a hard failure now (before installing
-# anything) rather than deep inside the run step.
-if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ]; then
-  hard_fail "both 'anthropic_api_key' and 'openai_api_key' are empty -- at least one is required so pi can authenticate"
+# anything) rather than deep inside the run step. A non-empty `env` input
+# also counts: pi supports many providers whose keys (KIMI_API_KEY,
+# GOOGLE_API_KEY, GROQ_API_KEY, ...) are passed through `env` rather than a
+# dedicated input, and gate.sh cannot tell which of those lines is an API
+# key -- pi itself fails with a clear MissingApiKey error if none applies.
+if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ] && [ -z "$ENV_INPUT" ]; then
+  hard_fail "'anthropic_api_key', 'openai_api_key', and 'env' are all empty -- provide an API key so pi can authenticate (either a dedicated input, or a provider key such as KIMI_API_KEY via 'env')"
 fi
 
 # Parse the cruise command: the first whitespace-delimited token immediately
