@@ -35,10 +35,18 @@ steps:
     prompt: "{input}"
 ```
 
-Or with the seher SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)):
+Or with an SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)) — `sdk: seher` (routes through seher's provider resolution) or `sdk: pi` (drives pi_agent_rust directly, no seher config needed):
 
 ```yaml
 sdk: seher
+steps:
+  implement:
+    prompt: "{input}"
+```
+
+```yaml
+sdk: pi
+model: anthropic/claude-sonnet-4-6   # plain model reference, not a mode key
 steps:
   implement:
     prompt: "{input}"
@@ -51,7 +59,7 @@ The full spec is split into the files below. Load only the sections you need.
 | Doc | Contents |
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, `pr_language`, `cleanup_after_pr`, hot-reload, rate-limit retry |
-| [references/sdk.md](references/sdk.md) | The seher SDK backend: `sdk: seher`, mode keys, differences from command mode |
+| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: seher` (mode keys, provider resolution) and `sdk: pi` (direct pi_agent_rust, model references, auth), differences from command mode |
 | [references/steps.md](references/steps.md) | The three step types: prompt, command, option; `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
@@ -60,12 +68,13 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge rules, the `llm:` section for session-title generation |
 | [examples/full-flow.yaml](examples/full-flow.yaml) | Complete example: plan → approve → implement → test → review → PR → after-pr |
 | [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: seher` with mode keys |
+| [examples/pi-flow.yaml](examples/pi-flow.yaml) | SDK-backend example: `sdk: pi` with plain model references, no seher config |
 
 ## Authoring checklist
 
 After writing or editing a config, verify each of the following:
 
-1. **Required fields**: is `steps` present, plus exactly one of `command` / `sdk`? (Both set or neither set is a validation error.)
+1. **Required fields**: is `steps` present, plus exactly one of `command` / `sdk`? (Both set or neither set is a validation error.) When `sdk` is set, is it `seher` or `pi`? (Any other value is a validation error.)
 2. **Step type uniqueness**: each step primarily holds one of `prompt` / `command` / `option` (group-call steps are the exception and hold none of these).
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`.
 4. **`next:` targets**: do referenced step names exist (no typos)?

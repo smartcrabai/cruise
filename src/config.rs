@@ -27,11 +27,20 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub command: Vec<String>,
 
-    /// SDK to drive prompt execution instead of an external `command`
-    /// (currently only `"seher"`). Mutually exclusive with `command`.
+    /// SDK to drive prompt execution instead of an external `command`.
+    /// Mutually exclusive with `command`. Accepted values (validated by
+    /// [`validate_sdk`]):
     ///
-    /// In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as
-    /// seher `mode_key`s (default: `model` -> `build`, `plan_model` -> `plan`).
+    /// - `"seher"` — routes through seher's provider-resolution layer
+    ///   (`~/.config/seher/config.yaml`), which picks a concrete
+    ///   provider/model. `model` / `plan_model` / per-step `model` are
+    ///   reinterpreted as seher `mode_key`s (default: `model` -> `build`,
+    ///   `plan_model` -> `plan`).
+    /// - `"pi"` — drives `pi_agent_rust` directly in-process, bypassing
+    ///   seher's provider resolution and config file entirely. `model` /
+    ///   `plan_model` / per-step `model` are plain model references
+    ///   (`"provider/model[:thinking]"` or a bare `"model"`; unset lets pi
+    ///   auto-select), not mode keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk: Option<String>,
 
@@ -589,29 +598,39 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// SDK values accepted by [`validate_sdk`].
+const SUPPORTED_SDKS: &[&str] = &["seher", "pi"];
+
 /// Validate the top-level execution backend selection.
 ///
 /// Exactly one of `command` or `sdk` must be specified:
 /// - both set -> ambiguous, rejected.
 /// - neither set -> nothing to run prompts with, rejected.
+/// - `sdk` set to anything other than `"seher"` / `"pi"` -> rejected.
 ///
 /// An empty `command` list counts as "not specified" so that `sdk`-only configs
 /// (where `command` defaults to `[]`) are accepted.
 ///
 /// # Errors
 ///
-/// Returns an error if both or neither of `command` / `sdk` are set.
+/// Returns an error if both or neither of `command` / `sdk` are set, or if
+/// `sdk` is set to an unsupported value.
 pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
     let has_command = !config.command.is_empty();
-    let has_sdk = config.sdk.is_some();
-    match (has_command, has_sdk) {
-        (true, true) => Err(CruiseError::InvalidStepConfig(
+    match (has_command, config.sdk.as_deref()) {
+        (true, Some(_)) => Err(CruiseError::InvalidStepConfig(
             "`sdk` and `command` are mutually exclusive; specify only one".to_string(),
         )),
-        (false, false) => Err(CruiseError::InvalidStepConfig(
+        (false, None) => Err(CruiseError::InvalidStepConfig(
             "either `command` or `sdk` must be specified".to_string(),
         )),
+        (false, Some(sdk)) if !SUPPORTED_SDKS.contains(&sdk) => {
+            Err(CruiseError::InvalidStepConfig(format!(
+                "unknown `sdk` value '{sdk}'; expected one of: {}",
+                SUPPORTED_SDKS.join(", ")
+            )))
+        }
         _ => Ok(()),
     }
 }
@@ -2824,6 +2843,53 @@ steps:
     }
 
     #[test]
+    fn test_sdk_pi_field_parses() {
+        let yaml = r"
+sdk: pi
+model: anthropic/claude-sonnet-4-6
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.sdk, Some("pi".to_string()));
+        assert_eq!(
+            config.model,
+            Some("anthropic/claude-sonnet-4-6".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_sdk_ok_pi() {
+        let yaml = r"
+sdk: pi
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(validate_sdk(&config).is_ok(), "sdk: pi should be valid");
+    }
+
+    #[test]
+    fn test_validate_sdk_rejects_unknown_value() {
+        let yaml = r"
+sdk: made-up-sdk
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_sdk(&config);
+        assert!(result.is_err(), "unknown sdk value should be rejected");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("made-up-sdk"),
+            "error should name the offending value, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_validate_config_runs_sdk_check() {
         // validate_config should surface the sdk/command mutual-exclusion error.
         let yaml = r"
@@ -3052,6 +3118,34 @@ steps:
         assert!(
             validate_sdk(&config).is_ok(),
             "validate_sdk must pass after env override"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_cruise_sdk_pi() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _sdk = EnvGuard::set("CRUISE_SDK", "pi");
+
+        // Given: config has command set (the default case when loaded from YAML)
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!config.command.is_empty(), "precondition: command is set");
+
+        // When: CRUISE_SDK=pi env var is applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: sdk is set to "pi", command is cleared, and validate_sdk passes
+        assert_eq!(config.sdk, Some("pi".to_string()));
+        assert!(
+            config.command.is_empty(),
+            "command must be cleared when sdk is set via env"
+        );
+        assert!(
+            validate_sdk(&config).is_ok(),
+            "validate_sdk must accept 'pi' after env override"
         );
     }
 }
