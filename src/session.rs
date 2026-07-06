@@ -813,6 +813,35 @@ mod tests {
     use crate::error::CruiseError;
     use tempfile::TempDir;
 
+    /// Guard that saves an environment variable's current value, removes it for
+    /// the duration of the test, and restores it on drop.
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn new(name: &'static str) -> Self {
+            let previous = std::env::var(name).ok();
+            if previous.is_some() {
+                // SAFETY: modifying environment variables is inherently unsafe in a
+                // multi-process context, but tests run in a single process and this
+                // guard is only used to isolate unit tests from the outer env.
+                unsafe { std::env::remove_var(name) };
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.name, value) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
     #[test]
     fn test_timestamp_id_format() {
         let id = current_timestamp_id();
@@ -1555,6 +1584,8 @@ mod tests {
 
     #[test]
     fn test_session_load_config_reads_valid_yaml() {
+        let _sdk_guard = EnvVarGuard::new("CRUISE_SDK");
+
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260309120000".to_string();
@@ -2306,6 +2337,8 @@ mod tests {
 
     #[test]
     fn test_session_load_config_reads_from_config_path_when_set() {
+        let _sdk_guard = EnvVarGuard::new("CRUISE_SDK");
+
         // Given: a session with a config_path pointing to an external file
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
@@ -2337,6 +2370,8 @@ mod tests {
 
     #[test]
     fn test_session_load_config_falls_back_to_session_dir_when_config_path_none() {
+        let _sdk_guard = EnvVarGuard::new("CRUISE_SDK");
+
         // Given: a session with config_path as None (backward-compatible fallback)
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
