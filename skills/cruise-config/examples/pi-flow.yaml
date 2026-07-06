@@ -1,0 +1,43 @@
+# pi SDK backend example: pi_agent_rust runs in-process, directly.
+# No seher config.yaml involved -- there is no provider-resolution step at all.
+sdk: pi
+
+description: pi-backed TDD flow
+
+# In sdk: pi mode these are plain model references, NOT seher mode_keys.
+model: anthropic/claude-sonnet-4-6     # "provider/model[:thinking]" for ordinary steps
+plan_model: openai/gpt-5.5:high        # per-step `model:` overrides both, same as command mode
+
+steps:
+  write-tests:
+    prompt: |
+      Based on {plan}, write the test code first.
+
+  implement:
+    # Per-step model is also a plain model reference in sdk: pi mode. A bare
+    # model name (no "provider/" prefix) lets pi resolve the provider itself
+    # by searching its model registry for this id.
+    model: claude-sonnet-4-6
+    prompt: |
+      Tests are written for {plan}. Implement to make them pass.
+    timeout: 30m
+    if:
+      no-file-changes:
+        fail: true
+
+  test:
+    command:
+      - cargo fmt --all
+      - cargo test
+    if:
+      fail: fix-test-error    # jump on non-zero exit / timeout
+
+  fix-test-error:
+    # Reached two ways: via if.fail jump (test failed -> runs) or
+    # sequentially after a passing test (prev.success = "true" -> skipped).
+    skip: prev.success
+    prompt: |
+      The following error occurred. Please correct it:
+      ---
+      {prev.stderr}
+    next: test

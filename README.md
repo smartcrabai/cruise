@@ -308,7 +308,8 @@ command:                   # LLM invocation command (mutually exclusive with `sd
   - "{model}"
   - -p
 
-# sdk: seher              # alternative to `command`: drive prompts via the seher SDK (see SDK Mode)
+# sdk: seher              # alternative to `command`: drive prompts via seher's resolved provider (see SDK Mode)
+# sdk: pi                 # alternative to `command`/`sdk: seher`: drive pi_agent_rust directly, no seher config needed
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -368,22 +369,43 @@ steps:
 
 ### SDK Mode
 
-Instead of spawning an external CLI via `command`, prompt steps can be driven in-process through an SDK by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified.
+Instead of spawning an external CLI via `command`, prompt steps can be driven in-process through an SDK by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified. Two values are accepted: `seher` and `pi`.
 
 ```yaml
-sdk: seher        # currently the only supported value
+sdk: seher        # resolve a provider/model through seher's config.yaml
 
-model: build      # in SDK mode, interpreted as a seher mode_key (default: build)
+model: build      # in seher mode, interpreted as a seher mode_key (default: build)
 plan_model: plan  # mode_key for the built-in plan step (falls back to `model`, then `plan`)
 ```
 
-In SDK mode, `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys** rather than LLM model names. When omitted, `model` defaults to `build`; `plan_model` falls back to `model`, or to `plan` when neither is set.
+In `sdk: seher` mode, `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys** rather than LLM model names. When omitted, `model` defaults to `build`; `plan_model` falls back to `model`, or to `plan` when neither is set.
+
+#### `sdk: pi` -- drive pi_agent_rust directly
+
+`sdk: pi` drives `pi_agent_rust` directly in-process, **bypassing seher's provider resolution and `~/.config/seher/config.yaml` entirely** -- no seher configuration is required at all.
+
+```yaml
+sdk: pi
+
+model: anthropic/claude-sonnet-4-6   # plain model reference, not a mode key
+plan_model: openai/gpt-5.5:high      # "provider/model[:thinking]"
+```
+
+In `sdk: pi` mode, `model` / `plan_model` / per-step `model` are plain **model references** instead of seher mode keys (same override precedence as command mode: step `model` > top-level `model` / `plan_model`):
+
+- `"provider/model"` (optionally `:thinking`, e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
+- `"model"` (no `/`) -- provider is left unset; pi resolves it by searching its own model registry for that model id (same as running the `pi` CLI with `--model` but no `--provider`).
+- Unset (both `model` and `plan_model` omitted) -- pi auto-selects a provider/model from its built-in preference order (Codex, then OpenAI, ... down to Anthropic and others), picking the first one with usable credentials.
+
+Authentication is resolved entirely by pi itself, in this order: an explicit key (not exposed by cruise) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials > ambient environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and similar provider-specific vars) -- so a stored `pi login` credential always wins over a stale shell env var. `env:` values configured in the workflow are applied on top of the process environment before each pi call.
+
+Rate limits are retried against the **same** provider/model with exponential backoff (2s, doubling up to a 60s cap, same schedule as command mode) up to `--rate-limit-retries` attempts -- there is no other seher provider to fall back to, unlike `sdk: seher`.
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers.
+By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Under `sdk: seher`, custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers; `sdk: pi` always supports custom tools (there is no tool-incapable pi provider), so this setting matters less there.
 
-Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). This makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
+Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). Under `sdk: seher` this makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
 
 ```yaml
 sdk: seher
@@ -412,7 +434,7 @@ plan_language: Japanese   # generated/updated plans and plan answers will be in 
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the GUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` configured)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same mode key as the plan step (`plan_model` -> `model` -> `plan`). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **SDK mode (`sdk:` configured)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same model resolution as the plan step (`plan_model` -> `model` -> `plan`, reinterpreted as a seher mode key under `sdk: seher` or passed through as a model reference under `sdk: pi`). If the call fails, cruise falls back to extracting the title from `plan.md`.
 - **Command mode (`command:` configured)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 No additional configuration is required.

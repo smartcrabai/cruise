@@ -7,8 +7,10 @@ command:                  # LLM invocation command (array). Mutually exclusive w
   - "{model}"
   - -p
 
-# sdk: seher              # Alternative backend: run prompts via the seher SDK
-                          # instead of an external command (see sdk.md).
+# sdk: seher              # Alternative backend: run prompts via seher's resolved
+                          # provider instead of an external command (see sdk.md).
+# sdk: pi                 # Alternative backend: run prompts via pi_agent_rust
+                          # directly, no seher config needed (see sdk.md).
 
 description: My workflow  # Optional: shown alongside the file name in config selectors
 
@@ -45,14 +47,15 @@ after-pr:                 # Optional: steps that run after PR creation (see refe
 cleanup_after_pr: false   # Optional: delete local worktree and branch after PR creation (default: false)
 ```
 
-`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). `steps` is held as an `IndexMap`, so declaration order is the execution order.
+`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). When `sdk` is set it must be `seher` or `pi` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order.
 
 ## `command` vs `sdk`
 
-There are two prompt-execution backends:
+There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: seher` — run prompts in-process via the seher SDK. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
+- `sdk: seher` — run prompts in-process, resolving a provider/model through seher's own `~/.config/seher/config.yaml`. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
+- `sdk: pi` — run prompts in-process via `pi_agent_rust` **directly**, bypassing seher's provider resolution and config file entirely. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:thinking]"` or a bare `"model"`), not mode keys. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
 
@@ -83,7 +86,7 @@ steps:
 
 ## `plan_model`
 
-Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is reinterpreted as the planning mode key (see [sdk.md](sdk.md)).
+Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. Under `sdk: seher` it is reinterpreted as the planning mode key; under `sdk: pi` it is a plain model reference (see [sdk.md](sdk.md)).
 
 ## `description`
 

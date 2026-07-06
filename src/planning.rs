@@ -49,11 +49,13 @@ pub fn setup_plan_vars(
 /// Whether SDK-mode planning should drive the plan through the interactive
 /// custom tools (`submit_plan` / `update_plan` / `ask_user`).
 ///
-/// True only when the SDK backend is selected *and* `interactive_planning` is
-/// left enabled. When false the planning turns fall back to the file-writing
-/// (`command`-style) templates and register no custom tools, so tool-incapable
-/// providers (e.g. `sdk: claude-terminal`, `sdk: claude-headless`) stay
-/// eligible.
+/// True only when an SDK backend is selected (`sdk: seher` or `sdk: pi`) *and*
+/// `interactive_planning` is left enabled. When false the planning turns fall
+/// back to the file-writing (`command`-style) templates and register no custom
+/// tools. Under `sdk: seher` this keeps tool-incapable providers (e.g.
+/// `sdk: claude-terminal`, `sdk: claude-headless`) eligible; `sdk: pi` always
+/// supports custom tools, so this mainly matters there for the file-based
+/// planning behavior itself, not provider eligibility.
 #[must_use]
 pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
     config.sdk.is_some() && config.interactive_planning
@@ -346,6 +348,18 @@ mod tests {
     #[test]
     fn templates_select_sdk_variants_with_sdk() {
         let config = config_with(Some("seher"), None);
+        assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
+        assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
+        assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
+    }
+
+    #[test]
+    fn templates_select_sdk_variants_with_pi() {
+        // sdk_plan_tools_enabled / template selection are driven off
+        // `config.sdk.is_some()`, not the SDK kind, so `sdk: pi` picks the same
+        // tool-based templates as `sdk: seher`.
+        let config = config_with(Some("pi"), None);
+        assert!(sdk_plan_tools_enabled(&config));
         assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);

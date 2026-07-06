@@ -20,7 +20,8 @@
     },
     "sdk": {
       "type": "string",
-      "description": "SDK backend to drive prompt execution instead of `command` (e.g. \"seher\"). Mutually exclusive with `command`."
+      "enum": ["seher", "pi"],
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`. \"seher\" resolves a provider/model through seher's config.yaml (model/plan_model become seher mode_keys); \"pi\" drives pi_agent_rust directly in-process, bypassing seher's provider resolution (model/plan_model become plain model references)."
     },
     "model": {
       "type": "string",
