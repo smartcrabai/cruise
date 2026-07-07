@@ -122,7 +122,9 @@ inputs:
     description: >-
       git user.email used for commits cruise/this action creates. Defaults to
       match `git_user_name`'s default (the cruise-agent App's or
-      github-actions[bot]'s noreply address).
+      github-actions[bot]'s noreply address). Commits still add the triggering
+      user as a Co-authored-by trailer when the event payload includes their
+      login and numeric user id.
     required: false
     default: ""
 
@@ -238,6 +240,8 @@ runs:
         GH_TOKEN: ${{ steps.token.outputs.token }}
         COMMAND: ${{ steps.gate.outputs.command }}
         ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
+        TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
+        TRIGGER_ACTOR_ID: ${{ steps.gate.outputs.actor_id }}
         COMMAND_REST_FILE: ${{ steps.gate.outputs.command_rest_file }}
         EXEC_CONFIG_PATH: ${{ steps.config.outputs.exec_config_path }}
         GIT_USER_NAME_INPUT: ${{ inputs.git_user_name }}

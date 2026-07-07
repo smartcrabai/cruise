@@ -37,6 +37,8 @@ source "$SCRIPT_DIR/lib/plan.sh"
 GIT_USER_NAME_INPUT="${GIT_USER_NAME_INPUT:-}"
 GIT_USER_EMAIL_INPUT="${GIT_USER_EMAIL_INPUT:-}"
 USED_APP="${USED_APP:-false}"
+TRIGGER_ACTOR="${TRIGGER_ACTOR:-}"
+TRIGGER_ACTOR_ID="${TRIGGER_ACTOR_ID:-}"
 
 if [ -n "$GIT_USER_NAME_INPUT" ]; then
   git_user_name="$GIT_USER_NAME_INPUT"
@@ -59,6 +61,28 @@ export GIT_AUTHOR_EMAIL="$git_user_email"
 export GIT_COMMITTER_NAME="$git_user_name"
 export GIT_COMMITTER_EMAIL="$git_user_email"
 
+commit_coauthor_name=""
+commit_coauthor_email=""
+init_commit_coauthor() {
+  # GitHub recognizes ID-based noreply addresses and keeps a user's private
+  # email hidden while still associating the trailer with their account.
+  if [ -z "$TRIGGER_ACTOR" ] || [ -z "$TRIGGER_ACTOR_ID" ]; then
+    return
+  fi
+  if [[ ! "$TRIGGER_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]]; then
+    return
+  fi
+  if [[ ! "$TRIGGER_ACTOR_ID" =~ ^[0-9]+$ ]]; then
+    return
+  fi
+
+  commit_coauthor_name="$TRIGGER_ACTOR"
+  commit_coauthor_email="${TRIGGER_ACTOR_ID}+${TRIGGER_ACTOR}@users.noreply.github.com"
+  export CRUISE_COMMIT_COAUTHOR_NAME="$commit_coauthor_name"
+  export CRUISE_COMMIT_COAUTHOR_EMAIL="$commit_coauthor_email"
+}
+init_commit_coauthor
+
 CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
 export XDG_DATA_HOME="$CRUISE_DIR/data"
 export XDG_CONFIG_HOME="$CRUISE_DIR/xdg-config"
@@ -68,6 +92,69 @@ mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 LOG_FILE="$CRUISE_DIR/run.log"
 : > "$LOG_FILE"
 echo "log_file=$LOG_FILE" >> "$GITHUB_OUTPUT"
+
+commit_coauthor_hook_installed=false
+previous_hooks_path_set=false
+previous_hooks_path=""
+
+restore_commit_coauthor_hook() {
+  if [ "$commit_coauthor_hook_installed" != "true" ]; then
+    return
+  fi
+
+  if [ "$previous_hooks_path_set" = "true" ]; then
+    git -C "$WORKSPACE" config --local core.hooksPath "$previous_hooks_path" >>"$LOG_FILE" 2>&1 \
+      || echo "::warning::cruise: failed to restore previous git core.hooksPath"
+  else
+    git -C "$WORKSPACE" config --local --unset core.hooksPath >>"$LOG_FILE" 2>&1 || true
+  fi
+}
+trap restore_commit_coauthor_hook EXIT
+
+install_commit_coauthor_hook() {
+  if [ -z "$commit_coauthor_name" ] || [ -z "$commit_coauthor_email" ]; then
+    return
+  fi
+
+  local hooks_dir hook_path
+  hooks_dir="$CRUISE_DIR/git-hooks"
+  hook_path="$hooks_dir/prepare-commit-msg"
+  mkdir -p "$hooks_dir"
+  cat > "$hook_path" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+msg_file="${1:-}"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  exit 0
+fi
+
+name="${CRUISE_COMMIT_COAUTHOR_NAME:-}"
+email="${CRUISE_COMMIT_COAUTHOR_EMAIL:-}"
+if [ -z "$name" ] || [ -z "$email" ]; then
+  exit 0
+fi
+
+trailer="Co-authored-by: $name <$email>"
+if grep -Fqx "$trailer" "$msg_file"; then
+  exit 0
+fi
+
+git interpret-trailers --in-place --trailer "$trailer" "$msg_file" >/dev/null 2>&1 \
+  || printf '\n%s\n' "$trailer" >> "$msg_file"
+EOF
+  chmod +x "$hook_path"
+
+  if previous_hooks_path="$(git -C "$WORKSPACE" config --local --get core.hooksPath 2>/dev/null)"; then
+    previous_hooks_path_set=true
+  fi
+  if ! git -C "$WORKSPACE" config --local core.hooksPath "$hooks_dir" >>"$LOG_FILE" 2>&1; then
+    echo "::warning::cruise: failed to install commit co-author hook; run-mode commits may omit Co-authored-by"
+  else
+    commit_coauthor_hook_installed=true
+  fi
+}
+install_commit_coauthor_hook
 
 # cruise (and this script, for `run`/`exec`) push to `origin` over HTTPS.
 # Configure auth the same way actions/checkout does: an AUTHORIZATION
@@ -197,8 +284,13 @@ do_exec() {
     emit_and_exit "$session_id" "" "" "" 0
   fi
 
+  commit_args=(-m "cruise: address request on #$ENTITY_NUMBER")
+  if [ -n "$commit_coauthor_name" ] && [ -n "$commit_coauthor_email" ]; then
+    commit_args+=(-m "Co-authored-by: $commit_coauthor_name <$commit_coauthor_email>")
+  fi
+
   if ! git -C "$WORKSPACE" add -A >>"$LOG_FILE" 2>&1 \
-    || ! git -C "$WORKSPACE" commit -m "cruise: address request on #$ENTITY_NUMBER" >>"$LOG_FILE" 2>&1; then
+    || ! git -C "$WORKSPACE" commit "${commit_args[@]}" >>"$LOG_FILE" 2>&1; then
     echo "cruise: git commit failed" | tee -a "$LOG_FILE"
     emit_and_exit "$session_id" "" "" "" 1 "git commit failed (see run logs)."
   fi

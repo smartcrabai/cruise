@@ -33,6 +33,7 @@ deny() {
   out proceed false
   out entity_number ""
   out actor ""
+  out actor_id ""
   out is_bot false
   out command ""
   out command_rest_file ""
@@ -50,6 +51,7 @@ hard_fail() {
   out proceed false
   out entity_number ""
   out actor ""
+  out actor_id ""
   out is_bot false
   out command ""
   out command_rest_file ""
@@ -79,6 +81,7 @@ action="$(jqr '.action')"
 number=""
 body=""
 actor=""
+actor_id=""
 actor_type=""
 
 case "$EVENT_NAME" in
@@ -92,6 +95,7 @@ case "$EVENT_NAME" in
     fi
     body="$(jqr '.comment.body')"
     actor="$(jqr '.comment.user.login')"
+    actor_id="$(jqr '.comment.user.id')"
     actor_type="$(jqr '.comment.user.type')"
     number="$(jqr '.issue.number')"
     ;;
@@ -104,6 +108,7 @@ case "$EVENT_NAME" in
     body="$title
 $issue_body"
     actor="$(jqr '.issue.user.login')"
+    actor_id="$(jqr '.issue.user.id')"
     actor_type="$(jqr '.issue.user.type')"
     number="$(jqr '.issue.number')"
     ;;
@@ -237,6 +242,7 @@ with open(rest_file, "w", encoding="utf-8") as f:
 out proceed true
 out entity_number "$number"
 out actor "$actor"
+out actor_id "$actor_id"
 out is_bot "$is_bot"
 out command "$command"
 out command_rest_file "$command_rest_file"
