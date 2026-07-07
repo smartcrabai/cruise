@@ -1365,9 +1365,18 @@ steps:
         let yaml = include_str!("../cruise.yaml");
         let config = WorkflowConfig::from_yaml(yaml)
             .unwrap_or_else(|e| panic!("failed to parse cruise.yaml: {e:?}"));
-        assert_eq!(config.command, vec!["claude", "--model", "{model}", "-p"]);
-        assert_eq!(config.model, Some("sonnet".to_string()));
+        assert_eq!(config.sdk, Some("seher".to_string()));
+        assert!(
+            config.command.is_empty(),
+            "command should be empty when sdk is set"
+        );
+        assert_eq!(config.model, Some("build".to_string()));
+        assert_eq!(config.plan_model, Some("plan".to_string()));
         assert!(!config.steps.is_empty(), "steps is empty");
+        assert!(
+            config.steps.contains_key("mise-trust"),
+            "expected mise-trust step"
+        );
     }
 
     #[test]
