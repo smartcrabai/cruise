@@ -1,0 +1,5 @@
+# Binary app icons
+src-tauri/icons/
+# Intentionally Japanese docs
+token-exchange/README.md
+skills/cruise-plan/SKILL.md
