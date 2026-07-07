@@ -22,6 +22,8 @@ use crate::worktree;
 const PR_NUMBER_VAR: &str = "pr.number";
 const PR_URL_VAR: &str = "pr.url";
 const PR_LANGUAGE_VAR: &str = "pr.language";
+const COMMIT_COAUTHOR_NAME_ENV: &str = "CRUISE_COMMIT_COAUTHOR_NAME";
+const COMMIT_COAUTHOR_EMAIL_ENV: &str = "CRUISE_COMMIT_COAUTHOR_EMAIL";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 
 // --- Types --------------------------------------------------------------------
@@ -43,6 +45,12 @@ pub(crate) enum PrAttemptOutcome {
         error: String,
         commit_outcome: CommitOutcome,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommitCoauthor {
+    name: String,
+    email: String,
 }
 
 impl PrAttemptOutcome {
@@ -353,7 +361,8 @@ pub(crate) fn attempt_pr_creation(
     } else {
         trimmed_title
     };
-    let commit_outcome = commit_changes(&ctx.path, commit_message)?;
+    let commit_message = commit_message_with_coauthor(commit_message);
+    let commit_outcome = commit_changes(&ctx.path, &commit_message)?;
     if branch_commit_count(ctx)? == 0 {
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
@@ -370,6 +379,49 @@ pub(crate) fn attempt_pr_creation(
             commit_outcome,
         }),
     }
+}
+
+fn commit_message_with_coauthor(message: &str) -> String {
+    let Some(coauthor) = commit_coauthor_from_env() else {
+        return message.to_string();
+    };
+
+    format!(
+        "{message}\n\nCo-authored-by: {} <{}>",
+        coauthor.name, coauthor.email
+    )
+}
+
+fn commit_coauthor_from_env() -> Option<CommitCoauthor> {
+    let name = std::env::var(COMMIT_COAUTHOR_NAME_ENV).ok()?;
+    let email = std::env::var(COMMIT_COAUTHOR_EMAIL_ENV).ok()?;
+    let name = name.trim();
+    let email = email.trim();
+
+    if !is_valid_commit_coauthor_name(name) || !is_valid_commit_coauthor_email(email) {
+        return None;
+    }
+
+    Some(CommitCoauthor {
+        name: name.to_string(),
+        email: email.to_string(),
+    })
+}
+
+fn is_valid_commit_coauthor_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('\n')
+        && !name.contains('\r')
+        && !name.contains('<')
+        && !name.contains('>')
+}
+
+fn is_valid_commit_coauthor_email(email: &str) -> bool {
+    !email.is_empty()
+        && email.contains('@')
+        && !email.chars().any(char::is_whitespace)
+        && !email.contains('<')
+        && !email.contains('>')
 }
 
 fn branch_commit_count(ctx: &worktree::WorktreeContext) -> Result<usize> {

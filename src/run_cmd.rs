@@ -794,7 +794,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_binary_support::PathEnvGuard;
-    use crate::test_support::{init_git_repo, run_git_ok};
+    use crate::test_support::{EnvGuard, init_git_repo, run_git_ok};
     use crate::worktree;
 
     fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
@@ -1310,6 +1310,39 @@ steps:
         assert!(
             gh_args.contains("--draft"),
             "gh pr create should include --draft flag, got: {gh_args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn test_attempt_pr_creation_adds_commit_coauthor_from_env() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let f = setup_pr_test(
+            &tmp,
+            "20260708_commit_coauthor",
+            "https://github.com/owner/repo/pull/20",
+        );
+        let _coauthor_name = EnvGuard::set("CRUISE_COMMIT_COAUTHOR_NAME", "octocat");
+        let _coauthor_email = EnvGuard::set(
+            "CRUISE_COMMIT_COAUTHOR_EMAIL",
+            "12345+octocat@users.noreply.github.com",
+        );
+
+        let result =
+            attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            result,
+            PrAttemptOutcome::Created {
+                url: f.url.clone(),
+                commit_outcome: CommitOutcome::Created,
+            }
+        );
+        let commit_body = git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%B"]);
+        assert!(
+            commit_body
+                .contains("Co-authored-by: octocat <12345+octocat@users.noreply.github.com>"),
+            "commit message should include co-author trailer, got: {commit_body}"
         );
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }

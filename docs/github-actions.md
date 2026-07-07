@@ -193,10 +193,10 @@ By default (`github_token` input left empty), the action tries to authenticate a
 
 1. With `permissions: id-token: write` granted, GitHub Actions gives the job a short-lived OIDC token identifying the workflow, repository, and run.
 2. The `token` step exchanges that OIDC token for a **repository-scoped, short-lived cruise-agent App installation token** by calling the `token_exchange_url` service (`POST` with `Authorization: Bearer <OIDC token>`, no body). The exchange service verifies the OIDC token's `repository` claim server-side and only ever issues a token scoped to that repository's installation -- it cannot mint a token for a repository the calling workflow doesn't belong to.
-3. cruise runs and pushes commits authenticated as `cruise-agent[bot]` using that token.
+3. cruise runs and pushes commits authenticated as `cruise-agent[bot]` using that token. Commits created by the action also add the user who triggered the mention as a `Co-authored-by` trailer using that user's GitHub-provided noreply address.
 4. After the run finishes (success or failure), the action revokes the token (`DELETE /installation/token`) so it can't be reused past the job's lifetime.
 
-If the App isn't installed on the repository (the exchange returns 404), the OIDC token can't be obtained (e.g. `id-token: write` wasn't granted), or the exchange service is unreachable, the action **falls back to the workflow's `GITHUB_TOKEN`** and logs why (a `::notice::` with the App install link for the "not installed" case, a `::warning::` otherwise). cruise still runs in that case, but with two `GITHUB_TOKEN`-specific limitations: draft PRs it opens won't trigger other `on: pull_request` workflows (see [Security](#security)), and commits are attributed to `github-actions[bot]` instead of `cruise-agent[bot]`.
+If the App isn't installed on the repository (the exchange returns 404), the OIDC token can't be obtained (e.g. `id-token: write` wasn't granted), or the exchange service is unreachable, the action **falls back to the workflow's `GITHUB_TOKEN`** and logs why (a `::notice::` with the App install link for the "not installed" case, a `::warning::` otherwise). cruise still runs in that case, but with two `GITHUB_TOKEN`-specific limitations: draft PRs it opens won't trigger other `on: pull_request` workflows (see [Security](#security)), and commits use `github-actions[bot]` as the author/committer instead of `cruise-agent[bot]`.
 
 ## Bring your own token
 
@@ -241,7 +241,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `env` | *(empty)* | Extra `KEY=VALUE` lines exported (masked) into the cruise process. Reserved names are skipped with a warning. |
 | `allowed_bots` | *(empty)* | Comma-separated bot logins (without `[bot]`) allowed to trigger cruise, or `*` for any bot. Empty blocks all bots. |
 | `git_user_name` | *(empty)* | git `user.name` for commits this action/cruise creates. Empty resolves to `cruise-agent[bot]` when the run used the App token, otherwise `github-actions[bot]`. |
-| `git_user_email` | *(empty)* | git `user.email` for those commits. Empty resolves to match `git_user_name`'s default. |
+| `git_user_email` | *(empty)* | git `user.email` for those commits. Empty resolves to match `git_user_name`'s default. Commits still add the triggering user as a `Co-authored-by` trailer when GitHub's event payload includes their login and numeric user id. |
 
 ## Outputs
 
