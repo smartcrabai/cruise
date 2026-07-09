@@ -622,4 +622,59 @@ describe("SessionSidebar", () => {
     expect(screen.queryByText(FIXING_LABEL)).toBeNull();
   });
 
+  // --- Awaiting Input + replan in progress -----------------------------------
+
+  it("shows PLANNING_LABEL for Awaiting Input session when fixInProgress is true and pendingAskQuestion is absent", async () => {
+    // Given: an Awaiting Input session where the question has been answered (no pendingAskQuestion) and replanning is in-flight
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Input", fixInProgress: true, pendingAskQuestion: undefined }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: the row badge shows "Planning" instead of "Awaiting Input"
+    await waitFor(() => {
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+    });
+
+    // And: no input-required dot is shown
+    expect(screen.queryByLabelText("user input required")).toBeNull();
+  });
+
+  it("shows 'Awaiting Input' with input-required dot when fixInProgress is true but pendingAskQuestion is present", async () => {
+    // Given: an Awaiting Input session that still has an unanswered question
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Input", fixInProgress: true, pendingAskQuestion: "What should I do?" }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: the row badge shows "Awaiting Input" (not "Planning")
+    await waitFor(() => {
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
+    });
+    expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
+
+    // And: the input-required dot is shown
+    expect(screen.getByLabelText("user input required")).toBeTruthy();
+  });
+
+  it("shows 'Awaiting Input' with input-required dot when fixInProgress is absent and pendingAskQuestion is present", async () => {
+    // Given: a normal Awaiting Input session with a pending question and no fix in progress
+    vi.mocked(commands.listSessions).mockResolvedValue([
+      makeSession({ id: "session-1", phase: "Awaiting Input", pendingAskQuestion: "What should I do?" }),
+    ]);
+
+    // When
+    render(<SessionSidebar {...defaultProps} />);
+
+    // Then: normal "Awaiting Input" display
+    await waitFor(() => {
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
+    });
+    expect(screen.getByLabelText("user input required")).toBeTruthy();
+  });
+
 });

@@ -822,7 +822,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
       <div className="px-6 pt-6 pb-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold font-mono text-gray-900 dark:text-gray-100">{session.id}</h2>
-          <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} fixing={isFixing} />
+          <PhaseBadge phase={session.phase} planAvailable={session.planAvailable} fixing={isFixing} inputPending={!!session.pendingAskQuestion} />
         </div>
 
         {session.prUrl && (
