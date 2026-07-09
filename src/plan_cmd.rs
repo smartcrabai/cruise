@@ -762,10 +762,16 @@ async fn generate_plan_markdown(
         true,
     )
     .await?;
-    crate::metadata::resolve_plan_content(
+    // If the SDK backend returned a session ID, try to read its transcript
+    // for a more useful error message when plan output is empty.
+    let transcript = resume
+        .as_deref()
+        .and_then(|session_id| crate::planning::read_sdk_transcript(ctx.working_dir, session_id));
+    crate::planning::resolve_generated_plan_content(
         ctx.plan_path,
         &prompt_result.output,
         &prompt_result.stderr,
+        transcript.as_deref(),
     )
 }
 

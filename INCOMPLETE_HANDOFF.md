@@ -1,36 +1,51 @@
-# Incomplete Handoff: Fix Failing `cargo test --lib`
+# Handoff: Planning context overflow - Partial Implementation
 
-## Status
+## What's Done
 
-Diagnosed and fixed the three failing unit tests in `src/session.rs`. They were failing because the `CRUISE_SDK` environment variable (set to `pi` in the runner) caused `WorkflowConfig::apply_env_overrides` to clear the `command` vector. The three affected tests now pass. The full `cargo test --lib` run was interrupted before completion due to tool-iteration limits.
+1. **`src/planning.rs`** - Fully implemented:
+   - `extract_terminal_error_from_transcript()` - Pure function to parse JSONL transcripts for terminal errors
+   - `resolve_generated_plan_content()` - New resolver that falls back to transcript errors when plan/stdout/stderr are empty
+   - Full unit test coverage for both functions (lines 659-825)
 
-## Done (this session)
+2. **`src/plan_cmd.rs`** - Updated:
+   - `generate_plan_markdown()` now uses `resolve_generated_plan_content` with transcript
+   - Added `read_sdk_transcript()` helper function using `seher::sdk::pi_session_path`
 
-- Confirmed the three failures by running `cargo test --lib`:
-  - `session::tests::test_session_load_config_reads_valid_yaml`
-  - `session::tests::test_session_load_config_reads_from_config_path_when_set`
-  - `session::tests::test_session_load_config_falls_back_to_session_dir_when_config_path_none`
-- Traced the root cause to `WorkflowConfig::apply_env_overrides` in `src/config.rs`, which sets `command` to `vec![]` when `CRUISE_SDK` is present.
-- Added a test-only `EnvVarGuard` helper in `src/session.rs` that saves an env var, removes it for the duration of a test, and restores it on drop.
-- Applied the guard to the three affected tests to isolate them from `CRUISE_SDK`.
-- Verified the targeted session tests pass: `cargo test --lib session::tests::test_session_load_config` reports 5 passed, 0 failed.
-- Committed the work:
-  - commit: `405f405263cbb6d5cb48b7e621a95abbf3a3e331`
-  - message: `fix: isolate session load_config tests from CRUISE_SDK env var`
-  - files changed: `src/session.rs` (+35 lines)
+3. **`src-tauri/src/commands.rs`** - Partially updated:
+   - `create_session` (new plan) - Updated to use new resolver with transcript
+   - `regenerate_plan` - NOT YET UPDATED (still uses `cruise::metadata::resolve_plan_content`)
+   - `fix_plan` - NOT YET UPDATED (still uses `cruise::metadata::resolve_plan_content`)
 
-## Remaining
+## What Remains
 
-1. **Run the full `cargo test --lib` suite** to confirm no other tests regress under the current environment. The previous run showed 798 passed / 3 failed before the fix; the targeted run now passes, but the full suite needs to be re-run end-to-end.
-2. **Address any additional env-sensitive failures** if the full suite still fails. If other tests fail because of `CRUISE_SDK`, `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_INTERACTIVE_PLANNING`, etc., extend `EnvVarGuard` to those tests/env vars.
-3. **Run lint / format checks** (`cargo fmt --check`, `cargo clippy --all-targets`) to ensure the change meets CI standards.
-4. **Verify the fix is minimal and correct** — the guard is intentionally scoped to tests only and does not alter production behavior.
+1. **Update `src-tauri/src/commands.rs` regenerate_plan** (~line 1789):
+   - Change `&mut None` to `let mut resume = None;` and pass `&mut resume`
+   - Add transcript reading logic after `run_plan_prompt_template`
+   - Use `cruise::planning::resolve_generated_plan_content` instead of `cruise::metadata::resolve_plan_content`
+
+2. **Update `src-tauri/src/commands.rs` fix_plan** (~line 1957):
+   - Same pattern as regenerate_plan
+
+3. **Add `read_sdk_transcript` helper to `src-tauri/src/commands.rs`**:
+   ```rust
+   fn read_sdk_transcript(working_dir: Option<&std::path::Path>, session_id: &str) -> Option<String> {
+       let transcript_path = seher::sdk::pi_session_path(working_dir, session_id);
+       std::fs::read_to_string(&transcript_path).ok()
+   }
+   ```
+
+4. **Update `prompts/plan-sdk.md`** with context budget discipline:
+   - Add constraints before the `submit_plan` instruction
+   - Content: use narrow `rg` queries, avoid huge alternation greps, read only needed line ranges, stop when evidence is gathered, keep tool output limits small
+
+5. **Run `cargo fmt`**
+
+6. **Run `cargo test`** to verify all tests pass
 
 ## Next-Agent Starting Position
 
-- Branch: current checked-out branch
-- Commit: `405f405263cbb6d5cb48b7e621a95abbf3a3e331`
-- Start by running `cargo test --lib` to see the full suite result.
-- If the suite is green, proceed with `cargo clippy --all-targets` and `cargo fmt --check`.
-- If additional env-sensitive tests fail, apply the same `EnvVarGuard` pattern (or expand it to multiple env vars) rather than changing production `apply_env_overrides` logic.
-- The guard is located in `src/session.rs` inside the `#[cfg(test)] mod tests` block, right after the imports.
+The commit `96d73ff` contains the partial implementation. The remaining work is mechanical - follow the same pattern used in `create_session` for the two other Tauri command functions.
+
+Key files:
+- `/Users/takumi/.local/share/cruise/worktrees/20260709034455541_c6abe48b368a4f8983194c444081e083/src-tauri/src/commands.rs`
+- `/Users/takumi/.local/share/cruise/worktrees/20260709034455541_c6abe48b368a4f8983194c444081e083/prompts/plan-sdk.md`

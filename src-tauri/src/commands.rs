@@ -19,7 +19,8 @@ use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 
 use cruise::planning::{
-    ask_plan_template, fix_plan_template, initial_plan_template, plan_template, setup_plan_vars,
+    ask_plan_template, fix_plan_template, initial_plan_template, plan_template,
+    read_sdk_transcript, setup_plan_vars,
 };
 
 use crate::events::{PlanEvent, WorkflowEvent};
@@ -1221,23 +1222,30 @@ pub async fn create_session(
         &base,
         grill,
     );
+    let mut resume: Option<String> = None;
     match cruise::planning::run_plan_prompt_template(
         &ctx,
         &mut vars,
         initial_plan_template(&config, grill),
         "[plan] creating plan...",
         Some(&stream_callbacks),
-        &mut None,
+        &mut resume,
         true,
     )
     .await
     .map_err(|e| e.to_string())
     {
         Ok(result) => {
-            let content = match cruise::metadata::resolve_plan_content(
+            // If the SDK backend returned a session ID, try to read its transcript
+            // for a more useful error message when plan output is empty.
+            let transcript = resume
+                .as_deref()
+                .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id));
+            let content = match cruise::planning::resolve_generated_plan_content(
                 &plan_path,
                 &result.output,
                 &result.stderr,
+                transcript.as_deref(),
             ) {
                 Ok(c) => c,
                 Err(e) => {
