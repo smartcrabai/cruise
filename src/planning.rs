@@ -244,6 +244,80 @@ pub fn write_input_as_plan(plan_path: &Path, input: &str) -> Result<String> {
     Ok(content)
 }
 
+/// Extract the last terminal error message from a JSONL transcript.
+///
+/// Scans line-by-line for JSON objects where `.message.stopReason == "error"`
+/// and `.message.errorMessage` is non-empty. Returns the last such message
+/// found, or `None` if no terminal error exists.
+///
+/// This is a pure function (no I/O) to facilitate unit testing.
+#[must_use]
+pub fn extract_terminal_error_from_transcript(jsonl: &str) -> Option<String> {
+    let mut last_error = None;
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Defensive parsing: skip malformed lines without failing
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // Look for message.stopReason == "error" and message.errorMessage present
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Some(stop_reason) = message.get("stopReason").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if stop_reason != "error" {
+            continue;
+        }
+        let Some(error_message) = message.get("errorMessage").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !error_message.is_empty() {
+            last_error = Some(error_message.to_string());
+        }
+    }
+    last_error
+}
+
+/// Resolve plan content with backend transcript error fallback.
+///
+/// First attempts the standard `metadata::resolve_plan_content` fallback chain
+/// (plan file → stdout → stderr). If all sources are empty and a transcript is
+/// provided, checks for a terminal error in the backend transcript and returns
+/// that as a descriptive error instead of the generic "no output" message.
+///
+/// # Errors
+///
+/// Returns an error if no source produced content. When a transcript with a
+/// terminal error is available, the error message includes the backend's error
+/// (e.g., `context_length_exceeded`).
+pub fn resolve_generated_plan_content(
+    plan_path: &Path,
+    stdout: &str,
+    stderr: &str,
+    transcript: Option<&str>,
+) -> Result<String> {
+    match crate::metadata::resolve_plan_content(plan_path, stdout, stderr) {
+        Ok(content) => Ok(content),
+        Err(original_err) => {
+            // Original error means plan/stdout/stderr were all empty.
+            // Try to extract a more useful error from the transcript.
+            if let Some(jsonl) = transcript {
+                if let Some(backend_error) = extract_terminal_error_from_transcript(jsonl) {
+                    return Err(crate::error::CruiseError::Other(format!(
+                        "planning backend failed after producing no plan output: {backend_error}"
+                    )));
+                }
+            }
+            Err(original_err)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +654,172 @@ mod tests {
             ),
             "expected CruiseError::Interrupted"
         );
+    }
+
+    // -- extract_terminal_error_from_transcript ---------------------------------
+
+    #[test]
+    fn extract_terminal_error_returns_error_from_valid_jsonl() {
+        let jsonl = r#"{"message":{"stopReason":"ok","content":"hello"}}
+{"message":{"stopReason":"error","errorMessage":"context_length_exceeded: token limit 100000 exceeded"}}"#;
+        let result = extract_terminal_error_from_transcript(jsonl);
+        assert_eq!(
+            result,
+            Some("context_length_exceeded: token limit 100000 exceeded".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_last_error_when_multiple_exist() {
+        let jsonl = r#"{"message":{"stopReason":"error","errorMessage":"first error"}}
+{"message":{"stopReason":"ok","content":"some output"}}
+{"message":{"stopReason":"error","errorMessage":"final context_length_exceeded error"}}"#;
+        let result = extract_terminal_error_from_transcript(jsonl);
+        assert_eq!(
+            result,
+            Some("final context_length_exceeded error".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_for_empty_input() {
+        assert_eq!(extract_terminal_error_from_transcript(""), None);
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_for_no_error_lines() {
+        let jsonl = r#"{"message":{"stopReason":"ok","content":"hello"}}
+{"message":{"stopReason":"ok","content":"world"}}"#;
+        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_for_malformed_json() {
+        let jsonl = r#"not valid json
+{"message":{"stopReason":"error","errorMessage":"this is valid but after bad line"}}"#;
+        // The valid line should still be parsed
+        let result = extract_terminal_error_from_transcript(jsonl);
+        assert_eq!(result, Some("this is valid but after bad line".to_string()));
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_when_error_message_missing() {
+        let jsonl = r#"{"message":{"stopReason":"error"}}"#;
+        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_when_error_message_empty() {
+        let jsonl = r#"{"message":{"stopReason":"error","errorMessage":""}}"#;
+        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
+    }
+
+    #[test]
+    fn extract_terminal_error_returns_none_when_stop_reason_not_error() {
+        let jsonl = r#"{"message":{"stopReason":"max_tokens","errorMessage":"truncated"}}"#;
+        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
+    }
+
+    #[test]
+    fn extract_terminal_error_ignores_non_message_lines() {
+        let jsonl = r#"{"type":"start","session":"abc123"}
+{"message":{"stopReason":"error","errorMessage":"API error: context_length_exceeded"}}"#;
+        let result = extract_terminal_error_from_transcript(jsonl);
+        assert_eq!(
+            result,
+            Some("API error: context_length_exceeded".to_string())
+        );
+    }
+
+    // -- resolve_generated_plan_content ----------------------------------------
+
+    #[test]
+    fn resolve_generated_plan_content_returns_content_when_plan_file_exists() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Existing Plan\n\nSteps here.")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = resolve_generated_plan_content(&plan_path, "", "", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(result, "# Existing Plan\n\nSteps here.");
+    }
+
+    #[test]
+    fn resolve_generated_plan_content_returns_stdout_when_nonempty() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+
+        let result = resolve_generated_plan_content(&plan_path, "# Plan from stdout", "", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(result, "# Plan from stdout");
+    }
+
+    #[test]
+    fn resolve_generated_plan_content_falls_back_to_transcript_error_when_all_empty() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        let transcript = r#"{"message":{"stopReason":"error","errorMessage":"API error: context_length_exceeded: token limit 200000 exceeded"}}"#;
+
+        let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
+
+        assert!(result.is_err(), "expected Err, got: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("context_length_exceeded"),
+            "error should mention context_length_exceeded: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("planning backend failed"),
+            "error should identify the source: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_generated_plan_content_preserves_original_error_when_no_transcript() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+
+        let result = resolve_generated_plan_content(&plan_path, "", "", None);
+
+        assert!(result.is_err(), "expected Err, got: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("plan generation produced no output"),
+            "should keep original error when no transcript: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_generated_plan_content_preserves_original_error_when_transcript_has_no_error() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        let transcript = r#"{"message":{"stopReason":"ok","content":"some output"}}"#;
+
+        let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
+
+        assert!(result.is_err(), "expected Err, got: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("plan generation produced no output"),
+            "should keep original error when transcript has no error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_generated_plan_content_ignores_transcript_when_content_available() {
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        let transcript =
+            r#"{"message":{"stopReason":"error","errorMessage":"context_length_exceeded"}}"#;
+
+        let result =
+            resolve_generated_plan_content(&plan_path, "# Plan from stdout", "", Some(transcript))
+                .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Transcript error should be ignored since we got valid content
+        assert_eq!(result, "# Plan from stdout");
     }
 }
