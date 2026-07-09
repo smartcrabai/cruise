@@ -30,6 +30,7 @@ import {
   getSessionLog,
   getSessionPlan,
   listConfigs,
+  publishPlanIssue,
   resetSession,
   respondToOption,
   runAllSessions,
@@ -47,6 +48,7 @@ import { MarkdownViewer } from "./components/MarkdownViewer";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SessionConfigEditor } from "./components/SessionConfigEditor";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { PublishIssueDialog } from "./components/PublishIssueDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { WorkflowDagPanel } from "./components/WorkflowDagPanel";
 import { Spinner } from "./components/Spinner";
@@ -492,6 +494,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   const [askResponse, setAskResponse] = useState("");
   const [askError, setAskError] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showPublishIssueConfirm, setShowPublishIssueConfirm] = useState(false);
   const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
@@ -662,6 +665,13 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   function handleDelete() {
     setShowDeleteConfirm(false);
     onDeleteConfirmed(session.id);
+  }
+
+  async function handlePublishIssue(mentionCruise: boolean) {
+    const published = await publishPlanIssue(session.id, mentionCruise);
+    setShowPublishIssueConfirm(false);
+    onDeleteConfirmed(session.id);
+    void openUrl(published.url);
   }
 
   async function handleOptionRespond(result: {
@@ -865,6 +875,15 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               className="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600"
             >
               Approve
+            </button>
+          )}
+          {actions.showPublishIssue && (
+            <button
+              type="button"
+              onClick={() => setShowPublishIssueConfirm(true)}
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800"
+            >
+              Publish as Issue
             </button>
           )}
           {canShowFix && (
@@ -1167,6 +1186,15 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           confirmLabel="Delete"
           onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
+
+      {/* Publish-as-issue confirmation dialog */}
+      {showPublishIssueConfirm && (
+        <PublishIssueDialog
+          sessionId={session.id}
+          onConfirm={handlePublishIssue}
+          onCancel={() => setShowPublishIssueConfirm(false)}
         />
       )}
     </div>

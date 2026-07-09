@@ -9,6 +9,7 @@ import type {
   NewSessionDraftPersisted,
   NewSessionHistorySummary,
   PlanEvent,
+  PublishedIssue,
   Session,
   UpdateReadiness,
   WorkspaceMode,
@@ -291,6 +292,15 @@ export function createDraftSession(params: {
 /** Approve a session (Awaiting Approval → Planned). */
 export function approveSession(sessionId: string): Promise<void> {
   return invoke<void>("approve_session", { sessionId });
+}
+
+/**
+ * Publish a session's generated plan as a GitHub issue and delete the local
+ * session. The target repo is inferred from the session (or its `origin` git
+ * remote); `mentionCruise` optionally prefixes the issue body with `@cruise`.
+ */
+export function publishPlanIssue(sessionId: string, mentionCruise: boolean): Promise<PublishedIssue> {
+  return invoke<PublishedIssue>("publish_plan_issue", { sessionId, mentionCruise });
 }
 
 /**

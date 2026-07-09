@@ -203,6 +203,46 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         style(format!("cruise run {}", session.id)).cyan()
                     );
                 }
+                "Publish as Issue" => {
+                    if !plan_available || session.plan_error.is_some() {
+                        eprintln!("{} plan is not ready for approval yet", style("!").yellow());
+                        continue;
+                    }
+                    crate::platform::reclaim_terminal_foreground();
+                    let mention_cruise =
+                        match inquire::Confirm::new("Mention @cruise in the issue body?")
+                            .with_default(false)
+                            .prompt()
+                        {
+                            Ok(answer) => answer,
+                            Err(
+                                InquireError::OperationCanceled
+                                | InquireError::OperationInterrupted,
+                            ) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(CruiseError::Other(format!("selection error: {e}")));
+                            }
+                        };
+                    match crate::issue_publish::publish_plan_issue_and_delete(
+                        &manager,
+                        session.clone(),
+                        mention_cruise,
+                    ) {
+                        Ok(published) => {
+                            eprintln!(
+                                "{} Published plan as issue: {}",
+                                style("v").green(),
+                                published.url
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("{} Failed to publish plan as issue: {e}", style("x").red());
+                        }
+                    }
+                }
                 "Run" | "Resume" => {
                     let run_args = crate::cli::RunArgs {
                         session: Some(session.id.clone()),
@@ -348,6 +388,7 @@ fn session_actions_with_plan_availability(
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
                 actions.push("Approve");
+                actions.push("Publish as Issue");
             }
             actions.push("Edit Settings");
         }
@@ -1376,10 +1417,16 @@ mod tests {
         // Given: AwaitingApproval phase
         let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
 
-        // When / Then: order is Approve -> Edit Settings -> Delete -> Back
+        // When / Then: order is Approve -> Publish as Issue -> Edit Settings -> Delete -> Back
         assert_eq!(
             session_actions(&session),
-            vec!["Approve", "Edit Settings", "Delete", "Back"]
+            vec![
+                "Approve",
+                "Publish as Issue",
+                "Edit Settings",
+                "Delete",
+                "Back"
+            ]
         );
     }
 

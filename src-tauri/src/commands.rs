@@ -1657,6 +1657,34 @@ pub fn approve_session(session_id: String) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Result of publishing a session's plan as a GitHub issue.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedIssueDto {
+    pub url: String,
+    pub repo: String,
+}
+
+/// Publish a session's generated plan as a GitHub issue and delete the local
+/// session. The target repo is inferred from the session (or its `origin`
+/// git remote); `mention_cruise` optionally prefixes the issue body with an
+/// `@cruise` mention.
+#[tauri::command]
+pub fn publish_plan_issue(
+    session_id: String,
+    mention_cruise: bool,
+) -> std::result::Result<PublishedIssueDto, String> {
+    let manager = new_session_manager()?;
+    let session = manager.load(&session_id).map_err(|e| e.to_string())?;
+    let published =
+        cruise::issue_publish::publish_plan_issue_and_delete(&manager, session, mention_cruise)
+            .map_err(|e| e.to_string())?;
+    Ok(PublishedIssueDto {
+        url: published.url,
+        repo: published.repo,
+    })
+}
+
 /// Reset a session to "Planned" phase regardless of its current phase.
 #[tauri::command]
 pub fn reset_session(session_id: String) -> std::result::Result<SessionDto, String> {

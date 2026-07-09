@@ -1016,7 +1016,7 @@ async fn run_approve_loop(
             return Ok(());
         }
 
-        let options = vec!["Approve", "Fix", "Ask", "Execute now"];
+        let options = vec!["Approve", "Fix", "Ask", "Execute now", "Publish as Issue"];
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
             Ok(s) => s,
@@ -1114,8 +1114,48 @@ async fn run_approve_loop(
                 };
                 return crate::run_cmd::run(run_args).await;
             }
+            "Publish as Issue" => {
+                let Some(mention_cruise) = prompt_mention_cruise()? else {
+                    continue;
+                };
+                match crate::issue_publish::publish_plan_issue_and_delete(
+                    manager,
+                    session.clone(),
+                    mention_cruise,
+                ) {
+                    Ok(published) => {
+                        eprintln!(
+                            "\n{} Published plan as issue: {}",
+                            style("v").green().bold(),
+                            published.url
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "\n{} Failed to publish plan as issue: {e}",
+                            style("x").red().bold()
+                        );
+                    }
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// Prompt whether to mention `@cruise` in a published issue body.
+///
+/// Returns `Ok(None)` if the user cancels the prompt.
+fn prompt_mention_cruise() -> Result<Option<bool>> {
+    crate::platform::reclaim_terminal_foreground();
+    match inquire::Confirm::new("Mention @cruise in the issue body?")
+        .with_default(false)
+        .prompt()
+    {
+        Ok(answer) => Ok(Some(answer)),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
+        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
 }
 
