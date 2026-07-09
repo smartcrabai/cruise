@@ -12,6 +12,14 @@ use crate::executor::{Executor, PromptRun};
 use crate::step::prompt::{PromptResult, StreamCallbacks};
 use crate::variable::VariableStore;
 
+/// Environment variable key for pi's HTTP request timeout.
+const PI_HTTP_REQUEST_TIMEOUT_SECS: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
+
+/// Default 30-minute timeout for planning requests (1800 seconds).
+/// Avoids failing after pi's 60-second default HTTP request timeout when the
+/// selected seher plan backend uses pi.
+const DEFAULT_PI_PLANNING_REQUEST_TIMEOUT_SECS: &str = "1800";
+
 // Built-in plan/fix/ask prompt templates, embedded at compile time. The `*_SDK`
 // variants drive the agent via the `submit_plan` / `update_plan` / `ask_user`
 // tools instead of writing the plan file directly. Shared by the CLI
@@ -144,6 +152,37 @@ impl PlanPromptCtx<'_> {
     }
 }
 
+/// Resolve environment variables for plan-related prompts.
+///
+/// 1. Resolves workflow top-level `env:` with template semantics (same as normal steps).
+/// 2. Adds `PI_HTTP_REQUEST_TIMEOUT_SECS=1800` only when:
+///    - The resolved workflow env does NOT already contain `PI_HTTP_REQUEST_TIMEOUT_SECS`
+///    - The ambient process environment does NOT define `PI_HTTP_REQUEST_TIMEOUT_SECS`
+///
+/// This preserves the override precedence:
+/// - Explicit workflow `env:` wins (inserted first)
+/// - Ambient `PI_HTTP_REQUEST_TIMEOUT_SECS` wins (cruise doesn't override)
+/// - The 1800-second default is used only when neither source specifies a value
+fn resolve_planning_env(
+    config: &WorkflowConfig,
+    vars: &VariableStore,
+) -> Result<HashMap<String, String>> {
+    // Resolve workflow top-level env with template semantics
+    let mut env = crate::engine::resolve_env(&config.env, &HashMap::new(), vars)?;
+
+    // Insert default only when no workflow or ambient override exists
+    if !env.contains_key(PI_HTTP_REQUEST_TIMEOUT_SECS)
+        && std::env::var_os(PI_HTTP_REQUEST_TIMEOUT_SECS).is_none()
+    {
+        env.insert(
+            PI_HTTP_REQUEST_TIMEOUT_SECS.to_string(),
+            DEFAULT_PI_PLANNING_REQUEST_TIMEOUT_SECS.to_string(),
+        );
+    }
+
+    Ok(env)
+}
+
 /// Resolve and execute a plan-related prompt template on the configured backend.
 ///
 /// In SDK mode, when `register_plan_tools` is true the planning tools
@@ -189,7 +228,7 @@ pub async fn run_plan_prompt_template(
         Vec::new()
     };
 
-    let env = HashMap::new();
+    let env = resolve_planning_env(ctx.config, vars)?;
     eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
     // The SDK backend surfaces progress through streamed deltas and `ask_user`
     // prompts, so a spinner would clobber interactive input; only spin for the
@@ -839,5 +878,179 @@ mod tests {
 
         // Transcript error should be ignored since we got valid content
         assert_eq!(result, "# Plan from stdout");
+    }
+
+    // -- resolve_planning_env --------------------------------------------------
+
+    use crate::test_support::{EnvGuard, lock_process};
+    use std::fmt::Write as _;
+
+    /// Helper: build a `WorkflowConfig` with top-level `env` entries.
+    fn config_with_env(env_entries: &[(&str, &str)]) -> WorkflowConfig {
+        let mut yaml = String::from("command: [\"echo\"]\n");
+        if !env_entries.is_empty() {
+            yaml.push_str("env:\n");
+            for (k, v) in env_entries {
+                let _ = writeln!(yaml, "  {k}: \"{v}\"");
+            }
+        }
+        yaml.push_str("steps:\n  s1:\n    prompt: hi\n");
+        WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    /// Helper: build a `WorkflowConfig` with a template variable in `env`.
+    fn config_with_env_template(key: &str, template: &str) -> WorkflowConfig {
+        let yaml = format!(
+            "command: [\"echo\"]\nenv:\n  {key}: \"{template}\"\nsteps:\n  s1:\n    prompt: hi\n"
+        );
+        WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    /// Given: empty workflow env and no ambient `PI_HTTP_REQUEST_TIMEOUT_SECS`
+    /// When: `resolve_planning_env` is called
+    /// Then: returns map containing `PI_HTTP_REQUEST_TIMEOUT_SECS=1800`
+    #[test]
+    fn resolve_planning_env_inserts_default_when_no_env() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        let config = config_with_env(&[]);
+        let vars = VariableStore::new("test".to_string());
+
+        let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            env.get(PI_HTTP_REQUEST_TIMEOUT_SECS)
+                .map(std::string::String::as_str),
+            Some(DEFAULT_PI_PLANNING_REQUEST_TIMEOUT_SECS),
+            "should insert default timeout when no env is set"
+        );
+    }
+
+    /// Given: workflow env sets `PI_HTTP_REQUEST_TIMEOUT_SECS=900`
+    /// When: `resolve_planning_env` is called
+    /// Then: returns `900`, not the default `1800`
+    #[test]
+    fn resolve_planning_env_preserves_workflow_env_override() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        let config = config_with_env(&[(PI_HTTP_REQUEST_TIMEOUT_SECS, "900")]);
+        let vars = VariableStore::new("test".to_string());
+
+        let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            env.get(PI_HTTP_REQUEST_TIMEOUT_SECS)
+                .map(std::string::String::as_str),
+            Some("900"),
+            "workflow env should override the default"
+        );
+    }
+
+    /// Given: ambient `PI_HTTP_REQUEST_TIMEOUT_SECS=600` and no workflow key
+    /// When: `resolve_planning_env` is called
+    /// Then: returned map does NOT contain the key (pi reads ambient value itself)
+    #[test]
+    fn resolve_planning_env_does_not_override_ambient_env() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::set(PI_HTTP_REQUEST_TIMEOUT_SECS, "600");
+        let config = config_with_env(&[]);
+        let vars = VariableStore::new("test".to_string());
+
+        let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(
+            !env.contains_key(PI_HTTP_REQUEST_TIMEOUT_SECS),
+            "should NOT insert default when ambient env is set; pi reads it directly"
+        );
+    }
+
+    /// Given: workflow env has an unrelated key with a template variable
+    /// When: `resolve_planning_env` is called
+    /// Then: unrelated key is preserved and template is resolved
+    #[test]
+    fn resolve_planning_env_preserves_unrelated_workflow_env() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        let config = config_with_env_template("MY_VAR", "{input}");
+        let vars = VariableStore::new("hello world".to_string());
+
+        let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            env.get("MY_VAR").map(std::string::String::as_str),
+            Some("hello world"),
+            "unrelated workflow env should be preserved and template resolved"
+        );
+        // Default should also be inserted since no PI_HTTP_REQUEST_TIMEOUT_SECS was set
+        assert_eq!(
+            env.get(PI_HTTP_REQUEST_TIMEOUT_SECS)
+                .map(std::string::String::as_str),
+            Some(DEFAULT_PI_PLANNING_REQUEST_TIMEOUT_SECS),
+            "default timeout should be inserted alongside unrelated env"
+        );
+    }
+
+    /// Given: workflow env sets both `PI_HTTP_REQUEST_TIMEOUT_SECS` and an unrelated key
+    /// When: `resolve_planning_env` is called
+    /// Then: both are preserved; the timeout override wins
+    #[test]
+    fn resolve_planning_env_preserves_override_with_other_env() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        let config = config_with_env(&[
+            (PI_HTTP_REQUEST_TIMEOUT_SECS, "1200"),
+            ("OTHER_KEY", "value"),
+        ]);
+        let vars = VariableStore::new("test".to_string());
+
+        let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            env.get(PI_HTTP_REQUEST_TIMEOUT_SECS)
+                .map(std::string::String::as_str),
+            Some("1200"),
+            "workflow timeout override should be preserved"
+        );
+        assert_eq!(
+            env.get("OTHER_KEY").map(std::string::String::as_str),
+            Some("value"),
+            "other workflow env should be preserved"
+        );
+    }
+
+    /// Given: command backend and no env overrides
+    /// When: `run_plan_prompt_template` is called
+    /// Then: the default `PI_HTTP_REQUEST_TIMEOUT_SECS` is visible in the child process
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_plan_prompt_template_forwards_default_env_to_command_backend() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Use `sh -c 'printf %s "$PI_HTTP_REQUEST_TIMEOUT_SECS"'` as the command
+        // to observe the env value in the child process.
+        let config = config_with(
+            None,
+            Some("\"sh\", \"-c\", \"printf %s $PI_HTTP_REQUEST_TIMEOUT_SECS\""),
+        );
+        let ctx = make_ctx_no_token(&config, &plan_path);
+        let mut vars = VariableStore::new("test input".to_string());
+        let mut resume = None;
+
+        let result =
+            run_plan_prompt_template(&ctx, &mut vars, "hello", "test", None, &mut resume, false)
+                .await;
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let prompt_result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        // The command should have printed "1800" to stdout, which becomes the output
+        assert!(
+            prompt_result.output.contains("1800"),
+            "expected output to contain '1800', got: {:?}",
+            prompt_result.output
+        );
     }
 }
