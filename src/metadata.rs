@@ -144,9 +144,9 @@ pub(crate) fn try_parse_frontmatter(content: &str) -> Option<(String, String)> {
     if !content.starts_with("---") {
         return None;
     }
-    let after_open = match content[3..].find('\n') {
-        Some(pos) => &content[3 + pos + 1..],
-        None => return None,
+    let after_open = {
+        let pos = content[3..].find('\n')?;
+        &content[3 + pos + 1..]
     };
     let close_pos = after_open.find("\n---")?;
     let frontmatter = &after_open[..close_pos];
