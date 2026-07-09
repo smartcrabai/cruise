@@ -11,6 +11,7 @@ pub mod dag;
 pub mod engine;
 pub mod error;
 pub mod executor;
+pub mod file_tracker;
 pub mod issue_publish;
 pub mod metadata;
 pub mod new_session_draft;
