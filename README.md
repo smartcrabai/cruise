@@ -1,5 +1,9 @@
 # cruise
 
+<p align="center">
+  <img src="src-tauri/icons/icon.png" alt="cruise logo" width="160" height="160">
+</p>
+
 A CLI tool that orchestrates coding agent workflows defined in a YAML config file.
 
 Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan -> approve -> write tests -> implement -> test -> review -> open PR -> post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
