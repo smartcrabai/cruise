@@ -321,6 +321,7 @@ pub fn resolve_generated_plan_content(
 /// Try to read an SDK transcript file for the given session ID.
 ///
 /// Returns `None` if the transcript cannot be found or read (non-fatal).
+#[must_use]
 pub fn read_sdk_transcript(working_dir: Option<&Path>, session_id: &str) -> Option<String> {
     let transcript_path = seher::sdk::pi_session_path(working_dir, session_id);
     std::fs::read_to_string(&transcript_path).ok()
