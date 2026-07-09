@@ -259,6 +259,7 @@ fn transition_reason(reason: &cruise::dag::TransitionReason) -> (String, Option<
     match reason {
         TransitionReason::Sequential => ("sequential".to_string(), None),
         TransitionReason::Next => ("next".to_string(), None),
+        TransitionReason::SkipFallback => ("skipFallback".to_string(), None),
         TransitionReason::IfFileChanged { target } => {
             ("ifFileChanged".to_string(), Some(target.clone()))
         }

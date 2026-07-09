@@ -85,6 +85,8 @@ pub enum TransitionReason {
     GroupRetry { target: String },
     /// Group retry budget exhausted; the invocation is skipped.
     GroupRetryExhausted,
+    /// Sequential-order fallback used when a step with `next:` is skipped.
+    SkipFallback,
 }
 
 /// Runtime data stored inside a DAG node.
@@ -295,6 +297,19 @@ fn compute_successors(
                 step,
                 max_retries,
             );
+
+            if step_config.next.is_some()
+                && let Some(fallback_target) = sequential_next(&compiled.steps, step)
+                && fallback_target != target
+            {
+                let fallback_key = key.for_step(fallback_target);
+                push_unbudgeted_transition(
+                    &mut successors,
+                    TransitionReason::SkipFallback,
+                    Some(fallback_target),
+                    &fallback_key,
+                );
+            }
         }
         None => {
             successors.push((sequential_reason, None, key.clone()));
@@ -472,6 +487,15 @@ fn push_transition(
     }
 }
 
+fn push_unbudgeted_transition(
+    successors: &mut Vec<(TransitionReason, Option<String>, StateKey)>,
+    reason: TransitionReason,
+    target: Option<&str>,
+    new_key: &StateKey,
+) {
+    successors.push((reason, target.map(str::to_string), new_key.clone()));
+}
+
 fn is_within_budget(key: &StateKey, max_retries: usize, from: &str, to: &str) -> bool {
     key.edge_counts
         .get(&(from.to_string(), to.to_string()))
@@ -634,6 +658,159 @@ steps:
         let b_id = a.successors[0].target.as_ref().unwrap();
 
         let b = &dag.nodes[b_id];
+        assert_eq!(b.step_name, "b");
+        assert_eq!(b.successors.len(), 2);
+        assert!(b.successors.iter().any(|s| {
+            s.reason == TransitionReason::Next
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "a")
+        }));
+        assert!(b.successors.iter().any(|s| {
+            s.reason == TransitionReason::SkipFallback
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "c")
+        }));
+    }
+
+    #[test]
+    fn test_dag_next_step_has_skip_fallback_edge() {
+        // Given: a step with an explicit `next:` jump to a non-sequential target.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  a:
+    command: echo a
+  b:
+    command: echo b
+    next: a
+  c:
+    command: echo c
+",
+        );
+
+        // When: the execution DAG is built.
+        let dag = build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let a = &dag.nodes[&dag.start];
+        let b_id = a.successors[0].target.as_ref().unwrap();
+        let b = &dag.nodes[b_id];
+
+        // Then: the step can either follow `next:` or fall back to definition order when skipped.
+        assert_eq!(b.step_name, "b");
+        assert_eq!(b.successors.len(), 2);
+        assert!(b.successors.iter().any(|s| {
+            s.reason == TransitionReason::Next
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "a")
+        }));
+        assert!(b.successors.iter().any(|s| {
+            s.reason == TransitionReason::SkipFallback
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "c")
+        }));
+    }
+
+    #[test]
+    fn test_dag_skip_fallback_bypasses_retry_budget() {
+        // Given: `b -> c` is a real loop edge that can exhaust its retry budget,
+        // and `b` also has a skip-only fallback to sequential step `c`.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  a:
+    command: echo a
+  b:
+    command: echo b
+    next: a
+    if:
+      file-changed: c
+  c:
+    command: echo c
+    next: b
+",
+        );
+
+        // When: the execution DAG is built with no retry allowance for real loop edges.
+        let dag = build_dag(&compiled, 0).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: even after the real `b -> c` edge count is over budget, skipped-step
+        // fallback from b to c remains non-terminal because it is not a retry edge.
+        let b_with_exhausted_file_changed_to_c = dag.nodes.values().find(|node| {
+            node.step_name == "b"
+                && node.successors.iter().any(|s| {
+                    matches!(
+                        s.reason,
+                        TransitionReason::IfFileChanged { ref target } if target == "c"
+                    ) && s.target.is_none()
+                })
+        });
+        let b = b_with_exhausted_file_changed_to_c
+            .unwrap_or_else(|| panic!("expected b node with exhausted file-changed edge to c"));
+
+        assert!(b.successors.iter().any(|s| {
+            s.reason == TransitionReason::SkipFallback
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "c")
+        }));
+    }
+
+    #[test]
+    fn test_dag_next_to_sequential_target_has_single_edge() {
+        // Given: `next:` points to the same step as definition-order sequencing.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  a:
+    command: echo a
+    next: b
+  b:
+    command: echo b
+",
+        );
+
+        // When: the execution DAG is built.
+        let dag = build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let a = &dag.nodes[&dag.start];
+
+        // Then: the DAG has only the existing `next:` edge, with no duplicate fallback edge.
+        assert_eq!(a.step_name, "a");
+        assert_eq!(a.successors.len(), 1);
+        assert_eq!(a.successors[0].reason, TransitionReason::Next);
+        assert_eq!(
+            dag.nodes[a.successors[0].target.as_ref().unwrap()].step_name,
+            "b"
+        );
+    }
+
+    #[test]
+    fn test_dag_last_step_with_next_has_no_skip_fallback() {
+        // Given: the final step has an explicit `next:` but no definition-order successor.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  a:
+    command: echo a
+  b:
+    command: echo b
+    next: a
+",
+        );
+
+        // When: the execution DAG is built.
+        let dag = build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let a = &dag.nodes[&dag.start];
+        let b_id = a.successors[0].target.as_ref().unwrap();
+        let b = &dag.nodes[b_id];
+
+        // Then: the final step only has the explicit `next:` edge.
         assert_eq!(b.step_name, "b");
         assert_eq!(b.successors.len(), 1);
         assert_eq!(b.successors[0].reason, TransitionReason::Next);
