@@ -1473,6 +1473,108 @@ steps:
     }
 
     #[tokio::test]
+    async fn test_skipped_step_with_next_proceeds_to_sequential_step() {
+        // Given: a successful step followed by a dynamically skipped step with `next:`.
+        let yaml = r#"
+command: [echo]
+steps:
+  wait:
+    command: "true"
+  fix:
+    skip: prev.success
+    command: "echo FIXING"
+    next: wait
+  merge:
+    command: "true"
+"#;
+
+        // When: the workflow runs and `fix` is skipped by `prev.success`.
+        let result = run_config(yaml, "", None).await;
+
+        // Then: execution falls through to `merge` instead of stopping early.
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 2, "wait and merge should run");
+        assert_eq!(result.skipped, 1, "fix should be counted as skipped");
+    }
+
+    #[tokio::test]
+    async fn test_static_skipped_step_with_next_proceeds() {
+        // Given: a statically skipped step has an explicit `next:` loop.
+        let yaml = r#"
+command: [echo]
+steps:
+  wait:
+    command: "true"
+  fix:
+    skip: true
+    command: "echo FIXING"
+    next: wait
+  merge:
+    command: "true"
+"#;
+
+        // When: the workflow runs and `fix` is skipped by `skip: true`.
+        let result = run_config(yaml, "", None).await;
+
+        // Then: execution falls through to the definition-order successor.
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 2, "wait and merge should run");
+        assert_eq!(result.skipped, 1, "fix should be counted as skipped");
+    }
+
+    #[tokio::test]
+    async fn test_user_skipped_step_with_next_proceeds() {
+        // Given: a user-skippable step has an explicit `next:` loop.
+        let yaml = r#"
+command: [echo]
+steps:
+  wait:
+    command: "true"
+  fix:
+    command: "echo FIXING"
+    next: wait
+  merge:
+    command: "true"
+"#;
+
+        // When: the user-selected skip list skips `fix`.
+        let result = run_config_with_skipped(yaml, "", None, &["fix"]).await;
+
+        // Then: execution falls through to the definition-order successor.
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 2, "wait and merge should run");
+        assert_eq!(result.skipped, 1, "fix should be counted as skipped");
+    }
+
+    #[tokio::test]
+    async fn test_after_pr_skipped_step_with_next_reaches_merge() {
+        // Given: an after-pr workflow matching the CI-fix loop followed by merge.
+        let yaml = r#"
+command: [echo]
+steps:
+  build:
+    command: "true"
+after-pr:
+  wait:
+    command: "true"
+  fix:
+    skip: prev.success
+    command: "echo FIXING"
+    next: wait
+  merge:
+    command: "true"
+"#;
+
+        // When: the after-pr workflow skips `fix` after `wait` succeeds.
+        let result = run_after_pr_config_with_skipped(yaml, "", &[]).await;
+
+        // Then: after-pr execution reaches `merge` instead of ending after the skipped step.
+        let result = result.unwrap_or_else(|e| panic!("after-pr failed: {e:?}"));
+        assert_eq!(result.run, 2, "wait and merge should run");
+        assert_eq!(result.skipped, 1, "fix should be counted as skipped");
+    }
+
+    #[tokio::test]
     async fn test_run_from_step() {
         let yaml = r#"
 command: [echo]
@@ -3310,6 +3412,33 @@ steps:
             result.is_err(),
             "prompt error with if.fail should eventually fail via loop protection, got: {err_detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_when_exists_skipped_step_with_next_proceeds() {
+        // Given: an empty temp dir and a when.exists-skipped step with `next:`.
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  wait:
+    command: "true"
+  fix:
+    command: "echo FIXING"
+    when:
+      exists: "*.definitely-missing"
+    next: wait
+  merge:
+    command: "true"
+"#;
+
+        // When: `fix` is skipped because the glob has no matches.
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+
+        // Then: execution falls through to `merge` instead of following `next:`.
+        let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
+        assert_eq!(result.run, 2, "wait and merge should run");
+        assert_eq!(result.skipped, 1, "fix should be counted as skipped");
     }
 
     // when.exists: file present → step runs
