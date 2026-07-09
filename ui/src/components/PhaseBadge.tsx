@@ -21,18 +21,24 @@ export function PhaseBadge({
   phase,
   planAvailable,
   fixing,
+  inputPending,
 }: {
   phase: SessionPhase;
   planAvailable?: boolean;
   /** When true, overrides the label: "Planning" for Draft sessions, "Fixing" for Awaiting Approval sessions. */
   fixing?: boolean;
+  /** When false for an Awaiting Input session, indicates the question has been answered and planning is resuming. */
+  inputPending?: boolean;
 }) {
   const cls = PHASE_COLORS[phase];
   const isAwaiting = phase === "Awaiting Approval";
   const isAwaitingInput = phase === "Awaiting Input";
+  const hasPendingInput = inputPending ?? isAwaitingInput;
   const isDraftPlanning = phase === "Draft" && !!fixing;
+  const isAwaitingInputPlanning = isAwaitingInput && !!fixing && !hasPendingInput;
   const showApproveReady = isAwaiting && planAvailable === true && !fixing;
-  const displayLabel = isDraftPlanning
+  const showInputRequired = isAwaitingInput && hasPendingInput;
+  const displayLabel = isDraftPlanning || isAwaitingInputPlanning
     ? PLANNING_LABEL
     : isAwaiting && fixing
       ? FIXING_LABEL
@@ -46,7 +52,7 @@ export function PhaseBadge({
           className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
         />
       )}
-      {isAwaitingInput && (
+      {showInputRequired && (
         <span
           role="img"
           aria-label="user input required"

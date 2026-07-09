@@ -307,7 +307,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
               <span className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{s.id}</span>
-              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id) || !!s.fixInProgress} />
+              <PhaseBadge phase={s.phase} planAvailable={s.planAvailable} fixing={fixingSessionIds?.has(s.id) || !!s.fixInProgress} inputPending={!!s.pendingAskQuestion} />
             </div>
             <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{s.title || s.input}</p>
             {s.title && (

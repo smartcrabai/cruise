@@ -256,4 +256,66 @@ describe("PhaseBadge", () => {
       expect(screen.getByLabelText(PLAN_READY_LABEL)).toBeTruthy();
     });
   });
+
+  describe("Awaiting Input planning (answered question + in-flight replan)", () => {
+    const INPUT_READY_LABEL = "user input required";
+
+    it("renders PLANNING_LABEL when phase is Awaiting Input, fixing is true, and inputPending is false", () => {
+      // Given: an Awaiting Input session where the question has been answered and replanning is in-flight
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={true} inputPending={false} />);
+
+      // Then: "Planning" is shown to indicate the plan is being regenerated
+      expect(screen.getByText(PLANNING_LABEL)).toBeTruthy();
+      expect(screen.queryByText("Awaiting Input")).toBeNull();
+    });
+
+    it("does not show the input-required dot when Awaiting Input + fixing + inputPending is false", () => {
+      // Given: question answered, replan in progress
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={true} inputPending={false} />);
+
+      // Then: the input-required indicator is hidden
+      expect(screen.queryByLabelText(INPUT_READY_LABEL)).toBeNull();
+    });
+
+    it("renders 'Awaiting Input' text when phase is Awaiting Input, fixing is true, and inputPending is true", () => {
+      // Given: an Awaiting Input session where the question has NOT been answered yet (still waiting)
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={true} inputPending={true} />);
+
+      // Then: "Awaiting Input" is shown (inputPending takes priority)
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
+    });
+
+    it("shows the input-required dot when Awaiting Input + fixing + inputPending is true", () => {
+      // Given: question not answered yet, but fix is somehow in progress
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={true} inputPending={true} />);
+
+      // Then: the input-required indicator is shown
+      expect(screen.getByLabelText(INPUT_READY_LABEL)).toBeTruthy();
+    });
+
+    it("defaults inputPending to true for Awaiting Input when prop is omitted (backward compat)", () => {
+      // Given: no inputPending prop (existing behavior preserved)
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={true} />);
+
+      // Then: treated as input pending, shows "Awaiting Input"
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
+      expect(screen.getByLabelText(INPUT_READY_LABEL)).toBeTruthy();
+    });
+
+    it("renders 'Awaiting Input' text when phase is Awaiting Input, fixing is false, and inputPending is false", () => {
+      // Given: question answered, no fix in progress (transient state before phase advances)
+      // When
+      render(<PhaseBadge phase="Awaiting Input" fixing={false} inputPending={false} />);
+
+      // Then: normal Awaiting Input label (no in-flight override applies)
+      expect(screen.getByText("Awaiting Input")).toBeTruthy();
+      expect(screen.queryByText(PLANNING_LABEL)).toBeNull();
+    });
+  });
 });
