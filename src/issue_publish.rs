@@ -1,5 +1,6 @@
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionState};
+use crate::worktree_pr::gh_output_line;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedIssue {
@@ -7,19 +8,156 @@ pub struct PublishedIssue {
     pub repo: String,
 }
 
+/// Parse a `git remote` origin URL into a GitHub `owner/repo` slug.
+///
+/// Supports HTTPS URLs (`https://github.com/owner/repo[.git]`), SSH URLs
+/// (`ssh://git@github.com/owner/repo[.git]`), and the scp-like syntax
+/// (`git@github.com:owner/repo[.git]`). Returns `None` for non-GitHub hosts
+/// or input that doesn't match any of these forms.
 #[must_use]
-pub fn parse_github_repo_from_origin(_origin_url: &str) -> Option<String> {
-    todo!("parse GitHub origin URLs into owner/repo")
+pub fn parse_github_repo_from_origin(origin_url: &str) -> Option<String> {
+    let trimmed = origin_url.trim();
+    let without_suffix = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+
+    let (host, path) = if let Some((_scheme, remainder)) = without_suffix.split_once("://") {
+        let after_user = remainder
+            .rsplit_once('@')
+            .map_or(remainder, |(_, host_and_path)| host_and_path);
+        after_user.split_once('/')?
+    } else {
+        let (user_and_host, path) = without_suffix.split_once(':')?;
+        let host = user_and_host
+            .rsplit_once('@')
+            .map_or(user_and_host, |(_, host)| host);
+        (host, path)
+    };
+
+    if host != "github.com" {
+        return None;
+    }
+
+    let mut segments = path.trim_matches('/').split('/');
+    let owner = segments.next().filter(|s| !s.is_empty())?;
+    let repo = segments.next().filter(|s| !s.is_empty())?;
+    if segments.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
+/// Resolve the `owner/repo` slug for `session`: its recorded `repo` field if
+/// set, otherwise the `origin` remote of its `base_dir` git checkout.
+fn resolve_repo(session: &SessionState) -> Result<String> {
+    if let Some(repo) = &session.repo {
+        return Ok(repo.clone());
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(&session.base_dir)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run git remote get-url origin: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::Other(format!(
+            "failed to determine GitHub repository: git remote get-url origin failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let origin_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_github_repo_from_origin(&origin_url).ok_or_else(|| {
+        CruiseError::Other(format!(
+            "could not determine GitHub repository from origin URL: {origin_url}"
+        ))
+    })
+}
+
+/// Publish a session's generated plan as a GitHub issue, then delete the
+/// local session.
+///
+/// The target repository comes from `session.repo` if set, otherwise from
+/// the `origin` remote of `session.base_dir`. When `mention_cruise` is
+/// `true`, the issue body is prefixed with an `@cruise` mention line so the
+/// `@cruise` GitHub Action picks up the issue.
+///
+/// # Errors
+///
+/// Returns an error if the repository cannot be determined, the generated
+/// plan is missing or empty, or `gh issue create` fails. The session is left
+/// in place whenever publishing fails.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "session is consumed and its backing directory is deleted by this function"
+)]
 pub fn publish_plan_issue_and_delete(
-    _manager: &SessionManager,
-    _session: SessionState,
-    _mention_cruise: bool,
+    manager: &SessionManager,
+    session: SessionState,
+    mention_cruise: bool,
 ) -> Result<PublishedIssue> {
-    Err(CruiseError::Other(
-        "publish_plan_issue_and_delete is not implemented yet".to_string(),
-    ))
+    let repo = resolve_repo(&session)?;
+
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let plan_content = std::fs::read_to_string(&plan_path).map_err(|e| {
+        CruiseError::Other(format!(
+            "failed to read generated plan at {}: {e}",
+            plan_path.display()
+        ))
+    })?;
+    if plan_content.trim().is_empty() {
+        return Err(CruiseError::Other(format!(
+            "no generated plan found for session {}",
+            session.id
+        )));
+    }
+
+    let body = if mention_cruise {
+        format!("@cruise\n\n{plan_content}")
+    } else {
+        plan_content
+    };
+
+    let body_path = manager
+        .sessions_dir()
+        .join(&session.id)
+        .join("issue-body.md");
+    std::fs::write(&body_path, &body)?;
+
+    let output = std::process::Command::new("gh")
+        .arg("issue")
+        .arg("create")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--title")
+        .arg(session.title_or_input())
+        .arg("--body-file")
+        .arg(&body_path)
+        .output()
+        .map_err(|e| CruiseError::Other(format!("failed to run gh issue create: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CruiseError::Other(format!(
+            "gh issue create failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let url = gh_output_line(&output.stdout).ok_or_else(|| {
+        CruiseError::Other("gh issue create succeeded but printed no URL".to_string())
+    })?;
+
+    if session.repo.is_some() {
+        crate::repo_clone::cleanup_session_workspace(manager, &session);
+    } else if let Some(ctx) = session.worktree_context()
+        && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
+    {
+        eprintln!("warning: failed to remove worktree for {}: {e}", session.id);
+    }
+    manager.delete(&session.id)?;
+
+    Ok(PublishedIssue { url, repo })
 }
 
 #[cfg(test)]
@@ -152,10 +290,13 @@ mod tests {
         );
         let _path = crate::test_support::prepend_to_path(&bin_dir);
 
-        let err = publish_plan_issue_and_delete(&manager, session.clone(), false)
-            .expect_err("gh failure should fail publishing");
+        let err = crate::test_support::err_string(publish_plan_issue_and_delete(
+            &manager,
+            session.clone(),
+            false,
+        ));
 
-        assert!(err.to_string().contains("gh issue create"));
+        assert!(err.contains("gh issue create"));
         assert!(manager.sessions_dir().join(&session.id).exists());
     }
 
@@ -169,10 +310,13 @@ mod tests {
         fs::write(session.plan_path(&manager.sessions_dir()), "   \n")
             .unwrap_or_else(|e| panic!("{e}"));
 
-        let err = publish_plan_issue_and_delete(&manager, session.clone(), false)
-            .expect_err("empty plan should fail");
+        let err = crate::test_support::err_string(publish_plan_issue_and_delete(
+            &manager,
+            session.clone(),
+            false,
+        ));
 
-        assert!(err.to_string().contains("generated plan"));
+        assert!(err.contains("generated plan"));
         assert!(manager.sessions_dir().join(&session.id).exists());
     }
 
@@ -236,7 +380,7 @@ mod tests {
 
         fs::create_dir_all(bin_dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
         let script_path = bin_dir.as_ref().join("gh");
-        let exit_code = if succeed { 0 } else { 1 };
+        let exit_code = i32::from(!succeed);
         let stdout = if succeed {
             "https://github.com/owner/repo/issues/123"
         } else {

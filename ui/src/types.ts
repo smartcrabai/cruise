@@ -130,6 +130,13 @@ export interface CleanupResult {
   skipped: number;
 }
 
+// --- Issue publishing -----------------------------------------------------------
+
+export interface PublishedIssue {
+  url: string;
+  repo: string;
+}
+
 // --- Directory listing --------------------------------------------------------
 
 export interface DirEntry {

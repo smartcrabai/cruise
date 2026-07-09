@@ -567,7 +567,7 @@ fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Res
 }
 
 /// Trim and return a non-empty line from `gh` stdout bytes, or `None`.
-fn gh_output_line(bytes: &[u8]) -> Option<String> {
+pub(crate) fn gh_output_line(bytes: &[u8]) -> Option<String> {
     let cow = String::from_utf8_lossy(bytes);
     let trimmed = cow.trim();
     if trimmed.is_empty() {
