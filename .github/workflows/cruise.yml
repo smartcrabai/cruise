@@ -37,7 +37,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: smartcrabai/cruise@v1
+      - uses: smartcrabai/cruise@fc55b2c2ff4e2e16975e07209d1b81199070cd49 # v1
         with:
           # Kimi for Coding (Anthropic-compatible, https://api.kimi.com/coding/)
           # is a pi built-in provider: pass its key via `env` and select its

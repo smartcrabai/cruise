@@ -16,7 +16,7 @@ jobs:
 
       - name: Install taplo
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2
+        uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2
         with:
           tool: taplo-cli
 
