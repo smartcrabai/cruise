@@ -766,21 +766,13 @@ async fn generate_plan_markdown(
     // for a more useful error message when plan output is empty.
     let transcript = resume
         .as_deref()
-        .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id));
+        .and_then(|session_id| crate::planning::read_sdk_transcript(ctx.working_dir, session_id));
     crate::planning::resolve_generated_plan_content(
         ctx.plan_path,
         &prompt_result.output,
         &prompt_result.stderr,
         transcript.as_deref(),
     )
-}
-
-/// Try to read an SDK transcript file for the given session ID.
-///
-/// Returns `None` if the transcript cannot be found or read (non-fatal).
-fn read_sdk_transcript(working_dir: Option<&Path>, session_id: &str) -> Option<String> {
-    let transcript_path = seher::sdk::pi_session_path(working_dir, session_id);
-    std::fs::read_to_string(&transcript_path).ok()
 }
 
 #[derive(Clone)]

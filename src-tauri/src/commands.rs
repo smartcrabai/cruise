@@ -19,7 +19,8 @@ use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
 
 use cruise::planning::{
-    ask_plan_template, fix_plan_template, initial_plan_template, plan_template, setup_plan_vars,
+    ask_plan_template, fix_plan_template, initial_plan_template, plan_template,
+    read_sdk_transcript, setup_plan_vars,
 };
 
 use crate::events::{PlanEvent, WorkflowEvent};
