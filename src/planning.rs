@@ -306,12 +306,12 @@ pub fn resolve_generated_plan_content(
         Err(original_err) => {
             // Original error means plan/stdout/stderr were all empty.
             // Try to extract a more useful error from the transcript.
-            if let Some(jsonl) = transcript {
-                if let Some(backend_error) = extract_terminal_error_from_transcript(jsonl) {
-                    return Err(crate::error::CruiseError::Other(format!(
-                        "planning backend failed after producing no plan output: {backend_error}"
-                    )));
-                }
+            if let Some(jsonl) = transcript
+                && let Some(backend_error) = extract_terminal_error_from_transcript(jsonl)
+            {
+                return Err(crate::error::CruiseError::Other(format!(
+                    "planning backend failed after producing no plan output: {backend_error}"
+                )));
             }
             Err(original_err)
         }
@@ -766,7 +766,10 @@ mod tests {
         let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
 
         assert!(result.is_err(), "expected Err, got: {result:?}");
-        let err_msg = result.unwrap_err().to_string();
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("context_length_exceeded"),
             "error should mention context_length_exceeded: {err_msg}"
@@ -785,7 +788,10 @@ mod tests {
         let result = resolve_generated_plan_content(&plan_path, "", "", None);
 
         assert!(result.is_err(), "expected Err, got: {result:?}");
-        let err_msg = result.unwrap_err().to_string();
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("plan generation produced no output"),
             "should keep original error when no transcript: {err_msg}"
@@ -801,7 +807,10 @@ mod tests {
         let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
 
         assert!(result.is_err(), "expected Err, got: {result:?}");
-        let err_msg = result.unwrap_err().to_string();
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("plan generation produced no output"),
             "should keep original error when transcript has no error: {err_msg}"
