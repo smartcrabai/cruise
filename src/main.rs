@@ -14,7 +14,7 @@ mod engine;
 mod error;
 mod exec_cmd;
 mod executor;
-mod file_tracker;
+mod issue_publish;
 mod list_cmd;
 mod metadata;
 mod multiline_input;
