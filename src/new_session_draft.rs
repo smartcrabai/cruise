@@ -64,13 +64,6 @@ impl NewSessionDraft {
         }
     }
 
-    /// Save the draft, logging any error as a warning.
-    pub fn save_best_effort(&self) {
-        if let Err(e) = self.save() {
-            eprintln!("warning: failed to save new session draft: {e}");
-        }
-    }
-
     /// Load the draft from an explicit path.
     ///
     /// - File absent returns `Ok(None)`.
@@ -161,13 +154,6 @@ impl NewSessionDraft {
                 "failed to remove new session draft {}: {e}",
                 path.display()
             ))),
-        }
-    }
-
-    /// Delete the draft file, logging any error as a warning.
-    pub fn clear_best_effort() {
-        if let Err(e) = Self::clear() {
-            eprintln!("warning: failed to clear new session draft: {e}");
         }
     }
 

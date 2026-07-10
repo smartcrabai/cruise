@@ -374,6 +374,14 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path);
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
+    restore_dag_runtime_context(
+        &manager,
+        &session,
+        &mut dag,
+        &start_node,
+        &mut vars,
+        &mut tracker,
+    );
     let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>> =
         session.config_path.as_ref().map(|path| {
             let path = path.clone();
@@ -401,7 +409,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         logger_for_step_start.write(step);
         Ok(())
     };
-    let on_node_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
+    let on_node_start = |cp: &NodeCheckpoint<'_>, dag: &crate::dag::ExecutionDag| {
         logger_for_start.write(cp.step_name);
         let mut s = session_cell.borrow_mut();
         s.current_step = Some(cp.node_id.clone());
@@ -410,6 +418,17 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         let fingerprint =
             save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
         session_fingerprint.set(fingerprint);
+        // Persist the DAG (including the runtime context just snapshotted
+        // onto this node) alongside the session state. Best-effort: a save
+        // failure must not abort the run, since the DAG is a resumption
+        // optimization, not a correctness requirement.
+        if let Err(e) = crate::dag::save_dag(dag, &manager.dag_path(&s.id)) {
+            eprintln!(
+                "{} warning: failed to persist DAG checkpoint: {}",
+                style("!").yellow(),
+                e
+            );
+        }
         Ok(())
     };
     let on_step_log = |stream: &str, line: &str| {
@@ -442,6 +461,19 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
             Err(CruiseError::Interrupted)
         },
     };
+
+    // Best-effort final flush so the persisted DAG reflects the last executed
+    // node's `visited_at` timestamp even when it was the final step in the
+    // workflow: the per-node checkpoint in `on_node_start` only flushes
+    // *before* a node runs, so the very last node's post-execution state
+    // would otherwise never reach disk.
+    if let Err(e) = crate::dag::save_dag(&dag, &manager.dag_path(&session_id)) {
+        eprintln!(
+            "{} warning: failed to persist final DAG checkpoint: {}",
+            style("!").yellow(),
+            e
+        );
+    }
     let session = session_cell.into_inner();
 
     let overall_result = match exec_result {
@@ -572,6 +604,74 @@ fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) 
             session.completed_at = Some(current_iso8601());
         }
     }
+}
+
+/// Restore the DAG-driven runtime context (`{prev.*}` variables and file
+/// tracker snapshots) so that resuming `session` at `start_node` continues
+/// with exactly the state that was in effect when the session was last
+/// interrupted.
+///
+/// Best-effort: if `session.has_dag` is false (fresh session, or a session
+/// created before DAG persistence existed and never checkpointed), or the
+/// persisted DAG file is missing, unreadable, or fails to deserialize, this
+/// silently falls back to the freshly built `dag` with no restored runtime
+/// context -- exactly the pre-persistence behavior. A warning is printed only
+/// when a file exists but fails to load, since a missing file is the expected
+/// case for old sessions.
+fn restore_dag_runtime_context(
+    manager: &SessionManager,
+    session: &SessionState,
+    dag: &mut crate::dag::ExecutionDag,
+    start_node: &crate::dag::NodeId,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+) {
+    if !session.has_dag {
+        return;
+    }
+    let dag_path = manager.dag_path(&session.id);
+    if !dag_path.exists() {
+        return;
+    }
+    let loaded = match crate::dag::load_dag(&dag_path) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!(
+                "{} warning: failed to load persisted DAG at {}: {} -- resuming without restored runtime context",
+                style("!").yellow(),
+                dag_path.display(),
+                e
+            );
+            return;
+        }
+    };
+    dag.adopt_runtime_from(&loaded);
+
+    let Some(node) = dag.nodes.get(start_node) else {
+        return;
+    };
+    let runtime = node.runtime.clone();
+    let has_prev_vars = runtime.prev_output.is_some()
+        || runtime.prev_input.is_some()
+        || runtime.prev_stderr.is_some()
+        || runtime.prev_success.is_some();
+    let has_snapshots = !runtime.file_snapshots.is_empty();
+    if !has_prev_vars && !has_snapshots {
+        return;
+    }
+    vars.set_prev_output(runtime.prev_output);
+    vars.set_prev_input(runtime.prev_input);
+    vars.set_prev_stderr(runtime.prev_stderr);
+    vars.set_prev_success(runtime.prev_success);
+    if has_snapshots {
+        tracker.restore_snapshots(runtime.file_snapshots);
+    }
+    let step_label = dag.step_name_for_node(start_node).unwrap_or(start_node);
+    eprintln!(
+        "{} restored runtime context for step '{}' from saved DAG",
+        style("->").cyan(),
+        step_label
+    );
 }
 
 /// Log a resume message if the session is being restarted.
@@ -2086,6 +2186,198 @@ steps:
         assert!(
             !gh_log.exists(),
             "current-branch resume should not invoke gh"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_persists_dag_checkpoint_with_node_runtime() {
+        // Given: a two-step session where 'first' produces a known prev.success
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260710130000";
+        let session = make_current_branch_session(session_id, &repo, "persist dag", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            r"command:
+  - cat
+steps:
+  first:
+    command: |
+      true
+  second:
+    command: |
+      printf second > second.txt
+",
+        );
+
+        // When: the session runs to completion
+        let result = run(run_args(session_id)).await;
+        assert!(result.is_ok(), "expected run to succeed: {result:?}");
+
+        // Then: a DAG checkpoint was persisted alongside the session state
+        let dag_path = manager.dag_path(session_id);
+        assert!(
+            dag_path.exists(),
+            "expected DAG checkpoint to be persisted at {}",
+            dag_path.display()
+        );
+
+        // And: 'second' node's runtime -- snapshotted right before it ran --
+        // records that 'first' succeeded.
+        let dag = crate::dag::load_dag(&dag_path)
+            .unwrap_or_else(|e| panic!("failed to load persisted dag: {e:?}"));
+        let second_id = dag
+            .first_node_for_step("second")
+            .unwrap_or_else(|| panic!("second step not found in persisted dag"));
+        assert_eq!(
+            dag.nodes[second_id].runtime.prev_success,
+            Some(true),
+            "second node's pre-execution runtime should record that 'first' succeeded"
+        );
+
+        // And: the session itself records that it has a persisted DAG.
+        let loaded = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(loaded.has_dag, "completed session should record has_dag");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_restores_prev_variables_from_persisted_dag_on_resume() {
+        // Given: a session interrupted between 'first' and 'second', where
+        // 'second' depends on `{prev.success}` set by 'first'. We fabricate
+        // exactly the on-disk state a real interruption would have left
+        // behind: current_step points at 'second' (not yet run), and the
+        // persisted DAG already carries 'first''s outcome on 'second''s
+        // pre-execution runtime snapshot (see `execute_steps_with_dag`).
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260710131000";
+        let yaml = r"command:
+  - cat
+steps:
+  first:
+    command: |
+      true
+  second:
+    command: |
+      printf '%s' '{prev.success}' > second.txt
+";
+        write_config(&manager, session_id, yaml);
+
+        let mut session =
+            make_current_branch_session(session_id, &repo, "resume with prev vars", "main");
+        session.phase = SessionPhase::Running;
+
+        let workflow_config =
+            crate::config::WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled =
+            crate::workflow::compile(workflow_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, DEFAULT_MAX_RETRIES)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let second_id = dag
+            .first_node_for_step("second")
+            .unwrap_or_else(|| panic!("missing second step"))
+            .clone();
+        dag.nodes
+            .get_mut(&second_id)
+            .unwrap_or_else(|| panic!("missing node"))
+            .runtime
+            .prev_success = Some(true);
+
+        session.current_step = Some(second_id.clone());
+        session.current_step_is_node_id = true;
+        session.has_dag = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let dag_path = manager.dag_path(session_id);
+        crate::dag::save_dag(&dag, &dag_path).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the session resumes
+        let result = run(run_args(session_id)).await;
+        assert!(
+            result.is_ok(),
+            "expected resumed run to succeed: {result:?}"
+        );
+
+        // Then: `{prev.success}` resolved using the restored runtime context,
+        // not an empty, freshly-constructed VariableStore (which would have
+        // failed to resolve the template with an UndefinedVariable error).
+        let output =
+            fs::read_to_string(repo.join("second.txt")).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            output, "true",
+            "expected {{prev.success}} to be restored from the persisted DAG checkpoint"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_falls_back_gracefully_when_has_dag_true_but_file_missing() {
+        // Given: a session that claims has_dag=true (as an old, pre-fix
+        // session that never persisted a DAG file would) but no dag.json
+        // exists on disk. This must not error; it must fall back to the
+        // legacy node-id resume behavior with no restored runtime context.
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260710132000";
+        write_config(
+            &manager,
+            session_id,
+            r"command:
+  - cat
+steps:
+  first:
+    command: |
+      printf first > first.txt
+  second:
+    command: |
+      printf second > second.txt
+",
+        );
+
+        let node_id = node_id_for_step(&manager, session_id, "second");
+
+        let mut session =
+            make_current_branch_session(session_id, &repo, "old session compat", "main");
+        session.phase = SessionPhase::Running;
+        session.current_step = Some(node_id);
+        session.current_step_is_node_id = true;
+        session.has_dag = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(
+            !manager.dag_path(session_id).exists(),
+            "sanity check: no DAG file should exist yet"
+        );
+
+        // When: the session resumes
+        let result = run(run_args(session_id)).await;
+
+        // Then: it succeeds via the legacy resume path (node id lookup on a
+        // freshly built DAG), skipping the already-completed 'first' step.
+        assert!(result.is_ok(), "expected graceful fallback: {result:?}");
+        assert!(
+            !repo.join("first.txt").exists(),
+            "resume should skip already-completed 'first' step"
+        );
+        assert!(
+            repo.join("second.txt").exists(),
+            "resume should still execute 'second' step via legacy node-id resume"
         );
     }
 

@@ -227,12 +227,18 @@ fn resolve_if_next(
 /// resumed exactly — the node id recorded in `current_step` is sufficient to
 /// restore the full loop-counter context.
 ///
-/// After each step the corresponding [`DagNode`]'s `runtime.visited_at` field
-/// is updated so the caller can persist the DAG for resumption diagnostics.
+/// Right before a node runs, its [`DagNode`]'s `runtime` fields
+/// (`prev_output`/`prev_input`/`prev_stderr`/`prev_success`/`file_snapshots`)
+/// are overwritten with the current `vars`/`tracker` state -- i.e. the exact
+/// context produced by whatever ran immediately before it. That makes the
+/// about-to-run node's `runtime` sufficient on its own to resume execution:
+/// after each step the corresponding node's `runtime.visited_at` field is
+/// also updated so the caller can persist the DAG for resumption diagnostics.
 ///
-/// `on_node_start` is called before each step with a [`NodeCheckpoint`]
-/// describing the node about to run.  The callback is the right place for the
-/// caller to flush `current_step` to stable storage before the step executes.
+/// `on_node_start` is called before each step (after its `runtime` has been
+/// refreshed) with a [`NodeCheckpoint`] describing the node about to run. The
+/// callback is the right place for the caller to flush `current_step` and the
+/// DAG itself to stable storage before the step executes.
 ///
 /// # Errors
 ///
@@ -302,6 +308,24 @@ pub async fn execute_steps_with_dag(
             skipped_steps: ctx.skipped_steps,
             on_step_log: ctx.on_step_log,
         };
+
+        // Snapshot the runtime context in effect right before this node runs:
+        // the `{prev.*}` variables and file-tracker snapshots produced by
+        // whatever ran immediately before it. This is exactly what a caller
+        // needs to restore in order to resume execution at this node, so it
+        // is written before `on_node_start` -- the hook callers use to
+        // persist a checkpoint -- runs.
+        {
+            let node = dag
+                .nodes
+                .get_mut(&current_node_id)
+                .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?;
+            node.runtime.prev_output = vars.prev_output().map(str::to_string);
+            node.runtime.prev_input = vars.prev_input().map(str::to_string);
+            node.runtime.prev_stderr = vars.prev_stderr().map(str::to_string);
+            node.runtime.prev_success = vars.prev_success();
+            node.runtime.file_snapshots = tracker.snapshots();
+        }
 
         on_node_start(
             &NodeCheckpoint {
@@ -1350,6 +1374,187 @@ mod tests {
             &[],
         )
         .await
+    }
+
+    // -- execute_steps_with_dag: NodeRuntime wiring ----------------------------
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_writes_pre_execution_runtime_onto_next_node() {
+        // Given: a two-step workflow where step1 produces a known prev.success
+        let _guard = crate::test_support::lock_process();
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "true"
+  step2:
+    command: "true"
+"#;
+        let compiled =
+            crate::workflow::compile(make_config(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(tmp.path()),
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: the whole workflow runs to completion
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_cp, _dag| Ok(()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: step2's node -- which had not yet run when its runtime was
+        // written -- records step1's produced prev.success, because runtime
+        // is snapshotted right *before* a node executes, not after.
+        let step2_id = dag
+            .first_node_for_step("step2")
+            .unwrap_or_else(|| panic!("step2 not found in dag"))
+            .clone();
+        assert_eq!(
+            dag.nodes[&step2_id].runtime.prev_success,
+            Some(true),
+            "step2's pre-execution runtime snapshot should reflect step1's success"
+        );
+
+        // And: step1's own node has visited_at set (it already ran) while
+        // step2's node -- whose step2 command doesn't touch prev.success --
+        // still records step1's outcome unchanged, since nothing overwrote it
+        // after step2 ran.
+        assert!(
+            dag.nodes[&start].runtime.visited_at.is_some(),
+            "step1 should be marked visited after it completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_steps_with_dag_resume_restores_prev_variables() {
+        // Given: a workflow whose second step's command depends on `{prev.success}`
+        // set by the first step -- this only resolves successfully if the DAG
+        // resume path correctly restores `{prev.*}` variables.
+        let _guard = crate::test_support::lock_process();
+        let yaml = r#"
+command: [echo]
+steps:
+  first:
+    command: "true"
+  second:
+    command: "printf '%s' '{prev.success}' > second.txt"
+"#;
+        let compiled =
+            crate::workflow::compile(make_config(yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Phase 1: run the workflow, but cancel the moment "second" is about
+        // to start -- simulating an interruption between the two steps, in a
+        // single process (mirrors what a Ctrl+C between steps would leave
+        // behind: "first" fully ran, "second" never started).
+        let mut dag = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let cancel = CancellationToken::new();
+        let on_node_start = |cp: &NodeCheckpoint<'_>, _dag: &crate::dag::ExecutionDag| {
+            if cp.step_name == "second" {
+                cancel.cancel();
+            }
+            Ok(())
+        };
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: Some(&cancel),
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(tmp.path()),
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &on_node_start,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(
+            !tmp.path().join("second.txt").exists(),
+            "second should not have run yet -- it was cancelled before executing"
+        );
+
+        // Phase 2: simulate a brand new process resuming the session -- fresh
+        // VariableStore, fresh FileTracker, fresh DAG rebuilt from the same
+        // compiled workflow -- restoring only the persisted runtime context
+        // recorded by phase 1.
+        let mut dag2 = crate::dag::build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        dag2.adopt_runtime_from(&dag);
+        let second_id = dag2
+            .first_node_for_step("second")
+            .unwrap_or_else(|| panic!("second not found in dag"))
+            .clone();
+        let runtime = dag2.nodes[&second_id].runtime.clone();
+        let mut vars2 = VariableStore::new(String::new());
+        vars2.set_prev_output(runtime.prev_output);
+        vars2.set_prev_input(runtime.prev_input);
+        vars2.set_prev_stderr(runtime.prev_stderr);
+        vars2.set_prev_success(runtime.prev_success);
+        let mut tracker2 = FileTracker::with_root(tmp.path().to_path_buf());
+        tracker2.restore_snapshots(runtime.file_snapshots);
+
+        let ctx2 = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 10,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(tmp.path()),
+            skipped_steps: &[],
+            on_step_log: None,
+        };
+
+        // When: execution resumes at "second" using only the restored context
+        execute_steps_with_dag(
+            &ctx2,
+            &mut vars2,
+            &mut tracker2,
+            &mut dag2,
+            &second_id,
+            &|_cp, _dag| Ok(()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("resume failed -- {{prev.success}} was not restored: {e:?}"));
+
+        // Then: `{prev.success}` resolved to "true" -- restored from phase 1,
+        // not from an empty, freshly-constructed VariableStore.
+        let output = std::fs::read_to_string(tmp.path().join("second.txt"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(output, "true");
     }
 
     #[test]

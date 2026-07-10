@@ -84,6 +84,7 @@ function defaultRunnerProps(session = makeSession()) {
     onActiveTabChange: vi.fn(),
     onSessionUpdated: vi.fn(),
     onDeleteConfirmed: vi.fn(),
+    onDiscardConfirmed: vi.fn(),
     onToast: vi.fn(),
     onFixingChange: vi.fn(),
   };

@@ -20,6 +20,7 @@ import {
   createDraftSession,
   createSession,
   deleteSession,
+  discardSession,
   fixSession,
   generatePlanForDraft,
   getAppConfig,
@@ -455,6 +456,7 @@ interface WorkflowRunnerProps {
   onActiveTabChange: (tab: ActiveTab) => void;
   onSessionUpdated: (session: Session) => void;
   onDeleteConfirmed: (sessionId: string) => void;
+  onDiscardConfirmed: (sessionId: string) => void;
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
   onFixingChange: (sessionId: string, fixing: boolean) => void;
 }
@@ -467,7 +469,7 @@ interface PendingOption {
 
 type ActiveTab = "info" | "dag" | "plan" | "log";
 
-export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
+export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onDiscardConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabDagId = `${uid}-tab-dag`;
@@ -494,6 +496,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   const [askResponse, setAskResponse] = useState("");
   const [askError, setAskError] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [showPublishIssueConfirm, setShowPublishIssueConfirm] = useState(false);
   const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
@@ -547,6 +550,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     setAskResponse("");
     setAskError("");
     setShowDeleteConfirm(false);
+    setShowDiscardConfirm(false);
     setIsConfigRegenerating(false);
   }, [session.id]);
 
@@ -665,6 +669,11 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   function handleDelete() {
     setShowDeleteConfirm(false);
     onDeleteConfirmed(session.id);
+  }
+
+  function handleDiscard() {
+    setShowDiscardConfirm(false);
+    onDiscardConfirmed(session.id);
   }
 
   async function handlePublishIssue(triggerCruise: boolean) {
@@ -970,6 +979,15 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
               Replan
             </button>
           )}
+          {actions.showDiscard && (
+            <button
+              type="button"
+              onClick={() => setShowDiscardConfirm(true)}
+              className="px-4 py-2 border border-gray-300 dark:border-gray-700 text-red-600 dark:text-red-400 rounded text-sm hover:bg-red-100/30 dark:hover:bg-red-900/30"
+            >
+              Discard
+            </button>
+          )}
           {actions.showDelete && (
             <button
               type="button"
@@ -1175,6 +1193,17 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           choices={pendingOption.choices}
           plan={pendingOption.plan}
           onRespond={(result) => void handleOptionRespond(result)}
+        />
+      )}
+
+      {/* Discard confirmation dialog */}
+      {showDiscardConfirm && (
+        <ConfirmDialog
+          title="Discard Plan"
+          message={`Discard session "${session.id}"? This cannot be undone.`}
+          confirmLabel="Discard"
+          onConfirm={handleDiscard}
+          onCancel={() => setShowDiscardConfirm(false)}
         />
       )}
 
@@ -2119,6 +2148,25 @@ export default function App() {
     });
   }, [addToast]);
 
+  const handleDiscardConfirmed = useCallback((sessionId: string) => {
+    const prevSession = selectedSessionRef.current;
+    const prevTab = sessionTabMapRef.current[sessionId];
+    sidebarRemoveSessionRef.current?.(sessionId);
+    setSessionTabMap((prev) => {
+      if (!(sessionId in prev)) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setSelectedSession(null);
+    discardSession(sessionId).catch((e) => {
+      sidebarRefreshRef.current?.();
+      setSelectedSession(prevSession);
+      if (prevTab !== undefined) setSessionTabMap((prev) => ({ ...prev, [sessionId]: prevTab }));
+      addToast({ kind: "failed", sessionInput: prevSession?.input ?? sessionId, detail: `Discard failed: ${e}` });
+    });
+  }, [addToast]);
+
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimersRef.current.get(id);
     if (timer !== undefined) {
@@ -2400,6 +2448,7 @@ export default function App() {
               sidebarRefreshRef.current?.();
             }}
             onDeleteConfirmed={handleDeleteConfirmed}
+            onDiscardConfirmed={handleDiscardConfirmed}
             onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
             onFixingChange={handleFixingChange}
           />

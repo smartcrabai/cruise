@@ -35,6 +35,7 @@ pub fn run() {
             commands::approve_session,
             commands::publish_plan_issue,
             commands::delete_session,
+            commands::discard_session,
             commands::reset_session,
             commands::update_session,
             commands::regenerate_session_plan,

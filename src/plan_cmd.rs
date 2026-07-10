@@ -1914,6 +1914,174 @@ steps:
         );
     }
 
+    // -----------------------------------------------------------------------
+    // regenerate_plan_for_session — success paths
+    // -----------------------------------------------------------------------
+
+    /// Config for a command backend that actually produces a plan: it drains
+    /// stdin (the resolved prompt) and writes a fixed markdown plan --
+    /// `MOCK_PLAN_CONTENT` -- to `{plan}` (resolved via the `PLAN_FILE` env
+    /// var). Mirrors the `sh -c` command-backend pattern already used in
+    /// `planning.rs`'s tests (e.g.
+    /// `run_plan_prompt_template_forwards_default_env_to_command_backend`).
+    fn regenerate_success_config_yaml() -> &'static str {
+        // Uses a two-hash raw string delimiter because the YAML content below
+        // contains a literal `"#` sequence (the mock plan heading), which
+        // would otherwise terminate a single-hash raw string early.
+        r##"command: ["sh", "-c", "cat >/dev/null; printf '%s' \"$MOCK_PLAN_CONTENT\" > \"$PLAN_FILE\""]
+env:
+  PLAN_FILE: "{plan}"
+  MOCK_PLAN_CONTENT: "# Regenerated Plan Title\n\nStep 1: do the thing.\n"
+steps:
+  s:
+    prompt: hi
+"##
+    }
+
+    /// Build a session + manager pair with a real git repo, a command-backend
+    /// config that successfully writes a plan (see
+    /// [`regenerate_success_config_yaml`]), and `session.config_path` pointing
+    /// at it (`load_config` falls back to the session dir otherwise).
+    fn make_regenerate_success_fixture(id: &str, tmp: &TempDir) -> (SessionManager, SessionState) {
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let config_path = repo.join("cruise.yaml");
+        fs::write(&config_path, regenerate_success_config_yaml())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session(id, &repo);
+        session.config_path = Some(config_path);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        (manager, session)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_draft_transitions_to_awaiting_approval() {
+        // Given: a Draft session and a config whose command backend successfully
+        // writes a plan
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090001", &tmp);
+        session.phase = SessionPhase::Draft;
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and transitions Draft -> AwaitingApproval
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_awaiting_input_transitions_to_awaiting_approval() {
+        // Given: an AwaitingInput session (blocked on an SDK ask_user answer)
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090002", &tmp);
+        session.phase = SessionPhase::AwaitingInput;
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and transitions AwaitingInput -> AwaitingApproval
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_awaiting_approval_stays_awaiting_approval() {
+        // Given: a session already in AwaitingApproval (regenerating before approval)
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090003", &tmp);
+        session.phase = SessionPhase::AwaitingApproval;
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and stays in AwaitingApproval (no-op transition)
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_planned_stays_planned() {
+        // Given: an already-approved Planned session. Regenerating its plan must
+        // NOT silently un-approve it back to AwaitingApproval.
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090004", &tmp);
+        session.phase = SessionPhase::Planned;
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and preserves the Planned (approved) phase
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            session.phase,
+            SessionPhase::Planned,
+            "Planned session must not be silently un-approved after regeneration"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_clears_plan_error_on_success() {
+        // Given: a session carrying a stale plan_error from a prior failed attempt
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090005", &tmp);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.plan_error = Some("previous planning attempt failed".to_string());
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and clears the stale plan_error
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            session.plan_error, None,
+            "plan_error should be cleared after a successful regeneration"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_regenerate_plan_for_session_refreshes_title_from_plan() {
+        // Given: a session with a stale title from a previous plan
+        let _guard = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (manager, mut session) = make_regenerate_success_fixture("20260701090006", &tmp);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.title = Some("Old stale title".to_string());
+        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When
+        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
+
+        // Then: succeeds and the title is refreshed from the newly generated
+        // plan's heading (see `regenerate_success_config_yaml`'s
+        // `MOCK_PLAN_CONTENT`)
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            session.title.as_deref(),
+            Some("Regenerated Plan Title"),
+            "session title should be refreshed from the regenerated plan content"
+        );
+    }
+
     #[test]
     fn test_finalize_skip_planning_session_lands_in_planned() {
         // Given: a session manager and a fresh session in AwaitingApproval state

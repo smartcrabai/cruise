@@ -982,6 +982,8 @@ When `cruise list` (or the desktop GUI) loads sessions, any session in the `Runn
 
 Suspended sessions can be resumed from `cruise list` or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
+On resume, cruise restores more than just the current step: while running, each step's pre-execution runtime context -- the `{prev.*}` variables and file-change-tracking snapshots -- is best-effort persisted to `dag.json` in the session directory. `cruise run` loads this file when resuming an interrupted session and restores that context, so `{prev.*}` references and file-change detection behave exactly as they would have without the interruption. A save failure, or a missing/corrupt `dag.json`, falls back to the previous resume behavior (no restored context) with a warning; sessions created before this existed are unaffected.
+
 ## Parallel Session Execution
 
 The desktop GUI supports running multiple sessions concurrently during `run --all`. The parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).

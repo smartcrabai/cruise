@@ -2671,8 +2671,9 @@ pub fn save_new_session_draft(draft: NewSessionDraftDto) -> std::result::Result<
         working_dir: draft.base_dir,
         repo: draft.repo,
         skipped_steps: draft.skipped_steps,
-        updated_at: cruise::session::current_iso8601(),
-    };
+        updated_at: String::new(),
+    }
+    .with_fresh_timestamp();
     entry
         .save()
         .map_err(|e| format!("failed to save new session draft: {e}"))

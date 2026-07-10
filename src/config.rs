@@ -99,7 +99,12 @@ pub struct WorkflowConfig {
     #[serde(default, rename = "after-pr")]
     pub after_pr: IndexMap<String, StepConfig>,
 
-    /// Human-readable description displayed alongside the file name in config selectors.
+    /// Human-readable description displayed alongside the file name in config selectors
+    /// (CLI and GUI both read this via [`crate::yaml_metadata::extract_one_line_description`],
+    /// which parses the full `WorkflowConfig` first and falls back to a raw re-parse only
+    /// when that fails). Kept as a real field (rather than derived purely from YAML text)
+    /// so it round-trips when a config is persisted back to YAML, e.g. into a session's
+    /// `config.yaml` snapshot (see `src/plan_cmd.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }

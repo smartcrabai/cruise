@@ -27,7 +27,13 @@ export interface SessionActions {
   showReset: boolean;
   /** Show the "Replan" button (`phase === "Planned"` only). */
   showReplan: boolean;
-  /** Show the "Delete" button (`phase !== "Running"`). */
+  /**
+   * Show the "Discard" button (`phase === "Awaiting Approval"`), which routes
+   * through the lighter `discard_session` backend command instead of `delete_session`
+   * since a pre-run session has no local git worktree to clean up.
+   */
+  showDiscard: boolean;
+  /** Show the "Delete" button (`phase !== "Running"`, excluding "Awaiting Approval" -- see `showDiscard`). */
   showDelete: boolean;
   /** Show the "Cancel" button (while the session is actively running, locally or per backend phase). */
   showCancel: boolean;
@@ -91,7 +97,9 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
 
   const showReplan = !isLocallyRunning && phase === "Planned";
 
-  const showDelete = !isLocallyRunning && phase !== "Running";
+  const showDiscard = !isLocallyRunning && phase === "Awaiting Approval";
+
+  const showDelete = !isLocallyRunning && phase !== "Running" && phase !== "Awaiting Approval";
 
   const showGeneratePlan =
     !isLocallyRunning &&
@@ -109,6 +117,7 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
     runLabel,
     showReset,
     showReplan,
+    showDiscard,
     showDelete,
     showCancel,
     showGeneratePlan,
