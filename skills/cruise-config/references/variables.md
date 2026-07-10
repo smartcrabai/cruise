@@ -17,11 +17,13 @@ Variables can be referenced as `{name}` inside `prompt` / `command` / `env` / `p
 
 ## Parser behavior
 
-The substitution is done by a hand-written parser. Keep these behaviors in mind:
+The substitution is done by a hand-written parser, with Rust-`format!`-style brace escaping. Keep these behaviors in mind:
 
 - Variable names are the characters between `{` and `}`.
-- An unclosed `{` is emitted literally (e.g. `"trailing {"` → `"trailing {"`).
-- There is no escape syntax like `{{...}}`. `{{input}}` is parsed as a lookup of a variable named `{input`, which is undefined.
+- Literal braces are escaped like Rust's `format!`: `{{` → `{`, `}}` → `}`. E.g. `"{{input}}"` → the literal string `"{input}"` (not a lookup of `input`).
+- An unclosed `{` is an error (`InvalidTemplateSyntax`), not emitted literally.
+- A lone `}` (not part of `}}`) is also an error (`InvalidTemplateSyntax`).
+- `{}` (empty variable name) is an error (`EmptyVariableReference`).
 - Referencing an undefined variable returns `UndefinedVariable`.
 
 ## Availability
@@ -35,4 +37,4 @@ The substitution is done by a hand-written parser. Keep these behaviors in mind:
 
 ## `{model}` is not a variable
 
-`{model}` is a special placeholder resolved only inside the top-level `command` array. It cannot be used inside `prompt` / `instruction` / `command` step fields (see [top-level.md](top-level.md)).
+`{model}` is a special placeholder resolved only inside the top-level `command` array. It cannot be used inside `prompt` / `instruction` / `command` step fields (see [top-level.md](top-level.md)). The same brace-escaping rules apply there: `{{model}}` is the literal string `{model}`, and any other unescaped `{name}` (as well as malformed brace syntax) is an error.

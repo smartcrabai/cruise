@@ -22,6 +22,9 @@ pub enum CruiseError {
     #[error("empty variable reference: {{}}")]
     EmptyVariableReference,
 
+    #[error("invalid template syntax: {0} (use `{{{{` / `}}}}` to escape a literal brace)")]
+    InvalidTemplateSyntax(String),
+
     #[error("command error: {0}")]
     CommandError(String),
 

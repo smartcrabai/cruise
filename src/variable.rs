@@ -2,6 +2,69 @@ use std::collections::HashMap;
 
 use crate::error::{CruiseError, Result};
 
+/// Resolve a Rust-style brace template, calling `lookup` for each `{name}` placeholder.
+///
+/// - `{{` and `}}` escape to literal `{` and `}`.
+/// - `{name}` calls `lookup(name)` and substitutes its result.
+/// - `{}` is an [`CruiseError::EmptyVariableReference`].
+/// - An unclosed `{` or a lone `}` is an [`CruiseError::InvalidTemplateSyntax`].
+pub(crate) fn resolve_template_with_lookup(
+    template: &str,
+    mut lookup: impl FnMut(&str) -> Result<String>,
+) -> Result<String> {
+    let mut result = String::new();
+    let mut chars = template.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => {
+                // Escaped opening brace: `{{` -> `{`.
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    result.push('{');
+                    continue;
+                }
+
+                // Collect the variable name up to the closing brace.
+                let mut var_name = String::new();
+                let mut closed = false;
+
+                for inner_ch in chars.by_ref() {
+                    if inner_ch == '}' {
+                        closed = true;
+                        break;
+                    }
+                    var_name.push(inner_ch);
+                }
+
+                if !closed {
+                    return Err(CruiseError::InvalidTemplateSyntax(format!(
+                        "unclosed `{{` in `{template}`"
+                    )));
+                }
+                if var_name.is_empty() {
+                    return Err(CruiseError::EmptyVariableReference);
+                }
+                result.push_str(&lookup(&var_name)?);
+            }
+            '}' => {
+                // Escaped closing brace: `}}` -> `}`.
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                    result.push('}');
+                } else {
+                    return Err(CruiseError::InvalidTemplateSyntax(format!(
+                        "lone `}}` in `{template}`"
+                    )));
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    Ok(result)
+}
+
 /// Holds all runtime variables for a workflow execution.
 #[derive(Debug, Default, Clone)]
 pub struct VariableStore {
@@ -89,55 +152,7 @@ impl VariableStore {
     /// Returns an error if the template references an undefined variable or
     /// contains an empty variable reference (`{}`).
     pub fn resolve(&self, template: &str) -> Result<String> {
-        let mut result = String::new();
-        let mut chars = template.chars().peekable();
-
-        while let Some(ch) = chars.next() {
-            match ch {
-                '{' => {
-                    // Escaped opening brace: `{{` -> `{`.
-                    if chars.peek() == Some(&'{') {
-                        chars.next();
-                        result.push('{');
-                        continue;
-                    }
-
-                    // Collect the variable name up to the closing brace.
-                    let mut var_name = String::new();
-                    let mut closed = false;
-
-                    for inner_ch in chars.by_ref() {
-                        if inner_ch == '}' {
-                            closed = true;
-                            break;
-                        }
-                        var_name.push(inner_ch);
-                    }
-
-                    if closed {
-                        if var_name.is_empty() {
-                            return Err(CruiseError::EmptyVariableReference);
-                        }
-                        let value = self.get_variable(&var_name)?;
-                        result.push_str(&value);
-                    } else {
-                        // No closing brace -- emit literally.
-                        result.push('{');
-                        result.push_str(&var_name);
-                    }
-                }
-                '}' => {
-                    // Escaped closing brace: `}}` -> `}`.
-                    if chars.peek() == Some(&'}') {
-                        chars.next();
-                    }
-                    result.push('}');
-                }
-                _ => result.push(ch),
-            }
-        }
-
-        Ok(result)
+        resolve_template_with_lookup(template, |name| self.get_variable(name))
     }
 
     /// Look up a variable by name and return its value.
@@ -294,13 +309,16 @@ mod tests {
 
     #[test]
     fn test_resolve_unclosed_brace() {
+        // Given: template with an opening brace that is never closed
         let store = VariableStore::new("input".to_string());
-        // No closing brace -- emit literally.
-        assert_eq!(
-            store
-                .resolve("Hello {unclosed")
-                .unwrap_or_else(|e| panic!("{e:?}")),
-            "Hello {unclosed"
+        // When: resolved
+        let err = store
+            .resolve("Hello {unclosed")
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: an unclosed brace is a template syntax error (Rust-style), not a literal passthrough
+        assert!(
+            matches!(err, crate::error::CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
         );
     }
 
@@ -402,11 +420,57 @@ mod tests {
     fn test_resolve_trailing_open_brace() {
         // Given: template "trailing {" -- no closing brace
         let store = VariableStore::new("hello".to_string());
-        // Parser hits `{`, collects until end-of-string, closed=false -> emits literally.
-        let result = store
+        // When: resolved
+        // Then: parser hits `{`, collects until end-of-string, closed=false -> errors
+        let err = store
             .resolve("trailing {")
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert!(
+            matches!(err, crate::error::CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_lone_closing_brace_errors() {
+        // Given: template with a single unescaped `}` and no matching `{`
+        let store = VariableStore::new("hello".to_string());
+        // When: resolved
+        let err = store
+            .resolve("oops }")
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: a lone `}` is a template syntax error (Rust-style)
+        assert!(
+            matches!(err, crate::error::CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_escaped_open_then_lone_close_errors() {
+        // Given: `{{` escapes to a literal `{`, leaving a trailing unescaped `}`
+        let store = VariableStore::new("hello".to_string());
+        // When: resolved
+        let err = store
+            .resolve("{{}")
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: the leftover lone `}` still errors -- escaping doesn't cascade
+        assert!(
+            matches!(err, crate::error::CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_triple_brace_escape_and_variable() {
+        // Given: `{{{input}}}` -- outer braces escaped, inner braces a variable reference
+        let store = VariableStore::new("hello".to_string());
+        // When: resolved
+        let result = store
+            .resolve("{{{input}}}")
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(result, "trailing {");
+        // Then: literal `{`, then the resolved variable, then literal `}`
+        assert_eq!(result, "{hello}");
     }
 
     #[test]
