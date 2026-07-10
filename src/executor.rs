@@ -246,15 +246,13 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
 /// Command-backend execution: resolve the `{model}` placeholder then delegate to
 /// the existing [`run_prompt`].
 async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let has_placeholder = command.iter().any(|s| s.contains("{model}"));
-    let (resolved_command, model_arg) = if has_placeholder {
-        (
-            crate::engine::resolve_command_with_model(command, req.model_or_mode),
-            None,
-        )
+    let resolved = crate::engine::resolve_command_with_model(command, req.model_or_mode)?;
+    let model_arg = if resolved.consumed_model_placeholder {
+        None
     } else {
-        (command.to_vec(), req.model_or_mode.map(str::to_string))
+        req.model_or_mode.map(str::to_string)
     };
+    let resolved_command = resolved.command;
 
     let retry = |msg: &str| {
         if let Some(cb) = req.on_retry {

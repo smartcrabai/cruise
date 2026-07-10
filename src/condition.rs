@@ -236,4 +236,22 @@ mod when_tests {
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result, "non-matching glob without working_dir should skip");
     }
+
+    // `{{` / `}}` in the exists pattern escape to literal braces before globbing,
+    // so a filename containing literal `{`/`}` can be matched.
+    #[test]
+    fn test_when_exists_escaped_braces_match_literal_filename() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(dir.path().join("{special}.rs"), "fn main() {}")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let when = WhenCondition {
+            exists: Some("{{special}}.rs".to_string()),
+        };
+        let result = should_skip_due_to_when(Some(&when), &empty_vars(), Some(dir.path()))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            !result,
+            "escaped literal-brace filename should match, not be skipped"
+        );
+    }
 }

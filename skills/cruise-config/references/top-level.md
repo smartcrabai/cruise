@@ -64,6 +64,7 @@ There are three prompt-execution backends:
 - When an effective model is set: `{model}` is replaced with the model name.
 - When no model is set: both `{model}` and its immediately preceding `--model` flag are removed automatically.
 - When the `command` array contains **no** `{model}` placeholder and an effective model is set: `--model <model>` is appended to the command arguments automatically.
+- Rust-`format!`-style brace escaping applies here too: `{{model}}` is the literal string `{model}`, not the placeholder. Any other unescaped `{name}`, an empty `{}`, an unclosed `{`, or a lone `}` is a template syntax error.
 
 The prompt body is passed to the spawned process via **stdin** (avoids ARG_MAX limits), not as an argument.
 
