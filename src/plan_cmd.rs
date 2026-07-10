@@ -1115,13 +1115,13 @@ async fn run_approve_loop(
                 return crate::run_cmd::run(run_args).await;
             }
             "Publish as Issue" => {
-                let Some(mention_cruise) = prompt_mention_cruise()? else {
+                let Some(trigger_cruise) = prompt_trigger_cruise()? else {
                     continue;
                 };
                 match crate::issue_publish::publish_plan_issue_and_delete(
                     manager,
                     session.clone(),
-                    mention_cruise,
+                    trigger_cruise,
                 ) {
                     Ok(published) => {
                         eprintln!(
@@ -1136,6 +1136,9 @@ async fn run_approve_loop(
                             "\n{} Failed to publish plan as issue: {e}",
                             style("x").red().bold()
                         );
+                        if let Ok(reloaded) = manager.load(&session.id) {
+                            *session = reloaded;
+                        }
                     }
                 }
             }
@@ -1144,12 +1147,12 @@ async fn run_approve_loop(
     }
 }
 
-/// Prompt whether to mention `@cruise` in a published issue body.
+/// Prompt whether to post an `@cruise run` comment after creating the issue.
 ///
 /// Returns `Ok(None)` if the user cancels the prompt.
-fn prompt_mention_cruise() -> Result<Option<bool>> {
+fn prompt_trigger_cruise() -> Result<Option<bool>> {
     crate::platform::reclaim_terminal_foreground();
-    match inquire::Confirm::new("Mention @cruise in the issue body?")
+    match inquire::Confirm::new("Post an @cruise run comment after creating the issue?")
         .with_default(false)
         .prompt()
     {

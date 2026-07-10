@@ -297,10 +297,11 @@ export function approveSession(sessionId: string): Promise<void> {
 /**
  * Publish a session's generated plan as a GitHub issue and delete the local
  * session. The target repo is inferred from the session (or its `origin` git
- * remote); `mentionCruise` optionally prefixes the issue body with `@cruise`.
+ * remote); the issue body is always the plan, unchanged. When `triggerCruise`
+ * is true, a separate `@cruise run` comment is posted on the created issue.
  */
-export function publishPlanIssue(sessionId: string, mentionCruise: boolean): Promise<PublishedIssue> {
-  return invoke<PublishedIssue>("publish_plan_issue", { sessionId, mentionCruise });
+export function publishPlanIssue(sessionId: string, triggerCruise: boolean): Promise<PublishedIssue> {
+  return invoke<PublishedIssue>("publish_plan_issue", { sessionId, triggerCruise });
 }
 
 /**

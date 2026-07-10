@@ -1668,17 +1668,18 @@ pub struct PublishedIssueDto {
 
 /// Publish a session's generated plan as a GitHub issue and delete the local
 /// session. The target repo is inferred from the session (or its `origin`
-/// git remote); `mention_cruise` optionally prefixes the issue body with an
-/// `@cruise` mention.
+/// git remote); the issue body is always the plan, unchanged. When
+/// `trigger_cruise` is `true`, a separate `@cruise run` comment is posted on
+/// the created issue.
 #[tauri::command]
 pub fn publish_plan_issue(
     session_id: String,
-    mention_cruise: bool,
+    trigger_cruise: bool,
 ) -> std::result::Result<PublishedIssueDto, String> {
     let manager = new_session_manager()?;
     let session = manager.load(&session_id).map_err(|e| e.to_string())?;
     let published =
-        cruise::issue_publish::publish_plan_issue_and_delete(&manager, session, mention_cruise)
+        cruise::issue_publish::publish_plan_issue_and_delete(&manager, session, trigger_cruise)
             .map_err(|e| e.to_string())?;
     Ok(PublishedIssueDto {
         url: published.url,

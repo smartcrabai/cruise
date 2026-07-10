@@ -209,26 +209,27 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         continue;
                     }
                     crate::platform::reclaim_terminal_foreground();
-                    let mention_cruise =
-                        match inquire::Confirm::new("Mention @cruise in the issue body?")
-                            .with_default(false)
-                            .prompt()
-                        {
-                            Ok(answer) => answer,
-                            Err(
-                                InquireError::OperationCanceled
-                                | InquireError::OperationInterrupted,
-                            ) => {
-                                continue;
-                            }
-                            Err(e) => {
-                                return Err(CruiseError::Other(format!("selection error: {e}")));
-                            }
-                        };
+                    let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
+                    let trigger_cruise = match inquire::Confirm::new(
+                        "Post an @cruise run comment after creating the issue?",
+                    )
+                    .with_default(default_trigger_cruise)
+                    .prompt()
+                    {
+                        Ok(answer) => answer,
+                        Err(
+                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
+                        ) => {
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(CruiseError::Other(format!("selection error: {e}")));
+                        }
+                    };
                     match crate::issue_publish::publish_plan_issue_and_delete(
                         &manager,
                         session.clone(),
-                        mention_cruise,
+                        trigger_cruise,
                     ) {
                         Ok(published) => {
                             eprintln!(
@@ -240,6 +241,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("{} Failed to publish plan as issue: {e}", style("x").red());
+                            if let Ok(reloaded) = manager.load(&session.id) {
+                                session = reloaded;
+                            }
                         }
                     }
                 }
@@ -394,6 +398,9 @@ fn session_actions_with_plan_availability(
         }
         SessionPhase::Planned => {
             actions.push("Run");
+            if plan_available && session.plan_error.is_none() {
+                actions.push("Publish as Issue");
+            }
             actions.push("Edit Settings");
             actions.push("Replan");
         }
@@ -1231,10 +1238,20 @@ mod tests {
 
     #[test]
     fn test_session_actions_planned_exact() {
+        // Given: Planned phase with a plan available
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
+
+        // When / Then: "Publish as Issue" now appears for Planned too, right after "Run"
         assert_eq!(
             session_actions(&session),
-            vec!["Run", "Edit Settings", "Replan", "Delete", "Back"]
+            vec![
+                "Run",
+                "Publish as Issue",
+                "Edit Settings",
+                "Replan",
+                "Delete",
+                "Back"
+            ]
         );
     }
 

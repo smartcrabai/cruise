@@ -92,18 +92,19 @@ The interactive menu changes with the session's phase:
 | Phase | Actions |
 |-------|---------|
 | **Draft** | Generate Plan, Delete, Back |
-| **AwaitingApproval** | Approve, Delete, Back |
-| **Planned** | Run, Replan, Delete, Back |
+| **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
+| **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
 | **Running** | Resume, Reset to Planned, Delete, Back |
-| **Suspended** | Resume, Reset to Planned, Delete, Back |
-| **Failed** | Run, Reset to Planned, Delete, Back |
+| **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
+| **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Reset to Planned, Delete, Back |
-| **Planning** / **Plan Failed** | Delete, Back (Approve appears only once a non-empty `plan.md` exists) |
+| **Planning** / **Plan Failed** | Delete, Back (Approve/Publish as Issue appear only once a non-empty `plan.md` exists) |
 
 \* Open PR shows only when the session has a PR URL.
 
 - **Reset to Planned** clears the current step so the session re-runs from the start — the go-to recovery for a wedged `Running`/`Failed` session.
 - **Replan** regenerates the plan from feedback while staying `Planned`.
+- **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate.
 
 ## Config-file resolution
 

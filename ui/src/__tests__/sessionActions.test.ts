@@ -241,6 +241,89 @@ describe("getSessionActions", () => {
     });
   });
 
+  // --- Publish as Issue button ------------------------------------------------
+
+  describe("Publish as Issue button", () => {
+    it("shows Publish as Issue for Awaiting Approval when planAvailable is true", () => {
+      // Given: session awaiting approval with a valid plan (existing behavior, locked in)
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then
+      expect(actions.showPublishIssue).toBe(true);
+    });
+
+    it("hides Publish as Issue for Awaiting Approval when planAvailable is false", () => {
+      // Given: session awaiting approval but no plan yet
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: false });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then
+      expect(actions.showPublishIssue).toBe(false);
+    });
+
+    it("shows Publish as Issue for Planned when planAvailable is true", () => {
+      // Given: a Planned session (already approved, plan.md exists) -- Planned
+      // sessions can be redirected to a GitHub issue + `@cruise run` instead of
+      // running locally.
+      const session = makeSession({ phase: "Planned", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then
+      expect(actions.showPublishIssue).toBe(true);
+    });
+
+    it("hides Publish as Issue for Planned when planAvailable is false", () => {
+      // Given: a Planned session whose plan.md is missing/empty
+      const session = makeSession({ phase: "Planned", planAvailable: false });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then
+      expect(actions.showPublishIssue).toBe(false);
+    });
+
+    it("hides Publish as Issue for Planned when planAvailable is undefined (safe default)", () => {
+      // Given: a Planned session with no planAvailable field (e.g. legacy DTO)
+      const session = makeSession({ phase: "Planned" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: treat undefined as false
+      expect(actions.showPublishIssue).toBe(false);
+    });
+
+    it("hides Publish as Issue for Planned while a local run is in progress", () => {
+      // Given: a Planned session with an active local run
+      const session = makeSession({ phase: "Planned", planAvailable: true });
+
+      // When
+      const actions = getSessionActions(session, "running");
+
+      // Then
+      expect(actions.showPublishIssue).toBe(false);
+    });
+
+    it("hides Publish as Issue for other phases", () => {
+      // Given: phases where publishing a plan as an issue is not meaningful
+      const phases: Array<Session["phase"]> = ["Draft", "Awaiting Input", "Running", "Suspended", "Failed", "Completed"];
+
+      for (const phase of phases) {
+        // When / Then
+        const actions = getSessionActions(makeSession({ phase, planAvailable: true }), "idle");
+        expect(actions.showPublishIssue, `expected showPublishIssue=false for phase ${phase}`).toBe(false);
+      }
+    });
+  });
+
   // --- Planned phase ---------------------------------------------------------
 
   describe("Planned phase", () => {
