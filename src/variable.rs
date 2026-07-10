@@ -133,6 +133,33 @@ impl VariableStore {
         self.prev_success = success;
     }
 
+    /// Current `{prev.output}` value (LLM output from the previous prompt step).
+    ///
+    /// Used by the DAG-driven engine to snapshot runtime context onto a node
+    /// before it executes, so a resumed session can restore it exactly.
+    #[must_use]
+    pub fn prev_output(&self) -> Option<&str> {
+        self.prev_output.as_deref()
+    }
+
+    /// Current `{prev.input}` value (user text from the previous option step).
+    #[must_use]
+    pub fn prev_input(&self) -> Option<&str> {
+        self.prev_input.as_deref()
+    }
+
+    /// Current `{prev.stderr}` value (stderr from the previous command/prompt step).
+    #[must_use]
+    pub fn prev_stderr(&self) -> Option<&str> {
+        self.prev_stderr.as_deref()
+    }
+
+    /// Current `{prev.success}` value (exit status of the previous command step).
+    #[must_use]
+    pub fn prev_success(&self) -> Option<bool> {
+        self.prev_success
+    }
+
     pub fn set_input(&mut self, input: String) {
         self.input = input;
     }

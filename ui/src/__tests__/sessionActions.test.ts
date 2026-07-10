@@ -229,15 +229,16 @@ describe("getSessionActions", () => {
       expect(actions.showRun).toBe(false);
     });
 
-    it("shows Delete", () => {
+    it("shows Discard instead of Delete (no worktree to clean up before it's approved)", () => {
       // Given: Awaiting Approval session
       const session = makeSession({ phase: "Awaiting Approval" });
 
       // When
       const actions = getSessionActions(session, "idle");
 
-      // Then: can discard the session
-      expect(actions.showDelete).toBe(true);
+      // Then: Discard (discard_session) replaces Delete (delete_session) for this phase
+      expect(actions.showDiscard).toBe(true);
+      expect(actions.showDelete).toBe(false);
     });
   });
 
@@ -522,10 +523,9 @@ describe("getSessionActions", () => {
   // --- Delete button ---------------------------------------------------------
 
   describe("Delete button", () => {
-    it("shows Delete for all non-Running phases", () => {
-      // Given: each phase except Running
+    it("shows Delete for all non-Running phases except Awaiting Approval (which uses Discard instead)", () => {
+      // Given: each phase except Running and Awaiting Approval
       const phases: Array<Session["phase"]> = [
-        "Awaiting Approval",
         "Planned",
         "Suspended",
         "Failed",
@@ -548,6 +548,52 @@ describe("getSessionActions", () => {
 
       // Then: cannot delete a running session; must cancel first
       expect(actions.showDelete).toBe(false);
+    });
+
+    it("hides Delete when phase is Awaiting Approval (Discard is used instead)", () => {
+      // Given: Awaiting Approval session
+      const session = makeSession({ phase: "Awaiting Approval" });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: pre-run sessions never had a worktree, so Discard (discard_session)
+      // is the narrower, correct action instead of Delete (delete_session)
+      expect(actions.showDelete).toBe(false);
+    });
+  });
+
+  // --- Discard button ---------------------------------------------------------
+
+  describe("Discard button", () => {
+    it("shows Discard only for Awaiting Approval phase", () => {
+      // Given: each non-Awaiting-Approval phase
+      const phases: Array<Session["phase"]> = [
+        "Draft",
+        "Awaiting Input",
+        "Planned",
+        "Running",
+        "Suspended",
+        "Failed",
+        "Completed",
+      ];
+
+      for (const phase of phases) {
+        // When / Then
+        const actions = getSessionActions(makeSession({ phase }), "idle");
+        expect(actions.showDiscard, `expected showDiscard=false for phase ${phase}`).toBe(false);
+      }
+    });
+
+    it("shows Discard for Awaiting Approval regardless of planAvailable", () => {
+      // Given: Awaiting Approval session without a plan yet
+      const session = makeSession({ phase: "Awaiting Approval", planAvailable: false });
+
+      // When
+      const actions = getSessionActions(session, "idle");
+
+      // Then: discarding an unreviewable plan is still allowed
+      expect(actions.showDiscard).toBe(true);
     });
   });
 
@@ -669,15 +715,17 @@ describe("getSessionActions", () => {
       expect(actions.showAsk).toBe(false);
     });
 
-    it("keeps Delete visible during an active plan fix", () => {
+    it("keeps Discard visible during an active plan fix", () => {
       // Given: an Awaiting Approval session with a plan, and a fix is currently running
       const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
 
       // When
       const actions = getSessionActions(session, "idle", true);
 
-      // Then: delete is unaffected by the fixing state
-      expect(actions.showDelete).toBe(true);
+      // Then: discard is unaffected by the fixing state (Delete does not apply to
+      // Awaiting Approval sessions -- see the "Discard button" describe block)
+      expect(actions.showDiscard).toBe(true);
+      expect(actions.showDelete).toBe(false);
     });
 
     it("isFixing=false produces the same result as omitting the argument", () => {
@@ -711,15 +759,17 @@ describe("getSessionActions", () => {
       expect(actions.showAsk).toBe(false);
     });
 
-    it("keeps Delete visible when fixInProgress is true", () => {
+    it("keeps Discard visible when fixInProgress is true", () => {
       // Given: Awaiting Approval session with fixInProgress: true
       const session = makeSession({ phase: "Awaiting Approval", planAvailable: true, fixInProgress: true });
 
       // When
       const actions = getSessionActions(session, "idle");
 
-      // Then: delete is unaffected by the persisted fixing state
-      expect(actions.showDelete).toBe(true);
+      // Then: discard is unaffected by the persisted fixing state (Delete does not
+      // apply to Awaiting Approval sessions -- see the "Discard button" describe block)
+      expect(actions.showDiscard).toBe(true);
+      expect(actions.showDelete).toBe(false);
     });
 
     it("fixInProgress: false produces the same result as omitting the field", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, within } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import type { Session } from "../types";
@@ -723,5 +723,97 @@ describe("App: Awaiting Approval -- 2-column layout", () => {
 
     // And: Session Settings heading appears only once (in the header)
     expect(screen.getAllByText("Session Settings")).toHaveLength(1);
+  });
+});
+
+// --- Awaiting Approval: Discard flow ------------------------------------------
+
+describe("App: Awaiting Approval -- Discard flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    vi.mocked(commands.getSessionLog).mockResolvedValue("");
+    vi.mocked(commands.getSessionPlan).mockResolvedValue("# The plan");
+    vi.mocked(commands.listDirectory).mockResolvedValue([]);
+    vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
+    vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  async function navigateToAwaitingApprovalSession(session = makeSession()): Promise<void> {
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+    render(<App />);
+    await waitFor(() => screen.getByText(session.input));
+    await userEvent.click(screen.getByRole("button", { name: new RegExp(session.input) }));
+    await waitFor(() => screen.getByRole("button", { name: "Discard" }));
+  }
+
+  async function openDiscardDialog(): Promise<HTMLElement> {
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+    return screen.findByRole("dialog");
+  }
+
+  it("shows a Discard button (not Delete) for an Awaiting Approval session", async () => {
+    await navigateToAwaitingApprovalSession();
+
+    expect(screen.getByRole("button", { name: "Discard" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("shows a confirmation dialog when Discard is clicked", async () => {
+    await navigateToAwaitingApprovalSession();
+
+    const dialog = await openDiscardDialog();
+    expect(within(dialog).getByText(/Discard Plan/)).toBeInTheDocument();
+  });
+
+  it("calls discardSession with the session ID when confirmed", async () => {
+    vi.mocked(commands.discardSession).mockResolvedValue(undefined);
+    await navigateToAwaitingApprovalSession(makeSession({ id: "sess-discard-me" }));
+
+    const dialog = await openDiscardDialog();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+
+    await waitFor(() => {
+      expect(commands.discardSession).toHaveBeenCalledWith("sess-discard-me");
+    });
+  });
+
+  it("removes the session from the sidebar immediately -- before the API call resolves", async () => {
+    // Given: discardSession is pending (never resolves during this test)
+    let resolveDiscard!: () => void;
+    vi.mocked(commands.discardSession).mockReturnValueOnce(
+      new Promise<void>((r) => {
+        resolveDiscard = r;
+      })
+    );
+    await navigateToAwaitingApprovalSession();
+
+    // When: open the discard confirmation dialog and confirm
+    const dialog = await openDiscardDialog();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+
+    // Then: session disappears from the sidebar immediately (API has not resolved).
+    expect(screen.queryAllByText("pending task")).toHaveLength(0);
+
+    // Cleanup: resolve the pending promise so no unhandled rejection remains
+    await act(async () => {
+      resolveDiscard();
+    });
+  });
+
+  it("rolls back and shows a Failed toast when discardSession fails", async () => {
+    vi.mocked(commands.discardSession).mockRejectedValue(new Error("disk error"));
+    await navigateToAwaitingApprovalSession();
+
+    const dialog = await openDiscardDialog();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+    });
   });
 });

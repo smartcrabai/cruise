@@ -362,6 +362,21 @@ impl SessionManager {
         self.sessions_dir().join(session_id).join("run.log")
     }
 
+    /// Path to the persisted execution DAG for a session.
+    ///
+    /// See [`crate::dag::save_dag`] and [`crate::dag::load_dag`]. The file
+    /// only exists once at least one step has run under the DAG-driven
+    /// execution path (see `SessionState::has_dag`); sessions created before
+    /// DAG persistence was wired up may have `has_dag` set without this file
+    /// ever existing, in which case callers should fall back to a freshly
+    /// built DAG with no restored runtime context.
+    #[must_use]
+    pub fn dag_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(session_id)
+            .join(crate::dag::DAG_FILE_NAME)
+    }
+
     /// Generate a new unique session ID from current UTC time.
     #[must_use]
     pub fn new_session_id() -> String {

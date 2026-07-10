@@ -16,10 +16,10 @@ pub(crate) fn sha256_digest(data: &[u8]) -> [u8; 32] {
 }
 
 /// SHA-256 digest of a single file.
-type FileHash = [u8; 32];
+pub(crate) type FileHash = [u8; 32];
 
 /// A snapshot of a directory tree: file path -> hash.
-type Snapshot = HashMap<PathBuf, FileHash>;
+pub(crate) type Snapshot = HashMap<PathBuf, FileHash>;
 
 /// Tracks file changes between workflow steps using SHA-256 snapshots.
 #[derive(Debug)]
@@ -97,6 +97,24 @@ impl FileTracker {
         }
 
         Ok(false)
+    }
+
+    /// Return a clone of every per-step snapshot currently held.
+    ///
+    /// Used by the DAG-driven engine to persist file-tracker state alongside
+    /// a DAG checkpoint, so that a resumed session can detect file changes
+    /// exactly as the original run would have.
+    #[must_use]
+    pub fn snapshots(&self) -> HashMap<String, Snapshot> {
+        self.snapshots.clone()
+    }
+
+    /// Replace all snapshots with previously captured state (see [`Self::snapshots`]).
+    ///
+    /// Used when resuming a session to restore the exact file-tracker state
+    /// that was in effect before the session was interrupted.
+    pub fn restore_snapshots(&mut self, snapshots: HashMap<String, Snapshot>) {
+        self.snapshots = snapshots;
     }
 }
 
@@ -244,6 +262,40 @@ mod tests {
                 .has_files_changed("step1")
                 .unwrap_or_else(|e| panic!("{e:?}"))
         );
+    }
+
+    #[test]
+    fn test_snapshots_roundtrip_via_restore() {
+        // Given: a tracker with a snapshot taken for one step
+        let dir = setup_test_dir();
+        let mut tracker = FileTracker::with_root(dir.path().to_path_buf());
+        tracker
+            .take_snapshot("step1")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the snapshots are exported and files change, then a *new*
+        // tracker restores the exported snapshots
+        let exported = tracker.snapshots();
+        std::fs::write(dir.path().join("file1.txt"), "modified content")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut restored_tracker = FileTracker::with_root(dir.path().to_path_buf());
+        restored_tracker.restore_snapshots(exported);
+
+        // Then: the restored tracker detects the change against the original snapshot
+        assert!(
+            restored_tracker
+                .has_files_changed("step1")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "restored snapshot should still reflect pre-modification state"
+        );
+    }
+
+    #[test]
+    fn test_snapshots_empty_by_default() {
+        // Given: a fresh tracker with no snapshots taken
+        let tracker = FileTracker::new();
+        // Then: snapshots() returns an empty map
+        assert!(tracker.snapshots().is_empty());
     }
 
     #[test]

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -91,8 +89,20 @@ pub enum TransitionReason {
 
 /// Runtime data stored inside a DAG node.
 ///
-/// This is populated by the engine after a step runs and serialized together
-/// with the DAG so that resuming a session restores the exact runtime context.
+/// The engine writes `prev_output`/`prev_input`/`prev_stderr`/`prev_success`
+/// and `file_snapshots` onto a node right *before* it executes: they capture
+/// the `{prev.*}` variables and file-tracker snapshots produced by whatever
+/// ran immediately before this node. That is exactly the context a caller
+/// needs to restore in order to resume execution at this node, and it is
+/// written before the node's own step runs so a checkpoint saved at that
+/// point (see `on_node_start` in [`crate::engine::execute_steps_with_dag`])
+/// is sufficient to resume deterministically -- no in-memory state needs to
+/// be reconstructed.
+///
+/// `visited_at` is written *after* the node's step finishes executing, and
+/// is purely a diagnostic marker (a node whose id is saved as the resume
+/// point was, by definition, not yet visited when the session was
+/// interrupted, so its own `visited_at` is typically unset).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeRuntime {
     pub prev_output: Option<String>,
@@ -588,6 +598,25 @@ impl ExecutionDag {
             .find(|(_, n)| n.step_name == step_name)
             .map(|(id, _)| id)
     }
+
+    /// Copy `runtime` data from `other` onto every node id that exists in
+    /// both graphs, leaving `self`'s graph structure (`start`, `successors`)
+    /// untouched.
+    ///
+    /// Used when resuming a session: the freshly rebuilt DAG (source of
+    /// truth for the current graph structure, since the workflow config may
+    /// have changed since the session last ran) receives back the runtime
+    /// context recorded in a previously persisted DAG. Node ids that no
+    /// longer exist (or are new) are silently skipped, so a structural
+    /// mismatch degrades gracefully to a partial (or empty) restore rather
+    /// than an error.
+    pub fn adopt_runtime_from(&mut self, other: &ExecutionDag) {
+        for (id, other_node) in &other.nodes {
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.runtime = other_node.runtime.clone();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1021,6 +1050,107 @@ steps:
         let loaded = load_dag(&path).unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(loaded, dag);
+    }
+
+    #[test]
+    fn test_load_dag_missing_file_errors() {
+        // Given: a path that does not exist
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().join(DAG_FILE_NAME);
+
+        // When: loading it
+        let result = load_dag(&path);
+
+        // Then: it errors instead of panicking, so callers can fall back gracefully
+        assert!(result.is_err(), "expected Err for a missing DAG file");
+    }
+
+    #[test]
+    fn test_load_dag_corrupt_file_errors() {
+        // Given: a file that exists but is not valid DAG JSON
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().join(DAG_FILE_NAME);
+        std::fs::write(&path, b"not json").unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loading it
+        let result = load_dag(&path);
+
+        // Then: it errors instead of panicking, so callers can fall back gracefully
+        assert!(result.is_err(), "expected Err for a corrupt DAG file");
+    }
+
+    #[test]
+    fn test_adopt_runtime_from_copies_matching_node_runtime() {
+        // Given: two DAGs built from the same workflow (so node ids line up),
+        // one of which ("source") has runtime data recorded on its start node.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  step1:
+    command: echo one
+  step2:
+    command: echo two
+",
+        );
+        let mut source = build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let start_id = source.start.clone();
+        source.nodes[&start_id].runtime = NodeRuntime {
+            prev_success: Some(true),
+            prev_stderr: Some("warning".to_string()),
+            ..Default::default()
+        };
+        let mut target = build_dag(&compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: target adopts source's runtime data
+        target.adopt_runtime_from(&source);
+
+        // Then: the matching node's runtime is copied over
+        assert_eq!(target.nodes[&start_id].runtime.prev_success, Some(true));
+        assert_eq!(
+            target.nodes[&start_id].runtime.prev_stderr,
+            Some("warning".to_string())
+        );
+        // And: the graph structure (successors) is untouched
+        assert_eq!(
+            target.nodes[&start_id].successors,
+            source.nodes[&start_id].successors
+        );
+    }
+
+    #[test]
+    fn test_adopt_runtime_from_skips_node_ids_missing_in_target() {
+        // Given: a "source" DAG built from a workflow with an extra step, so
+        // it has a node id that does not exist in "target"'s smaller graph.
+        let small_compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  step1:
+    command: echo one
+",
+        );
+        let large_compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  step1:
+    command: echo one
+  step2:
+    command: echo two
+",
+        );
+        let source = build_dag(&large_compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut target = build_dag(&small_compiled, 10).unwrap_or_else(|e| panic!("{e:?}"));
+        let target_before = target.clone();
+
+        // When: target (fewer nodes) adopts runtime from source (more nodes)
+        target.adopt_runtime_from(&source);
+
+        // Then: nothing panics, and node ids present in target are unaffected
+        // beyond what genuinely overlaps by id (here, only the start node id
+        // is shared, and source never set any runtime data on it).
+        assert_eq!(target, target_before);
     }
 
     #[test]

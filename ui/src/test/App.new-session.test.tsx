@@ -49,6 +49,7 @@ vi.mock("../lib/commands", () => ({
   getUpdateReadiness: vi.fn(),
   cleanSessions: vi.fn(),
   deleteSession: vi.fn(),
+  discardSession: vi.fn(),
   runSession: vi.fn(),
   cancelSession: vi.fn(),
   resetSession: vi.fn(),
