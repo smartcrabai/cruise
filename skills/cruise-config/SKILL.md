@@ -76,7 +76,7 @@ After writing or editing a config, verify each of the following:
 
 1. **Required fields**: is `steps` present, plus exactly one of `command` / `sdk`? (Both set or neither set is a validation error.) When `sdk` is set, is it `seher` or `pi`? (Any other value is a validation error.)
 2. **Step type uniqueness**: each step primarily holds one of `prompt` / `command` / `option` (group-call steps are the exception and hold none of these).
-3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`.
+3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `command` / `if:`?
 6. **`if.no-file-changes`**: is exactly one of `fail` / `retry` set to true? Make sure it isn't used inside `after-pr` or in a group-level `if:`.

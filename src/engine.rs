@@ -797,41 +797,93 @@ pub(crate) fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// Outcome of resolving the top-level `command`'s `{model}` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelCommand {
+    /// The command with `{model}` substituted (or its `--model` flag stripped).
+    pub command: Vec<String>,
+    /// Whether an unescaped `{model}` placeholder was actually found and consumed.
+    ///
+    /// `false` means the caller should still append `--model <model>` itself
+    /// (see [`crate::step::prompt::run_prompt`]) when a model is given.
+    pub consumed_model_placeholder: bool,
+}
+
+/// Resolve one top-level `command` argument, treating `model` as the only
+/// placeholder name permitted here. Returns the escape-processed string and
+/// whether an unescaped `{model}` placeholder was found in it.
+fn resolve_model_arg(arg: &str, effective_model: Option<&str>) -> Result<(String, bool)> {
+    let mut found = false;
+    let resolved = crate::variable::resolve_template_with_lookup(arg, |name| {
+        if name == "model" {
+            found = true;
+            Ok(effective_model.unwrap_or_default().to_string())
+        } else {
+            Err(CruiseError::UndefinedVariable(name.to_string()))
+        }
+    })?;
+    Ok((resolved, found))
+}
+
 /// Resolve the `{model}` placeholder in a command, or strip `--model {model}` if no model.
-#[must_use]
+///
+/// Rust-style brace escaping applies: `{{model}}` is a literal `{model}`, not a
+/// placeholder. Any other unescaped `{name}`, an empty `{}`, an unclosed `{`,
+/// or a lone `}` is a template syntax error.
+///
+/// # Errors
+///
+/// Returns an error if the command contains an unescaped placeholder other
+/// than `{model}`, or malformed brace syntax.
 pub fn resolve_command_with_model(
     command: &[String],
     effective_model: Option<&str>,
-) -> Vec<String> {
+) -> Result<ResolvedModelCommand> {
     if let Some(model) = effective_model {
-        command
-            .iter()
-            .map(|arg| arg.replace("{model}", model))
-            .collect()
-    } else {
-        let mut result = Vec::new();
-        let mut i = 0;
-        while i < command.len() {
-            let arg = &command[i];
-            if arg == "--model" {
-                if command
-                    .get(i + 1)
-                    .is_some_and(|next| next.contains("{model}"))
-                {
-                    i += 2;
-                } else {
-                    result.push(arg.clone());
-                    i += 1;
-                }
-            } else if arg.starts_with("--model=") || arg.contains("{model}") {
-                i += 1;
-            } else {
-                result.push(arg.clone());
-                i += 1;
-            }
+        let mut consumed = false;
+        let mut resolved_command = Vec::with_capacity(command.len());
+        for arg in command {
+            let (resolved_arg, found) = resolve_model_arg(arg, Some(model))?;
+            consumed |= found;
+            resolved_command.push(resolved_arg);
         }
-        result
+        return Ok(ResolvedModelCommand {
+            command: resolved_command,
+            consumed_model_placeholder: consumed,
+        });
     }
+
+    // No model given: strip `--model {model}` pairs, `--model=...` flags, and
+    // any bare unescaped `{model}` placeholder, while still validating and
+    // unescaping brace syntax in every arg -- including ones we end up
+    // dropping, so a malformed template still surfaces as an error.
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < command.len() {
+        let arg = &command[i];
+        let (resolved_arg, found) = resolve_model_arg(arg, None)?;
+
+        if arg == "--model" {
+            if let Some(next_raw) = command.get(i + 1) {
+                let (_, next_found) = resolve_model_arg(next_raw, None)?;
+                if next_found {
+                    i += 2;
+                    continue;
+                }
+            }
+            result.push(resolved_arg);
+            i += 1;
+        } else if arg.starts_with("--model=") || found {
+            i += 1;
+        } else {
+            result.push(resolved_arg);
+            i += 1;
+        }
+    }
+    Ok(ResolvedModelCommand {
+        command: result,
+        consumed_model_placeholder: false,
+    })
 }
 
 /// Execute a prompt step, updating variable state and returning the LLM output.
@@ -1308,8 +1360,10 @@ mod tests {
             "{model}".to_string(),
             "-p".to_string(),
         ];
-        let resolved = resolve_command_with_model(&command, Some("sonnet"));
-        assert_eq!(resolved, vec!["claude", "--model", "sonnet", "-p"]);
+        let resolved = resolve_command_with_model(&command, Some("sonnet"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(resolved.command, vec!["claude", "--model", "sonnet", "-p"]);
+        assert!(resolved.consumed_model_placeholder);
     }
 
     #[test]
@@ -1320,15 +1374,18 @@ mod tests {
             "{model}".to_string(),
             "-p".to_string(),
         ];
-        let resolved = resolve_command_with_model(&command, None);
-        assert_eq!(resolved, vec!["claude", "-p"]);
+        let resolved =
+            resolve_command_with_model(&command, None).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(resolved.command, vec!["claude", "-p"]);
     }
 
     #[test]
     fn test_resolve_command_no_placeholder() {
         let command = vec!["claude".to_string(), "-p".to_string()];
-        let resolved = resolve_command_with_model(&command, Some("opus"));
-        assert_eq!(resolved, vec!["claude", "-p"]);
+        let resolved =
+            resolve_command_with_model(&command, Some("opus")).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(resolved.command, vec!["claude", "-p"]);
+        assert!(!resolved.consumed_model_placeholder);
     }
 
     #[test]
@@ -1338,8 +1395,9 @@ mod tests {
             "--model=claude-opus-4-6".to_string(),
             "-p".to_string(),
         ];
-        let resolved = resolve_command_with_model(&command, None);
-        assert_eq!(resolved, vec!["claude", "-p"]);
+        let resolved =
+            resolve_command_with_model(&command, None).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(resolved.command, vec!["claude", "-p"]);
     }
 
     #[test]
@@ -1349,8 +1407,92 @@ mod tests {
             "--model={model}".to_string(),
             "-p".to_string(),
         ];
-        let resolved = resolve_command_with_model(&command, Some("claude-opus-4-6"));
-        assert_eq!(resolved, vec!["claude", "--model=claude-opus-4-6", "-p"]);
+        let resolved = resolve_command_with_model(&command, Some("claude-opus-4-6"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            resolved.command,
+            vec!["claude", "--model=claude-opus-4-6", "-p"]
+        );
+        assert!(resolved.consumed_model_placeholder);
+    }
+
+    #[test]
+    fn test_resolve_command_escaped_model_is_literal() {
+        // Given: `{{model}}` -- escaped, so it's a literal `{model}`, not a placeholder
+        let command = vec![
+            "claude".to_string(),
+            "--model".to_string(),
+            "{{model}}".to_string(),
+            "-p".to_string(),
+        ];
+        // When: resolved with a model given
+        let resolved = resolve_command_with_model(&command, Some("sonnet"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: the literal `{model}` string survives untouched, and the
+        // placeholder was NOT consumed (caller must still append --model itself)
+        assert_eq!(resolved.command, vec!["claude", "--model", "{model}", "-p"]);
+        assert!(!resolved.consumed_model_placeholder);
+    }
+
+    #[test]
+    fn test_resolve_command_unsupported_placeholder_errors() {
+        // Given: an unescaped placeholder other than `{model}`
+        let command = vec![
+            "claude".to_string(),
+            "--foo".to_string(),
+            "{foo}".to_string(),
+        ];
+        // When: resolved
+        let err = resolve_command_with_model(&command, Some("sonnet"))
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: it's an error, same as a normal template's undefined placeholder
+        assert!(
+            matches!(err, CruiseError::UndefinedVariable(ref name) if name == "foo"),
+            "expected UndefinedVariable(\"foo\"), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_escaped_other_placeholder_is_literal() {
+        // Given: `{{foo}}` -- escaped, so it's a literal `{foo}`, never an error
+        let command = vec![
+            "claude".to_string(),
+            "--foo".to_string(),
+            "{{foo}}".to_string(),
+        ];
+        // When: resolved
+        let resolved = resolve_command_with_model(&command, Some("sonnet"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: literal `{foo}` passes through unresolved
+        assert_eq!(resolved.command, vec!["claude", "--foo", "{foo}"]);
+    }
+
+    #[test]
+    fn test_resolve_command_unclosed_brace_errors() {
+        // Given: a command arg with an opening brace that's never closed
+        let command = vec!["claude".to_string(), "{unclosed".to_string()];
+        // When: resolved
+        let err = resolve_command_with_model(&command, Some("sonnet"))
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: it's a template syntax error
+        assert!(
+            matches!(err, CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_lone_closing_brace_errors() {
+        // Given: a command arg with a lone unescaped `}`
+        let command = vec!["claude".to_string(), "unexpected}".to_string()];
+        // When: resolved
+        let err = resolve_command_with_model(&command, None)
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        // Then: it's a template syntax error
+        assert!(
+            matches!(err, CruiseError::InvalidTemplateSyntax(_)),
+            "expected InvalidTemplateSyntax, got: {err:?}"
+        );
     }
 
     #[test]
@@ -1686,6 +1828,49 @@ steps:
 "#;
         let result = run_config(yaml, "hello", None).await;
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_escaped_braces_in_command_are_literal() {
+        // Given: a step command mixing an escaped `{{input}}` (-> literal "{input}")
+        // with an unescaped `{input}` (-> the actual input value)
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: 'test "prefix {{input}} suffix {input}" = "prefix {input} suffix abc123"'
+"#;
+        // When: run with input "abc123"
+        let result = run_config(yaml, "abc123", None).await;
+        // Then: the escaped braces resolve to a literal "{input}", the unescaped
+        // one resolves to the actual input value
+        assert!(
+            result.is_ok(),
+            "escaped braces in command should be literal: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_escaped_braces_in_env_are_literal() {
+        // Given: an env value using `{{input}}`, which should resolve to the
+        // literal string "{input}" rather than substituting the input value
+        let yaml = r#"
+command: [echo]
+env:
+  CRUISE_LITERAL_BRACE: "{{input}}"
+steps:
+  step1:
+    command: 'test "$CRUISE_LITERAL_BRACE" = "{{input}}"'
+"#;
+        // When: run with any input
+        let result = run_config(yaml, "myinput", None).await;
+        // Then: both sides resolve to the literal "{input}" and match
+        assert!(
+            result.is_ok(),
+            "escaped braces in env should be literal: {result:?}"
+        );
     }
 
     #[cfg(unix)]

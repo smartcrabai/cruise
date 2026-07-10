@@ -357,6 +357,8 @@ When the `command` array contains a `{model}` placeholder, cruise resolves it at
 
 A step-level `model` field overrides the top-level `model` default for that step only.
 
+The same Rust-`format!`-style brace escaping used for template variables (see [Variable Reference](#variable-reference)) applies here: `{{model}}` is the literal string `{model}`, not the placeholder. Any other unescaped `{name}`, an empty `{}`, an unclosed `{`, or a lone `}` is a template syntax error.
+
 ```yaml
 command:
   - claude
@@ -796,6 +798,8 @@ steps:
 | `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
+
+Literal braces are escaped Rust-`format!`-style: `{{` -> `{` and `}}` -> `}` (e.g. `"{{input}}"` resolves to the literal string `"{input}"`, not a lookup of `input`). An unclosed `{`, a lone `}`, or an empty `{}` is a template syntax error, as is referencing an undefined variable.
 
 ## Workspace Mode
 
