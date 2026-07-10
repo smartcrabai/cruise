@@ -2,16 +2,23 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 interface PublishIssueDialogProps {
   sessionId: string;
-  onConfirm: (mentionCruise: boolean) => Promise<void>;
+  onConfirm: (triggerCruise: boolean) => Promise<void>;
   onCancel: () => void;
+  /** Initial checked state of the "post `@cruise run` comment" checkbox. */
+  defaultTriggerCruise?: boolean;
 }
 
 const FOCUSABLE = 'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
-export function PublishIssueDialog({ sessionId, onConfirm, onCancel }: PublishIssueDialogProps) {
+export function PublishIssueDialog({
+  sessionId,
+  onConfirm,
+  onCancel,
+  defaultTriggerCruise = false,
+}: PublishIssueDialogProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
-  const [mentionCruise, setMentionCruise] = useState(false);
+  const [triggerCruise, setTriggerCruise] = useState(defaultTriggerCruise);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const onCancelRef = useRef(onCancel);
@@ -56,7 +63,7 @@ export function PublishIssueDialog({ sessionId, onConfirm, onCancel }: PublishIs
     setSubmitting(true);
     setError("");
     try {
-      await onConfirm(mentionCruise);
+      await onConfirm(triggerCruise);
     } catch (e) {
       setError(String(e));
       setSubmitting(false);
@@ -78,16 +85,16 @@ export function PublishIssueDialog({ sessionId, onConfirm, onCancel }: PublishIs
       >
         <h2 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-gray-100">Publish as GitHub Issue</h2>
         <p className="text-sm text-gray-500 dark:text-gray-400">
-          Publish session {sessionId}&apos;s plan as a GitHub issue and delete the local session. This cannot be undone.
+          Publish session {sessionId}&apos;s plan.md as a GitHub issue, unchanged, and delete the local session. This cannot be undone.
         </p>
         <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
           <input
             type="checkbox"
-            checked={mentionCruise}
-            onChange={(e) => setMentionCruise(e.target.checked)}
+            checked={triggerCruise}
+            onChange={(e) => setTriggerCruise(e.target.checked)}
             disabled={submitting}
           />
-          Mention @cruise in the issue body
+          Post an @cruise run comment after creating the issue
         </label>
         {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
         <div className="flex gap-2 justify-end">

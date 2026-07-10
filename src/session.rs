@@ -144,6 +144,12 @@ pub struct SessionState {
     /// support was added.
     #[serde(default)]
     pub current_step_is_node_id: bool,
+    /// URL of the GitHub issue created by a "Publish as Issue" attempt that
+    /// failed after the issue was created (e.g. the follow-up `@cruise run`
+    /// comment failed). Set so a retry reuses the existing issue instead of
+    /// creating a duplicate.
+    #[serde(default)]
+    pub published_issue_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +217,7 @@ impl SessionState {
             attachments: vec![],
             has_dag: false,
             current_step_is_node_id: false,
+            published_issue_url: None,
         }
     }
 

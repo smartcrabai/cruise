@@ -667,8 +667,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     onDeleteConfirmed(session.id);
   }
 
-  async function handlePublishIssue(mentionCruise: boolean) {
-    const published = await publishPlanIssue(session.id, mentionCruise);
+  async function handlePublishIssue(triggerCruise: boolean) {
+    const published = await publishPlanIssue(session.id, triggerCruise);
     setShowPublishIssueConfirm(false);
     onDeleteConfirmed(session.id);
     void openUrl(published.url);
@@ -1195,6 +1195,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           sessionId={session.id}
           onConfirm={handlePublishIssue}
           onCancel={() => setShowPublishIssueConfirm(false)}
+          defaultTriggerCruise={session.phase === "Planned"}
         />
       )}
     </div>

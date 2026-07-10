@@ -11,7 +11,7 @@ export function isApprovalReady(session: Session): boolean {
 export interface SessionActions {
   /** Show the Approve button (`phase === "Awaiting Approval" && planAvailable`). */
   showApprove: boolean;
-  /** Show the "Publish as Issue" button (`phase === "Awaiting Approval" && planAvailable`). */
+  /** Show the "Publish as Issue" button (`phase === "Awaiting Approval" || phase === "Planned"`, both requiring `planAvailable`). */
   showPublishIssue: boolean;
   /** Show the "Fix" button (`phase === "Awaiting Approval" && planAvailable`). */
   showFix: boolean;
@@ -63,8 +63,11 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
   const awaitingApprovalWithPlan =
     !isLocallyRunning && !isFixing && isApprovalReady(session);
 
+  const plannedWithPlan =
+    !isLocallyRunning && phase === "Planned" && session.planAvailable === true;
+
   const showApprove = awaitingApprovalWithPlan;
-  const showPublishIssue = awaitingApprovalWithPlan;
+  const showPublishIssue = awaitingApprovalWithPlan || plannedWithPlan;
   const showFix = awaitingApprovalWithPlan;
   const showAsk = awaitingApprovalWithPlan;
 

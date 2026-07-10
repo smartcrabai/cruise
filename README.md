@@ -266,19 +266,20 @@ The interactive session list shows a menu of actions depending on the session's 
 | Phase | Available Actions |
 |-------|-------------------|
 | **Draft** | Generate Plan, Delete, Back |
-| **AwaitingApproval** | Approve, Delete, Back |
-| **Planned** | Run, Replan, Delete, Back |
+| **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
+| **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
 | **Running** | Resume, Reset to Planned, Delete, Back |
-| **Suspended** | Resume, Reset to Planned, Delete, Back |
-| **Failed** | Run, Reset to Planned, Delete, Back |
+| **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
+| **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Reset to Planned, Delete, Back |
 
 \* Open PR is shown only when the session has a PR URL.
 
-`cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` appears only after a non-empty `plan.md` is available.
+`cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` and `Publish as Issue` appear only after a non-empty `plan.md` is available.
 
 - **Generate Plan** -- Start planning for a `Draft` session (transitions it through the normal planning flow).
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
+- **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue in the resolved repo, then delete the local session. Prompts whether to also post a follow-up `@cruise run` comment so the `@cruise` GitHub Action picks it up (default: off for `AwaitingApproval`, on for `Planned`). If the issue is created but that comment fails to post, the session is kept so you can retry (the existing issue is reused, not duplicated) or comment manually.
 - **Run / Resume** -- Execute (or continue) the session.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
 - **Open PR** -- Open the session's pull request in the browser via `gh pr view --web`.
