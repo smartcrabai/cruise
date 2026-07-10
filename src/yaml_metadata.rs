@@ -15,16 +15,15 @@ use crate::config::WorkflowConfig;
 /// at all.
 #[must_use]
 pub fn extract_one_line_description(yaml: &str) -> Option<String> {
-    let desc = match WorkflowConfig::from_yaml(yaml) {
-        Ok(config) => config.description,
-        Err(_) => {
-            #[derive(Deserialize)]
-            struct DescriptionOnly {
-                description: Option<String>,
-            }
-            let parsed: DescriptionOnly = serde_yaml::from_str(yaml).ok()?;
-            parsed.description
+    let desc = if let Ok(config) = WorkflowConfig::from_yaml(yaml) {
+        config.description
+    } else {
+        #[derive(Deserialize)]
+        struct DescriptionOnly {
+            description: Option<String>,
         }
+        let parsed: DescriptionOnly = serde_yaml::from_str(yaml).ok()?;
+        parsed.description
     }?;
     let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
