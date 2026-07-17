@@ -5,7 +5,7 @@ use console::style;
 use inquire::InquireError;
 use serde::Serialize;
 
-use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
+use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
@@ -251,7 +251,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     let run_args = crate::cli::RunArgs {
                         session: Some(session.id.clone()),
                         all: false,
-                        max_retries: DEFAULT_MAX_RETRIES,
+                        max_retries: None,
                         rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                         dry_run: false,
                         cleanup_after_pr: false,

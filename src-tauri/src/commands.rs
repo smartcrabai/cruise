@@ -27,7 +27,6 @@ use crate::events::{PlanEvent, WorkflowEvent};
 use crate::gui_option_handler::GuiOptionHandler;
 use crate::state::{AppState, AskResponder};
 
-const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 
 // --- DTOs ---------------------------------------------------------------------
@@ -613,8 +612,10 @@ pub fn get_session_dag(session_id: String) -> std::result::Result<DagDto, String
     let manager = new_session_manager()?;
     let session = manager.load(&session_id).map_err(|e| e.to_string())?;
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    let effective_max_retries = cruise::config::resolve_effective_max_retries(None, &config);
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
-    let dag = cruise::dag::build_dag(&compiled, DEFAULT_MAX_RETRIES).map_err(|e| e.to_string())?;
+    let dag =
+        cruise::dag::build_dag(&compiled, effective_max_retries).map_err(|e| e.to_string())?;
     build_dag_dto(
         &compiled,
         &dag,
@@ -2158,9 +2159,14 @@ async fn execute_single_session(
     }
 
     let config = manager.load_config(&session).map_err(|e| e.to_string())?;
+    cruise::config::validate_config(&config).map_err(|e| e.to_string())?;
+    let effective_max_retries = cruise::config::resolve_effective_max_retries(None, &config);
+    cruise::config::validate_group_retry_budget(&config, effective_max_retries)
+        .map_err(|e| e.to_string())?;
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
 
-    let mut dag = cruise::dag::build_dag(&compiled, 10).map_err(|e| e.to_string())?;
+    let mut dag =
+        cruise::dag::build_dag(&compiled, effective_max_retries).map_err(|e| e.to_string())?;
     let start_node = session.current_step.clone().map_or_else(
         || Ok(dag.start.clone()),
         |step| {
@@ -2282,7 +2288,7 @@ async fn execute_single_session(
 
             let ctx = ExecutionContext {
                 compiled: &compiled,
-                max_retries: DEFAULT_MAX_RETRIES,
+                max_retries: effective_max_retries,
                 rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                 on_step_start: &on_step_start,
                 on_step_log: Some(&on_step_log),
@@ -2332,8 +2338,8 @@ async fn execute_single_session(
                     &mut vars,
                     &mut tracker,
                     &mut session_for_pr,
-                    5,
-                    10,
+                    DEFAULT_RATE_LIMIT_RETRIES,
+                    effective_max_retries,
                     &skipped_steps_for_pr,
                     None,
                 ));

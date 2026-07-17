@@ -17,6 +17,9 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         )?,
     };
     validate_config(&config)?;
+    let effective_max_retries =
+        crate::config::resolve_effective_max_retries(args.max_retries, &config);
+    crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
 
     if args.dry_run {
         engine::print_dry_run(&config, None);
@@ -81,9 +84,8 @@ pub(crate) fn setup_exec_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::DEFAULT_MAX_RETRIES;
     use crate::session::{SessionPhase, WorkspaceMode};
-    use crate::test_support::{init_git_repo, run_git_ok};
+    use crate::test_support::{group_retry_budget_config_with, init_git_repo, run_git_ok};
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -234,7 +236,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("non-utf8 path"))
                     .to_string(),
             ),
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
         }
@@ -476,7 +478,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("non-utf8"))
                     .to_string(),
             ),
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries: None,
             rate_limit_retries: 0,
             dry_run: true,
         };
@@ -501,6 +503,93 @@ mod tests {
         assert!(
             sessions.iter().all(|s| s.base_dir != repo),
             "dry-run must not create a session"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_fails_fast_when_group_max_retries_unreachable() {
+        // Given: a config whose group max_retries can never take effect
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, group_retry_budget_config_with(5))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec is called (non-dry-run)
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: it fails fast, naming the group and both values
+        assert!(
+            result.is_err(),
+            "expected an unreachable group max_retries to fail fast: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("review"),
+            "error should name the offending group, got: {message}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "no step should have executed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_dry_run_also_fails_fast_when_group_max_retries_unreachable() {
+        // Given: the same offending config, but requested via --dry-run
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, group_retry_budget_config_with(5))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut args = exec_args_no_op(&config_path);
+        args.dry_run = true;
+
+        // When: exec is called with --dry-run
+        let result = run(args).await;
+
+        // Then: --dry-run does not bypass the fail-fast validation
+        assert!(
+            result.is_err(),
+            "dry-run should still surface the unreachable group max_retries error: {result:?}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "dry-run must not execute any step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_succeeds_when_group_max_retries_equals_ceiling() {
+        // Given: a config whose group max_retries exactly equals the effective
+        // ceiling of 3 (R == G, reachable)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, group_retry_budget_config_with(3))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec is called (non-dry-run)
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: R == G is reachable, so validation passes and steps execute
+        assert!(
+            result.is_ok(),
+            "R == G should be accepted, not rejected as unreachable: {result:?}"
+        );
+        assert!(
+            repo.join("out.txt").exists(),
+            "the workflow should have executed past validation"
         );
     }
 }

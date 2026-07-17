@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use crate::ask_handler::{AskHandler, CliAskHandler, NoninteractiveAskHandler};
 use crate::cancellation::CancellationToken;
-use crate::cli::{
-    DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs,
-};
+use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs};
 use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
@@ -1106,7 +1104,7 @@ async fn run_approve_loop(
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
                     all: false,
-                    max_retries: DEFAULT_MAX_RETRIES,
+                    max_retries: None,
                     rate_limit_retries,
                     dry_run: false,
                     cleanup_after_pr: false,

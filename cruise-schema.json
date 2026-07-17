@@ -78,6 +78,11 @@
     "cleanup_after_pr": {
       "type": "boolean",
       "description": "When true, the local git worktree and branch are deleted after the PR is created. Has no effect in current-branch mode or for --repo sessions. Default: false."
+    },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Global loop-protection ceiling; CLI --max-retries overrides. Default: 3."
     }
   },
   "$defs": {

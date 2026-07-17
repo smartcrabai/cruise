@@ -284,6 +284,9 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
 
     let config = manager.load_config(&session)?;
     validate_config(&config)?;
+    let effective_max_retries =
+        crate::config::resolve_effective_max_retries(args.max_retries, &config);
+    crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
 
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {session_id}")).dim());
@@ -326,7 +329,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;
     }
-    let mut dag = crate::dag::build_dag(&compiled, args.max_retries)?;
+    let mut dag = crate::dag::build_dag(&compiled, effective_max_retries)?;
     let start_node = session.current_step.clone().map_or_else(
         || Ok(dag.start.clone()),
         |step| {
@@ -437,7 +440,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     let cancel_token = CancellationToken::new();
     let ctx = crate::engine::ExecutionContext {
         compiled: &compiled,
-        max_retries: args.max_retries,
+        max_retries: effective_max_retries,
         rate_limit_retries: args.rate_limit_retries,
         on_step_start: &on_step_start,
         on_step_log: Some(&on_step_log),
@@ -493,7 +496,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                             &mut tracker,
                             session,
                             args.rate_limit_retries,
-                            args.max_retries,
+                            effective_max_retries,
                             &skipped_steps,
                             Some(&cancel_token),
                         ) => result,
@@ -882,7 +885,8 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use crate::cli::{DEFAULT_MAX_RETRIES, DEFAULT_RATE_LIMIT_RETRIES};
+    use crate::cli::DEFAULT_RATE_LIMIT_RETRIES;
+    use crate::config::DEFAULT_MAX_RETRIES;
     use crate::session::WorkspaceMode;
     use crate::worktree_pr::{
         CommitOutcome, PrAttemptOutcome, attempt_pr_creation, build_pr_prompt,
@@ -894,7 +898,9 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_binary_support::PathEnvGuard;
-    use crate::test_support::{EnvGuard, init_git_repo, run_git_ok};
+    use crate::test_support::{
+        EnvGuard, group_retry_budget_config_with, init_git_repo, run_git_ok,
+    };
     use crate::worktree;
 
     fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
@@ -1161,7 +1167,7 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
@@ -1821,7 +1827,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
             cleanup_after_pr: false,
@@ -1864,7 +1870,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
             cleanup_after_pr: false,
@@ -1887,6 +1893,118 @@ Previously, emojis were used as user icons."#;
 
         // Then: returns Ok(()) without error
         assert!(result.is_ok(), "expected Ok but got: {:?}", result.err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_fails_fast_when_group_max_retries_unreachable() {
+        // Given: a session whose group 'review' has max_retries: 5, which can never
+        // take effect under the default effective ceiling of 3 (R must not exceed G).
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260717090000";
+        let session = make_current_branch_session(session_id, &repo, "budget check", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &group_retry_budget_config_with(5));
+
+        // When: run() is called
+        let result = run(run_args(session_id)).await;
+
+        // Then: it fails fast, naming the group and both the configured and effective values
+        assert!(
+            result.is_err(),
+            "expected an unreachable group max_retries to fail fast: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("review"),
+            "error should name the offending group, got: {message}"
+        );
+        assert!(
+            message.contains('5'),
+            "error should mention the group's configured max_retries, got: {message}"
+        );
+        assert!(
+            message.contains('3'),
+            "error should mention the effective global ceiling, got: {message}"
+        );
+
+        // And: no step ran before the validation error was returned
+        assert!(
+            !manager.run_log_path(session_id).exists(),
+            "no run.log should be written when validation fails before execution starts"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "no step should have executed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_dry_run_also_fails_fast_when_group_max_retries_unreachable() {
+        // Given: the same offending session, but requested via --dry-run
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260717090100";
+        let session =
+            make_current_branch_session(session_id, &repo, "budget check dry run", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &group_retry_budget_config_with(5));
+
+        // When: run() is called with --dry-run
+        let mut args = run_args(session_id);
+        args.dry_run = true;
+        let result = run(args).await;
+
+        // Then: --dry-run does not bypass the fail-fast validation
+        assert!(
+            result.is_err(),
+            "dry-run should still surface the unreachable group max_retries error: {result:?}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "dry-run must not execute any step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_succeeds_when_group_max_retries_equals_ceiling() {
+        // Given: a session whose group 'review' has max_retries: 3, exactly
+        // matching the default effective ceiling of 3 (R == G, reachable)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260717090200";
+        let session =
+            make_current_branch_session(session_id, &repo, "budget check at ceiling", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &group_retry_budget_config_with(3));
+
+        // When: run() is called
+        let result = run(run_args(session_id)).await;
+
+        // Then: R == G is reachable, so validation passes and steps execute
+        assert!(
+            result.is_ok(),
+            "R == G should be accepted, not rejected as unreachable: {result:?}"
+        );
+        assert!(
+            repo.join("out.txt").exists(),
+            "the workflow should have executed past validation"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2624,7 +2742,7 @@ steps:
         let result = run(RunArgs {
             session: None,
             all: true,
-            max_retries: 10,
+            max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
@@ -2703,7 +2821,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
-            max_retries: 10,
+            max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
@@ -3481,7 +3599,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
-            max_retries: 10,
+            max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,

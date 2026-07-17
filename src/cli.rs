@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 
-pub(crate) const DEFAULT_MAX_RETRIES: usize = 3;
 pub(crate) const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
 
@@ -148,8 +147,12 @@ pub struct RunArgs {
     pub all: bool,
 
     /// Maximum number of times a single loop edge may be traversed.
-    #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
-    pub max_retries: usize,
+    ///
+    /// When omitted, falls back to the workflow config's top-level `max_retries`
+    /// if set, otherwise defaults to 3. An explicitly-passed flag always wins
+    /// over the config value.
+    #[arg(long)]
+    pub max_retries: Option<usize>,
 
     /// Maximum number of rate-limit retries per step.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
@@ -210,8 +213,12 @@ pub struct ExecArgs {
     pub config: Option<String>,
 
     /// Maximum number of times a single loop edge may be traversed.
-    #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
-    pub max_retries: usize,
+    ///
+    /// When omitted, falls back to the workflow config's top-level `max_retries`
+    /// if set, otherwise defaults to 3. An explicitly-passed flag always wins
+    /// over the config value.
+    #[arg(long)]
+    pub max_retries: Option<usize>,
 
     /// Maximum number of rate-limit retries per step.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
@@ -351,7 +358,10 @@ mod tests {
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert_eq!(args.session, None);
-                assert_eq!(args.max_retries, DEFAULT_MAX_RETRIES);
+                assert_eq!(
+                    args.max_retries, None,
+                    "--max-retries omitted should parse to None (config/default resolved later)"
+                );
                 assert_eq!(args.rate_limit_retries, DEFAULT_RATE_LIMIT_RETRIES);
                 assert!(!args.dry_run);
             }
@@ -382,7 +392,7 @@ mod tests {
         ]);
         match cli.command {
             Some(Commands::Run(args)) => {
-                assert_eq!(args.max_retries, 20);
+                assert_eq!(args.max_retries, Some(20));
                 assert_eq!(args.rate_limit_retries, 3);
             }
             _ => panic!("expected Run subcommand"),
@@ -639,7 +649,10 @@ mod tests {
             Some(Commands::Exec(args)) => {
                 assert_eq!(args.input, None);
                 assert_eq!(args.config, None);
-                assert_eq!(args.max_retries, DEFAULT_MAX_RETRIES);
+                assert_eq!(
+                    args.max_retries, None,
+                    "--max-retries omitted should parse to None (config/default resolved later)"
+                );
                 assert_eq!(args.rate_limit_retries, DEFAULT_RATE_LIMIT_RETRIES);
                 assert!(!args.dry_run);
             }
@@ -675,7 +688,7 @@ mod tests {
         // When/Then: custom values are parsed
         match cli.command {
             Some(Commands::Exec(args)) => {
-                assert_eq!(args.max_retries, 5);
+                assert_eq!(args.max_retries, Some(5));
                 assert_eq!(args.rate_limit_retries, 2);
             }
             _ => panic!("expected Exec subcommand"),

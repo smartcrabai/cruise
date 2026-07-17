@@ -5,6 +5,15 @@ use std::collections::HashMap;
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
 pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 
+/// Default global loop-protection ceiling ("G") when neither an explicit CLI
+/// flag nor a workflow config `max_retries` is set.
+///
+/// Lives here (rather than in the CLI-only `cli` module) because this file is
+/// shared by both the `cruise` binary and the `cruise` library crate (used by
+/// the Tauri GUI), and [`resolve_effective_max_retries`] must be callable from
+/// both.
+pub const DEFAULT_MAX_RETRIES: usize = 3;
+
 /// Nested language configuration (new style).
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LanguagesConfig {
@@ -50,6 +59,11 @@ pub struct WorkflowConfig {
     /// Model to use for the built-in plan step (falls back to `model`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<String>,
+
+    /// Global loop-protection ceiling; CLI `--max-retries` overrides; defaults to
+    /// [`DEFAULT_MAX_RETRIES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<usize>,
 
     /// Whether SDK-mode planning drives the plan through the interactive custom
     /// tools (`submit_plan` / `update_plan` / `ask_user`).
@@ -371,6 +385,7 @@ impl WorkflowConfig {
             sdk: None,
             model: Some("sonnet".to_string()),
             plan_model: Some("opus".to_string()),
+            max_retries: None,
             interactive_planning: true,
             pr_language: None,
             plan_language: None,
@@ -747,6 +762,75 @@ fn validate_group_inner_steps(
                      which is not allowed inside group steps"
                 )));
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve the effective global loop-protection ceiling ("G").
+///
+/// Precedence: an explicitly-passed CLI value wins, then the workflow config's
+/// top-level `max_retries`, then [`DEFAULT_MAX_RETRIES`].
+#[must_use]
+pub fn resolve_effective_max_retries(cli_value: Option<usize>, config: &WorkflowConfig) -> usize {
+    cli_value
+        .or(config.max_retries)
+        .unwrap_or(DEFAULT_MAX_RETRIES)
+}
+
+/// Validate that every group's `max_retries` ("R") can actually take effect
+/// under the effective global loop-protection ceiling ("G").
+///
+/// Both counters advance in lock-step on every loop-back traversal of a
+/// group's edge: the group retry gate gracefully skips the group once
+/// `group_retry_counts >= R`, while the hard `LoopProtection` error fires
+/// only once the same edge count exceeds G (`count > G`). So the edge count
+/// reaches exactly `R` (triggering the graceful skip on the next visit)
+/// without ever exceeding G, as long as `R <= G`. R is reachable only when
+/// `R <= G`; `R > G` means the hard failure fires first.
+///
+/// Only groups actually referenced by a step (via `StepConfig.group`, in
+/// `steps` or `after_pr`) are checked; unreferenced group definitions are
+/// harmless and ignored.
+///
+/// Deliberately not called from [`validate_config`]: some of its callers run
+/// at plan/edit time where the effective G is not yet known.
+///
+/// # Errors
+///
+/// Returns an error naming the offending group, its configured `max_retries`,
+/// and the effective global ceiling, when `max_retries > effective_max_retries`.
+pub fn validate_group_retry_budget(
+    config: &WorkflowConfig,
+    effective_max_retries: usize,
+) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let mut referenced_groups: Vec<&str> = Vec::new();
+    for step in config.steps.values().chain(config.after_pr.values()) {
+        if let Some(group_name) = step.group.as_deref()
+            && !referenced_groups.contains(&group_name)
+        {
+            referenced_groups.push(group_name);
+        }
+    }
+
+    for group_name in referenced_groups {
+        let Some(group) = config.groups.get(group_name) else {
+            continue;
+        };
+        let Some(r) = group.max_retries else {
+            continue;
+        };
+        if r > effective_max_retries {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "group '{group_name}' has max_retries: {r}, which can never take effect under \
+                 the effective global loop-protection ceiling of {effective_max_retries} \
+                 (a group's max_retries must not exceed the ceiling). Either lower \
+                 groups.{group_name}.max_retries to at most {effective_max_retries} or raise \
+                 the ceiling via `--max-retries {r}` / config `max_retries: {r}`"
+            )));
         }
     }
 
@@ -3161,5 +3245,227 @@ steps:
             validate_sdk(&config).is_ok(),
             "validate_sdk must accept 'pi' after env override"
         );
+    }
+
+    // --- top-level `max_retries` field ---
+
+    #[test]
+    fn test_max_retries_field_parses_when_present() {
+        // Given: workflow YAML sets a top-level max_retries ceiling
+        let yaml = r"
+command: [claude, -p]
+max_retries: 5
+steps:
+  s1:
+    command: echo hi
+";
+        // When: parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: the field is Some(5)
+        assert_eq!(config.max_retries, Some(5));
+    }
+
+    #[test]
+    fn test_max_retries_field_defaults_to_none_when_omitted() {
+        // Given: workflow YAML omits max_retries
+        let config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the field defaults to None
+        assert_eq!(config.max_retries, None);
+    }
+
+    #[test]
+    fn test_max_retries_field_round_trips_through_serialize() {
+        // Given: a parsed config with max_retries set
+        let yaml = r"
+command: [claude, -p]
+max_retries: 7
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: serialized back to YAML and re-parsed (mirrors session config.yaml snapshots)
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        let reparsed = WorkflowConfig::from_yaml(&serialized).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the value survives the round trip
+        assert_eq!(reparsed.max_retries, Some(7));
+    }
+
+    #[test]
+    fn test_default_builtin_has_max_retries_none() {
+        // Given/When: built-in default config is constructed
+        let config = WorkflowConfig::default_builtin();
+        // Then: max_retries is unset so DEFAULT_MAX_RETRIES governs, unchanged behavior
+        assert_eq!(config.max_retries, None);
+    }
+
+    // --- resolve_effective_max_retries ---
+
+    #[test]
+    fn test_resolve_effective_max_retries_cli_flag_wins_over_config() {
+        // Given: config sets max_retries: 5, and the CLI flag is explicitly 7
+        let yaml = r"
+command: [claude, -p]
+max_retries: 5
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the explicit CLI value takes precedence
+        assert_eq!(resolve_effective_max_retries(Some(7), &config), 7);
+    }
+
+    #[test]
+    fn test_resolve_effective_max_retries_uses_config_value_when_cli_omitted() {
+        // Given: config sets max_retries: 5, and no CLI flag was passed
+        let yaml = r"
+command: [claude, -p]
+max_retries: 5
+steps:
+  s1:
+    command: echo hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the config value is used
+        assert_eq!(resolve_effective_max_retries(None, &config), 5);
+    }
+
+    #[test]
+    fn test_resolve_effective_max_retries_falls_back_to_default_when_neither_set() {
+        // Given: config has no max_retries, and no CLI flag was passed
+        let config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: DEFAULT_MAX_RETRIES governs
+        assert_eq!(
+            resolve_effective_max_retries(None, &config),
+            DEFAULT_MAX_RETRIES
+        );
+    }
+
+    // --- validate_group_retry_budget ---
+
+    fn group_config_with_max_retries(max_retries: usize) -> String {
+        format!(
+            r"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: {max_retries}
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+  review-pass:
+    group: review
+"
+        )
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_rejects_unreachable_group() {
+        // Given: group 'review' has max_retries: 4, effective ceiling is 3 (R > G)
+        let config = WorkflowConfig::from_yaml(&group_config_with_max_retries(4))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // When
+        let result = validate_group_retry_budget(&config, 3);
+        // Then: rejected, naming the group and both values
+        assert!(result.is_err());
+        let msg = err_string(result);
+        assert!(msg.contains("review"), "expected group name in: {msg}");
+        assert!(
+            msg.contains('4'),
+            "expected configured max_retries in: {msg}"
+        );
+        assert!(msg.contains('3'), "expected effective ceiling in: {msg}");
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_boundary_equal_is_accepted() {
+        // Given: group max_retries exactly equals the effective ceiling (R == G)
+        let config = WorkflowConfig::from_yaml(&group_config_with_max_retries(3))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the graceful skip at R fires exactly when the edge count reaches R,
+        // which is still <= G, so the hard LoopProtection failure never triggers.
+        assert!(
+            validate_group_retry_budget(&config, 3).is_ok(),
+            "R == G should be accepted: the graceful skip at R fires before the hard failure at G+1"
+        );
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_accepts_value_below_ceiling() {
+        // Given: group max_retries is strictly below the effective ceiling (R < G)
+        let config = WorkflowConfig::from_yaml(&group_config_with_max_retries(2))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: reachable, so validation passes
+        assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_ok_when_group_has_no_max_retries() {
+        // Given: group 'review' is referenced by a step but sets no max_retries of its own
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the global ceiling governs; nothing to validate for this group
+        assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_ignores_unreferenced_group() {
+        // Given: group 'review' has an unreachable max_retries but no step references it
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: 99
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: unused group definitions are harmless
+        assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_checks_after_pr_referenced_group() {
+        // Given: group 'review' is referenced only from an after-pr step
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    max_retries: 4
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+after-pr:
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: after-pr references are validated the same way as regular steps
+        assert!(validate_group_retry_budget(&config, 3).is_err());
     }
 }
