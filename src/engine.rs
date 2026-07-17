@@ -280,6 +280,10 @@ pub async fn execute_steps_with_dag(
         // reloaded workflow still contains the current step we rebuild the DAG
         // and continue from the first node for that step, resetting in-memory
         // retry counters just like the legacy path did.
+        //
+        // `ctx.max_retries` (resolved once at run start) keeps governing the DAG
+        // rebuild below; a reloaded config's own top-level `max_retries` is
+        // intentionally ignored mid-run.
         if let Some(reloader) = ctx.config_reloader
             && let Some(new_compiled) = reloader()?
             && new_compiled.steps.contains_key(&step_name)

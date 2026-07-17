@@ -154,6 +154,34 @@ pub fn err_string<T: std::fmt::Debug>(result: crate::error::Result<T>) -> String
     }
 }
 
+/// A workflow config whose group `review` has a configurable `max_retries`,
+/// used to probe the group retry-budget fail-fast validation (a group's
+/// `max_retries` ("R") must not exceed the effective global loop-protection
+/// ceiling ("G")). `max_retries: 5` is unreachable under the default ceiling
+/// of 3.
+#[must_use]
+pub fn group_retry_budget_config_with(max_retries: usize) -> String {
+    format!(
+        r"
+command:
+  - cat
+groups:
+  review:
+    max_retries: {max_retries}
+    steps:
+      simplify:
+        command: |
+          printf simplify
+steps:
+  edit:
+    command: |
+      printf direct > out.txt
+  review-pass:
+    group: review
+"
+    )
+}
+
 /// Create a minimal `Planned` session for use in tests.
 #[must_use]
 pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
