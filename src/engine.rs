@@ -43,8 +43,10 @@ pub struct ExecutionContext<'a> {
     /// Step names that the user selected to skip before execution.
     /// Applied in addition to YAML-configured `skip` conditions.
     pub skipped_steps: &'a [String],
-    /// Optional callback invoked for each streamed stdout/stderr line from prompt steps.
-    /// First argument is `"stdout"` or `"stderr"`, second is the line (trailing newline removed).
+    /// Optional callback invoked for each streamed stdout/stderr line from prompt steps,
+    /// plus engine-emitted progress lines on the `"info"` stream (step skips, edge
+    /// transitions). First argument is `"stdout"`, `"stderr"`, or `"info"`; second is
+    /// the line (trailing newline removed).
     #[expect(clippy::type_complexity)]
     pub on_step_log: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
 }
@@ -459,6 +461,9 @@ async fn step_loop_iteration(
         };
         // sakoku-ignore-next-line
         eprintln!("{} skipping: {}", style("→").yellow(), skip_label);
+        if let Some(log) = ctx.on_step_log {
+            log("info", &format!("skipping: {skip_label}"));
+        }
         // When the first substep of a group with file-changed is user-skipped,
         // the normal "before" snapshot is never taken (it happens in the
         // non-skip path below). Take it here so the group-level file-changed
@@ -636,6 +641,15 @@ async fn step_loop_iteration(
             count,
             ctx.max_retries
         );
+        if let Some(log) = ctx.on_step_log {
+            log(
+                "info",
+                &format!(
+                    "-> {current_step} -> {next} [{transition_reason}] (edge {count}/{})",
+                    ctx.max_retries
+                ),
+            );
+        }
         if *count > ctx.max_retries {
             let mut all_edges: Vec<(String, String, usize)> = state
                 .edge_counts
@@ -643,11 +657,26 @@ async fn step_loop_iteration(
                 .map(|((f, t), &c)| (f.clone(), t.clone(), c))
                 .collect();
             all_edges.sort_by_key(|b| std::cmp::Reverse(b.2));
+            let referenced_steps: std::collections::HashSet<&str> = std::iter::once(current_step)
+                .chain(std::iter::once(next.as_str()))
+                .chain(
+                    all_edges
+                        .iter()
+                        .flat_map(|(f, t, _)| [f.as_str(), t.as_str()]),
+                )
+                .collect();
+            let skipped_steps: Vec<String> = ctx
+                .skipped_steps
+                .iter()
+                .filter(|s| referenced_steps.contains(s.as_str()))
+                .cloned()
+                .collect();
             return Err(CruiseError::LoopProtection {
                 from: current_step.to_string(),
                 to: next.clone(),
                 max_retries: ctx.max_retries,
                 edge_counts: all_edges,
+                skipped_steps,
             });
         }
     }
@@ -1380,6 +1409,65 @@ mod tests {
         .await
     }
 
+    /// Run config while capturing `on_step_log` emissions as `(stream, line)` pairs.
+    /// Useful for testing the engine's progress-line callback independently of
+    /// what the CLI/GUI frontends do with those lines.
+    async fn run_config_with_log(
+        yaml: &str,
+        input: &str,
+        start_step: Option<&str>,
+        tracker_root: std::path::PathBuf,
+        max_retries: usize,
+        skipped_steps: &[&str],
+        captured: &std::sync::Mutex<Vec<(String, String)>>,
+    ) -> Result<ExecutionResult> {
+        let _guard = crate::test_support::lock_process();
+        let skipped: Vec<String> = skipped_steps
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dag =
+            crate::dag::build_dag(&compiled, max_retries).unwrap_or_else(|e| panic!("{e:?}"));
+        let start_node = if let Some(step_name) = start_step {
+            dag.first_node_for_step(step_name)
+                .cloned()
+                .ok_or_else(|| CruiseError::StepNotFound(step_name.to_string()))?
+        } else {
+            dag.start.clone()
+        };
+        let mut vars = VariableStore::new(input.to_string());
+        let mut tracker = FileTracker::with_root(tracker_root.clone());
+        let on_step_log = |stream: &str, line: &str| {
+            captured
+                .lock()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .push((stream.to_string(), line.to_string()));
+        };
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(tracker_root.as_path()),
+            skipped_steps: &skipped,
+            on_step_log: Some(&on_step_log),
+        };
+        execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &|_cp, _dag| Ok(()),
+        )
+        .await
+    }
+
     // -- execute_steps_with_dag: NodeRuntime wiring ----------------------------
 
     #[tokio::test]
@@ -1950,6 +2038,180 @@ steps:
 "#;
         let result = run_config_with_retries(yaml, "", None, 2, 0).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_loop_protection_error_lists_skipped_step_in_edge() {
+        // Given: "test" always transitions to "only-english" (user-skipped), which
+        // falls through back to "test" (its own `next:` is ignored while skipped),
+        // forming a loop counted on the "test -> only-english" edge -- mirroring
+        // the real-world report where a skipped step's edge still trips loop protection.
+        let yaml = r#"
+command: [echo]
+steps:
+  only-english:
+    command: "echo should not run"
+  test:
+    command: "true"
+    next: only-english
+"#;
+        let skipped = vec!["only-english".to_string()];
+        let dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the loop exceeds max_retries
+        let result = run_config_inner(
+            yaml,
+            "",
+            Some("test"),
+            dir,
+            2,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &skipped,
+        )
+        .await;
+
+        // Then: loop protection fires and the error records "only-english" as skipped
+        let Err(err) = result else {
+            panic!("expected loop protection error, got Ok");
+        };
+        let CruiseError::LoopProtection { skipped_steps, .. } = err else {
+            panic!("expected LoopProtection, got: {err:?}");
+        };
+        assert!(
+            skipped_steps.contains(&"only-english".to_string()),
+            "expected skipped_steps to include the user-skipped target, got: {skipped_steps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_loop_protection_error_has_empty_skipped_steps_when_nothing_skipped() {
+        // Given: the same kind of self-looping workflow but with no user-selected skips
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "echo loop"
+    next: step1
+"#;
+        let dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loop protection fires
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            dir,
+            2,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+
+        // Then: skipped_steps is empty
+        let Err(err) = result else {
+            panic!("expected loop protection error, got Ok");
+        };
+        let CruiseError::LoopProtection { skipped_steps, .. } = err else {
+            panic!("expected LoopProtection, got: {err:?}");
+        };
+        assert!(
+            skipped_steps.is_empty(),
+            "expected empty skipped_steps when nothing was skipped, got: {skipped_steps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_step_log_emits_skip_line_for_user_skipped_step() {
+        // Given: a two-step workflow where "only-english" is user-skipped
+        let yaml = r#"
+command: [echo]
+steps:
+  test:
+    command: "true"
+  only-english:
+    command: "echo should not run"
+"#;
+        let captured = std::sync::Mutex::new(Vec::new());
+        let dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the workflow runs with "only-english" skipped
+        let result =
+            run_config_with_log(yaml, "", None, dir, 10, &["only-english"], &captured).await;
+
+        // Then: the run succeeds and an "info" line records the skip
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            lines
+                .iter()
+                .any(|(stream, line)| stream == "info" && line == "skipping: only-english"),
+            "expected an (\"info\", \"skipping: only-english\") entry, got: {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_step_log_emits_transition_line_for_sequential_edge() {
+        // Given: a simple two-step sequential workflow
+        let yaml = r#"
+command: [echo]
+steps:
+  step1:
+    command: "true"
+  step2:
+    command: "true"
+"#;
+        let captured = std::sync::Mutex::new(Vec::new());
+        let dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the workflow runs to completion
+        let result = run_config_with_log(yaml, "", None, dir, 10, &[], &captured).await;
+
+        // Then: an "info" line records the step1 -> step2 transition
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            lines.iter().any(|(stream, line)| {
+                stream == "info" && line.contains("-> step1 -> step2 [sequential] (edge 1/")
+            }),
+            "expected a transition (\"info\", ...) entry, got: {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_step_log_when_skip_includes_no_files_match_suffix() {
+        // Given: an empty temp dir and a when.exists-skipped step
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  fix:
+    command: "echo FIXING"
+    when:
+      exists: "*.definitely-missing"
+  done:
+    command: "echo done"
+"#;
+        let captured = std::sync::Mutex::new(Vec::new());
+
+        // When: "fix" is skipped because the glob has no matches
+        let result =
+            run_config_with_log(yaml, "", None, dir.path().to_path_buf(), 10, &[], &captured).await;
+
+        // Then: the info line carries the "(no files match when.exists)" suffix
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            lines.iter().any(|(stream, line)| {
+                stream == "info" && line == "skipping: fix (no files match when.exists)"
+            }),
+            "expected when-skip info line with suffix, got: {lines:?}"
+        );
     }
 
     #[test]

@@ -107,7 +107,7 @@ export interface RunAllCompletedEvent {
 
 export interface LogChunkEvent {
   event: "logChunk";
-  data: { sessionId: string; stream: "stdout" | "stderr"; line: string };
+  data: { sessionId: string; stream: "stdout" | "stderr" | "info"; line: string };
 }
 
 export type WorkflowEvent =
