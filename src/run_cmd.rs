@@ -2366,6 +2366,48 @@ steps:
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_run_log_records_user_skipped_step() {
+        // Given: a session where 'second' is a user-selected skip
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260717070000";
+        let mut session = make_current_branch_session(session_id, &repo, "skip logging", "main");
+        session.skipped_steps = vec!["second".to_string()];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            r"command:
+  - cat
+steps:
+  first:
+    command: |
+      true
+  second:
+    command: |
+      true
+",
+        );
+
+        // When: the session runs to completion
+        let result = run(run_args(session_id)).await;
+        assert!(result.is_ok(), "expected run to succeed: {result:?}");
+
+        // Then: the run.log records the skip via the 'info' stream
+        let log_path = manager.run_log_path(session_id);
+        let log = fs::read_to_string(&log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            log.contains("[info] skipping: second"),
+            "expected run.log to record the skipped step, got:\n{log}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_restores_prev_variables_from_persisted_dag_on_resume() {
         // Given: a session interrupted between 'first' and 'second', where
         // 'second' depends on `{prev.success}` set by 'first'. We fabricate

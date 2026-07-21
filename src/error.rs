@@ -38,6 +38,9 @@ pub enum CruiseError {
         max_retries: usize,
         /// All edge traversal counts at the time of the error, sorted by count descending.
         edge_counts: Vec<(String, String, usize)>,
+        /// Subset of the caller's user-skipped steps referenced by `from`, `to`, or
+        /// any `edge_counts` entry.
+        skipped_steps: Vec<String>,
     },
 
     #[error("I/O error: {0}")]
@@ -92,19 +95,162 @@ impl CruiseError {
                 to,
                 max_retries,
                 edge_counts,
+                skipped_steps,
             } => {
+                let mut annotated_any = false;
+                let mut annotate = |name: &str| -> String {
+                    if skipped_steps.iter().any(|s| s == name) {
+                        annotated_any = true;
+                        format!("{name} (skipped)")
+                    } else {
+                        name.to_string()
+                    }
+                };
                 let mut msg = format!(
-                    "loop protection: edge {from} -> {to} exceeded max retries {max_retries}"
+                    "loop protection: edge {} -> {} exceeded max retries {max_retries}",
+                    annotate(from),
+                    annotate(to)
                 );
                 if !edge_counts.is_empty() {
                     msg.push_str("\n  edge counts:");
                     for (f, t, c) in edge_counts {
-                        let _ = write!(msg, "\n    {f} -> {t}: {c}");
+                        let _ = write!(msg, "\n    {} -> {}: {c}", annotate(f), annotate(t));
                     }
+                }
+                if annotated_any {
+                    msg.push_str(
+                        "\n  note: skip suppresses only the step's own execution; transitions into a skipped step still count toward loop protection",
+                    );
                 }
                 msg
             }
             other => other.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detailed_message_annotates_skipped_steps() {
+        // Given: a LoopProtection error where "only-english" is a user-skipped step
+        // that is also the loop's edge target and appears in the edge-counts table.
+        let err = CruiseError::LoopProtection {
+            from: "test".to_string(),
+            to: "only-english".to_string(),
+            max_retries: 3,
+            edge_counts: vec![
+                ("test".to_string(), "only-english".to_string(), 4),
+                ("a".to_string(), "test".to_string(), 3),
+            ],
+            skipped_steps: vec!["only-english".to_string()],
+        };
+
+        // When: rendering the detailed message
+        let msg = err.detailed_message();
+
+        // Then: the headline marks the skipped step
+        assert!(
+            msg.contains("test -> only-english (skipped) exceeded"),
+            "expected headline to annotate the skipped step, got: {msg}"
+        );
+        // And: the matching edge-counts row is annotated too
+        assert!(
+            msg.contains("test -> only-english (skipped): 4"),
+            "expected edge-counts row to annotate the skipped step, got: {msg}"
+        );
+        // And: the untouched row (no skipped step involved) stays bare
+        assert!(
+            msg.contains("a -> test: 3"),
+            "expected untouched row to remain unannotated, got: {msg}"
+        );
+        // And: the note explaining skip semantics appears exactly once
+        let note_count = msg
+            .matches("note: skip suppresses only the step's own execution")
+            .count();
+        assert_eq!(
+            note_count, 1,
+            "expected exactly one note line, got {note_count} in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_detailed_message_annotates_skipped_step_when_it_is_the_from_side() {
+        // Given: the skipped step is the edge's `from` side rather than `to`
+        let err = CruiseError::LoopProtection {
+            from: "only-english".to_string(),
+            to: "test".to_string(),
+            max_retries: 3,
+            edge_counts: vec![("only-english".to_string(), "test".to_string(), 4)],
+            skipped_steps: vec!["only-english".to_string()],
+        };
+
+        // When: rendering the detailed message
+        let msg = err.detailed_message();
+
+        // Then: the headline and edge-counts row both annotate the `from` side
+        assert!(
+            msg.contains("only-english (skipped) -> test exceeded"),
+            "expected headline to annotate the skipped `from` step, got: {msg}"
+        );
+        assert!(
+            msg.contains("only-english (skipped) -> test: 4"),
+            "expected edge-counts row to annotate the skipped `from` step, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_detailed_message_no_skipped_steps_is_unannotated() {
+        // Given: the same LoopProtection scenario but nothing was user-skipped
+        let err = CruiseError::LoopProtection {
+            from: "test".to_string(),
+            to: "only-english".to_string(),
+            max_retries: 3,
+            edge_counts: vec![
+                ("test".to_string(), "only-english".to_string(), 4),
+                ("a".to_string(), "test".to_string(), 3),
+            ],
+            skipped_steps: vec![],
+        };
+
+        // When: rendering the detailed message
+        let msg = err.detailed_message();
+
+        // Then: no "(skipped)" annotation appears anywhere
+        assert!(
+            !msg.contains("(skipped)"),
+            "expected no annotation when nothing is skipped, got: {msg}"
+        );
+        // And: no note line is appended
+        assert!(
+            !msg.contains("note:"),
+            "expected no note line when nothing is skipped, got: {msg}"
+        );
+        // And: the message matches the historical (pre-annotation) format exactly,
+        // guarding backward compatibility of the edge-counts table.
+        assert_eq!(
+            msg,
+            "loop protection: edge test -> only-english exceeded max retries 3\n  edge counts:\n    test -> only-english: 4\n    a -> test: 3"
+        );
+    }
+
+    #[test]
+    fn test_display_ignores_skipped_steps() {
+        // Given: a LoopProtection error whose edge target is user-skipped
+        let err = CruiseError::LoopProtection {
+            from: "test".to_string(),
+            to: "only-english".to_string(),
+            max_retries: 3,
+            edge_counts: vec![],
+            skipped_steps: vec!["only-english".to_string()],
+        };
+
+        // When / Then: Display (to_string()) stays the stable, unannotated form
+        assert_eq!(
+            err.to_string(),
+            "loop protection: edge test -> only-english exceeded max retries 3"
+        );
     }
 }
