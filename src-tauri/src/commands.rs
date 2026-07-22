@@ -1238,17 +1238,26 @@ pub async fn create_session(
     .map_err(|e| e.to_string())
     {
         Ok(result) => {
-            // If the SDK backend returned a session ID, try to read its transcript
-            // for a more useful error message when plan output is empty.
-            let transcript = resume
-                .as_deref()
-                .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id));
+            // Read the backend transcript only when content resolution fails;
+            // on success the plan document is already on disk and the
+            // transcript read would be dead I/O.
             let content = match cruise::planning::resolve_generated_plan_content(
                 &plan_path,
                 &result.output,
                 &result.stderr,
-                transcript.as_deref(),
-            ) {
+                None,
+            )
+            .or_else(|_| {
+                let transcript = resume
+                    .as_deref()
+                    .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id));
+                cruise::planning::resolve_generated_plan_content(
+                    &plan_path,
+                    &result.output,
+                    &result.stderr,
+                    transcript.as_deref(),
+                )
+            }) {
                 Ok(c) => c,
                 Err(e) => {
                     let msg = e.to_string();

@@ -760,17 +760,26 @@ async fn generate_plan_markdown(
         true,
     )
     .await?;
-    // If the SDK backend returned a session ID, try to read its transcript
-    // for a more useful error message when plan output is empty.
-    let transcript = resume
-        .as_deref()
-        .and_then(|session_id| crate::planning::read_sdk_transcript(ctx.working_dir, session_id));
+    // Read the backend transcript only when content resolution fails; on
+    // success the plan document is already on disk and the transcript read
+    // would be dead I/O.
     crate::planning::resolve_generated_plan_content(
         ctx.plan_path,
         &prompt_result.output,
         &prompt_result.stderr,
-        transcript.as_deref(),
+        None,
     )
+    .or_else(|_| {
+        let transcript = resume.as_deref().and_then(|session_id| {
+            crate::planning::read_sdk_transcript(ctx.working_dir, session_id)
+        });
+        crate::planning::resolve_generated_plan_content(
+            ctx.plan_path,
+            &prompt_result.output,
+            &prompt_result.stderr,
+            transcript.as_deref(),
+        )
+    })
 }
 
 #[derive(Clone)]

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use console::style;
 
@@ -36,6 +37,36 @@ pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan
 pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
 
 const PLAN_LANGUAGE_VAR: &str = "plan.language";
+
+/// Template variable holding the ambiguity-handling guidance for the current
+/// planning turn. Resolved from [`PlanPromptCtx::interactive`] on every
+/// plan-related turn so interactive and headless (CI) runs get different
+/// instructions.
+const PLAN_CLARIFICATION_VAR: &str = "plan.clarification";
+
+/// Guidance for interactive runs: the user can be reached via the `ask_user`
+/// tool, so ambiguous requirements should be clarified rather than guessed.
+const PLAN_CLARIFICATION_INTERACTIVE: &str = "**Whenever a requirement is genuinely ambiguous \
+and the answer changes the plan, call the `ask_user` tool to ask the user a focused question \
+instead of guessing. Prefer asking over assuming.**";
+
+/// Guidance for non-interactive runs (piped stdin, CI, GitHub Actions): no
+/// `ask_user` tool is registered, so the agent must never stop to wait for
+/// clarification — it decides on stated assumptions and still submits a plan.
+const PLAN_CLARIFICATION_NONINTERACTIVE: &str = "**This run is non-interactive: the `ask_user` \
+tool is not available and no one can answer questions. Never defer work or end your turn to \
+wait for clarification — when a requirement is ambiguous, choose the most reasonable \
+interpretation, state the assumption explicitly in the plan, and continue.**";
+
+/// Ambiguity-handling guidance for the current run's interactivity.
+#[must_use]
+fn clarification_guidance(interactive: bool) -> &'static str {
+    if interactive {
+        PLAN_CLARIFICATION_INTERACTIVE
+    } else {
+        PLAN_CLARIFICATION_NONINTERACTIVE
+    }
+}
 
 /// Build the variable store used by all plan-related flows.
 ///
@@ -197,8 +228,11 @@ fn resolve_planning_env(
 ///
 /// # Errors
 ///
-/// Returns an error if variable resolution fails, the backend fails, or a rate
-/// limit is hit and retries are exhausted.
+/// Returns an error if variable resolution fails, the backend fails, a rate
+/// limit is hit and retries are exhausted, or — when the plan tools were
+/// registered (`sdk:` planning with `register_plan_tools`) — the agent ended
+/// its turn without a successful `submit_plan` / `update_plan` call (the
+/// captured output is not a plan and is refused as a fallback).
 pub async fn run_plan_prompt_template(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
@@ -208,6 +242,13 @@ pub async fn run_plan_prompt_template(
     resume: &mut Option<String>,
     register_plan_tools: bool,
 ) -> Result<PromptResult> {
+    // The ambiguity guidance depends on whether a user can answer `ask_user`
+    // this run; refresh it every turn so plan/fix templates never instruct the
+    // agent to call a tool that is not registered.
+    vars.set_named_value(
+        PLAN_CLARIFICATION_VAR,
+        clarification_guidance(ctx.interactive).to_string(),
+    );
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
     let model_or_mode = executor.plan_model_or_mode(
@@ -218,14 +259,15 @@ pub async fn run_plan_prompt_template(
     // plan is written to `{plan}` directly via the file-writing templates and no
     // custom tools are registered, keeping tool-incapable providers eligible.
     let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
-    let tools = if plan_tools_enabled && register_plan_tools {
-        crate::sdk_tools::planning_tools(
+    let (tools, plan_persisted) = if plan_tools_enabled && register_plan_tools {
+        let set = crate::sdk_tools::planning_tools(
             ctx.plan_path.to_path_buf(),
             Arc::clone(&ctx.ask),
             ctx.interactive,
-        )
+        );
+        (set.tools, Some(set.plan_persisted))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
     let env = resolve_planning_env(ctx.config, vars)?;
@@ -252,6 +294,14 @@ pub async fn run_plan_prompt_template(
     drop(spinner);
 
     let outcome = outcome?;
+    // Lazily read the backend transcript only for the error path — a
+    // successful turn must not pay for loading the whole JSONL.
+    ensure_plan_persisted(plan_persisted.as_deref(), || {
+        outcome
+            .session_id
+            .as_deref()
+            .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id))
+    })?;
     // Carry the seher session id forward only in the tool-based interactive flow,
     // where plan/fix/ask turns share one tool-capable conversation (pi or claude).
     // The tool-less flow is stateless (templates read `{plan}` from disk each
@@ -262,6 +312,45 @@ pub async fn run_plan_prompt_template(
         *resume = outcome.session_id;
     }
     Ok(outcome.result)
+}
+
+/// Guard against a tool-based planning turn that ended without the agent
+/// persisting the plan.
+///
+/// When the plan tools were registered (`submit_plan` / `update_plan`), the
+/// agent must persist the plan through them before its turn ends. If neither
+/// tool completed, the agent's captured output is usually not a plan at all —
+/// clarifying questions it could never get answered, or a "handoff" note — and
+/// adopting it as `plan.md` posts that non-plan to the user. Fail the turn
+/// instead. `transcript` is invoked only on this failure path and, when the
+/// backend transcript records a terminal error, it is appended for diagnosis.
+///
+/// Turns without plan tools (command backend, `interactive_planning: false`,
+/// or the read-only Ask flow) pass `None` and are never guarded: the
+/// captured-output fallback remains valid there.
+fn ensure_plan_persisted(
+    plan_persisted: Option<&AtomicBool>,
+    transcript: impl FnOnce() -> Option<String>,
+) -> Result<()> {
+    let Some(flag) = plan_persisted else {
+        return Ok(());
+    };
+    if flag.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let mut msg = "planning agent ended its turn without persisting the plan: tool-based \
+        planning requires a successful `submit_plan` (or `update_plan`) call before the turn \
+        ends, but neither tool completed. Refusing to adopt the agent's final message as the \
+        plan. This typically means the model stopped to wait for clarification it could not \
+        receive, or it does not support the planning tools."
+        .to_string();
+    if let Some(jsonl) = transcript()
+        && let Some(backend_error) = extract_terminal_error_from_transcript(&jsonl)
+    {
+        use std::fmt::Write as _;
+        let _ = write!(msg, " Backend transcript error: {backend_error}");
+    }
+    Err(crate::error::CruiseError::Other(msg))
 }
 
 /// Write the user input directly as plan.md, bypassing LLM generation.
@@ -357,13 +446,40 @@ pub fn resolve_generated_plan_content(
     }
 }
 
+/// Maximum bytes read from an SDK transcript for error diagnosis.
+///
+/// The transcript is only scanned for the *last* terminal error, so reading
+/// the tail is sufficient and bounds memory/parse cost for very long agent
+/// sessions.
+const MAX_TRANSCRIPT_DIAGNOSTIC_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Try to read an SDK transcript file for the given session ID.
 ///
-/// Returns `None` if the transcript cannot be found or read (non-fatal).
+/// Reads at most the last [`MAX_TRANSCRIPT_DIAGNOSTIC_BYTES`] of the file;
+/// the diagnostics consumer only needs the most recent records. Returns
+/// `None` if the transcript cannot be found or read (non-fatal).
 #[must_use]
 pub fn read_sdk_transcript(working_dir: Option<&Path>, session_id: &str) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
     let transcript_path = seher::sdk::pi_session_path(working_dir, session_id);
-    std::fs::read_to_string(&transcript_path).ok()
+    let mut file = std::fs::File::open(&transcript_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let capped = len > MAX_TRANSCRIPT_DIAGNOSTIC_BYTES;
+    if capped {
+        file.seek(SeekFrom::End(-MAX_TRANSCRIPT_DIAGNOSTIC_BYTES.cast_signed()))
+            .ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if capped {
+        // The seek can land mid-line, so drop the first partial record to
+        // keep JSONL lines whole for the terminal-error scan.
+        let start = text.find('\n').map_or(0, |i| i + 1);
+        text.drain(..start);
+    }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -878,6 +994,157 @@ mod tests {
 
         // Transcript error should be ignored since we got valid content
         assert_eq!(result, "# Plan from stdout");
+    }
+
+    // -- clarification guidance ------------------------------------------------
+
+    #[test]
+    fn clarification_guidance_interactive_prefers_ask_user() {
+        let guidance = clarification_guidance(true);
+        assert!(guidance.contains("ask_user"), "got: {guidance}");
+        assert!(guidance.contains("Prefer asking"), "got: {guidance}");
+    }
+
+    #[test]
+    fn clarification_guidance_noninteractive_forbids_waiting() {
+        let guidance = clarification_guidance(false);
+        assert!(guidance.contains("non-interactive"), "got: {guidance}");
+        assert!(
+            guidance.contains("not available"),
+            "must state ask_user is unavailable: {guidance}"
+        );
+        assert!(
+            !guidance.contains("Prefer asking"),
+            "must not instruct asking when no one can answer: {guidance}"
+        );
+    }
+
+    #[test]
+    fn sdk_templates_resolve_clarification_var_in_both_modes() {
+        let config = config_with(Some("seher"), None);
+        for interactive in [true, false] {
+            let mut vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
+            // The fix template also references {prev.input} (the change request).
+            vars.set_prev_input(Some("change request".to_string()));
+            vars.set_named_value(
+                PLAN_CLARIFICATION_VAR,
+                clarification_guidance(interactive).to_string(),
+            );
+            for template in [PLAN_PROMPT_TEMPLATE_SDK, FIX_PLAN_PROMPT_TEMPLATE_SDK] {
+                let resolved = vars
+                    .resolve(template)
+                    .unwrap_or_else(|e| panic!("template must resolve: {e:?}"));
+                assert!(
+                    !resolved.contains("{plan.clarification}"),
+                    "placeholder must be substituted"
+                );
+                assert!(
+                    resolved.contains(clarification_guidance(interactive)),
+                    "resolved template must carry the {interactive}-mode guidance"
+                );
+            }
+        }
+    }
+
+    /// Given: a command backend and a template referencing `{plan.clarification}`
+    /// When: `run_plan_prompt_template` runs in either interactivity mode
+    /// Then: the variable is set before resolution, so the resolved prompt
+    ///       (echoed back by `cat`) equals the mode's guidance
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_plan_prompt_template_sets_clarification_var_before_resolve() {
+        let _guard = crate::test_support::lock_process();
+        for interactive in [true, false] {
+            let tmp = make_temp_dir();
+            let plan_path = tmp.path().join("plan.md");
+            let config = config_with(None, Some("\"cat\""));
+            let ctx = PlanPromptCtx {
+                interactive,
+                ..make_ctx_no_token(&config, &plan_path)
+            };
+            let mut vars = VariableStore::new("test input".to_string());
+            let mut resume = None;
+
+            let result = run_plan_prompt_template(
+                &ctx,
+                &mut vars,
+                "{plan.clarification}",
+                "test",
+                None,
+                &mut resume,
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("expected Ok: {e:?}"));
+
+            assert_eq!(
+                result.output.trim(),
+                clarification_guidance(interactive),
+                "wrong guidance for interactive={interactive}"
+            );
+        }
+    }
+
+    // -- ensure_plan_persisted --------------------------------------------------
+
+    #[test]
+    fn ensure_plan_persisted_passes_without_plan_tools() {
+        // Turns without registered plan tools (command backend, tool-less
+        // planning, read-only Ask flow) are never guarded.
+        assert!(ensure_plan_persisted(None, || panic!("transcript must not be read")).is_ok());
+    }
+
+    #[test]
+    fn ensure_plan_persisted_passes_when_plan_was_persisted() {
+        let flag = AtomicBool::new(true);
+        assert!(
+            ensure_plan_persisted(Some(&flag), || panic!("transcript must not be read")).is_ok()
+        );
+    }
+
+    #[test]
+    fn ensure_plan_persisted_errors_when_agent_never_persisted() {
+        let flag = AtomicBool::new(false);
+        let result = ensure_plan_persisted(Some(&flag), || None);
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("submit_plan"), "got: {msg}");
+        assert!(msg.contains("without persisting"), "got: {msg}");
+    }
+
+    #[test]
+    fn ensure_plan_persisted_appends_transcript_terminal_error() {
+        let flag = AtomicBool::new(false);
+        let transcript = r#"{"message":{"stopReason":"error","errorMessage":"context_length_exceeded: token limit exceeded"}}"#;
+        let result = ensure_plan_persisted(Some(&flag), || Some(transcript.to_string()));
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("context_length_exceeded"),
+            "should include the backend terminal error: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_plan_persisted_omits_backend_suffix_when_transcript_has_no_error() {
+        // A transcript present but without a terminal error must still yield
+        // the plain missing-persistence error, with no backend suffix.
+        let flag = AtomicBool::new(false);
+        let transcript = r#"{"message":{"stopReason":"ok","content":"handoff note"}}"#;
+        let result = ensure_plan_persisted(Some(&flag), || Some(transcript.to_string()));
+        let Err(err) = result else {
+            panic!("expected Err, got: {result:?}")
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("without persisting"), "got: {msg}");
+        assert!(
+            !msg.contains("Backend transcript error"),
+            "must not append a backend suffix: {msg}"
+        );
     }
 
     // -- resolve_planning_env --------------------------------------------------
