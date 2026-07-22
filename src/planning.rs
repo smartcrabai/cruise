@@ -467,8 +467,10 @@ pub fn read_sdk_transcript(working_dir: Option<&Path>, session_id: &str) -> Opti
     let len = file.metadata().ok()?.len();
     let capped = len > MAX_TRANSCRIPT_DIAGNOSTIC_BYTES;
     if capped {
-        file.seek(SeekFrom::End(-MAX_TRANSCRIPT_DIAGNOSTIC_BYTES.cast_signed()))
-            .ok()?;
+        file.seek(SeekFrom::End(
+            -MAX_TRANSCRIPT_DIAGNOSTIC_BYTES.cast_signed(),
+        ))
+        .ok()?;
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
