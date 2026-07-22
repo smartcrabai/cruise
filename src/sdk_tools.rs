@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use seher::sdk::{SeherTool, ToolHandler};
 use serde_json::json;
@@ -32,28 +33,50 @@ pub const GENERATE_TITLE_TOOL: &str = "generate_title";
 /// Tool name for the PR metadata submission tool.
 pub const SUBMIT_PR_METADATA_TOOL: &str = "submit_pr_metadata";
 
+/// Shared flag recording whether the planning agent persisted the plan during
+/// the current turn. Set to `true` only by a *successful* `submit_plan` /
+/// `update_plan` call; a handler error (e.g. a stale `update_plan` snippet or a
+/// failed write) leaves it untouched so the agent can retry.
+pub type PlanPersistFlag = Arc<AtomicBool>;
+
+/// The planning tool vec plus the shared persist flag for the turn. The caller
+/// inspects [`PlanningToolSet::plan_persisted`] after the turn ends to verify
+/// the agent actually persisted the plan instead of just talking about one.
+pub struct PlanningToolSet {
+    /// Tools to register with the SDK backend.
+    pub tools: Vec<SeherTool>,
+    /// Set once the plan has been persisted via `submit_plan` / `update_plan`.
+    pub plan_persisted: PlanPersistFlag,
+}
+
 /// Build the planning tool set.
 ///
 /// `interactive` controls whether the user can be reached:
 /// - `true`  -> `[ask_user, submit_plan, update_plan]` (the agent can ask
 ///   questions and iteratively revise the plan).
-/// - `false` -> `[submit_plan]` only (non-TTY runs: the agent proceeds on
-///   assumptions and submits a single plan).
+/// - `false` -> `[submit_plan, update_plan]` (non-TTY runs: no `ask_user`,
+///   since no one can answer; `update_plan` needs no user interaction and the
+///   fix-plan template relies on it for targeted edits).
 #[must_use]
 pub fn planning_tools(
     plan_path: PathBuf,
     ask: Arc<dyn AskHandler>,
     interactive: bool,
-) -> Vec<SeherTool> {
+) -> PlanningToolSet {
+    let plan_persisted: PlanPersistFlag = Arc::new(AtomicBool::new(false));
     let mut tools = Vec::new();
     if interactive {
         tools.push(ask_user_tool(ask));
     }
-    tools.push(submit_plan_tool(plan_path.clone()));
-    if interactive {
-        tools.push(update_plan_tool(plan_path));
+    tools.push(submit_plan_tool(
+        plan_path.clone(),
+        Arc::clone(&plan_persisted),
+    ));
+    tools.push(update_plan_tool(plan_path, Arc::clone(&plan_persisted)));
+    PlanningToolSet {
+        tools,
+        plan_persisted,
     }
-    tools
 }
 
 /// `ask_user` — delegates the agent's question to the [`AskHandler`].
@@ -83,10 +106,12 @@ pub fn ask_user_tool(ask: Arc<dyn AskHandler>) -> SeherTool {
 
 /// `submit_plan` — writes the full plan markdown to `plan_path`.
 #[must_use]
-pub fn submit_plan_tool(plan_path: PathBuf) -> SeherTool {
+pub fn submit_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> SeherTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let content = require_str(&input, "content")?;
-        write_plan(&plan_path, content)
+        write_plan(&plan_path, content)?;
+        plan_persisted.store(true, Ordering::SeqCst);
+        Ok("Plan saved.".to_string())
     });
     SeherTool::new(
         SUBMIT_PLAN_TOOL,
@@ -108,15 +133,15 @@ pub fn submit_plan_tool(plan_path: PathBuf) -> SeherTool {
 
 /// `update_plan` — find/replace a section of the existing plan document.
 #[must_use]
-pub fn update_plan_tool(plan_path: PathBuf) -> SeherTool {
+pub fn update_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> SeherTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let old = require_str(&input, "old")?;
         let new = require_str(&input, "new")?;
         let current = std::fs::read_to_string(&plan_path)
             .map_err(|e| format!("failed to read plan at {}: {e}", plan_path.display()))?;
         let updated = apply_update(&current, old, new)?;
-        std::fs::write(&plan_path, &updated)
-            .map_err(|e| format!("failed to write plan at {}: {e}", plan_path.display()))?;
+        write_plan(&plan_path, &updated)?;
+        plan_persisted.store(true, Ordering::SeqCst);
         Ok("Plan updated.".to_string())
     });
     SeherTool::new(
@@ -220,10 +245,17 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| format!("missing or non-string `{field}` argument"))
 }
 
-/// Write `content` to the plan file, returning the success message or an error.
-fn write_plan(plan_path: &std::path::Path, content: &str) -> Result<String, String> {
+/// Write `content` to the plan file, rejecting blank content.
+///
+/// Blank content is rejected: an empty plan file is treated as "no plan" by
+/// the plan-content fallback chain, which would silently re-expose the agent's
+/// captured output as the plan and bypass the persist guard. Both plan-writing
+/// tools go through here so the invariant cannot drift between them.
+fn write_plan(plan_path: &std::path::Path, content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("plan content must not be empty".to_string());
+    }
     std::fs::write(plan_path, content)
-        .map(|()| "Plan saved.".to_string())
         .map_err(|e| format!("failed to write plan at {}: {e}", plan_path.display()))
 }
 
@@ -294,18 +326,54 @@ mod tests {
     fn submit_plan_writes_content_to_file() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan = tmp.path().join("plan.md");
-        let tool = submit_plan_tool(plan.clone());
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = submit_plan_tool(plan.clone(), Arc::clone(&flag));
         let res = invoke(&tool, json!({"content": "# My Plan\nstep 1"}));
         assert!(res.is_ok(), "got: {res:?}");
         let written = std::fs::read_to_string(&plan).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(written, "# My Plan\nstep 1");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "successful submit_plan must mark the plan as persisted"
+        );
     }
 
     #[test]
     fn submit_plan_errors_without_content() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let tool = submit_plan_tool(tmp.path().join("plan.md"));
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = submit_plan_tool(tmp.path().join("plan.md"), Arc::clone(&flag));
         assert!(invoke(&tool, json!({})).is_err());
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "failed submit_plan must not mark the plan as persisted"
+        );
+    }
+
+    #[test]
+    fn submit_plan_error_does_not_set_persist_flag() {
+        // Given: a plan path whose parent directory does not exist (write fails)
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = submit_plan_tool(PathBuf::from("/nonexistent/dir/plan.md"), Arc::clone(&flag));
+        // When / Then: handler errors and the flag stays unset
+        assert!(invoke(&tool, json!({"content": "x"})).is_err());
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn submit_plan_rejects_blank_content() {
+        // Given: a valid plan path but whitespace-only content
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan = tmp.path().join("plan.md");
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = submit_plan_tool(plan.clone(), Arc::clone(&flag));
+        // When / Then: handler errors, nothing is written, flag stays unset —
+        // a blank plan file would fall through to the stdout fallback and
+        // bypass the persist guard.
+        let res = invoke(&tool, json!({"content": "  \n\t "}));
+        assert!(res.is_err(), "blank content must error, got: {res:?}");
+        assert!(!plan.exists());
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     // -- update_plan tool -----------------------------------------------------
@@ -315,11 +383,16 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan = tmp.path().join("plan.md");
         std::fs::write(&plan, "# Plan\nUse JWT.\n").unwrap_or_else(|e| panic!("{e:?}"));
-        let tool = update_plan_tool(plan.clone());
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = update_plan_tool(plan.clone(), Arc::clone(&flag));
         let res = invoke(&tool, json!({"old": "JWT", "new": "sessions"}));
         assert!(res.is_ok(), "got: {res:?}");
         let written = std::fs::read_to_string(&plan).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(written, "# Plan\nUse sessions.\n");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "successful update_plan must mark the plan as persisted"
+        );
     }
 
     #[test]
@@ -327,12 +400,41 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let plan = tmp.path().join("plan.md");
         std::fs::write(&plan, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
-        let tool = update_plan_tool(plan);
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = update_plan_tool(plan, Arc::clone(&flag));
         let res = invoke(&tool, json!({"old": "nope", "new": "x"}));
         assert!(
             res.is_err(),
             "stale old should error so the agent can retry"
         );
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "failed update_plan must not mark the plan as persisted"
+        );
+    }
+
+    #[test]
+    fn update_plan_rejects_blank_result() {
+        // Given: a plan the agent replaces wholesale with whitespace
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, "# Plan\nfull content\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
+        let tool = update_plan_tool(plan.clone(), Arc::clone(&flag));
+        // When / Then: handler errors, the original plan survives, and the
+        // flag stays unset — a blank file would fall through to the stdout
+        // fallback and bypass the persist guard.
+        let res = invoke(
+            &tool,
+            json!({"old": "# Plan\nfull content\n", "new": " \n\t"}),
+        );
+        assert!(res.is_err(), "blank result must error, got: {res:?}");
+        assert_eq!(
+            std::fs::read_to_string(&plan).unwrap_or_else(|e| panic!("{e:?}")),
+            "# Plan\nfull content\n",
+            "original plan must be left intact"
+        );
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     // -- ask_user tool --------------------------------------------------------
@@ -357,20 +459,24 @@ mod tests {
     #[test]
     fn planning_tools_interactive_has_three() {
         let ask = Arc::new(ScriptedAskHandler::new(std::iter::empty()));
-        let tools = planning_tools(PathBuf::from("/tmp/plan.md"), ask, true);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, true);
+        let names: Vec<&str> = set.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
             vec![ASK_USER_TOOL, SUBMIT_PLAN_TOOL, UPDATE_PLAN_TOOL]
         );
+        assert!(!set.plan_persisted.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn planning_tools_noninteractive_has_submit_only() {
+    fn planning_tools_noninteractive_has_submit_and_update() {
+        // `ask_user` is the only user-facing tool; `update_plan` needs no
+        // interaction and the fix-plan template relies on it for targeted
+        // edits, so non-interactive runs register both plan-writing tools.
         let ask = Arc::new(ScriptedAskHandler::new(std::iter::empty()));
-        let tools = planning_tools(PathBuf::from("/tmp/plan.md"), ask, false);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec![SUBMIT_PLAN_TOOL]);
+        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, false);
+        let names: Vec<&str> = set.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec![SUBMIT_PLAN_TOOL, UPDATE_PLAN_TOOL]);
     }
 
     // -- generate_title tool --------------------------------------------------
