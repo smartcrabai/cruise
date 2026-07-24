@@ -3,9 +3,9 @@
     "config:best-practices"
   ],
   dependencyDashboard: false,
-  // Only scan the central source files in the terraforms repository.
-  // Default patterns are still scanned because the option is additive.
-  // This path does not exist in downstream repositories.
+  // Scan the central source file for Renovate only in the terraforms repository
+  // (additive, so the default patterns are still kept; this path does not
+  // exist in the distribution target repositories).
   "github-actions": {
     managerFilePatterns: [
       "/(^|/)environments/shared/cruise/workflow(-private)?\\.yml$/"
@@ -41,9 +41,9 @@
       minimumReleaseAge: "7 days"
     },
     {
-      // Do not let Renovate update files distributed from Terraform in each repository
-      // (to avoid tug-of-war with the source of truth). ignorePaths is non-mergeable
-      // and would override preset exclusions, so disable these via packageRules instead.
+      // Do not let files distributed by Terraform be updated on the repository side
+      // (to avoid fighting over the source of truth). ignorePaths is non-mergeable
+      // and would override the preset's exclusions, so disable via packageRules instead.
       matchFileNames: [
         ".github/workflows/cruise.yml",
         ".woodpecker/cruise.yaml",
