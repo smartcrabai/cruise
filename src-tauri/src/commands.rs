@@ -852,6 +852,16 @@ impl Drop for GuiPlanCtx {
 }
 // --- Session creation commands -------------------------------------------------
 
+/// Where a discovered config file lives, for GUI grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigEntrySource {
+    /// Under the session/working `base_dir` (root file or `.cruise/`).
+    Local,
+    /// Under the user config dir (`$XDG_CONFIG_HOME/cruise` or `~/.config/cruise`).
+    User,
+}
+
 /// A discovered workflow config file, returned to the frontend.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -859,6 +869,7 @@ pub struct ConfigEntryDto {
     pub path: String,
     pub name: String,
     pub description: Option<String>,
+    pub source: ConfigEntrySource,
 }
 
 /// Summary of the latest GUI "New Session" selections.
@@ -894,7 +905,8 @@ pub struct NewSessionDraftDto {
 
 /// Enumerate `*.yaml` / `*.yml` files in `dir`, parse each for `description`, and return
 /// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
-fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
+/// Every returned entry is tagged with `source`.
+fn read_configs_in(dir: &std::path::Path, source: ConfigEntrySource) -> Vec<ConfigEntryDto> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
@@ -917,6 +929,7 @@ fn read_configs_in(dir: &std::path::Path) -> Vec<ConfigEntryDto> {
                 name,
                 path: p.to_string_lossy().into_owned(),
                 description,
+                source,
             }
         })
         .collect();
@@ -943,6 +956,7 @@ fn collect_local_configs(base_dir: &std::path::Path) -> Vec<ConfigEntryDto> {
                 name: (*name).to_string(),
                 path: path.to_string_lossy().into_owned(),
                 description,
+                source: ConfigEntrySource::Local,
             });
         }
     }
@@ -950,7 +964,7 @@ fn collect_local_configs(base_dir: &std::path::Path) -> Vec<ConfigEntryDto> {
     // 2. Files inside `.cruise/` (ASCII-sorted via read_configs_in).
     let cruise_dir = base_dir.join(".cruise");
     if cruise_dir.is_dir() {
-        configs.extend(read_configs_in(&cruise_dir));
+        configs.extend(read_configs_in(&cruise_dir, ConfigEntrySource::Local));
     }
 
     configs
@@ -971,7 +985,7 @@ fn collect_configs_for_gui(
     } else {
         vec![]
     };
-    let user_entries = read_configs_in(user_dir);
+    let user_entries = read_configs_in(user_dir, ConfigEntrySource::User);
 
     let mut configs = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -994,8 +1008,8 @@ fn collect_configs_for_gui(
 /// are included first (in resolver priority order), followed by user-dir configs.
 /// When `base_dir` is absent, only user-dir configs are returned.
 ///
-/// Note: `repo` is reserved for future repo-mode filtering but the current frontend always
-/// passes `null`; `is_repo_mode` is therefore always `false` in practice.
+/// When `repo` is set (a repo-backed session), `is_repo_mode` is `true` and local configs are
+/// skipped even if `base_dir` also points at a (possibly transient) repo clone directory.
 #[tauri::command]
 pub fn list_configs(
     base_dir: Option<String>,
@@ -4337,7 +4351,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: description field is populated
         assert_eq!(configs.len(), 1);
@@ -4356,7 +4370,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: description is None
         assert_eq!(configs.len(), 1);
@@ -4375,7 +4389,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: entry still appears with description = None (no panic, no missing entry)
         assert_eq!(configs.len(), 1);
@@ -4389,7 +4403,7 @@ mod tests {
         let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: empty result
         assert!(configs.is_empty());
@@ -4408,7 +4422,7 @@ mod tests {
         fs::write(dir.path().join("config.json"), "{}").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: only the YAML file is included
         assert_eq!(configs.len(), 1);
@@ -4428,13 +4442,53 @@ mod tests {
         }
 
         // When: reading configs
-        let configs = read_configs_in(dir.path());
+        let configs = read_configs_in(dir.path(), ConfigEntrySource::Local);
 
         // Then: results are sorted alphabetically by name
         assert_eq!(configs.len(), 3);
         assert_eq!(configs[0].name, "alpha.yaml");
         assert_eq!(configs[1].name, "middle.yml");
         assert_eq!(configs[2].name, "zebra.yaml");
+    }
+
+    #[test]
+    fn test_read_configs_in_tags_entries_with_passed_source() {
+        // Given: two separate directories, each with one config file
+        let local_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            local_dir.path().join("a.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let user_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            user_dir.path().join("b.yaml"),
+            "command: [claude, -p]\nsteps:\n  s1:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: reading each directory with a different source
+        let local_configs = read_configs_in(local_dir.path(), ConfigEntrySource::Local);
+        let user_configs = read_configs_in(user_dir.path(), ConfigEntrySource::User);
+
+        // Then: each entry is tagged with the source it was read with
+        assert_eq!(local_configs[0].source, ConfigEntrySource::Local);
+        assert_eq!(user_configs[0].source, ConfigEntrySource::User);
+    }
+
+    #[test]
+    fn test_config_entry_source_serializes_to_lowercase_json() {
+        // Given: the two ConfigEntrySource variants
+        // When: serialized to JSON, as sent to the frontend over the Tauri IPC bridge
+        let local_json =
+            serde_json::to_string(&ConfigEntrySource::Local).unwrap_or_else(|e| panic!("{e:?}"));
+        let user_json =
+            serde_json::to_string(&ConfigEntrySource::User).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the wire format matches the lowercase literals the frontend hardcodes
+        // (ui/src/types.ts's ConfigEntrySource and ConfigSelect.tsx's `c.source === "local"`/`"user"` checks).
+        assert_eq!(local_json, "\"local\"");
+        assert_eq!(user_json, "\"user\"");
     }
 
     // ---- collect_local_configs ----
@@ -4452,9 +4506,10 @@ mod tests {
         // When: collecting local configs
         let configs = collect_local_configs(dir.path());
 
-        // Then: cruise.yaml is included
+        // Then: cruise.yaml is included and tagged as Local
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "cruise.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::Local);
     }
 
     #[test]
@@ -4490,9 +4545,10 @@ mod tests {
         // When: collecting local configs
         let configs = collect_local_configs(dir.path());
 
-        // Then: foo.yaml from .cruise/ is included
+        // Then: foo.yaml from .cruise/ is included and tagged as Local
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "foo.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::Local);
     }
 
     #[test]
@@ -4515,10 +4571,12 @@ mod tests {
         // When: collecting local configs
         let configs = collect_local_configs(dir.path());
 
-        // Then: root cruise.yaml comes before .cruise/bar.yaml
+        // Then: root cruise.yaml comes before .cruise/bar.yaml, both tagged Local
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].name, "cruise.yaml");
         assert_eq!(configs[1].name, "bar.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::Local);
+        assert_eq!(configs[1].source, ConfigEntrySource::Local);
     }
 
     #[test]
@@ -4578,10 +4636,12 @@ mod tests {
         // When: collecting all configs (non-repo mode)
         let configs = collect_configs_for_gui(Some(base.path()), false, user.path());
 
-        // Then: local cruise.yaml comes first, then user.yaml
+        // Then: local cruise.yaml comes first (tagged Local), then user.yaml (tagged User)
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].name, "cruise.yaml");
         assert_eq!(configs[1].name, "user.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::Local);
+        assert_eq!(configs[1].source, ConfigEntrySource::User);
     }
 
     #[test]
@@ -4603,9 +4663,10 @@ mod tests {
         // When: collecting configs in repo mode
         let configs = collect_configs_for_gui(Some(base.path()), true, user.path());
 
-        // Then: only user.yaml is returned (no local configs)
+        // Then: only user.yaml is returned (no local configs), tagged User
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "user.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::User);
     }
 
     #[test]
@@ -4621,9 +4682,10 @@ mod tests {
         // When: collecting configs without a base_dir
         let configs = collect_configs_for_gui(None, false, user.path());
 
-        // Then: only user.yaml is returned
+        // Then: only user.yaml is returned, tagged User
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "user.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::User);
     }
 
     #[test]
@@ -4643,6 +4705,10 @@ mod tests {
         let count = configs.iter().filter(|c| c.name == "cruise.yaml").count();
         let names: Vec<_> = configs.iter().map(|c| &c.name).collect();
         assert_eq!(count, 1, "duplicate found: {names:?}");
+
+        // And: the surviving entry is the Local one (local entries are chained before user
+        // entries, and dedup keeps the first occurrence of a given canonical path)
+        assert_eq!(configs[0].source, ConfigEntrySource::Local);
     }
 
     // --- respond_to_ask_impl --------------------------------------------------

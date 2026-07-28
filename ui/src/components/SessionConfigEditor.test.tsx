@@ -405,4 +405,76 @@ describe("SessionConfigEditor", () => {
       });
     });
   });
+
+  describe("listConfigs invocation", () => {
+    it("calls listConfigs with { baseDir } for a non-repo session", async () => {
+      // Given: a session with a baseDir and no repo
+      render(<SessionConfigEditor {...defaultProps} baseDir="/home/user/project" />);
+
+      // Then: listConfigs is called with the session's baseDir
+      await waitFor(() => {
+        expect(mockListConfigs).toHaveBeenCalledWith({ baseDir: "/home/user/project" });
+      });
+    });
+
+    it("calls listConfigs with { repo } for a repo-backed session, ignoring baseDir", async () => {
+      // Given: a session backed by a repo clone
+      render(<SessionConfigEditor {...defaultProps} baseDir="/tmp/clones/abc" repo="owner/repo" />);
+
+      // Then: listConfigs is called with repo instead of baseDir (clone dir is transient)
+      await waitFor(() => {
+        expect(mockListConfigs).toHaveBeenCalledWith({ repo: "owner/repo" });
+      });
+    });
+  });
+
+  describe("Draft phase — config edits save without regenerating the plan", () => {
+    it("Config select is enabled when phase is 'Draft'", async () => {
+      // Given: component rendered with Draft phase
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml", source: "local" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Draft" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // Then: config select is enabled (Draft allows changing the config)
+      const configSelect = screen.getByLabelText("Config") as HTMLSelectElement;
+      expect(configSelect).not.toBeDisabled();
+    });
+
+    it("shows a plain 'Save' button (not 'Save & Regenerate Plan') when config changes in Draft phase", async () => {
+      // Given: Draft-phase session with a selectable config
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml", source: "local" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Draft" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: changing the config
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+
+      // Then: the plain Save button appears, and the regenerate variant does not
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /^save$/i })).toBeInTheDocument();
+      });
+      expect(screen.queryByRole("button", { name: /save & regenerate plan/i })).not.toBeInTheDocument();
+    });
+
+    it("calls updateSessionSettings but not regenerateSessionPlan when saving a config change in Draft phase", async () => {
+      // Given: Draft-phase session with a selectable config
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml", source: "local" }]);
+      render(<SessionConfigEditor {...defaultProps} phase="Draft" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: changing the config and clicking Save
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+      const saveBtn = await screen.findByRole("button", { name: /^save$/i });
+      await userEvent.click(saveBtn);
+
+      // Then: settings are persisted via the plain save path, and no plan regeneration is triggered
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(
+          "session-1",
+          expect.objectContaining({ configPath: "/path/custom.yaml" })
+        );
+      });
+      expect(mockRegenerate).not.toHaveBeenCalled();
+    });
+  });
 });

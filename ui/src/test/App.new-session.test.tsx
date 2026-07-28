@@ -1649,6 +1649,47 @@ describe("App: New Session -- listConfigs reacts to source changes", () => {
   });
 });
 
+// --- ConfigSelect grouping wiring in NewSessionForm ---------------------------
+
+describe("App: New Session -- ConfigSelect groups entries by source", () => {
+  beforeEach(setupNewSessionMocks);
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("groups local and user entries under their respective optgroups using the form's baseDir", async () => {
+    // Given: listConfigs returns one local and one user entry for the current baseDir
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastWorkingDir: "/my/project",
+      recentWorkingDirs: [],
+    });
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/my/project/cruise.yaml", name: "cruise.yaml", source: "local" },
+      { path: "/home/user/.config/cruise/default.yaml", name: "default.yaml", source: "user" },
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    // Then: the rendered select groups each entry under the matching optgroup label
+    const select = await screen.findByLabelText("Config");
+    await waitFor(() => {
+      expect(select.querySelectorAll("option")).toHaveLength(3); // Auto + 2 entries
+    });
+    const groups = Array.from(select.querySelectorAll("optgroup"));
+    const localGroup = groups.find((g) => g.label === "Base dir (/my/project)");
+    const userGroup = groups.find((g) => g.label === "User config (/home/user/.config/cruise)");
+
+    expect(localGroup?.querySelector("option")?.getAttribute("value")).toBe(
+      "/my/project/cruise.yaml"
+    );
+    expect(userGroup?.querySelector("option")?.getAttribute("value")).toBe(
+      "/home/user/.config/cruise/default.yaml"
+    );
+  });
+});
+
 // --- Planning badge during create_session (Draft + FixingGuard flow) ----------
 //
 // These tests document the fix for: GUI shows "Awaiting Approval" during LLM
