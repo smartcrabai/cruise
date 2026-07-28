@@ -191,6 +191,22 @@ describe("App: Post-plan session editing - UI visibility", () => {
       expect(screen.queryByText("Session Settings")).toBeNull();
     });
   });
+
+  it("shows session settings editor for Draft session", async () => {
+    // Draft sessions allow changing the config file before a plan is generated
+    // (save-only -- Generate Plan stays a separate, explicit action).
+    const session = makeSession({ phase: "Draft", planAvailable: false });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+    vi.mocked(commands.getSession).mockResolvedValue(session);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Session Settings")).toBeInTheDocument();
+    });
+  });
 });
 
 describe("App: Post-plan session editing - skip-only save", () => {

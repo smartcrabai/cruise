@@ -146,10 +146,15 @@ export interface DirEntry {
 
 // --- Session creation ---------------------------------------------------------
 
+/** Where a config file was discovered by the backend. */
+export type ConfigEntrySource = "local" | "user";
+
 export interface ConfigEntry {
   path: string;
   name: string;
   description?: string;
+  /** Absent only for the synthetic "current config" entry injected by SessionConfigEditor. */
+  source?: ConfigEntrySource;
 }
 
 export interface NewSessionHistorySummary {

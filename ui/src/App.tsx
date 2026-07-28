@@ -41,6 +41,7 @@ import {
 } from "./lib/commands";
 import { notifyDesktop } from "./lib/desktopNotifications";
 import { AskUserPanel } from "./components/AskUserPanel";
+import { ConfigSelect } from "./components/ConfigSelect";
 import { DirectoryPicker } from "./components/DirectoryPicker";
 import { ImageAttachments } from "./components/ImageAttachments";
 import { RepoPicker } from "./components/RepoPicker";
@@ -824,6 +825,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     sessionId: session.id,
     baseDir: session.baseDir,
     configPath: session.configPath,
+    repo: session.repo,
     skippedSteps: session.skippedSteps,
     phase: session.phase,
     currentStep: session.currentStep,
@@ -999,7 +1001,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           )}
         </div>
 
-        {(session.phase === "Planned" || session.phase === "Failed" || session.phase === "Suspended") && (
+        {(session.phase === "Draft" || session.phase === "Planned" || session.phase === "Failed" || session.phase === "Suspended") && (
           <div className="border-b border-gray-200 dark:border-gray-800 pb-4">
             <h3 className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">Session Settings</h3>
             <SessionConfigEditor {...sessionConfigEditorCommonProps} />
@@ -1699,20 +1701,14 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         {/* Config selector */}
         <div className="space-y-1.5">
           <label htmlFor="config-select" className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Config</label>
-          <select
+          <ConfigSelect
             id="config-select"
             value={configPath}
-            onChange={(e) => set("configPath", e.target.value)}
+            onChange={(v) => set("configPath", v)}
             disabled={isGenerating}
-            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
-          >
-            <option value="">Auto (repo / ~/.cruise / builtin)</option>
-            {configs.map((c) => (
-              <option key={c.path} value={c.path}>
-                {c.description ? `${c.name} — ${c.description}` : c.name}
-              </option>
-            ))}
-          </select>
+            configs={configs}
+            baseDir={baseDir || "."}
+          />
         </div>
 
         {/* Skip steps */}

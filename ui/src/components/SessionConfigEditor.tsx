@@ -3,12 +3,15 @@ import { Channel } from "@tauri-apps/api/core";
 import type { ConfigEntry, PlanEvent, SkippableStepDto } from "../types";
 import { getNewSessionConfigDefaults, listConfigs, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";
 import { collectExpandedStepIds } from "../lib/stepUtils";
+import { ConfigSelect } from "./ConfigSelect";
 import { Spinner } from "./Spinner";
 
 interface SessionConfigEditorProps {
   sessionId: string;
   baseDir: string;
   configPath?: string;
+  /** Repo slug ("owner/repo") when this session is repo-backed; forwarded to `listConfigs`. */
+  repo?: string;
   skippedSteps: string[];
   /** Current session phase — controls which fields are editable. Defaults to "Planned". */
   phase?: import("../types").SessionPhase;
@@ -26,6 +29,7 @@ export function SessionConfigEditor({
   sessionId,
   baseDir,
   configPath,
+  repo,
   skippedSteps,
   phase = "Planned",
   currentStep,
@@ -47,6 +51,7 @@ export function SessionConfigEditor({
   const [error, setError] = useState<string | null>(null);
 
   const isFailedOrSuspended = phase === "Failed" || phase === "Suspended";
+  const isDraft = phase === "Draft";
 
   // Ref to read the latest skippedSteps in the config-loading effect without
   // re-triggering it on every parent re-render (array reference changes after save).
@@ -59,7 +64,7 @@ export function SessionConfigEditor({
   useEffect(() => {
     let active = true;
     const currentConfig = configPath ?? "";
-    void listConfigs()
+    void listConfigs(repo ? { repo } : { baseDir: baseDir || "." })
       .then((c) => {
         if (active) {
           if (currentConfig && !c.some((cfg) => cfg.path === currentConfig)) {
@@ -78,7 +83,7 @@ export function SessionConfigEditor({
     return () => {
       active = false;
     };
-  }, [configPath]);
+  }, [configPath, baseDir, repo]);
 
   useEffect(() => {
     let active = true;
@@ -272,20 +277,14 @@ export function SessionConfigEditor({
         >
           Config
         </label>
-        <select
+        <ConfigSelect
           id="session-config-select"
           value={selectedConfigPath}
-          onChange={(e) => setSelectedConfigPath(e.target.value)}
+          onChange={setSelectedConfigPath}
           disabled={isDisabled || isFailedOrSuspended}
-          className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50"
-        >
-          <option value="">Auto (repo / ~/.cruise / builtin)</option>
-          {configs.map((c) => (
-            <option key={c.path} value={c.path}>
-              {c.description ? `${c.name} — ${c.description}` : c.name}
-            </option>
-          ))}
-        </select>
+          configs={configs}
+          baseDir={baseDir}
+        />
       </div>
 
       {(configSteps.length > 0 || afterPrSteps.length > 0) && (
@@ -337,7 +336,7 @@ export function SessionConfigEditor({
       )}
 
       <div className="flex gap-2">
-        {hasConfigChanged && (
+        {hasConfigChanged && !isDraft && (
           <button
             type="button"
             onClick={() => void handleSaveAndRegenerate()}
