@@ -16,7 +16,7 @@ interface SessionConfigEditorProps {
   currentStep?: string;
   onSessionUpdated: (session: import("../types").Session) => void;
   onPlanRegenerated: (content: string) => void;
-  onRegeneratingChange?: (isRegenerating: boolean) => void;
+  onBusyChange?: (isBusy: boolean) => void;
   onError: (error: string) => void;
   onAskUserRequired?: () => void;
   disabled?: boolean;
@@ -31,7 +31,7 @@ export function SessionConfigEditor({
   currentStep,
   onSessionUpdated,
   onPlanRegenerated,
-  onRegeneratingChange,
+  onBusyChange,
   onError,
   onAskUserRequired,
   disabled = false,
@@ -197,6 +197,7 @@ export function SessionConfigEditor({
     Array.from(selectedSkippedSteps).some((id) => !skippedSteps.includes(id));
   const hasCurrentStepChanged =
     isFailedOrSuspended && selectedCurrentStep !== (currentStep ?? "");
+  const hasAnyChange = hasConfigChanged || hasSkipChanged || hasCurrentStepChanged;
 
   const buildSettings = () => {
     const base: { configPath?: string; skippedSteps: string[]; currentStep?: string | null } = {
@@ -212,7 +213,7 @@ export function SessionConfigEditor({
   const handleSaveAndRegenerate = async () => {
     setError(null);
     setIsRegenerating(true);
-    onRegeneratingChange?.(true);
+    onBusyChange?.(true);
     try {
       const updated = await updateSessionSettings(sessionId, buildSettings());
       onSessionUpdated(updated);
@@ -235,13 +236,14 @@ export function SessionConfigEditor({
       onError(msg);
     } finally {
       setIsRegenerating(false);
-      onRegeneratingChange?.(false);
+      onBusyChange?.(false);
     }
   };
 
-  const handleSkipOnlySave = async () => {
+  const handleSaveOnly = async () => {
     setError(null);
     setIsSaving(true);
+    onBusyChange?.(true);
     try {
       const updated = await updateSessionSettings(sessionId, buildSettings());
       onSessionUpdated(updated);
@@ -251,6 +253,7 @@ export function SessionConfigEditor({
       onError(msg);
     } finally {
       setIsSaving(false);
+      onBusyChange?.(false);
     }
   };
 
@@ -327,8 +330,14 @@ export function SessionConfigEditor({
         </div>
       )}
 
+      {hasConfigChanged && (
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          Saving without regenerating keeps the existing plan, which may not match the new config.
+        </p>
+      )}
+
       <div className="flex gap-2">
-        {hasConfigChanged ? (
+        {hasConfigChanged && (
           <button
             type="button"
             onClick={() => void handleSaveAndRegenerate()}
@@ -344,17 +353,22 @@ export function SessionConfigEditor({
               "Save & Regenerate Plan"
             )}
           </button>
-        ) : (hasSkipChanged || hasCurrentStepChanged) ? (
+        )}
+        {hasAnyChange && (
           <button
             type="button"
-            onClick={() => void handleSkipOnlySave()}
+            onClick={() => void handleSaveOnly()}
             disabled={isDisabled}
-            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`px-4 py-2 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+              hasConfigChanged
+                ? "border border-blue-600 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+                : "bg-blue-600 text-white hover:bg-blue-700"
+            }`}
           >
             {isSaving ? "Saving..." : "Save"}
           </button>
-        ) : null}
-        {(hasConfigChanged || hasSkipChanged || hasCurrentStepChanged) && (
+        )}
+        {hasAnyChange && (
           <button
             type="button"
             onClick={() => {
