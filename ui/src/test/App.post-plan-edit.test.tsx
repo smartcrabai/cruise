@@ -362,6 +362,7 @@ describe("App: Post-plan session editing - config change with replan", () => {
     const configSelect = screen.getByLabelText("Config");
     fireEvent.change(configSelect, { target: { value: "/Users/takumi/.cruise/minimal.yaml" } });
 
+    // Clicking the exact "Save & Regenerate Plan" button still regenerates the plan.
     const saveButton = await screen.findByRole("button", { name: "Save & Regenerate Plan" });
     await userEvent.click(saveButton);
 
@@ -371,6 +372,40 @@ describe("App: Post-plan session editing - config change with replan", () => {
         expect.anything()
       );
     });
+  });
+
+  it("calls updateSessionSettings but not regenerateSessionPlan when clicking plain Save after a config change", async () => {
+    vi.mocked(commands.updateSessionSettings).mockResolvedValue({
+      ...makeSession(),
+      configSource: "minimal.yaml",
+    });
+
+    const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+    vi.mocked(commands.getSession).mockResolvedValue(session);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Session Settings")).toBeInTheDocument();
+    });
+
+    const configSelect = screen.getByLabelText("Config");
+    fireEvent.change(configSelect, { target: { value: "/Users/takumi/.cruise/minimal.yaml" } });
+
+    // Plain "Save" must persist the change without regenerating the plan.
+    const saveButton = await screen.findByRole("button", { name: "Save" });
+    await userEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(commands.updateSessionSettings).toHaveBeenCalledWith(
+        "session-1",
+        expect.objectContaining({ configPath: "/Users/takumi/.cruise/minimal.yaml" })
+      );
+    });
+    expect(commands.regenerateSessionPlan).not.toHaveBeenCalled();
   });
 
   it("updates Plan tab content after plan regeneration completes", async () => {
@@ -439,6 +474,38 @@ describe("App: Post-plan session editing - config change with replan", () => {
     fireEvent.change(configSelect, { target: { value: "/Users/takumi/.cruise/minimal.yaml" } });
 
     const saveButton = await screen.findByRole("button", { name: "Save & Regenerate Plan" });
+    await userEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Fix" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
+      // Save must be disabled too, to prevent a conflicting save mid-regeneration.
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    });
+  });
+
+  it("disables Approve/Fix/Ask while plain Save is in progress", async () => {
+    vi.mocked(commands.updateSessionSettings).mockImplementationOnce(
+      () => new Promise(() => {})
+    );
+
+    const session = makeSession({ phase: "Awaiting Approval", planAvailable: true });
+    vi.mocked(commands.listSessions).mockResolvedValue([session]);
+    vi.mocked(commands.getSession).mockResolvedValue(session);
+
+    render(<App />);
+    await waitFor(() => screen.getByText("test task"));
+    await userEvent.click(screen.getByRole("button", { name: /test task/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Session Settings")).toBeInTheDocument();
+    });
+
+    const configSelect = screen.getByLabelText("Config");
+    fireEvent.change(configSelect, { target: { value: "/Users/takumi/.cruise/minimal.yaml" } });
+
+    const saveButton = await screen.findByRole("button", { name: "Save" });
     await userEvent.click(saveButton);
 
     await waitFor(() => {
