@@ -499,7 +499,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [showPublishIssueConfirm, setShowPublishIssueConfirm] = useState(false);
-  const [isConfigRegenerating, setIsConfigRegenerating] = useState(false);
+  const [isConfigBusy, setIsConfigBusy] = useState(false);
   const logEndRef = useRef<HTMLSpanElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -552,7 +552,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     setAskError("");
     setShowDeleteConfirm(false);
     setShowDiscardConfirm(false);
-    setIsConfigRegenerating(false);
+    setIsConfigBusy(false);
   }, [session.id]);
 
   // Clear the ephemeral fixingSessionIds entry from App when this runner unmounts.
@@ -810,8 +810,8 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   // isApprovalReady() already checks !session.fixInProgress, so only the local
   // ephemeral flag needs to be forwarded to suppress buttons while the request
   // is in flight within this component instance.
-  const actions = getSessionActions(session, status, replanPhase === "generating" || isConfigRegenerating);
-  const notBusy = replanPhase === "idle" && askPhase === "idle" && !isConfigRegenerating;
+  const actions = getSessionActions(session, status, replanPhase === "generating" || isConfigBusy);
+  const notBusy = replanPhase === "idle" && askPhase === "idle" && !isConfigBusy;
   const canShowFix = actions.showFix && notBusy;
   const canShowAsk = actions.showAsk && notBusy;
 
@@ -831,7 +831,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     currentStep: session.currentStep,
     onSessionUpdated,
     onPlanRegenerated: setPlanContent,
-    onRegeneratingChange: setIsConfigRegenerating,
+    onBusyChange: setIsConfigBusy,
     onError: (error: string) => { onToast({ kind: "failed", sessionInput: session.input, detail: error }); },
     onAskUserRequired: () => void refreshSession(),
     disabled: replanPhase === "generating",

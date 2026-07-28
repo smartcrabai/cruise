@@ -53,7 +53,7 @@ const defaultProps = {
   skippedSteps: [] as string[],
   onSessionUpdated: vi.fn(),
   onPlanRegenerated: vi.fn(),
-  onRegeneratingChange: vi.fn(),
+  onBusyChange: vi.fn(),
   onError: vi.fn(),
   disabled: false,
 };
@@ -109,6 +109,64 @@ describe("SessionConfigEditor", () => {
         expect(screen.getByRole("button", { name: /save & regenerate plan/i })).toBeInTheDocument();
       });
     });
+
+    it("'Save' button is also shown alongside 'Save & Regenerate Plan' when config is changed", async () => {
+      // Given
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: change config
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+
+      // Then: both buttons are shown so the user can save without regenerating the plan
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Save & Regenerate Plan" })).toBeInTheDocument();
+      });
+    });
+
+    it("clicking 'Save' after a config change calls updateSessionSettings but not regenerateSessionPlan", async () => {
+      // Given
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: change config and click plain "Save"
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+      const saveBtn = await screen.findByRole("button", { name: "Save" });
+      await userEvent.click(saveBtn);
+
+      // Then: settings are saved but the plan is not regenerated
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
+          configPath: "/path/custom.yaml",
+          skippedSteps: [],
+        });
+      });
+      expect(mockRegenerate).not.toHaveBeenCalled();
+    });
+
+    it("clicking 'Save & Regenerate Plan' after a config change calls both updateSessionSettings and regenerateSessionPlan", async () => {
+      // Given
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: change config and click "Save & Regenerate Plan"
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+      const regenBtn = await screen.findByRole("button", { name: "Save & Regenerate Plan" });
+      await userEvent.click(regenBtn);
+
+      // Then: both settings are saved and the plan is regenerated
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
+          configPath: "/path/custom.yaml",
+          skippedSteps: [],
+        });
+        expect(mockRegenerate).toHaveBeenCalledWith("session-1", expect.anything());
+      });
+    });
   });
 
   describe("Save button disabled state", () => {
@@ -130,6 +188,87 @@ describe("SessionConfigEditor", () => {
       // Then: Save button is rendered (change exists) but must be disabled
       const saveBtn = screen.getByRole("button", { name: /^save$/i });
       expect(saveBtn).toBeDisabled();
+    });
+
+    it("both 'Save' and 'Save & Regenerate Plan' are disabled while plain Save is in flight", async () => {
+      // Given: config changed, updateSessionSettings never resolves
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      mockUpdateSettings.mockImplementation(() => new Promise(() => {}));
+      render(<SessionConfigEditor {...defaultProps} />);
+      await waitFor(() => screen.getByLabelText("Config"));
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+
+      // When: click plain "Save"
+      const saveBtn = await screen.findByRole("button", { name: "Save" });
+      await userEvent.click(saveBtn);
+
+      // Then: both buttons become disabled so nothing else can run concurrently
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Saving..." })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Save & Regenerate Plan" })).toBeDisabled();
+      });
+    });
+  });
+
+  describe("Save failure handling", () => {
+    it("shows an error, calls onError, and re-enables 'Save' when updateSessionSettings rejects", async () => {
+      // Given: skip step changed, updateSessionSettings rejects
+      const steps = [makeStep("step-a")];
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
+      mockUpdateSettings.mockRejectedValue(new Error("save failed"));
+      const onError = vi.fn();
+      render(<SessionConfigEditor {...defaultProps} onError={onError} />);
+      await waitFor(() => screen.getByLabelText("step-a"));
+
+      // When: check step-a and click "Save"
+      await userEvent.click(screen.getByLabelText("step-a"));
+      const saveBtn = await screen.findByRole("button", { name: /^save$/i });
+      await userEvent.click(saveBtn);
+
+      // Then: the error is displayed and onError is called
+      await waitFor(() => {
+        expect(screen.getByText(/save failed/)).toBeInTheDocument();
+        expect(onError).toHaveBeenCalledWith(expect.stringContaining("save failed"));
+      });
+
+      // And: isSaving resets so the button label reverts to "Save" and is re-enabled
+      const resetSaveBtn = screen.getByRole("button", { name: "Save" });
+      expect(resetSaveBtn).not.toBeDisabled();
+    });
+  });
+
+  describe("Save-without-regenerate note", () => {
+    it("is shown only when the config has changed", async () => {
+      // Given
+      const steps = [makeStep("step-a")];
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // Then: no changes yet, so the note is absent
+      expect(
+        screen.queryByText(/Saving without regenerating keeps the existing plan/),
+      ).not.toBeInTheDocument();
+
+      // When: skip-only change
+      await userEvent.click(screen.getByLabelText("step-a"));
+
+      // Then: skip-only change does not show the note either
+      await waitFor(() => screen.getByRole("button", { name: /^save$/i }));
+      expect(
+        screen.queryByText(/Saving without regenerating keeps the existing plan/),
+      ).not.toBeInTheDocument();
+
+      // When: config is also changed
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "/path/custom.yaml");
+
+      // Then: the note appears
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Saving without regenerating keeps the existing plan/),
+        ).toBeInTheDocument();
+      });
     });
   });
 
