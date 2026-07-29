@@ -95,3 +95,6 @@ dbg_macro = "deny"
 expect_used = "deny"
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
+
+[patch.crates-io]
+asupersync = { path = "vendor/asupersync" }
