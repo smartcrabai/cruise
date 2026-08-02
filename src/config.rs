@@ -782,13 +782,48 @@ pub fn resolve_effective_max_retries(cli_value: Option<usize>, config: &Workflow
 /// Validate that every group's `max_retries` ("R") can actually take effect
 /// under the effective global loop-protection ceiling ("G").
 ///
-/// Both counters advance in lock-step on every loop-back traversal of a
-/// group's edge: the group retry gate gracefully skips the group once
-/// `group_retry_counts >= R`, while the hard `LoopProtection` error fires
-/// only once the same edge count exceeds G (`count > G`). So the edge count
-/// reaches exactly `R` (triggering the graceful skip on the next visit)
-/// without ever exceeding G, as long as `R <= G`. R is reachable only when
-/// `R <= G`; `R > G` means the hard failure fires first.
+/// The lock-step assumption -- "the group retry counter and the edge counter
+/// advance together, so `R <= G` is always safe" -- only holds for **one** of
+/// two shapes a group's `if.file-changed` retry target can take:
+///
+/// - **Case 1: the retry target re-enters the group at its own start.** The
+///   target is either the call-site step name itself (the step whose
+///   `group: <name>` invokes this group) or `"<call-site>/<first-sub-step>"`
+///   (the group's first expanded step). Here the *only* edge retraversed
+///   each retry cycle is the group-internal edge that the graceful group
+///   skip watches (`group_retry_counts >= R`), so the corresponding
+///   `edge_counts` entry and `group_retry_counts` move in lock-step: the
+///   graceful skip fires once the count reaches `R`, which is always
+///   `<= G`, so the hard `LoopProtection` failure (`count > G`) never wins
+///   the race. Safe whenever `R <= G`.
+///
+/// - **Case 2: the retry target is some other step outside the group** (e.g.
+///   an earlier step in the workflow). Each retry cycle then *also*
+///   retraverses the plain sequential edge(s) leading from that target back
+///   to the group's first step -- an edge that the group's graceful skip
+///   does not gate at all, only the global `edge_counts` check does. That
+///   edge is counted once per cycle *in addition to* the group-internal
+///   edges (it includes the initial pass-through, so it reaches `R + 1` by
+///   the time the group's own counter reaches `R`). Case 2 is therefore only
+///   safe when `R + 1 <= G`; at `R == G` the external edge's count exceeds
+///   `G` and triggers `LoopProtection` before the group ever gets to
+///   gracefully skip. (This is exactly the failure this function was
+///   hardened against: `groups.review` with `max_retries: 3`, retry target
+///   `test` outside the group, and an unset/default `G` of 3 hit
+///   `LoopProtection` on the `test -> ...` edge on its 4th traversal.)
+///
+/// When the group has no `if` block, or `if.file-changed` is unset, the
+/// group structurally never loops back on itself (nothing increments
+/// `group_retry_counts` in that case), so `max_retries` is inert. That case
+/// keeps the original `R <= G` check purely as a "this setting can never
+/// matter" guard rather than a safety requirement.
+///
+/// A group may be invoked from more than one call site. A single shared
+/// `if.file-changed` target string can structurally match at most one call
+/// site's own name, so -- erring on the safe (stricter) side -- case 1's
+/// looser `R <= G` bound is only applied when *every* referencing call site
+/// would re-enter the group at itself; if even one call site's retry target
+/// points elsewhere, case 2's `R + 1 <= G` bound is required for that group.
 ///
 /// Only groups actually referenced by a step (via `StepConfig.group`, in
 /// `steps` or `after_pr`) are checked; unreferenced group definitions are
@@ -800,41 +835,117 @@ pub fn resolve_effective_max_retries(cli_value: Option<usize>, config: &Workflow
 /// # Errors
 ///
 /// Returns an error naming the offending group, its configured `max_retries`,
-/// and the effective global ceiling, when `max_retries > effective_max_retries`.
+/// its retry target (case 2 only), and the effective global ceiling, when
+/// the case-appropriate budget check fails.
 pub fn validate_group_retry_budget(
     config: &WorkflowConfig,
     effective_max_retries: usize,
 ) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
-    let mut referenced_groups: Vec<&str> = Vec::new();
-    for step in config.steps.values().chain(config.after_pr.values()) {
-        if let Some(group_name) = step.group.as_deref()
-            && !referenced_groups.contains(&group_name)
-        {
-            referenced_groups.push(group_name);
+    // Group name -> every call-site step name (from `steps` and `after_pr`)
+    // that references it, in first-seen order. A group can have more than one
+    // call site (see `test_validate_groups_multiple_call_sites_ok`), and each
+    // one is checked below when deciding whether the lenient case 1 applies.
+    let mut group_call_sites: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (step_name, step) in config.steps.iter().chain(config.after_pr.iter()) {
+        let Some(group_name) = step.group.as_deref() else {
+            continue;
+        };
+        if let Some(entry) = group_call_sites.iter_mut().find(|(g, _)| *g == group_name) {
+            entry.1.push(step_name.as_str());
+        } else {
+            group_call_sites.push((group_name, vec![step_name.as_str()]));
         }
     }
 
-    for group_name in referenced_groups {
+    for (group_name, call_sites) in group_call_sites {
         let Some(group) = config.groups.get(group_name) else {
             continue;
         };
         let Some(r) = group.max_retries else {
             continue;
         };
-        if r > effective_max_retries {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "group '{group_name}' has max_retries: {r}, which can never take effect under \
-                 the effective global loop-protection ceiling of {effective_max_retries} \
-                 (a group's max_retries must not exceed the ceiling). Either lower \
-                 groups.{group_name}.max_retries to at most {effective_max_retries} or raise \
-                 the ceiling via `--max-retries {r}` / config `max_retries: {r}`"
-            )));
+
+        let Some(target) = group
+            .if_condition
+            .as_ref()
+            .and_then(|c| c.file_changed.as_deref())
+        else {
+            // No retry path exists structurally: keep the original guard.
+            if r > effective_max_retries {
+                return Err(CruiseError::InvalidStepConfig(unreachable_group_message(
+                    group_name,
+                    r,
+                    effective_max_retries,
+                )));
+            }
+            continue;
+        };
+
+        // The group's first expanded sub-step name, if any -- used to detect
+        // the `"<call-site>/<first-sub-step>"` re-entry shape of case 1.
+        let first_sub = group.steps.keys().next().map(String::as_str);
+        let all_call_sites_reenter_group = call_sites.iter().all(|call_site| {
+            target == *call_site
+                || first_sub.is_some_and(|sub| target == format!("{call_site}/{sub}"))
+        });
+
+        if all_call_sites_reenter_group {
+            if r > effective_max_retries {
+                return Err(CruiseError::InvalidStepConfig(unreachable_group_message(
+                    group_name,
+                    r,
+                    effective_max_retries,
+                )));
+            }
+        } else if r + 1 > effective_max_retries {
+            return Err(CruiseError::InvalidStepConfig(
+                unreachable_group_message_external_target(
+                    group_name,
+                    r,
+                    target,
+                    effective_max_retries,
+                ),
+            ));
         }
     }
 
     Ok(())
+}
+
+/// Error message for case 1 (and the no-retry-path fallback): the group's
+/// `max_retries` alone exceeds the effective ceiling.
+fn unreachable_group_message(group_name: &str, r: usize, effective_max_retries: usize) -> String {
+    format!(
+        "group '{group_name}' has max_retries: {r}, which can never take effect under \
+         the effective global loop-protection ceiling of {effective_max_retries} \
+         (a group's max_retries must not exceed the ceiling). Either lower \
+         groups.{group_name}.max_retries to at most {effective_max_retries} or raise \
+         the ceiling via `--max-retries {r}` / config `max_retries: {r}`"
+    )
+}
+
+/// Error message for case 2: the retry target lands outside the group, so
+/// one extra sequential edge is counted every retry cycle and the effective
+/// required budget is `R + 1`, not `R`.
+fn unreachable_group_message_external_target(
+    group_name: &str,
+    r: usize,
+    target: &str,
+    effective_max_retries: usize,
+) -> String {
+    let r_plus_1 = r + 1;
+    let g_minus_1 = effective_max_retries.saturating_sub(1);
+    format!(
+        "group '{group_name}' has max_retries: {r}, but its if.file-changed retry target \
+         '{target}' is outside the group, so each retry cycle counts one extra sequential \
+         edge (the jump from '{target}' back into the group) on top of the group's own \
+         internal edges -- effectively requiring a budget of {r} + 1 = {r_plus_1} under the \
+         effective global loop-protection ceiling of {effective_max_retries}. Either lower \
+         groups.{group_name}.max_retries to at most {g_minus_1} or raise the ceiling via \
+         `--max-retries {r_plus_1}` / config `max_retries: {r_plus_1}`"
+    )
 }
 
 #[cfg(test)]
@@ -3467,5 +3578,230 @@ after-pr:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // When/Then: after-pr references are validated the same way as regular steps
         assert!(validate_group_retry_budget(&config, 3).is_err());
+    }
+
+    // --- validate_group_retry_budget: case 1 vs case 2 (retry-target location) ---
+
+    /// Case 1, target == the call-site step name itself (`review-pass`).
+    fn group_config_case1_call_site_target(max_retries: usize) -> String {
+        format!(
+            r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: review-pass
+    max_retries: {max_retries}
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+"
+        )
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_case1_boundary_r_equals_g_is_accepted() {
+        // Given: case 1 (retry target is the call site itself), R == G.
+        // Regression guard: this exact boundary was the site of a past off-by-one bug.
+        let config = WorkflowConfig::from_yaml(&group_config_case1_call_site_target(3))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: lock-step holds for case 1, so R == G is safe.
+        assert!(
+            validate_group_retry_budget(&config, 3).is_ok(),
+            "case 1 with R == G must be accepted (lock-step boundary regression check)"
+        );
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_case1_r_greater_than_g_is_rejected() {
+        // Given: case 1 (retry target is the call site itself), R > G.
+        let config = WorkflowConfig::from_yaml(&group_config_case1_call_site_target(4))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        // When
+        let result = validate_group_retry_budget(&config, 3);
+        // Then: rejected, naming the group and both values
+        assert!(result.is_err());
+        let msg = err_string(result);
+        assert!(msg.contains("review"), "expected group name in: {msg}");
+        assert!(
+            msg.contains('4'),
+            "expected configured max_retries in: {msg}"
+        );
+        assert!(msg.contains('3'), "expected effective ceiling in: {msg}");
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_case1_first_substep_target_form_is_accepted() {
+        // Given: case 1's other shape -- target is "<call-site>/<first-sub-step>"
+        // instead of the bare call-site name -- with R == G.
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: review-pass/simplify
+    max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+      ai-antipattern:
+        prompt: /ai-antipattern
+steps:
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: still case 1 (re-enters the group's own first step), R == G is safe.
+        assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_case2_r_plus_1_equals_g_is_accepted() {
+        // Given: case 2 (retry target is an external step 'build'), R + 1 == G.
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: build
+    max_retries: 2
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: the extra sequential edge back into the group costs one unit of
+        // budget, so R + 1 <= G (2 + 1 == 3) is the safe boundary for case 2.
+        assert!(
+            validate_group_retry_budget(&config, 3).is_ok(),
+            "case 2 with R + 1 == G must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_case2_r_equals_g_is_rejected() {
+        // Given: the real-world failure this function was hardened for --
+        // groups.review has max_retries: 3, retry target 'test' is outside the
+        // group, and the effective ceiling is 3 (R == G, R + 1 > G).
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: test
+    max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When
+        let result = validate_group_retry_budget(&config, 3);
+        // Then: rejected -- R == G is not enough budget once the extra external
+        // edge is accounted for -- and the message names both the group and the
+        // external retry target so the user knows exactly which edge is at fault.
+        assert!(result.is_err());
+        let msg = err_string(result);
+        assert!(msg.contains("review"), "expected group name in: {msg}");
+        assert!(msg.contains("test"), "expected retry target in: {msg}");
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_no_file_changed_keeps_old_rule() {
+        // Given: the group has an `if:` block, but it does not set `file-changed`
+        // (so no retry can structurally ever happen). R > G would be rejected
+        // under the original rule regardless of what the group's steps look like.
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if: {}
+    max_retries: 4
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: falls back to the original `R > G` guard (no case-2 penalty
+        // applies since there is no retry target to jump to at all).
+        assert!(validate_group_retry_budget(&config, 3).is_err());
+        assert!(validate_group_retry_budget(&config, 4).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_ignores_unreferenced_group_with_external_target() {
+        // Given: an unreferenced group definition that would fail case 2 if it were
+        // ever wired up (R == G with an external-looking retry target).
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: nonexistent-external-step
+    max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  build:
+    command: cargo build
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: unused group definitions are harmless regardless of shape
+        assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_multiple_call_sites_requires_all_to_reenter() {
+        // Given: group 'review' is invoked from two call sites, but its single
+        // shared if.file-changed target can only match one of their names
+        // ('review-after-lib'). From 'review-after-doc's perspective the retry
+        // target is an unrelated external step, so the group as a whole must be
+        // held to case 2's stricter bound (safe side). R == G should therefore
+        // be rejected even though it would pass under case 1.
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: review-after-lib
+    max_retries: 3
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test1:
+    command: cargo test --lib
+  review-after-lib:
+    group: review
+  test2:
+    command: cargo test --doc
+  review-after-doc:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        // When/Then: rejected under case 2's R + 1 <= G bound, not accepted under case 1
+        assert!(
+            validate_group_retry_budget(&config, 3).is_err(),
+            "a shared target matching only one of several call sites must not get case 1's looser bound"
+        );
     }
 }
