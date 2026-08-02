@@ -39,7 +39,15 @@ When every provider is rate-limited, cruise waits and re-polls every 60 seconds 
 - **`env` applies to prompt steps**: top-level and per-step `env:` values are forwarded to the selected seher SDK backend. Backends that spawn Claude pass them to the child process; the in-process pi backend applies them through process environment mutation inside seher.
 - **`{model}` placeholder is irrelevant**: it only exists for the `command` array.
 - **Interactive planning**: during `cruise plan`, the SDK agent gets custom planning tools — `ask_user` (ask the user a clarifying question), `submit_plan` (write the plan markdown), and `update_plan` (find/replace a section of the existing plan). Custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers. In non-interactive runs (no TTY), `ask_user` is not registered — the prompt instead tells the agent to decide on explicitly stated assumptions — but `submit_plan` and `update_plan` remain available, and a turn that ends without a successful `submit_plan`/`update_plan` call fails instead of falling back to the agent's final message as the plan. The interview-style `cruise plan --grill` mode is built on `ask_user` and therefore requires both an `sdk:` config and interactive planning enabled (`interactive_planning: true`, the default, and no `--no-interactive-planning` flag); cruise errors out otherwise.
-- **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing.
+- **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing. The one exception is `skip_step` (see below), which is registered only on steps that need it.
+
+### `skip_step` — declaring intentional no-changes (`if.no-file-changes` steps only)
+
+A prompt step with an `if.no-file-changes` condition (`fail` or `retry`) additionally gets a `skip_step(reason)` tool: the agent calls it to declare that leaving the workspace unchanged this turn is the deliberate, correct outcome (for example, the plan explicitly says not to add tests), which disables that step's `if.no-file-changes` `fail`/`retry` for the current attempt. A plain-text alternative that needs no tool support at all — a `NO_CHANGES_INTENTIONAL: <reason>` line anchored at the start of a line in the step's output — has the same effect and works in `command:` mode too; see `flow-control.md` for both.
+
+This tool is registered **only** on steps that carry `if.no-file-changes` — not on every run step — because registering it unconditionally would have a workflow-wide side effect: a non-empty custom-tool list makes SDK-mode provider resolution require a tool-capable backend (same `require_tools` mechanism as planning above), dropping `claude-terminal` / `claude-headless` from the candidate list even for steps that never call `skip_step`. Scoping registration to `if.no-file-changes` steps keeps that narrowing local to the steps that actually need it.
+
+`skip_step` only exists in SDK mode. In classic `command:` mode, `run_command` never sees `tools` at all, so there is no way for a `command:` step to call it — the `NO_CHANGES_INTENTIONAL:` output marker is the only option there.
 
 Command and option steps behave identically in both modes.
 

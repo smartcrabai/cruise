@@ -94,6 +94,25 @@ steps:
 - Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
 - Can coexist with `if: file-changed` on the same step, but then `file-changed` is **ignored entirely** — `no-file-changes` takes over change detection.
 
+### Declaring intentional no-changes
+
+Sometimes a step legitimately makes no file changes — for example, the plan explicitly says "don't add tests for this step" — and the agent reaching that conclusion again on every retry is not a bug to route around, it's the correct answer being rejected. Two ways to tell cruise the no-change is deliberate, both of which disable **both** `fail` and `retry` for that attempt (a `fail: true` step does not abort; a `retry: true` step does not re-run):
+
+1. **Output marker** — the step's raw output contains a line starting with `NO_CHANGES_INTENTIONAL:` (leading whitespace on the line is ignored; trailing text on that line is the reason). Works with every backend — `command:` mode and both `sdk:` modes — since it's plain text scanning with no tool support required. A mid-line mention (e.g. quoted in passing, or inside a code block) does **not** count — the marker must anchor the start of a line.
+
+   ```yaml
+   steps:
+     write_tests:
+       prompt: "Add tests per {plan}. If the plan says not to add tests here, reply with a line starting with `NO_CHANGES_INTENTIONAL: <reason>` instead."
+       if:
+         no-file-changes:
+           retry: true
+   ```
+
+2. **`skip_step` tool** (SDK mode only) — the agent calls `skip_step(reason)` instead of relying on text matching. Schema-validated, so it can't be missed by an accidental typo in the marker. Only registered on prompt steps that carry an `if.no-file-changes` condition — see `sdk.md` for why (registering custom tools narrows SDK-mode provider resolution to tool-capable backends, so it's kept opt-in per step). Not available in classic `command:` mode: `run_command` never sees the tool list, so a `command:` step can only use the output marker.
+
+Either path logs the declared reason (`intentional no-changes declared: <reason>`) so the decision stays visible in the run output even though it silently changes what would otherwise be a failure/retry.
+
 ## `if: fail:` — failure handler
 
 Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a no-file-changes fail directive triggers (`if.no-file-changes.fail` or legacy `fail-if-no-file-changes`). The value is either a step name (jump) or `{ retry: true }` (re-execute the same step).

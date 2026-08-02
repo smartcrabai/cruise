@@ -84,6 +84,13 @@ pub(crate) struct StepExecOutcome {
     pub option_next: Option<String>,
     /// True if the step failed (non-zero exit, prompt error, or timeout).
     pub failed: bool,
+    /// Reason captured from a successful `skip_step` tool call (SDK mode only;
+    /// see [`crate::sdk_tools::skip_step_tool`]). `Some` means the agent
+    /// explicitly declared that making no file changes this turn was
+    /// deliberate, which disables `if.no-file-changes` `fail` / `retry` for
+    /// this attempt exactly like the output marker
+    /// ([`detect_no_changes_marker`]).
+    pub skip_step_reason: Option<String>,
 }
 
 /// Check whether the group containing `current_step` has exhausted its retry budget.
@@ -523,6 +530,7 @@ async fn step_loop_iteration(
     )?;
 
     let has_if_fail = if_fail.is_some();
+    let has_nfc_condition = nfc_cond.is_some();
     let outcome = execute_step_kind(
         ctx,
         &kind,
@@ -532,6 +540,7 @@ async fn step_loop_iteration(
         &mut state.counters.failed,
         timeout_duration,
         has_if_fail,
+        has_nfc_condition,
         current_step,
     )
     .await?;
@@ -547,7 +556,23 @@ async fn step_loop_iteration(
         && let Some(nfc) = nfc_cond
         && !tracker.has_files_changed(key)?
     {
-        if nfc.fail {
+        // The agent can declare that making no file changes this turn was a
+        // deliberate, correct decision -- either via the `skip_step` SDK tool
+        // (`outcome.skip_step_reason`) or the `NO_CHANGES_INTENTIONAL:` output
+        // marker, which works on every backend. Either one disables both
+        // `fail` and `retry` below for this attempt; a declaration is always
+        // logged so it stays visible even though it changes behavior silently
+        // from the workflow's point of view.
+        let declared_reason =
+            resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output());
+        if let Some(reason) = declared_reason {
+            let msg = format!("intentional no-changes declared: {reason}");
+            eprintln!("  {} {msg}", style("i").cyan());
+            if let Some(log) = ctx.on_step_log {
+                log("info", &msg);
+            }
+            (false, false)
+        } else if nfc.fail {
             (true, false)
         } else if nfc.retry {
             eprintln!(
@@ -685,7 +710,18 @@ async fn step_loop_iteration(
 }
 
 /// Execute a single step kind and return execution outcome.
+///
+/// `has_nfc_condition` is only consulted for `StepKind::Prompt`: it tells
+/// [`run_prompt_step`] whether to register the `skip_step` SDK tool (see
+/// [`crate::sdk_tools::skip_step_tool`]), which is restricted to prompt steps
+/// with an `if.no-file-changes` condition. See `run_prompt_step` for why: a
+/// non-empty tool list narrows SDK-mode provider resolution to tool-capable
+/// backends, so it must stay opt-in per step rather than always-on.
 #[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three step-kind arms each with their own error-handling branches"
+)]
 async fn execute_step_kind(
     ctx: &ExecutionContext<'_>,
     kind: &StepKind,
@@ -695,6 +731,7 @@ async fn execute_step_kind(
     failed: &mut usize,
     timeout: Option<Duration>,
     has_if_fail: bool,
+    has_nfc_condition: bool,
     current_step: &str,
 ) -> Result<StepExecOutcome> {
     match kind {
@@ -710,15 +747,17 @@ async fn execute_step_kind(
                 ctx.on_step_log,
                 timeout,
                 current_step,
+                has_nfc_condition,
             )
             .await;
             let elapsed = step_start.elapsed();
             match result {
-                Ok(()) => {
+                Ok(skip_step_reason) => {
                     log_step_result(elapsed, true);
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: false,
+                        skip_step_reason,
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
@@ -730,6 +769,7 @@ async fn execute_step_kind(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        skip_step_reason: None,
                     })
                 }
                 Err(e) if has_if_fail => {
@@ -741,6 +781,7 @@ async fn execute_step_kind(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        skip_step_reason: None,
                     })
                 }
                 Err(e) => Err(e),
@@ -766,6 +807,7 @@ async fn execute_step_kind(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: !success,
+                        skip_step_reason: None,
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
@@ -777,6 +819,7 @@ async fn execute_step_kind(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        skip_step_reason: None,
                     })
                 }
                 Err(e) => Err(e),
@@ -789,6 +832,7 @@ async fn execute_step_kind(
             Ok(StepExecOutcome {
                 option_next: result,
                 failed: false,
+                skip_step_reason: None,
             })
         }
     }
@@ -839,6 +883,49 @@ fn nochange_snapshot_key(step_name: &str) -> String {
 /// Build the `FileTracker` snapshot key for an if.no-file-changes check.
 fn nfc_snapshot_key(step_name: &str) -> String {
     format!("__nfc__{step_name}")
+}
+
+/// Output marker an agent can emit to declare that making no file changes this
+/// turn is a deliberate, correct decision (e.g. the plan explicitly says not to
+/// add tests) rather than the agent doing nothing.
+///
+/// Detected in a prompt step's raw output (`vars.prev_output()`) by
+/// [`detect_no_changes_marker`]. Works with every prompt-step backend (command
+/// CLI and both SDK modes) since it is plain text scanning with no tool support
+/// required -- see [`crate::sdk_tools::SKIP_STEP_TOOL`] for the SDK-only,
+/// schema-validated alternative.
+pub(crate) const NO_CHANGES_MARKER: &str = "NO_CHANGES_INTENTIONAL:";
+
+/// Scan `output` for a line beginning with [`NO_CHANGES_MARKER`] (leading
+/// whitespace on the line is ignored) and return the reason text that follows
+/// it on the same line, trimmed.
+///
+/// Returns the first matching line. The marker must anchor the start of the
+/// line: an occurrence in the middle of a line (e.g. quoted inside a code
+/// block, or mentioned in passing while explaining the convention) is not
+/// detected, which keeps incidental mentions from being misread as a real
+/// declaration.
+pub(crate) fn detect_no_changes_marker(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix(NO_CHANGES_MARKER)
+            .map(|reason| reason.trim().to_string())
+    })
+}
+
+/// Combine the two "declare intentional no-changes" signals for a step attempt
+/// into a single reason, if either fired.
+///
+/// `tool_reason` comes from a successful `skip_step` SDK tool call
+/// ([`StepExecOutcome::skip_step_reason`]); it wins when present since it is
+/// schema-validated and unambiguous. `output` is the step's raw LLM output
+/// (`vars.prev_output()`), scanned for [`NO_CHANGES_MARKER`] via
+/// [`detect_no_changes_marker`] only when no tool call was recorded.
+fn resolve_declared_no_changes(
+    tool_reason: Option<String>,
+    output: Option<&str>,
+) -> Option<String> {
+    tool_reason.or_else(|| output.and_then(detect_no_changes_marker))
 }
 
 /// Format a duration as a human-readable string.
@@ -943,7 +1030,22 @@ pub fn resolve_command_with_model(
     })
 }
 
-/// Execute a prompt step, updating variable state and returning the LLM output.
+/// Execute a prompt step, updating variable state and returning the LLM
+/// output. Returns the `skip_step` tool's captured reason, if the agent called
+/// it during this turn (`None` otherwise).
+///
+/// `register_skip_tool` gates whether the `skip_step` tool (see
+/// [`crate::sdk_tools::skip_step_tool`]) is registered for this run: the
+/// caller passes `true` only for prompt steps that carry an
+/// `if.no-file-changes` condition. This restriction is deliberate, not
+/// incidental: a non-empty `tools` list makes `run_sdk`'s `require_tools`
+/// (`executor.rs`) `true`, which narrows SDK-mode provider resolution to
+/// tool-capable backends (`pi` / `claude`) and drops the tool-incapable
+/// `claude-terminal` / `claude-headless` fallback candidates. Registering the
+/// tool unconditionally on every run step would silently narrow provider
+/// choice workflow-wide for a feature most steps never use, so it stays
+/// opt-in per step. Ordinary run steps still get no custom tools; pi's /
+/// claude's built-in tools do the file editing in SDK mode.
 #[expect(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
@@ -956,7 +1058,8 @@ pub(crate) async fn run_prompt_step(
     on_step_log: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
     timeout: Option<Duration>,
     timeout_step_name: &str,
-) -> Result<()> {
+    register_skip_tool: bool,
+) -> Result<Option<String>> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
@@ -969,11 +1072,24 @@ pub(crate) async fn run_prompt_step(
     }
     let prompt = vars.resolve(&step.prompt)?;
 
-    // Run steps execute autonomously with no custom tools (pi's built-in tools
-    // do the file editing in SDK mode), so no ask handler is needed.
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode =
         executor.step_model_or_mode(step.model.as_deref(), compiled.model.as_deref());
+
+    // Fire-and-forget capture store for `skip_step`, mirroring
+    // `submit_pr_metadata_tool` (see `worktree_pr.rs`): the handler stashes the
+    // reason here and we read it back once the turn ends, no UI round-trip
+    // needed. Only populated with a tool when `register_skip_tool` is set --
+    // see the doc comment above for why this can't be unconditional.
+    let skip_reason_store: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let tools = if register_skip_tool {
+        vec![crate::sdk_tools::skip_step_tool(std::sync::Arc::clone(
+            &skip_reason_store,
+        ))]
+    } else {
+        Vec::new()
+    };
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
@@ -1003,7 +1119,7 @@ pub(crate) async fn run_prompt_step(
             cancel_token,
             working_dir,
             stream: Some(&stream_callbacks),
-            tools: Vec::new(),
+            tools,
             resume: None,
         });
 
@@ -1030,7 +1146,11 @@ pub(crate) async fn run_prompt_step(
     vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_input(None);
 
-    Ok(())
+    let skip_step_reason = skip_reason_store
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+    Ok(skip_step_reason)
 }
 
 /// Execute a command step, updating variable state and returning whether it succeeded.
@@ -3098,6 +3218,242 @@ steps:
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
         let r = result.unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(r.run, 2, "implement + done = 2 executions (no nfc retry)");
+    }
+
+    // -- NO_CHANGES_INTENTIONAL marker: engine integration ---------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_no_changes_marker_at_line_start_disables_retry() {
+        // Given: a prompt step with if.no-file-changes.retry: true whose output
+        // declares an intentional no-change via the marker anchored at the start
+        // of a line. `command: [cat]` echoes the resolved prompt text back as the
+        // "LLM" output, so the prompt text below stands in for a model response.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [cat]
+steps:
+  implement:
+    prompt: "NO_CHANGES_INTENTIONAL: plan says not to add tests here"
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        // When: executed in a dir where no files are ever written
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: the retry is suppressed and the workflow proceeds to `done`
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let r = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            r.run, 2,
+            "implement (1 attempt, no retry) + done = 2 executions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_no_marker_still_retries_and_hits_loop_protection() {
+        // Given: the same if.no-file-changes.retry config, but the output has no
+        // marker at all (regression check: retry-until-loop-protection must be
+        // unchanged for the common no-declaration case). Uses an isolated
+        // TempDir (via run_config_with_log) rather than the repo cwd as the
+        // tracker root -- unlike a "files changed" assertion, this test needs
+        // "no files ever change" to hold for several retries in a row, which a
+        // shared cwd cannot guarantee under `cargo test --workspace` (other
+        // test binaries may write into the repo concurrently).
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [cat]
+steps:
+  implement:
+    prompt: "done, nothing to change"
+    if:
+      no-file-changes:
+        retry: true
+"#;
+        let captured: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        // When: executed with max_retries=3 (loop protection kicks in)
+        let result =
+            run_config_with_log(yaml, "", None, dir.path().to_path_buf(), 3, &[], &captured).await;
+        // Then: workflow fails with LoopProtection, exactly as without marker support
+        assert!(result.is_err(), "expected Err but got Ok");
+        let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert!(
+            matches!(err, CruiseError::LoopProtection { .. }),
+            "expected LoopProtection, got: {err:?}"
+        );
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, line)| line.contains("intentional no-changes declared")),
+            "no declaration should have been logged without a marker, got: {lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_no_changes_marker_mid_line_is_not_detected() {
+        // Given: the marker text appears in the output, but not anchored to the
+        // start of a line (e.g. mentioned in passing rather than declared) --
+        // this must NOT suppress the retry (false-positive protection). Uses an
+        // isolated TempDir tracker root for the same reason as the sibling
+        // no-marker regression test above.
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [cat]
+steps:
+  implement:
+    prompt: "Note: NO_CHANGES_INTENTIONAL: this should not count"
+    if:
+      no-file-changes:
+        retry: true
+"#;
+        let captured: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        let result =
+            run_config_with_log(yaml, "", None, dir.path().to_path_buf(), 3, &[], &captured).await;
+        assert!(result.is_err(), "expected Err but got Ok");
+        let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert!(
+            matches!(err, CruiseError::LoopProtection { .. }),
+            "mid-line marker must not be detected; expected LoopProtection, got: {err:?}"
+        );
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, line)| line.contains("intentional no-changes declared")),
+            "a mid-line marker must not be logged as a declaration, got: {lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_no_changes_marker_disables_fail() {
+        // Given: if.no-file-changes.fail: true, with the marker declared
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [cat]
+steps:
+  implement:
+    prompt: "NO_CHANGES_INTENTIONAL: nothing to change per the plan"
+    if:
+      no-file-changes:
+        fail: true
+"#;
+        // When: executed
+        let result = run_config_with_tracker(yaml, "", None, dir.path().to_path_buf()).await;
+        // Then: the workflow does NOT abort, even though `fail: true` is set
+        assert!(
+            result.is_ok(),
+            "declared intentional no-changes must suppress if.no-file-changes.fail, \
+             got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_no_changes_marker_logs_declared_reason() {
+        // Given: a marker declaration carrying a specific, greppable reason string
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = r#"
+command: [cat]
+steps:
+  implement:
+    prompt: "NO_CHANGES_INTENTIONAL: covered by existing integration tests"
+    if:
+      no-file-changes:
+        retry: true
+  done:
+    command: "echo done"
+"#;
+        let captured: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        // When: executed with on_step_log capturing engine progress lines
+        let result =
+            run_config_with_log(yaml, "", None, dir.path().to_path_buf(), 10, &[], &captured).await;
+        // Then: the reason is present in a logged "info" line
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+        let lines = captured.into_inner().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            lines.iter().any(|(stream, line)| stream == "info"
+                && line.contains("covered by existing integration tests")),
+            "expected the declared reason to appear in an info log line, got: {lines:?}"
+        );
+    }
+
+    // -- detect_no_changes_marker (pure) ----------------------------------------
+
+    #[test]
+    fn detect_no_changes_marker_extracts_reason_at_line_start() {
+        let out = detect_no_changes_marker(
+            "Implemented the change.\nNO_CHANGES_INTENTIONAL: plan says skip tests\nDone.",
+        );
+        assert_eq!(out.as_deref(), Some("plan says skip tests"));
+    }
+
+    #[test]
+    fn detect_no_changes_marker_allows_leading_whitespace() {
+        let out = detect_no_changes_marker("  NO_CHANGES_INTENTIONAL: indented reason");
+        assert_eq!(out.as_deref(), Some("indented reason"));
+    }
+
+    #[test]
+    fn detect_no_changes_marker_ignores_mid_line_occurrence() {
+        let out = detect_no_changes_marker("Note: NO_CHANGES_INTENTIONAL: not a declaration");
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn detect_no_changes_marker_returns_none_without_marker() {
+        assert_eq!(detect_no_changes_marker("nothing to see here"), None);
+    }
+
+    #[test]
+    fn detect_no_changes_marker_trims_reason_whitespace() {
+        let out = detect_no_changes_marker("NO_CHANGES_INTENTIONAL:    padded reason   ");
+        assert_eq!(out.as_deref(), Some("padded reason"));
+    }
+
+    #[test]
+    fn detect_no_changes_marker_returns_first_match_when_multiple() {
+        let out = detect_no_changes_marker(
+            "NO_CHANGES_INTENTIONAL: first reason\nNO_CHANGES_INTENTIONAL: second reason",
+        );
+        assert_eq!(out.as_deref(), Some("first reason"));
+    }
+
+    #[test]
+    fn detect_no_changes_marker_handles_empty_reason() {
+        let out = detect_no_changes_marker("NO_CHANGES_INTENTIONAL:");
+        assert_eq!(out.as_deref(), Some(""));
+    }
+
+    // -- resolve_declared_no_changes (pure) --------------------------------------
+
+    #[test]
+    fn resolve_declared_no_changes_prefers_tool_reason() {
+        let out = resolve_declared_no_changes(
+            Some("tool reason".to_string()),
+            Some("NO_CHANGES_INTENTIONAL: marker reason"),
+        );
+        assert_eq!(out.as_deref(), Some("tool reason"));
+    }
+
+    #[test]
+    fn resolve_declared_no_changes_falls_back_to_marker() {
+        let out = resolve_declared_no_changes(None, Some("NO_CHANGES_INTENTIONAL: marker reason"));
+        assert_eq!(out.as_deref(), Some("marker reason"));
+    }
+
+    #[test]
+    fn resolve_declared_no_changes_none_when_neither_present() {
+        assert_eq!(resolve_declared_no_changes(None, None), None);
+        assert_eq!(
+            resolve_declared_no_changes(None, Some("no marker here")),
+            None
+        );
     }
 
     // -- format_duration -------------------------------------------------------
