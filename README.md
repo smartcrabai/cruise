@@ -655,6 +655,15 @@ steps:
 
 The legacy `fail-if-no-file-changes: true` syntax is still supported and is equivalent to `if: { no-file-changes: { fail: true } }`.
 
+##### Declaring intentional no-changes
+
+Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** `fail` and `retry` for that attempt:
+
+- **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
+- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi` / `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
+
+Either path logs the declared reason so the decision stays visible in the run output.
+
 #### Failure handling (`if.fail`)
 
 `if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: fail` trigger.

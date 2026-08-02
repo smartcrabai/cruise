@@ -32,6 +32,8 @@ pub const UPDATE_PLAN_TOOL: &str = "update_plan";
 pub const GENERATE_TITLE_TOOL: &str = "generate_title";
 /// Tool name for the PR metadata submission tool.
 pub const SUBMIT_PR_METADATA_TOOL: &str = "submit_pr_metadata";
+/// Tool name for the intentional no-changes declaration tool.
+pub const SKIP_STEP_TOOL: &str = "skip_step";
 
 /// Shared flag recording whether the planning agent persisted the plan during
 /// the current turn. Set to `true` only by a *successful* `submit_plan` /
@@ -232,6 +234,47 @@ pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>)
                 }
             },
             "required": ["title", "body"]
+        }),
+        handler,
+    )
+}
+
+/// `skip_step` -- lets the agent declare that making no file changes this turn
+/// is a deliberate, correct decision (for example, the plan explicitly says
+/// not to add tests) rather than the agent simply doing nothing.
+///
+/// Only registered by `engine::run_prompt_step` on prompt steps that carry an
+/// `if.no-file-changes` condition (see the caller for why it isn't registered
+/// on every step). Calling it disables that step's `if.no-file-changes`
+/// `fail` / `retry` for the current attempt -- the same effect as the
+/// `NO_CHANGES_INTENTIONAL:` output marker, which works without any tool
+/// support. Fire-and-forget like [`submit_pr_metadata_tool`]: the reason is
+/// captured into `store` and read back by the caller after the turn ends.
+#[must_use]
+pub fn skip_step_tool(store: Arc<std::sync::Mutex<Option<String>>>) -> SeherTool {
+    let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
+        let reason = require_str(&input, "reason")?;
+        *store
+            .lock()
+            .map_err(|e| format!("skip_step reason store lock poisoned: {e}"))? =
+            Some(reason.to_string());
+        Ok("Acknowledged: recorded as an intentional no-change step.".to_string())
+    });
+    SeherTool::new(
+        SKIP_STEP_TOOL,
+        "Call this ONLY when making no file changes during this turn is the deliberate, \
+         correct decision -- for example, the plan explicitly says not to add tests for this \
+         step. Do not call it to excuse skipped, incomplete, or forgotten work. You must \
+         explain why leaving the workspace unchanged is correct.",
+        json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why making no file changes is the correct outcome here."
+                }
+            },
+            "required": ["reason"]
         }),
         handler,
     )
@@ -547,5 +590,65 @@ mod tests {
         let store = Arc::new(std::sync::Mutex::new(None::<PrMetadata>));
         let tool = submit_pr_metadata_tool(store);
         assert!(invoke(&tool, json!({"title": "x"})).is_err());
+    }
+
+    // -- skip_step tool --------------------------------------------------------
+
+    #[test]
+    fn skip_step_tool_has_expected_name_and_required_schema() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = skip_step_tool(store);
+        assert_eq!(tool.name, SKIP_STEP_TOOL);
+        assert_eq!(
+            tool.parameters["required"],
+            serde_json::json!(["reason"]),
+            "got: {:?}",
+            tool.parameters
+        );
+        assert_eq!(tool.parameters["type"], "object");
+        assert!(
+            tool.parameters["properties"]["reason"].is_object(),
+            "expected a `reason` property, got: {:?}",
+            tool.parameters
+        );
+    }
+
+    #[test]
+    fn skip_step_stores_reason() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = skip_step_tool(Arc::clone(&store));
+        let res = invoke(&tool, json!({"reason": "plan says not to add tests here"}));
+        assert!(res.is_ok(), "got: {res:?}");
+        assert_eq!(
+            store.lock().unwrap_or_else(|e| panic!("{e:?}")).as_deref(),
+            Some("plan says not to add tests here")
+        );
+    }
+
+    #[test]
+    fn skip_step_errors_without_reason() {
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = skip_step_tool(Arc::clone(&store));
+        let res = invoke(&tool, json!({}));
+        assert!(res.is_err(), "expected error for missing reason");
+        assert!(
+            store.lock().unwrap_or_else(|e| panic!("{e:?}")).is_none(),
+            "failed call must not populate the store"
+        );
+    }
+
+    #[test]
+    fn skip_step_last_call_wins_when_called_twice() {
+        // Direct-handler-invocation test only: exercises the store overwrite
+        // semantics, not a real multi-call agent turn (a single turn calls the
+        // handler at most once in practice).
+        let store = Arc::new(std::sync::Mutex::new(None::<String>));
+        let tool = skip_step_tool(Arc::clone(&store));
+        assert!(invoke(&tool, json!({"reason": "first"})).is_ok());
+        assert!(invoke(&tool, json!({"reason": "second"})).is_ok());
+        assert_eq!(
+            store.lock().unwrap_or_else(|e| panic!("{e:?}")).as_deref(),
+            Some("second")
+        );
     }
 }
