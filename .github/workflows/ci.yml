@@ -47,6 +47,9 @@ jobs:
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt -- --check
+      - name: Test GitHub Action provider configuration
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/test_action_provider_config.sh
 
   test-tauri:
     runs-on: ubuntu-latest

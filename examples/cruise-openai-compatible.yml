@@ -40,20 +40,17 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          # Points pi's "openai" provider slot at a self-hosted OpenAI-
-          # compatible endpoint (vLLM, LiteLLM, an internal gateway, ...)
-          # instead of api.openai.com. `openai_api_key` becomes whatever
-          # bearer token that endpoint expects (use a dummy value if it
-          # doesn't check one). `pi_models_json` is written to
-          # $RUNNER_TEMP/pi-agent/models.json for the run; see "sdk: pi --
-          # how execution works" in docs/github-actions.md.
-          openai_api_key: ${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}
-          model: openai/my-custom-model
-          plan_model: openai/my-custom-model
-          pi_models_json: |
+          # Concise generated provider registry. OpenAI-compatible adapters
+          # normalize the base URL to the endpoint path pi expects.
+          providers: |
             {
-              "openai": {
-                "baseUrl": "https://my-openai-compatible-endpoint.example.com/v1",
+              "my-gateway": {
+                "api": "openai-completions",
+                "base_url": "https://my-openai-compatible-endpoint.example.com/v1",
                 "models": ["my-custom-model"]
               }
             }
+          provider_api_keys: |
+            my-gateway=${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}
+          model: my-gateway/my-custom-model
+          plan_model: my-gateway/my-custom-model

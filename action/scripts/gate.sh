@@ -20,6 +20,7 @@ ALLOWED_BOTS="${ALLOWED_BOTS:-}"
 ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}"
 OPENAI_API_KEY_INPUT="${OPENAI_API_KEY_INPUT:-}"
 ENV_INPUT="${ENV_INPUT:-}"
+PROVIDER_API_KEYS_INPUT="${PROVIDER_API_KEYS_INPUT:-}"
 EVENT_NAME="${GITHUB_EVENT_NAME:-}"
 EVENT_PATH="${GITHUB_EVENT_PATH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
@@ -188,8 +189,8 @@ fi
 # GOOGLE_API_KEY, GROQ_API_KEY, ...) are passed through `env` rather than a
 # dedicated input, and gate.sh cannot tell which of those lines is an API
 # key -- pi itself fails with a clear MissingApiKey error if none applies.
-if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ] && [ -z "$ENV_INPUT" ]; then
-  hard_fail "'anthropic_api_key', 'openai_api_key', and 'env' are all empty -- provide an API key so pi can authenticate (either a dedicated input, or a provider key such as KIMI_API_KEY via 'env')"
+if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ] && [ -z "$PROVIDER_API_KEYS_INPUT" ] && [ -z "$ENV_INPUT" ]; then
+  hard_fail "'anthropic_api_key', 'openai_api_key', 'provider_api_keys', and 'env' are all empty -- provide an API key so pi can authenticate (a dedicated input, provider_api_keys, or a provider key such as KIMI_API_KEY via 'env')"
 fi
 
 # Parse the cruise command: the first whitespace-delimited token immediately
