@@ -106,7 +106,35 @@ The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't 
 
 ## Providers
 
-cruise always executes through `sdk: pi` in this action (see [below](#sdk-pi----how-execution-works)), and pi ships built-in definitions for several dozen providers -- each one just needs its API key, no `pi_models_json` required. Only `anthropic_api_key` and `openai_api_key` have dedicated action inputs; every other provider's key goes through the [`env`](#env-input) input as a `KEY=VALUE` line.
+cruise always executes through `sdk: pi` in this action (see [below](#sdk-pi----how-execution-works)). pi ships built-in definitions for several dozen providers -- each one just needs its API key, no `pi_models_json` required. Dedicated inputs exist for Anthropic/OpenAI keys; other built-in providers use [`env`](#env-input). For arbitrary standard OpenAI-compatible or Anthropic endpoints, use the concise `providers` plus `provider_api_keys` inputs:
+
+```yaml
+with:
+  providers: |
+    {
+      "openai-local": {
+        "api": "openai-completions",
+        "base_url": "https://gateway.example/v1",
+        "models": ["gpt-local"]
+      },
+      "anthropic-local": {
+        "api": "anthropic-messages",
+        "base_url": "https://gateway.example/anthropic/v1/messages",
+        "models": ["claude-local"]
+      }
+    }
+  provider_api_keys: |
+    openai-local=${{ secrets.OPENAI_LOCAL_KEY }}
+    anthropic-local=${{ secrets.ANTHROPIC_LOCAL_KEY }}
+  model: openai-local/gpt-local
+  plan_model: anthropic-local/claude-local
+```
+
+`openai-completions` and `openai-responses` accept an OpenAI endpoint base URL; pi normalizes the selected endpoint path. `anthropic-messages` uses the full Messages request URL, so include `/v1/messages` when the endpoint requires it. Each provider requires exactly one non-empty key. IDs, URLs, model IDs, duplicate models, unknown fields, and malformed lines are rejected before files or provider environment values are written. `providers` and `provider_api_keys` must be set together and cannot be combined with `pi_models_json`.
+
+Generated credentials are masked and stored only in `$GITHUB_ENV` as `CRUISE_PROVIDER_API_KEY_N`; generated `models.json` contains only `env:CRUISE_PROVIDER_API_KEY_N` references. Use raw `pi_models_json` for custom headers, `authHeader`, `compat`, detailed model metadata, keyless endpoints, or adapters outside these three protocols.
+
+Pick a `providers` id that doesn't collide with one of pi's own built-in provider ids (e.g. `anthropic`, `openai`) -- pi resolves a matching built-in id from that provider's own credential source first (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, etc.), so your `provider_api_keys` value would silently never be used.
 
 | Provider | pi provider id | Env var(s) | Example model reference |
 |---|---|---|---|
@@ -120,7 +148,7 @@ cruise always executes through `sdk: pi` in this action (see [below](#sdk-pi----
 | xAI (Grok) | `xai` | `XAI_API_KEY` (via `env`) | `xai/grok-4` |
 | Moonshot AI | `moonshotai` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` (via `env`) | `moonshotai/kimi-k2-turbo-preview` |
 
-Model IDs move fast -- treat the examples above as illustrative and check the provider's own docs if a reference stops resolving. Several more providers work the same way with no extra config at all (OpenRouter, Cerebras, Fireworks, Together AI, Perplexity, and others). `pi_models_json` is only needed for an endpoint pi doesn't already know about, such as a self-hosted OpenAI-compatible gateway -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml).
+Model IDs move fast -- treat the examples above as illustrative and check the provider's own docs if a reference stops resolving. Several more providers work the same way with no extra config at all (OpenRouter, Cerebras, Fireworks, Together AI, Perplexity, and others). Use the `providers`/`provider_api_keys` inputs above for an endpoint pi doesn't already know about, such as a self-hosted OpenAI-compatible gateway -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml) for a full drop-in workflow. `pi_models_json` remains available as the raw escape hatch for schemas those two inputs can't express.
 
 ### Kimi for Coding example
 
@@ -142,12 +170,12 @@ Model IDs move fast -- treat the examples above as illustrative and check the pr
 This action always forces `CRUISE_SDK=pi` in the environment before invoking cruise, regardless of what any config file says (`command:`/`sdk:` in a repo's own `cruise.yaml` are overridden). This means:
 
 - **No `claude` CLI is installed.** cruise drives `pi_agent_rust` directly, in-process.
-- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > provider API-key env vars (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the dedicated inputs, or any other provider's key -- see [Providers](#providers) -- passed through the `env` input). The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, **and** `env` are all empty.
+- **Authentication** is resolved entirely by pi, in this order: an explicit key (not exposed here) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials (only relevant on a persistent self-hosted runner where someone ran `pi login` ahead of time) > provider API-key env vars (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from dedicated inputs, generated `CRUISE_PROVIDER_API_KEY_N` values from `provider_api_keys`, or any other provider's key passed through `env`). The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, and `env` are all empty.
 - **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses pi's model-reference format, not seher mode keys:
   - `"provider/model"`, optionally with `:thinking` (e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
   - `"model"` (no `/`) -- pi searches its own model registry for that id.
   - Empty (default) -- pi auto-selects a provider/model from its built-in preference order, picking the first one with usable credentials.
-- **Custom endpoints / providers** (`pi_models_json` input): paste the raw contents of a pi `models.json` file (OpenAI-compatible endpoints, custom providers, registry overrides -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml)). The action writes it to `$RUNNER_TEMP/pi-agent/models.json` and points `PI_CODING_AGENT_DIR` at that directory for the run.
+- **Custom endpoints / providers**: the concise `providers`/`provider_api_keys` inputs generate a pi `models.json` for you -- see [Providers](#providers) above, including a worked example ([`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml)). `pi_models_json` remains the raw escape hatch for schemas those two inputs can't express: paste the raw contents of a pi `models.json` file directly. The action writes either form to `$RUNNER_TEMP/pi-agent/models.json` and points `PI_CODING_AGENT_DIR` at that directory for the run.
 
 ### Zero-config default: pi auto-selects the model
 
@@ -228,8 +256,8 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 
 | Input | Default | Description |
 |---|---|---|
-| `anthropic_api_key` | *(empty)* | Anthropic API key for pi. At least one of `anthropic_api_key`/`openai_api_key` is required. |
-| `openai_api_key` | *(empty)* | OpenAI API key for pi. At least one of `anthropic_api_key`/`openai_api_key` is required. |
+| `anthropic_api_key` | *(empty)* | Anthropic API key for pi. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, or `env` must be non-empty. |
+| `openai_api_key` | *(empty)* | OpenAI API key for pi. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, or `env` must be non-empty. |
 | `github_token` | *(empty)* | Token for GitHub API calls (permission checks, comments, PRs, pushes). Empty (default) tries the cruise-agent App OIDC token exchange first, falling back to the workflow's `GITHUB_TOKEN`; set explicitly to skip the exchange and use that token instead. See [How authentication works](#how-authentication-works). |
 | `token_exchange_url` | *(cruise-agent's hosted exchange)* | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
 | `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) in the body to trigger a run. |
@@ -238,6 +266,8 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `model` | *(empty)* | Overrides `CRUISE_MODEL`, in pi's model-reference format (`provider/model[:thinking]`, a bare model id, or empty for auto-select). |
 | `plan_model` | *(empty)* | Overrides `CRUISE_PLAN_MODEL` (the `plan`/`fix` commands' planning step), same format as `model`. |
 | `pi_models_json` | *(empty)* | Raw contents of a pi `models.json` file. When set, written to `$RUNNER_TEMP/pi-agent/models.json` with `PI_CODING_AGENT_DIR` pointed at it. |
+| `providers` | *(empty)* | Concise JSON provider map. Each value requires `api`, `base_url`, and non-empty unique `models`; supported APIs are `openai-completions`, `openai-responses`, and `anthropic-messages`. |
+| `provider_api_keys` | *(empty)* | One `provider-id=API key` per line for `providers`; blank/comment lines ignored and the first `=` separates the key. |
 | `env` | *(empty)* | Extra `KEY=VALUE` lines exported (masked) into the cruise process. Reserved names are skipped with a warning. |
 | `allowed_bots` | *(empty)* | Comma-separated bot logins (without `[bot]`) allowed to trigger cruise, or `*` for any bot. Empty blocks all bots. |
 | `git_user_name` | *(empty)* | git `user.name` for commits this action/cruise creates. Empty resolves to `cruise-agent[bot]` when the run used the App token, otherwise `github-actions[bot]`. |
@@ -272,7 +302,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 ## Troubleshooting
 
 - **Nothing happens after mentioning `@cruise`.** Check the workflow run list for a skipped/no-op run: the gate step logs why it declined (event type, action, missing trigger phrase, PR comment, or insufficient actor permission).
-- **"'anthropic_api_key', 'openai_api_key', and 'env' are all empty".** Set at least one: `anthropic_api_key`, `openai_api_key`, or a provider key via `env` (e.g. `KIMI_API_KEY=...` -- see [Providers](#providers)). No dummy value is needed for the two you're not using.
+- **"'anthropic_api_key', 'openai_api_key', 'provider_api_keys', and 'env' are all empty".** Set at least one dedicated key, `provider_api_keys` for a generated provider, or a provider key via `env` (e.g. `KIMI_API_KEY=...`).
 - **"actor has insufficient permission".** The commenter needs `write`, `maintain`, or `admin` access to the repository.
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.

@@ -15,9 +15,9 @@ inputs:
     description: >-
       Anthropic API key used by pi (the sdk: pi backend cruise always drives
       in this action). Provide an API key through `anthropic_api_key`,
-      `openai_api_key`, or another pi-supported provider's key (e.g.
-      KIMI_API_KEY) via `env` -- the gate step fails clearly when all three
-      inputs are empty.
+      `openai_api_key`, or `provider_api_keys`, or another pi-supported
+      provider's key (e.g. KIMI_API_KEY) via `env` -- the gate step fails
+      clearly when all four credential inputs are empty.
     required: false
     default: ""
   openai_api_key:
@@ -104,6 +104,20 @@ inputs:
       overridden.
     required: false
     default: ""
+  providers:
+    description: >-
+      JSON object keyed by pi provider id. Each value must contain `api`
+      (`openai-completions`, `openai-responses`, or `anthropic-messages`),
+      `base_url`, and a non-empty `models` array.
+    required: false
+    default: ""
+  provider_api_keys:
+    description: >-
+      One `provider-id=API key` per line for `providers`; blank lines and
+      lines starting with "#" are ignored. The first "=" separates the id,
+      so keys may contain "=".
+    required: false
+    default: ""
   allowed_bots:
     description: >-
       Comma-separated list of bot logins (without the "[bot]" suffix) allowed
@@ -170,6 +184,7 @@ runs:
         ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
         OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
         ENV_INPUT: ${{ inputs.env }}
+        PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
       run: ${{ github.action_path }}/action/scripts/gate.sh
 
     - name: Resolve GitHub token (cruise-agent App or fallback)
@@ -193,6 +208,8 @@ runs:
         PLAN_MODEL_INPUT: ${{ inputs.plan_model }}
         PI_MODELS_JSON: ${{ inputs.pi_models_json }}
         ENV_INPUT: ${{ inputs.env }}
+        PROVIDERS_INPUT: ${{ inputs.providers }}
+        PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
       run: ${{ github.action_path }}/action/scripts/setup-env.sh
 
     - name: Record start time
