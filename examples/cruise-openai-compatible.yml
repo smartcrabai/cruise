@@ -41,13 +41,18 @@ jobs:
       - uses: smartcrabai/cruise@v1
         with:
           # Concise generated provider registry. OpenAI-compatible adapters
-          # normalize the base URL to the endpoint path pi expects.
+          # normalize the base URL to the endpoint path pi expects. `compat`
+          # lets you match quirks of your specific gateway -- here,
+          # `max_tokens_field` covers a gateway that proxies newer
+          # reasoning-style models expecting `max_completion_tokens` instead
+          # of the usual `max_tokens` (see docs/github-actions.md#providers).
           providers: |
             {
               "my-gateway": {
                 "api": "openai-completions",
                 "base_url": "https://my-openai-compatible-endpoint.example.com/v1",
-                "models": ["my-custom-model"]
+                "models": ["my-custom-model"],
+                "compat": { "max_tokens_field": "max_completion_tokens" }
               }
             }
           provider_api_keys: |

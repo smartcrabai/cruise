@@ -86,10 +86,13 @@ inputs:
     description: >-
       Raw contents of a pi `models.json` file (custom providers / OpenAI-
       compatible endpoints / model registry overrides -- see pi's own model
-      docs for the schema). When set, this is written to
+      docs for the schema). When `providers` is also set, this is deep-merged
+      on top of the document generated from it (this wins on any key both
+      define -- it's the raw escape hatch) rather than being mutually
+      exclusive with it. The merged (or standalone) result is written to
       `$RUNNER_TEMP/pi-agent/models.json` and `PI_CODING_AGENT_DIR` is
       pointed at that directory for the duration of the run. Empty (default)
-      leaves pi's model resolution untouched.
+      leaves pi's model resolution untouched unless `providers` is set.
     required: false
     default: ""
   env:
@@ -106,16 +109,27 @@ inputs:
     default: ""
   providers:
     description: >-
-      JSON object keyed by pi provider id. Each value must contain `api`
-      (`openai-completions`, `openai-responses`, or `anthropic-messages`),
-      `base_url`, and a non-empty `models` array.
+      JSON object keyed by pi provider id (letters/digits/`.`/`_`/`-`). Each
+      value requires `api` (one of `anthropic-messages`, `openai-completions`,
+      `openai-responses`, `google-generative-ai`, `azure-openai-responses`,
+      `bedrock-converse-stream`, `cohere-chat`), `base_url`, and a non-empty
+      `models` array (each entry a bare model id string, or an object with
+      `id` plus optional `name`/`api`/`reasoning`/`input`/`cost`/
+      `context_window`/`max_tokens`/`headers`/`compat`). Optional
+      provider-level keys: `headers`, `auth_header`, `compat`, and
+      `no_auth: true` for a key-less endpoint (rejected for
+      `bedrock-converse-stream`). See docs/github-actions.md for the full
+      schema, including `cost`/`compat` field details and the built-in
+      provider-id collision warning.
     required: false
     default: ""
   provider_api_keys:
     description: >-
       One `provider-id=API key` per line for `providers`; blank lines and
-      lines starting with "#" are ignored. The first "=" separates the id,
-      so keys may contain "=".
+      lines starting with "#" are ignored, and the first "=" separates the
+      id (keys may contain "="). Required for every `providers` entry that
+      isn't `no_auth: true`; may be left empty when every entry is
+      `no_auth`. See docs/github-actions.md.
     required: false
     default: ""
   allowed_bots:
@@ -185,6 +199,8 @@ runs:
         OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
         ENV_INPUT: ${{ inputs.env }}
         PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
+        PROVIDERS_INPUT: ${{ inputs.providers }}
+        PI_MODELS_JSON: ${{ inputs.pi_models_json }}
       run: ${{ github.action_path }}/action/scripts/gate.sh
 
     - name: Resolve GitHub token (cruise-agent App or fallback)

@@ -21,6 +21,8 @@ ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}"
 OPENAI_API_KEY_INPUT="${OPENAI_API_KEY_INPUT:-}"
 ENV_INPUT="${ENV_INPUT:-}"
 PROVIDER_API_KEYS_INPUT="${PROVIDER_API_KEYS_INPUT:-}"
+PROVIDERS_INPUT="${PROVIDERS_INPUT:-}"
+PI_MODELS_JSON="${PI_MODELS_JSON:-}"
 EVENT_NAME="${GITHUB_EVENT_NAME:-}"
 EVENT_PATH="${GITHUB_EVENT_PATH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
@@ -189,8 +191,14 @@ fi
 # GOOGLE_API_KEY, GROQ_API_KEY, ...) are passed through `env` rather than a
 # dedicated input, and gate.sh cannot tell which of those lines is an API
 # key -- pi itself fails with a clear MissingApiKey error if none applies.
-if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ] && [ -z "$PROVIDER_API_KEYS_INPUT" ] && [ -z "$ENV_INPUT" ]; then
-  hard_fail "'anthropic_api_key', 'openai_api_key', 'provider_api_keys', and 'env' are all empty -- provide an API key so pi can authenticate (a dedicated input, provider_api_keys, or a provider key such as KIMI_API_KEY via 'env')"
+# `providers` and `pi_models_json` count too: since a `no_auth: true`
+# provider entry never needs a `provider_api_keys` line (setup-env.sh
+# injects a placeholder auth-override header for it instead), a `providers`
+# config where every entry is no_auth can be entirely credential-free on
+# its own, and `pi_models_json` can carry its own literal `apiKey` values --
+# neither of those is reflected in `provider_api_keys` at all.
+if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENAI_API_KEY_INPUT" ] && [ -z "$PROVIDER_API_KEYS_INPUT" ] && [ -z "$ENV_INPUT" ] && [ -z "$PROVIDERS_INPUT" ] && [ -z "$PI_MODELS_JSON" ]; then
+  hard_fail "'anthropic_api_key', 'openai_api_key', 'provider_api_keys', 'providers', 'pi_models_json', and 'env' are all empty -- provide an API key so pi can authenticate (a dedicated input, providers/provider_api_keys, pi_models_json, or a provider key such as KIMI_API_KEY via 'env')"
 fi
 
 # Parse the cruise command: the first whitespace-delimited token immediately
