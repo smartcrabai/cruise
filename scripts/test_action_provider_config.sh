@@ -403,5 +403,80 @@ if bash action/scripts/gate.sh >/dev/null; then pass "gate accepts a non-empty p
 
 export PI_MODELS_JSON=; set +e; bash action/scripts/gate.sh >"$TMP/gate.out" 2>&1; status=$?; set -e
 if [ "$status" -ne 0 ] && grep -Fq "'provider_api_keys', 'providers', 'pi_models_json', and 'env' are all empty" "$TMP/gate.out"; then pass "gate retains empty-credential failure with the updated message"; else fail "gate retains empty-credential failure with the updated message" "status=$status output=$(cat "$TMP/gate.out")"; fi
+# --- the `env` input's reserved-name handling. This loop had no coverage at
+# all, which is exactly how action.yml's and docs/github-actions.md's
+# reserved-name lists drifted from RESERVED_KEYS without anything noticing:
+# both claimed ANTHROPIC_API_KEY/OPENAI_API_KEY were reserved when the code
+# has never treated them that way, and gate.sh deliberately counts a
+# non-empty `env` as a credential source so a provider key CAN be passed
+# there. These cases pin the real behaviour so the prose can be checked
+# against something executable.
+unset PROVIDERS_INPUT PROVIDER_API_KEYS_INPUT PI_MODELS_JSON
+export PROVIDERS_INPUT= PROVIDER_API_KEYS_INPUT= PI_MODELS_JSON=
+
+env_case() { # $1=name $2=ENV_INPUT $3=jq-free predicate over $GITHUB_ENV+stdout
+  export ENV_INPUT="$2"
+  env_out="$(run_setup 2>&1)"
+}
+
+# Not reserved: both dedicated-input names pass through to $GITHUB_ENV.
+env_case "" 'ANTHROPIC_API_KEY=from-env'
+if grep -Fqx 'ANTHROPIC_API_KEY=from-env' "$GITHUB_ENV" && ! printf '%s\n' "$env_out" | grep -Fq 'ignoring'; then
+  pass "env: ANTHROPIC_API_KEY is NOT reserved (matches RESERVED_KEYS, not the old docs)"
+else
+  fail "env: ANTHROPIC_API_KEY is NOT reserved" "$env_out / $(cat "$GITHUB_ENV")"
+fi
+
+env_case "" 'OPENAI_API_KEY=from-env'
+if grep -Fqx 'OPENAI_API_KEY=from-env' "$GITHUB_ENV"; then pass "env: OPENAI_API_KEY is NOT reserved"; else fail "env: OPENAI_API_KEY is NOT reserved" "$(cat "$GITHUB_ENV")"; fi
+
+# Reserved: every literal name in RESERVED_KEYS plus the four prefix rules.
+for key in GITHUB_TOKEN GH_TOKEN PI_CODING_AGENT_DIR PATH HOME SHELL \
+           GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
+           XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME \
+           CRUISE_MODEL CRUISE_SDK CRUISE_CONFIG GITHUB_ANYTHING ACTIONS_ANYTHING RUNNER_ANYTHING; do
+  env_case "" "$key=should-be-dropped"
+  if printf '%s\n' "$env_out" | grep -Fq "::warning::cruise: ignoring 'env' entry for '$key'" \
+     && ! grep -Fqx "$key=should-be-dropped" "$GITHUB_ENV"; then
+    pass "env: $key is reserved and skipped with a warning"
+  else
+    fail "env: $key is reserved and skipped with a warning" "$env_out"
+  fi
+done
+
+# CRUISE_* gets its own message pointing at the dedicated inputs.
+env_case "" 'CRUISE_MODEL=x'
+if printf '%s\n' "$env_out" | grep -Fq 'dedicated inputs (model/plan_model/config)'; then pass "env: CRUISE_* warning names the dedicated inputs"; else fail "env: CRUISE_* warning names the dedicated inputs" "$env_out"; fi
+
+# An ordinary provider key passes through and is masked -- the pattern
+# gate.sh's error message explicitly advertises (e.g. KIMI_API_KEY via env).
+env_case "" 'KIMI_API_KEY=kimi-secret'
+if grep -Fqx 'KIMI_API_KEY=kimi-secret' "$GITHUB_ENV" && printf '%s\n' "$env_out" | grep -Fq '::add-mask::kimi-secret'; then
+  pass "env: a provider key passes through and is masked"
+else
+  fail "env: a provider key passes through and is masked" "$env_out / $(cat "$GITHUB_ENV")"
+fi
+unset ENV_INPUT
+
+# --- action.yml and docs must describe the SAME reserved names the code
+# enforces. This is the check that would have caught the drift above; it
+# reads RESERVED_KEYS out of the script rather than hardcoding a second copy.
+reserved_line="$(grep '^RESERVED_KEYS=' action/scripts/setup-env.sh | sed 's/^RESERVED_KEYS="//; s/"$//')"
+env_desc="$(sed -n '/^  env:/,/^  providers:/p' action.yml)"
+drift=""
+for key in $reserved_line; do
+  case "$key" in
+    GIT_AUTHOR_*|GIT_COMMITTER_*|XDG_*) continue ;;  # covered by a collective phrase
+  esac
+  printf '%s' "$env_desc" | grep -Fq "$key" || drift="$drift $key(missing-from-action.yml)"
+  grep -Fq "\`$key\`" docs/github-actions.md || drift="$drift $key(missing-from-docs)"
+done
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY; do
+  case " $reserved_line " in *" $key "*) drift="$drift $key(unexpectedly-in-RESERVED_KEYS)" ;; esac
+  printf '%s' "$env_desc" | grep -Fq "NOT reserved" || drift="$drift action.yml-missing-NOT-reserved-note"
+  break
+done
+if [ -z "$drift" ]; then pass "action.yml and docs list the same reserved names the code enforces"; else fail "action.yml and docs list the same reserved names the code enforces" "drift:$drift"; fi
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

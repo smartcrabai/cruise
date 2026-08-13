@@ -100,11 +100,13 @@ inputs:
       Extra environment variables to export into the cruise process, one
       `KEY=VALUE` per line (blank lines and lines starting with "#" are
       ignored). Each value is masked in the log before being exported.
-      Reserved names (GITHUB_TOKEN, GH_TOKEN, ANTHROPIC_API_KEY,
-      OPENAI_API_KEY, CRUISE_SDK, CRUISE_CONFIG, PI_CODING_AGENT_DIR, PATH,
-      HOME, git identity vars, XDG_* vars, and anything prefixed
-      GITHUB_/ACTIONS_/RUNNER_) are skipped with a warning instead of being
-      overridden.
+      Reserved names (GITHUB_TOKEN, GH_TOKEN, PI_CODING_AGENT_DIR, PATH,
+      HOME, SHELL, the git identity vars, the XDG_* vars, and anything
+      prefixed CRUISE_/GITHUB_/ACTIONS_/RUNNER_) are skipped with a
+      warning instead of being overridden. ANTHROPIC_API_KEY and
+      OPENAI_API_KEY are NOT reserved: passing them here, instead of or
+      alongside the dedicated anthropic_api_key/openai_api_key inputs, is a
+      supported way to satisfy the credential gate.
     required: false
     default: ""
   providers:

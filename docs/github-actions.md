@@ -265,7 +265,7 @@ Pass extra environment variables into the cruise process with the `env` input, o
       FEATURE_FLAG=true
 ```
 
-Blank lines and lines starting with `#` are ignored. Each value is masked (`::add-mask::`) before being exported. Reserved names -- `GITHUB_TOKEN`, `GH_TOKEN`, `CRUISE_SDK`, `CRUISE_CONFIG`, `PI_CODING_AGENT_DIR`, `PATH`, `HOME`, the git identity vars, the `XDG_*` vars, and anything prefixed `GITHUB_`/`ACTIONS_`/`RUNNER_` -- are skipped with a `::warning::` instead of being overridden, since the action itself manages them. `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are **not** reserved here -- passing them via `env` (instead of, or alongside, the dedicated `anthropic_api_key`/`openai_api_key` inputs) is a supported way to satisfy the credential gate.
+Blank lines and lines starting with `#` are ignored. Each value is masked (`::add-mask::`) before being exported. Reserved names -- `GITHUB_TOKEN`, `GH_TOKEN`, `PI_CODING_AGENT_DIR`, `PATH`, `HOME`, `SHELL`, the git identity vars (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`), the `XDG_*` vars, and anything prefixed `CRUISE_`/`GITHUB_`/`ACTIONS_`/`RUNNER_` -- are skipped with a `::warning::` instead of being overridden, since the action itself manages them. (`CRUISE_*` is a prefix rule, not just `CRUISE_SDK`/`CRUISE_CONFIG`: reach for the dedicated `model`/`plan_model`/`config` inputs rather than a raw `CRUISE_*` variable.) `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are **not** reserved here -- passing them via `env` (instead of, or alongside, the dedicated `anthropic_api_key`/`openai_api_key` inputs) is a supported way to satisfy the credential gate.
 
 ## exec caveats
 
@@ -363,7 +363,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 
 - **Nothing happens after mentioning `@cruise`.** Check the workflow run list for a skipped/no-op run: the gate step logs why it declined (event type, action, missing trigger phrase, PR comment, or insufficient actor permission).
 - **"'anthropic_api_key', 'openai_api_key', 'provider_api_keys', 'providers', 'pi_models_json', and 'env' are all empty".** Set at least one dedicated key, `providers`/`provider_api_keys` for a generated provider, `pi_models_json`, or a provider key via `env` (e.g. `KIMI_API_KEY=...`).
-- **"actor has insufficient permission".** The commenter needs `write`, `maintain`, or `admin` access to the repository.
+- **"actor '&lt;login&gt;' has insufficient permission: '&lt;permission&gt;'".** The commenter needs `write`, `maintain`, or `admin` access to the repository.
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
