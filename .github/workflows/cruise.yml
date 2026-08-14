@@ -54,7 +54,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: smartcrabai/cruise@36833f10063e94efee298bf3293e00019121b8ed # v1
+      - uses: smartcrabai/cruise@e599274ccea20180da858e87ef2dd497ed009d49 # v1
         with:
           providers: |
             {
