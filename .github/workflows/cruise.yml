@@ -54,7 +54,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: smartcrabai/cruise@e599274ccea20180da858e87ef2dd497ed009d49 # v1
+      # Pinned to main while the action's end-to-end path is verified; the v1
+      # tag still points at e599274, which predates the providers/
+      # provider_api_keys inputs this workflow now uses.
+      - uses: smartcrabai/cruise@a896279459514a33bdae959ed2ba325d2e139cbf # main
         with:
           providers: |
             {
