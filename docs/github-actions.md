@@ -345,6 +345,38 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `conclusion` | `success`, `failure`, or `skipped` (mention didn't match, or actor wasn't authorized). |
 | `used_app` | `"true"` if the run authenticated with a cruise-agent App installation token, `"false"` if it used `github_token`/`GITHUB_TOKEN`, or an empty string if the gate step skipped the run before the `token` step ran (mention didn't match / actor not authorized). |
 
+## Testing the action's step scripts
+
+The composite action's step scripts (`action/scripts/*.sh`) are exercised directly by the suites in `scripts/test_action_*.sh`. The suites fake the runner contract (`GITHUB_ENV`, `GITHUB_OUTPUT`, `RUNNER_TEMP`) and use PATH stubs for `gh`, `curl`, and `cruise`, so the tests are fully hermetic: everything is written under a temp directory, no network access is required, and they run on bash 3.2 as well as bash 5.
+
+| Test suite | Step scripts covered |
+|---|---|
+| `scripts/test_action_gate.sh` | `action/scripts/gate.sh` |
+| `scripts/test_action_token.sh` | `action/scripts/app-token.sh` and `action/scripts/revoke-token.sh` |
+| `scripts/test_action_config_install.sh` | `action/scripts/resolve-config.sh` and `action/scripts/install.sh` |
+| `scripts/test_action_comments.sh` | `action/scripts/comment-start.sh` and `action/scripts/finalize.sh` |
+| `scripts/test_action_run.sh` | `action/scripts/run.sh` and `action/scripts/lib/plan.sh` |
+| `scripts/test_action_provider_config.sh` | `action/scripts/setup-env.sh` and the credential gate |
+
+Run a single suite locally with:
+
+```bash
+bash scripts/test_action_<name>.sh
+```
+
+To run every suite the way CI does, loop over `scripts/test_action_*.sh`:
+
+```bash
+status=0
+for suite in scripts/test_action_*.sh; do
+  echo "== $suite"
+  bash "$suite" || status=1
+done
+exit "$status"
+```
+
+The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named `scripts/test_action_*.sh` is picked up automatically by the `Test GitHub Action step scripts` step in `.github/workflows/ci.yml`.
+
 ## Security
 
 - **Only repository collaborators can trigger cruise.** The action calls the GitHub collaborator-permission API for the commenting/mentioning user and requires write access (the API reports the `maintain` role as `write`, so maintainers qualify; `triage` and `read` do not). Bot actors are rejected unless explicitly added to `allowed_bots`.
