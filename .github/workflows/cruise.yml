@@ -54,44 +54,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Pinned to main while the action's end-to-end path is verified; the v1
-      # tag still points at e599274, which predates the providers/
-      # provider_api_keys inputs this workflow now uses.
-      - uses: smartcrabai/cruise@a896279459514a33bdae959ed2ba325d2e139cbf # main
+      - uses: smartcrabai/cruise@36833f10063e94efee298bf3293e00019121b8ed # v1
         with:
-          # TEMPORARY (end-to-end verification of the action): the
-          # opencode-go provider block below needs an OPENCODE_API_KEY
-          # repository secret, which does not exist yet -- the gate step
-          # correctly refuses to start with an empty provider key. Restore the
-          # providers/provider_api_keys/model block once the secret is added.
-          #
-          # providers: |
-          #   {
-          #     "opencode-go": {
-          #       "api": "openai-completions",
-          #       "base_url": "https://opencode.ai/zen/go/v1",
-          #       "models": [
-          #         {
-          #           "id": "deepseek-v4-flash",
-          #           "name": "DeepSeek V4 Flash",
-          #           "reasoning": true,
-          #           "input": ["text"],
-          #           "context_window": 1000000,
-          #           "max_tokens": 384000,
-          #           "compat": {
-          #             "supports_store": false,
-          #             "supports_developer_role": false,
-          #             "supports_reasoning_effort": true,
-          #             "thinking_format": "deepseek"
-          #           }
-          #         }
-          #       ]
-          #     }
-          #   }
-          # provider_api_keys: |
-          #   opencode-go=${{ secrets.OPENCODE_API_KEY }}
-          # model: opencode-go/deepseek-v4-flash
-          model: kimi-for-coding/kimi-for-coding
+          providers: |
+            {
+              "opencode-go": {
+                "api": "openai-completions",
+                "base_url": "https://opencode.ai/zen/go/v1",
+                "models": [
+                  {
+                    "id": "deepseek-v4-flash",
+                    "name": "DeepSeek V4 Flash",
+                    "reasoning": true,
+                    "input": ["text"],
+                    "context_window": 1000000,
+                    "max_tokens": 384000,
+                    "compat": {
+                      "supports_store": false,
+                      "supports_developer_role": false,
+                      "supports_reasoning_effort": true,
+                      "thinking_format": "deepseek"
+                    }
+                  }
+                ]
+              }
+            }
+          provider_api_keys: |
+            opencode-go=${{ secrets.OPENCODE_API_KEY }}
+          model: opencode-go/deepseek-v4-flash
           plan_model: kimi-for-coding/kimi-for-coding
           env: |
             KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
