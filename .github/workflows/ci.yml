@@ -47,9 +47,25 @@ jobs:
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt -- --check
-      - name: Test GitHub Action provider configuration
+
+      - name: Test GitHub Action step scripts
         if: matrix.os == 'ubuntu-latest'
-        run: bash scripts/test_action_provider_config.sh
+        run: |
+          status=0
+          log="$RUNNER_TEMP/action-suite.log"
+          for suite in scripts/test_action_*.sh; do
+            echo "== $suite"
+            bash "$suite" > "$log" 2>&1 || status=1
+            cat "$log"
+            # A suite that dies mid-run (parse error, unset variable) never
+            # reaches its `finish` call, so the tally line is the only proof
+            # that every case actually executed.
+            if ! grep -q '^Results:' "$log"; then
+              echo "::error::$suite exited without a Results line -- it aborted before finishing"
+              status=1
+            fi
+          done
+          exit "$status"
 
   test-tauri:
     runs-on: ubuntu-latest

@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
-PASS=0
-FAIL=0
-pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
-fail() { echo "FAIL: $1 -- $2"; FAIL=$((FAIL + 1)); }
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-export GITHUB_ENV="$TMP/github_env"
-export GITHUB_OUTPUT="$TMP/github_output"
-export RUNNER_TEMP="$TMP/runner"
-mkdir -p "$RUNNER_TEMP"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/action_test_harness.sh"
 
 run_setup() {
   : > "$GITHUB_ENV"
@@ -26,10 +13,8 @@ run_setup() {
 }
 assert_setup_fails() {
   local name="$1" expected="$2"
-  set +e
   output="$(run_setup 2>&1)"
   status=$?
-  set -e
   if [ "$status" -ne 0 ] && [[ "$output" == *"$expected"* ]]; then pass "$name"; else fail "$name" "status=$status output=$output"; fi
 }
 
@@ -360,7 +345,7 @@ if printf '%s\n' "$output" | grep -Fq "::warning::cruise: provider 'copilot' col
 export PROVIDERS_INPUT='{"my-totally-custom-gateway":{"api":"openai-completions","base_url":"https://x","models":["m"]}}'
 export PROVIDER_API_KEYS_INPUT='my-totally-custom-gateway=k'
 output="$(run_setup)"
-if printf '%s\n' "$output" | grep -Fq 'collides with a pi built-in provider id'; then fail "a non-colliding id produces no collision warning" "$output"; else pass "a non-colliding id produces no collision warning"; fi
+refute_contains "a non-colliding id produces no collision warning" "$output" 'collides with a pi built-in provider id'
 
 # A colliding id combined with no_auth must be a hard failure, not just the
 # advisory warning above: request dispatch matches the provider id before
@@ -378,8 +363,11 @@ assert_setup_fails "rejects no_auth on a reserved alias id (copilot)" "cannot se
 unset PROVIDERS_INPUT PROVIDER_API_KEYS_INPUT PI_MODELS_JSON
 
 : > "$GITHUB_OUTPUT"
-EVENT="$TMP/event.json"; printf '%s' '{"action":"opened","issue":{"number":1,"user":{"login":"alice","id":1},"body":"@cruise run"}}' > "$EVENT"
-GH="$TMP/gh"; printf '%s\n' '#!/usr/bin/env bash' 'echo write' > "$GH"; chmod +x "$GH"
+EVENT="$TMP/event.json"
+must printf '%s' '{"action":"opened","issue":{"number":1,"user":{"login":"alice","id":1},"body":"@cruise run"}}' > "$EVENT"
+GH="$TMP/gh"
+must printf '%s\n' '#!/usr/bin/env bash' 'echo write' > "$GH"
+must chmod +x "$GH"
 export PATH="$TMP:$PATH"; hash -r
 export GITHUB_EVENT_NAME=issues GITHUB_EVENT_PATH="$EVENT" GITHUB_REPOSITORY=owner/repo ALLOWED_BOTS= TRIGGER_PHRASE=@cruise
 # Explicitly (re)set every credential-source *_INPUT var gate.sh reads,
@@ -401,7 +389,8 @@ if bash action/scripts/gate.sh >/dev/null; then pass "gate accepts a non-empty p
 export PROVIDERS_INPUT=; export PI_MODELS_JSON='{"providers":{}}'
 if bash action/scripts/gate.sh >/dev/null; then pass "gate accepts a non-empty pi_models_json credential source"; else fail "gate accepts a non-empty pi_models_json credential source" "exit=$?"; fi
 
-export PI_MODELS_JSON=; set +e; bash action/scripts/gate.sh >"$TMP/gate.out" 2>&1; status=$?; set -e
+export PI_MODELS_JSON=
+bash action/scripts/gate.sh >"$TMP/gate.out" 2>&1; status=$?
 if [ "$status" -ne 0 ] && grep -Fq "'provider_api_keys', 'providers', 'pi_models_json', and 'env' are all empty" "$TMP/gate.out"; then pass "gate retains empty-credential failure with the updated message"; else fail "gate retains empty-credential failure with the updated message" "status=$status output=$(cat "$TMP/gate.out")"; fi
 # --- the `env` input's reserved-name handling. This loop had no coverage at
 # all, which is exactly how action.yml's and docs/github-actions.md's
@@ -462,6 +451,10 @@ unset ENV_INPUT
 # enforces. This is the check that would have caught the drift above; it
 # reads RESERVED_KEYS out of the script rather than hardcoding a second copy.
 reserved_line="$(grep '^RESERVED_KEYS=' action/scripts/setup-env.sh | sed 's/^RESERVED_KEYS="//; s/"$//')"
+if [ -z "$reserved_line" ]; then
+  echo "FATAL: could not extract RESERVED_KEYS from action/scripts/setup-env.sh" >&2
+  exit 1
+fi
 env_desc="$(sed -n '/^  env:/,/^  providers:/p' action.yml)"
 drift=""
 for key in $reserved_line; do
@@ -478,5 +471,4 @@ for key in ANTHROPIC_API_KEY OPENAI_API_KEY; do
 done
 if [ -z "$drift" ]; then pass "action.yml and docs list the same reserved names the code enforces"; else fail "action.yml and docs list the same reserved names the code enforces" "drift:$drift"; fi
 
-echo "Results: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+finish
