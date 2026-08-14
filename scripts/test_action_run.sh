@@ -29,6 +29,12 @@ mk_repo() {
   must git -C "$REPO_DIR" commit -q -m "initial commit"
   must git -C "$REPO_DIR" remote add origin "$ORIGIN_DIR"
   must git -C "$REPO_DIR" push -q -u origin main
+  # `git init --bare` names its initial HEAD from git's built-in default,
+  # which is still `master` on the runners (the harness nulls the global
+  # config, so no init.defaultBranch applies). Point origin's HEAD at the
+  # branch that actually exists, so a plain `git clone` of this fixture
+  # checks out `main` instead of landing on an unborn `master`.
+  must git -C "$ORIGIN_DIR" symbolic-ref HEAD refs/heads/main
 }
 
 # --- gh stub: dispatches on the endpoint shape, entirely via env vars so
@@ -623,7 +629,7 @@ GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
 # Advance origin's main out from under REPO_DIR via an independent clone, so
 # run.sh's own push is rejected as a non-fast-forward.
 OTHER_DIR="$TMP/other_$REPO_COUNTER"
-must git clone -q "$ORIGIN_DIR" "$OTHER_DIR"
+must git clone -q -b main "$ORIGIN_DIR" "$OTHER_DIR"
 echo "advance" >> "$OTHER_DIR/other.txt"
 must git -C "$OTHER_DIR" add other.txt
 must git -C "$OTHER_DIR" -c user.name=Other -c user.email=other@example.com commit -q -m "advance origin main"
