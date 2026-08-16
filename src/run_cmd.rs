@@ -1325,6 +1325,34 @@ steps:
             prompt.contains("plan.md"),
             "prompt should continue resolving existing variables: {prompt}"
         );
+        assert!(
+            prompt.contains("git status --short"),
+            "prompt should inspect the current worktree status: {prompt}"
+        );
+        assert!(
+            prompt.contains("git diff HEAD --"),
+            "prompt should inspect uncommitted worktree changes: {prompt}"
+        );
+        assert!(
+            prompt.contains("Read any untracked files"),
+            "prompt should cover untracked files: {prompt}"
+        );
+        assert!(
+            prompt.contains("committed branch changes"),
+            "prompt should cover committed branch changes: {prompt}"
+        );
+        assert!(
+            prompt.contains("git diff HEAD~1..HEAD"),
+            "prompt should inspect the latest committed changes: {prompt}"
+        );
+        assert!(
+            prompt.contains("actual default branch"),
+            "prompt should discover the repository's default branch: {prompt}"
+        );
+        assert!(
+            !prompt.contains("git merge-base HEAD main"),
+            "prompt must not assume that the default branch is main: {prompt}"
+        );
     }
 
     #[test]

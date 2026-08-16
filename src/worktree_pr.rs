@@ -130,7 +130,8 @@ pub async fn handle_worktree_pr(
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let (pr_title, pr_body) =
-        generate_pr_description(compiled, vars, rate_limit_retries, cancel_token).await?;
+        generate_pr_description(&ctx.path, compiled, vars, rate_limit_retries, cancel_token)
+            .await?;
 
     let pr_attempt = attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body)?;
     pr_attempt.report();
@@ -176,6 +177,7 @@ pub async fn handle_worktree_pr(
 /// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation;
 /// all other failures return empty strings (best-effort PR description).
 async fn generate_pr_description(
+    worktree_path: &Path,
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
@@ -196,6 +198,7 @@ async fn generate_pr_description(
     if executor.is_sdk() {
         let result = generate_pr_via_sdk_tool(
             &executor,
+            worktree_path,
             &pr_prompt,
             model_or_mode.as_deref(),
             rate_limit_retries,
@@ -218,7 +221,7 @@ async fn generate_pr_description(
                 env: &env,
                 on_retry: Some(&on_retry),
                 cancel_token,
-                working_dir: None,
+                working_dir: Some(worktree_path),
                 stream: None,
                 tools: Vec::new(),
                 resume: None,
@@ -249,8 +252,13 @@ async fn generate_pr_description(
     Ok((pr_title, pr_body))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PR metadata execution needs the executor, worktree, prompt, retry, environment, spinner, and cancellation state"
+)]
 async fn generate_pr_via_sdk_tool(
     executor: &crate::executor::Executor,
+    worktree_path: &Path,
     pr_prompt: &str,
     model_or_mode: Option<&str>,
     rate_limit_retries: usize,
@@ -275,7 +283,7 @@ async fn generate_pr_via_sdk_tool(
             env,
             on_retry: Some(&on_retry),
             cancel_token,
-            working_dir: None,
+            working_dir: Some(worktree_path),
             stream: None,
             tools: vec![tool],
             resume: None,
@@ -820,7 +828,7 @@ mod tests {
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_pr_description(&compiled, &mut vars, 0, Some(&token)),
+            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, Some(&token)),
         )
         .await;
 
@@ -852,7 +860,81 @@ mod tests {
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
 
         // cat echoes the prompt; the function should complete without panicking.
-        let _ = generate_pr_description(&compiled, &mut vars, 0, None).await;
+        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None).await;
         // No assertion on values — only that the function accepts None and returns without hanging.
+    }
+
+    /// Given: a command backend and a temporary worktree path
+    /// When: PR metadata generation runs
+    /// Then: the command executes from that worktree rather than the process cwd
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_pr_description_runs_in_worktree_directory() {
+        let _guard = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- step 1").unwrap_or_else(|e| panic!("{e:?}"));
+        let cwd_path = tmp.path().join("cwd.txt");
+        let compiled = minimal_compiled_workflow(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "pwd > \"$1\"; cat".to_string(),
+            "_".to_string(),
+            cwd_path.to_string_lossy().into_owned(),
+        ]);
+        let mut vars = VariableStore::new("implement feature X".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+
+        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None).await;
+
+        let expected = std::fs::canonicalize(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let actual_path = std::fs::read_to_string(&cwd_path)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .trim()
+            .to_string();
+        let actual = std::fs::canonicalize(actual_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(actual, expected);
+    }
+
+    /// Given: the SDK PR-metadata helper with a deterministic command executor
+    /// When: it runs against a temporary worktree
+    /// Then: its `PromptRun` uses that worktree as the command/agent directory
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_pr_via_sdk_tool_runs_in_worktree_directory() {
+        let _guard = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cwd_path = tmp.path().join("sdk-cwd.txt");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "pwd > \"$1\"; cat".to_string(),
+            "_".to_string(),
+            cwd_path.to_string_lossy().into_owned(),
+        ];
+        let executor = crate::executor::Executor::new(None, &command);
+        let env = std::collections::HashMap::new();
+        let spinner = crate::spinner::Spinner::start("test");
+
+        let _ = generate_pr_via_sdk_tool(
+            &executor,
+            tmp.path(),
+            "test prompt",
+            None,
+            0,
+            &env,
+            &spinner,
+            None,
+        )
+        .await;
+        drop(spinner);
+
+        let expected = std::fs::canonicalize(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let actual_path = std::fs::read_to_string(&cwd_path)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .trim()
+            .to_string();
+        let actual = std::fs::canonicalize(actual_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(actual, expected);
     }
 }

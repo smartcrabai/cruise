@@ -299,6 +299,12 @@ EOF
 write_failing_installer() {
   cat > "$FAKE_INSTALLER" <<'EOF'
 #!/bin/sh
+mkdir -p "$CRUISE_UNMANAGED_INSTALL"
+cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
+#!/bin/sh
+echo "cruise 0.0.0-fake"
+BIN
+chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
 printf 'installer-invoked-then-failed\n' >> "$STUB_LOG"
 exit 1
 EOF
@@ -394,10 +400,32 @@ if grep -q 'installer-invoked-then-failed' "$STUB_LOG"; then
 else
   fail "install: the failing installer was actually invoked before the step aborted" "$(cat "$STUB_LOG")"
 fi
-# Filed defect, not asserted: install.sh:31-34's `::error::cruise
-# installation failed` is unreachable here because `set -euo pipefail`
-# aborts the script at the `curl | sh` pipeline's non-zero exit first, so a
-# failing installer only ever surfaces as a bare non-zero status.
+assert_contains "install: a failing installer reports a clear ::error:: annotation" \
+  "$status_out" "::error::cruise installer failed for version 'latest'"
+
+# --- curl failure: the download itself must produce the same clear error ---
+new_case
+: > "$GITHUB_PATH"
+stub curl <<'SH'
+#!/usr/bin/env bash
+printf 'curl-invoked-then-failed\n' >> "$STUB_LOG"
+exit 22
+SH
+IDIR7="$TMP/install-curl-failing"
+mkdir -p "$IDIR7"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR7" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: a curl failure makes the step fail" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install: a curl failure reports a clear ::error:: annotation" \
+  "$status_out" "::error::cruise installer failed for version 'latest'"
+
+# Restore the normal download stub for the independent missing-gh case.
+stub curl <<'SH'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$STUB_LOG"
+cat "$FAKE_INSTALLER"
+SH
 
 # --- gh missing on PATH: exits non-zero with a clear error -----------------
 # GitHub-hosted ubuntu-latest ships /usr/bin/gh (cli/cli's .deb installs to
@@ -430,7 +458,7 @@ assert_contains "install: a missing gh CLI reports a clear ::error:: naming the 
 # hermetically): install.sh's `cruise --version` output is only ever the
 # fake binary's own canned string above, never a real cargo-dist build; and
 # the case where BOTH the installer succeeds AND the freshly-installed
-# `cruise` binary still fails `command -v cruise` afterward (line 31-34's
+# fake `cruise` binary still fails `command -v cruise` afterward (line 35-38's
 # "cruise installation failed" ::error::) is unreachable from a stub that
 # always drops a working binary in place -- reaching it would require an
 # installer that reports success but writes no executable, which isn't a

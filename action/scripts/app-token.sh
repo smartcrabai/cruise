@@ -52,7 +52,7 @@ if [ -z "$TOKEN_EXCHANGE_URL" ]; then
 fi
 
 if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-  use_fallback "cruise: no OIDC token available for this job (add \`permissions: id-token: write\` to use the cruise-agent App); using the workflow token"
+  use_fallback "::warning::cruise: no OIDC token available for this job (add \`permissions: id-token: write\` to use the cruise-agent App); using the workflow token"
 fi
 
 oidc_body="$(curl -sf -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}" 2>/dev/null)"

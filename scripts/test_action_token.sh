@@ -104,10 +104,8 @@ ACTIONS_ID_TOKEN_REQUEST_TOKEN=
 run_token_capture
 assert_eq "token: missing ACTIONS_ID_TOKEN_REQUEST_TOKEN falls back" "workflow-fallback-token" "$(out token)"
 assert_contains "token: missing OIDC request token names the id-token permission fix" "$output" "permissions: id-token: write"
-# Known defect (filed): app-token.sh:54-56 logs this fallback with no
-# ::warning::/::notice:: annotation, though docs/github-actions.md:287
-# implies one for this "otherwise" bucket -- not asserting the (buggy)
-# annotation-free output here.
+assert_contains "token: missing OIDC request token warns about the id-token permission fix" \
+  "$output" "::warning::cruise: no OIDC token available"
 assert_eq "token: missing OIDC request token fallback sets used_app=false" "false" "$(out used_app)"
 
 new_case
