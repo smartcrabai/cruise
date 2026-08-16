@@ -18,12 +18,16 @@ else
     installer_url="https://github.com/smartcrabai/cruise/releases/download/${CRUISE_VERSION}/cruise-installer.sh"
   fi
   echo "cruise: installing ($CRUISE_VERSION) from $installer_url"
-  curl -fsSL "$installer_url" | \
+  if ! curl -fsSL "$installer_url" | \
     CRUISE_UNMANAGED_INSTALL="$INSTALL_DIR" \
     CRUISE_NO_MODIFY_PATH=1 \
     CRUISE_DISABLE_UPDATE=1 \
     CRUISE_PRINT_QUIET=1 \
     sh
+  then
+    echo "::error::cruise installer failed for version '$CRUISE_VERSION' from $installer_url" >&2
+    exit 1
+  fi
   echo "$INSTALL_DIR" >> "$GITHUB_PATH"
   export PATH="$INSTALL_DIR:$PATH"
 fi
