@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use seher::sdk::{
     CodexBarProbe, EffortLevel, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk,
@@ -46,7 +46,8 @@ const SDK_POLL_INTERVAL_MS: u64 = 60_000;
 /// a model name in command mode, a seher `mode_key` in `sdk: seher` mode, and a
 /// raw model reference in `sdk: pi` mode (compute it with
 /// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]). `tools`
-/// and `resume` are honored only by the two SDK backends.
+/// and `resume` are honored by SDK backends except OMP, whose sessions are
+/// intentionally closed after each prompt because Cruise may rebuild its tools.
 pub struct PromptRun<'a> {
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
@@ -72,12 +73,13 @@ pub struct PromptRun<'a> {
     pub stream: Option<&'a StreamCallbacks<'a>>,
     /// Custom tools to inject (SDK mode only).
     pub tools: Vec<SeherTool>,
-    /// Prior session id to resume (SDK mode only).
+    /// Prior session id to resume (SDK mode only; OMP starts a fresh session).
     pub resume: Option<String>,
 }
 
 /// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the seher
-/// session id (for a follow-up `resume`). `session_id` is `None` in command mode.
+/// session id (for a follow-up `resume`). `session_id` is `None` in command mode
+/// and for OMP, whose sessions are closed after each Cruise prompt.
 #[derive(Debug, Clone)]
 pub struct PromptOutcome {
     pub result: PromptResult,
@@ -92,9 +94,9 @@ pub struct PromptOutcome {
 pub enum Executor {
     /// Spawn an external command (the classic `claude -p` path).
     Command { command: Vec<String> },
-    /// Drive prompts through one of the seher SDKs (`pi`, `claude`,
-    /// `claude-terminal`, `claude-headless`); the concrete backend is picked
-    /// by [`spawn_agent_stream`] from the resolved provider's `sdk` field.
+    /// Drive prompts through one of the seher SDKs (`pi`, `omp`, `pi-rust`,
+    /// `claude`, `claude-terminal`, `claude-headless`); the concrete backend is
+    /// picked by [`spawn_agent_stream`] from the resolved provider's `sdk` field.
     /// Selected by `sdk: seher` (or any `sdk:` value other than `"pi"`).
     Sdk,
     /// Drive prompts through `pi_agent_rust` directly (`sdk: pi`), bypassing
@@ -179,9 +181,9 @@ impl Executor {
 /// Resolve a non-rate-limited seher provider for `mode_key`.
 ///
 /// `require_tools` restricts candidates to SDKs that can execute custom tools
-/// (`pi` and `claude`); with `false`, the tool-incapable SDKs (`claude-terminal`
-/// and `claude-headless`) are also eligible and the caller must dispatch on
-/// `ResolvedAgent::sdk`.
+/// (`pi`, `omp`, `pi-rust`, and `claude`); with `false`, the tool-incapable SDKs
+/// (`claude-terminal` and `claude-headless`) are also eligible and the caller
+/// must dispatch on `ResolvedAgent::sdk`.
 ///
 /// `poll_for_agent` borrows a `&mut dyn LimitProbe` whose probe future is not
 /// `Send`, which would make the whole `run_sdk` future `!Send` and break the
@@ -235,6 +237,15 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Cancels an OMP runner when the SDK execution future is dropped.
+struct CancelOnDrop(seher::sdk::CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Resolves when the token is cancelled, or waits forever if no token is given.
 async fn maybe_cancelled(token: Option<&CancellationToken>) {
     match token {
@@ -282,18 +293,20 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 ///
 /// - `pi` — in-process pi engine. `resolved.model_id` is a full pi model ref
 ///   (`"<pi-provider>/<model>[:thinking]"`).
+/// - `omp` — oh-my-pi RPC subprocess. `resolved.model_id` is a full pi model ref.
+/// - `pi-rust` — seher's in-process Rust pi engine.
 /// - `claude` — `claude-agent-sdk` (supports custom tools). `resolved.model_id`
 ///   is a plain `claude --model` name.
 /// - `claude-terminal` — local `claude` CLI via tmux. No tools.
 /// - `claude-headless` — `claude -p` subprocess. No tools.
 ///
-/// `seher::sdk::is_supported_sdk` filters the candidate list to exactly these
-/// four kinds before resolution, so the match is exhaustive; an unknown kind
-/// here indicates the cruise<->seher dispatch mapping has drifted out of sync
-/// with the seher version in use and is treated as a bug.
+/// `seher::sdk::is_supported_sdk` filters the candidate list to these kinds
+/// before resolution; an unknown kind here indicates the cruise<->seher
+/// dispatch mapping has drifted out of sync with the seher version in use.
 fn spawn_agent_stream(
     resolved: &seher::sdk::ResolvedAgent,
     req: &PromptRun<'_>,
+    omp_cancel: seher::sdk::CancelToken,
 ) -> std::sync::mpsc::Receiver<StreamChunk> {
     let cwd_string = req.working_dir.map(|p| p.to_string_lossy().into_owned());
     match resolved.sdk.as_str() {
@@ -359,6 +372,39 @@ fn spawn_agent_stream(
                 req.resume.clone(),
             )
         }
+        "omp" | "pi-rust" => {
+            let resume = match resolved.sdk.as_str() {
+                "omp" => None,
+                // PiRust can only open its own on-disk sessions. A provider
+                // fallback may hand us a Claude/OMP id; starting fresh is safer
+                // than passing a foreign id that PiRust cannot open.
+                "pi-rust" => req.resume.as_deref().and_then(|id| {
+                    seher::sdk::pi_session_path(req.working_dir, id)
+                        .is_file()
+                        .then(|| id.to_string())
+                }),
+                _ => unreachable!("shared OMP/PiRust dispatch branch"),
+            };
+            let mut resolved = resolved.clone();
+            if resolved.sdk == "omp" {
+                merge_omp_env(&mut resolved, req.env);
+            } else {
+                resolved
+                    .env
+                    .extend(req.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            seher::sdk::stream_for_resolved(
+                &resolved,
+                req.prompt.to_string(),
+                seher::sdk::RunAgentOptions {
+                    working_dir: req.working_dir.map(Path::to_path_buf),
+                    resume,
+                    tools: req.tools.clone(),
+                    cancel: omp_cancel,
+                    ..Default::default()
+                },
+            )
+        }
         "pi" => {
             // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
             // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
@@ -389,6 +435,36 @@ fn spawn_agent_stream(
     }
 }
 
+/// Merge request variables into OMP without allowing workflow `PATH` values to
+/// select the helper executable. `ResolvedAgent::env` is also the launch
+/// environment used by seher's OMP candidate resolver.
+fn merge_omp_env(resolved: &mut seher::sdk::ResolvedAgent, request_env: &HashMap<String, String>) {
+    for (key, value) in request_env {
+        if matches!(key.as_str(), "PATH" | "PATHEXT") {
+            continue;
+        }
+        resolved.env.insert(key.clone(), value.clone());
+    }
+}
+
+/// OMP sessions are closed after each Cruise prompt because planning rebuilds
+/// its tool handlers between turns; seher fingerprints those handler identities
+/// and cannot resume a session with a different tool set.
+fn finish_sdk_session(
+    sdk: &str,
+    working_dir: Option<&Path>,
+    session: Option<String>,
+) -> Option<String> {
+    if sdk == "omp" {
+        if let Some(session_id) = session.as_deref() {
+            let _ = seher::sdk::close_omp_session(session_id, working_dir);
+        }
+        None
+    } else {
+        session
+    }
+}
+
 /// SDK-backend execution: resolve a non-limited provider, run it via
 /// [`spawn_agent_stream`], and fold the streamed chunks into a [`PromptOutcome`].
 async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
@@ -397,11 +473,12 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         .unwrap_or(DEFAULT_STEP_MODE_KEY)
         .to_string();
     let on_delta = req.stream.and_then(|s| s.on_stdout);
-    // Custom tools only run on tool-capable SDKs (`pi`, `claude`), and `resume`
-    // ids belong to whichever SDK started the session — every resumable turn in
-    // the planning flow starts with a tool-registering one — so both pin
-    // resolution to tool-capable providers. Tool-less fresh runs may also
-    // resolve tool-incapable SDKs (`claude-terminal`, `claude-headless`).
+    // Custom tools only run on tool-capable SDKs (`pi`, `omp`, `pi-rust`,
+    // `claude`), and `resume` ids belong to whichever SDK started the session —
+    // every resumable turn in the planning flow starts with a tool-registering
+    // one — so both pin resolution to tool-capable providers. Tool-less fresh
+    // runs may also resolve tool-incapable SDKs (`claude-terminal`,
+    // `claude-headless`).
     let require_tools = !req.tools.is_empty() || req.resume.is_some();
 
     let mut attempts = 0;
@@ -418,11 +495,28 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         // Resolution finished; the resolver thread has already exited.
         drop(abort_guard);
 
-        let rx_std = spawn_agent_stream(&resolved, &req);
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token).await?;
+        let omp_cancel = seher::sdk::CancelToken::new();
+        let _omp_cancel_guard = CancelOnDrop(omp_cancel.clone());
+        let session_slot = (resolved.sdk == "omp").then(|| Arc::new(Mutex::new(None)));
+        let rx_std = spawn_agent_stream(&resolved, &req, omp_cancel);
+        let outcome =
+            match stream_to_outcome(rx_std, on_delta, req.cancel_token, session_slot.clone()).await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if matches!(&error, CruiseError::Interrupted) {
+                        let session = session_slot
+                            .as_ref()
+                            .and_then(|slot| slot.lock().ok().and_then(|session| session.clone()));
+                        let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
+                    }
+                    return Err(error);
+                }
+            };
 
         match outcome {
             ChunkOutcome::Done { output, session } => {
+                let session = finish_sdk_session(&resolved.sdk, req.working_dir, session);
                 return Ok(PromptOutcome {
                     result: PromptResult {
                         output,
@@ -431,8 +525,12 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
                     session_id: session,
                 });
             }
-            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
-            ChunkOutcome::Limited { message, .. } => {
+            ChunkOutcome::Failed { message, session } => {
+                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
+                return Err(CruiseError::CommandError(message));
+            }
+            ChunkOutcome::Limited { message, session } => {
+                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
                 if attempts < req.max_retries {
                     attempts += 1;
                     if let Some(cb) = req.on_retry {
@@ -445,7 +543,8 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
                 }
                 return Err(CruiseError::CommandError(message));
             }
-            ChunkOutcome::Closed { .. } => {
+            ChunkOutcome::Closed { session, .. } => {
+                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
                 return Err(CruiseError::Other(
                     "seher stream closed before completion".to_string(),
                 ));
@@ -467,13 +566,21 @@ async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     cancel_token: Option<&CancellationToken>,
+    session_slot: Option<Arc<Mutex<Option<String>>>>,
 ) -> Result<ChunkOutcome> {
     // Bridge the blocking std channel to an async one so we can stream deltas
     // through the borrowed `on_delta` callback without moving it onto the
     // backend's worker thread.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
+    let bridge_session_slot = session_slot;
     std::thread::spawn(move || {
         while let Ok(chunk) = rx_std.recv() {
+            if let StreamChunk::Session(id) = &chunk
+                && let Some(slot) = &bridge_session_slot
+                && let Ok(mut session) = slot.lock()
+            {
+                *session = Some(id.clone());
+            }
             if tx.send(chunk).is_err() {
                 break;
             }
@@ -539,7 +646,7 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
     let mut attempts = 0;
     loop {
         let rx_std = runner.stream(req.prompt.to_string(), req.resume.clone());
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token).await?;
+        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
 
         match outcome {
             ChunkOutcome::Done { output, session } => {
@@ -1276,6 +1383,146 @@ mod tests {
         assert_eq!(opts.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(opts.tools.len(), 1);
         assert_eq!(opts.tools[0].name, "echo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omp_dispatch_streams_through_cruise_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let _home_guards = crate::test_support::set_fake_home(dir.path());
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
+        let script = bin_dir.join("omp");
+        let tool_marker = dir.path().join("tool-registered");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"ready","protocolVersion":1}'
+while IFS= read -r line; do
+  case "$line" in
+    *get_state*) printf '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"omp-test-session"}}\n' ;;
+    *set_host_tools*) printf '%s\n' '{"id":"seher-host-tools","type":"response","command":"set_host_tools","success":true,"data":{"toolNames":["echo"]}}'; : > "$OMP_TOOL_MARKER" ;;
+    *prompt*) if [ ! -f "$OMP_TOOL_MARKER" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_end","isTerminal":true,"messages":[]}' ;;
+    *abort*) exit 0 ;;
+  esac
+done
+"#,
+        )
+        .unwrap_or_else(|e| panic!("write fake OMP: {e}"));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("chmod fake OMP: {e}"));
+        for name in ["bunx", "npx"] {
+            let blocker = bin_dir.join(name);
+            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
+                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
+            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
+                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
+        }
+
+        let env = HashMap::new();
+        let echo = SeherTool::new(
+            "echo",
+            "Echo",
+            serde_json::json!({"type": "object"}),
+            std::sync::Arc::new(|input| Ok(input.to_string())),
+        );
+        let req = PromptRun {
+            prompt: "hello",
+            model_or_mode: None,
+            max_retries: 0,
+            env: &env,
+            on_retry: None,
+            cancel_token: None,
+            working_dir: Some(dir.path()),
+            stream: None,
+            tools: vec![echo],
+            resume: None,
+        };
+        let resolved = seher::sdk::ResolvedAgent {
+            provider: "test-provider".to_string(),
+            model_id: "test-provider/test-model:high".to_string(),
+            mode_key: "build".to_string(),
+            sdk: "omp".to_string(),
+            api: None,
+            skills: Default::default(),
+            retry: Default::default(),
+            env: [
+                (String::from("PATH"), bin_dir.display().to_string()),
+                (
+                    String::from("OMP_TOOL_MARKER"),
+                    tool_marker.display().to_string(),
+                ),
+            ]
+            .into(),
+            effort: None,
+        };
+
+        let rx = spawn_agent_stream(&resolved, &req, seher::sdk::CancelToken::new());
+        let mut output = String::new();
+        let mut session = None;
+        loop {
+            let chunk = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or_else(|e| panic!("OMP stream did not finish: {e}"));
+            match chunk {
+                StreamChunk::Session(id) => session = Some(id),
+                StreamChunk::Delta(delta) => output.push_str(&delta),
+                StreamChunk::Done(done) => {
+                    if !done.is_empty() {
+                        output = done;
+                    }
+                    break;
+                }
+                StreamChunk::Error(message) => panic!("unexpected OMP error: {message}"),
+                StreamChunk::Limit(_) => panic!("unexpected OMP rate limit"),
+            }
+        }
+
+        assert_eq!(output, "ok");
+        assert_eq!(session.as_deref(), Some("omp-test-session"));
+        let session_id = session.unwrap_or_else(|| panic!("OMP session id missing"));
+        assert!(finish_sdk_session("omp", Some(dir.path()), Some(session_id.clone())).is_none());
+        assert!(!seher::sdk::close_omp_session(
+            &session_id,
+            Some(dir.path())
+        ));
+    }
+
+    #[test]
+    fn omp_env_does_not_override_helper_search_path() {
+        let mut resolved = seher::sdk::ResolvedAgent {
+            provider: "test-provider".to_string(),
+            model_id: "test-provider/test-model".to_string(),
+            mode_key: "build".to_string(),
+            sdk: "omp".to_string(),
+            api: None,
+            skills: Default::default(),
+            retry: Default::default(),
+            env: [("PATH".to_string(), "/trusted/bin".to_string())].into(),
+            effort: None,
+        };
+        let request_env = [
+            ("PATH".to_string(), "/repo/bin".to_string()),
+            ("PATHEXT".to_string(), ".COM".to_string()),
+            ("PROJECT".to_string(), "cruise".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        merge_omp_env(&mut resolved, &request_env);
+
+        assert_eq!(
+            resolved.env.get("PATH").map(String::as_str),
+            Some("/trusted/bin")
+        );
+        assert!(!resolved.env.contains_key("PATHEXT"));
+        assert_eq!(
+            resolved.env.get("PROJECT").map(String::as_str),
+            Some("cruise")
+        );
     }
 
     #[test]
