@@ -1464,8 +1464,7 @@ mod tests {
         let home = std::path::Path::new("/home/u");
 
         // When: shortened
-        let label =
-            shorten_display_path(&cwd.join(".cruise").join("t.yaml"), cwd, Some(home));
+        let label = shorten_display_path(&cwd.join(".cruise").join("t.yaml"), cwd, Some(home));
 
         // Then: ./ prefix with nested relative path
         let expected = format!(
@@ -1671,9 +1670,12 @@ mod tests {
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
 
         // When: candidates collected
-        let env_val = env_file.to_str().unwrap_or_else(|| panic!("non-UTF8")).to_string();
-        let candidates = collect_candidates(tmp_dir.path(), Some(env_val))
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_val = env_file
+            .to_str()
+            .unwrap_or_else(|| panic!("non-UTF8"))
+            .to_string();
+        let candidates =
+            collect_candidates(tmp_dir.path(), Some(env_val)).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: env candidate label uses the shortened "./rel" form, not the absolute path
         let env_candidate = candidates
