@@ -303,6 +303,10 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// `seher::sdk::is_supported_sdk` filters the candidate list to these kinds
 /// before resolution; an unknown kind here indicates the cruise<->seher
 /// dispatch mapping has drifted out of sync with the seher version in use.
+#[expect(
+    clippy::too_many_lines,
+    reason = "backend routing keeps all SDK branches together"
+)]
 fn spawn_agent_stream(
     resolved: &seher::sdk::ResolvedAgent,
     req: &PromptRun<'_>,
@@ -1447,8 +1451,8 @@ done
             mode_key: "build".to_string(),
             sdk: "omp".to_string(),
             api: None,
-            skills: Default::default(),
-            retry: Default::default(),
+            skills: seher::sdk::ResolvedSkillsConfig::default(),
+            retry: seher::sdk::RetryConfig::default(),
             env: [
                 (String::from("PATH"), bin_dir.display().to_string()),
                 (
@@ -1499,8 +1503,8 @@ done
             mode_key: "build".to_string(),
             sdk: "omp".to_string(),
             api: None,
-            skills: Default::default(),
-            retry: Default::default(),
+            skills: seher::sdk::ResolvedSkillsConfig::default(),
+            retry: seher::sdk::RetryConfig::default(),
             env: [("PATH".to_string(), "/trusted/bin".to_string())].into(),
             effort: None,
         };
