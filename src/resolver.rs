@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 
 /// Indicates where the resolved config came from.
@@ -283,12 +282,10 @@ fn materialize_candidate(candidate: ConfigCandidate) -> Result<(String, ConfigSo
             let yaml = read_config_file(&path)?;
             Ok((yaml, ConfigSource::UserDir(path)))
         }
-        CandidateKind::Builtin => {
-            let yaml = serde_yaml::to_string(&WorkflowConfig::default_builtin()).map_err(|e| {
-                CruiseError::Other(format!("failed to serialize built-in config: {e}"))
-            })?;
-            Ok((yaml, ConfigSource::Builtin))
-        }
+        CandidateKind::Builtin => Ok((
+            crate::config::BUILTIN_CONFIG_YAML.to_string(),
+            ConfigSource::Builtin,
+        )),
     }
 }
 
@@ -1092,7 +1089,7 @@ mod tests {
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
         // When: resolved non-interactively with nothing available
-        let (_yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: falls back to built-in default
@@ -1100,6 +1097,7 @@ mod tests {
             matches!(source, ConfigSource::Builtin),
             "expected Builtin, got: {source:?}"
         );
+        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import type { SkippableStepDto } from "./types";
 
 type SessionPhase =
   | "Awaiting Approval"
@@ -33,10 +34,44 @@ const BUILTIN_CONFIG_KEY = "__builtin__";
 const TEAM_CONFIG_PATH = "/Users/takumi/.cruise/team.yaml";
 const AUTO_CONFIG_PATH = "/Users/takumi/projects/demo/cruise.yaml";
 
-const CONFIG_STEPS: Record<string, string[]> = {
-  [BUILTIN_CONFIG_KEY]: ["write-tests", "implement"],
-  [TEAM_CONFIG_PATH]: ["research", "write-tests", "implement", "review"],
-  [AUTO_CONFIG_PATH]: ["plan", "implement", "verify"],
+function makeStep(id: string): SkippableStepDto {
+  return { id, expandedStepIds: [id], children: [] };
+}
+
+function makeGroup(id: string, childIds: string[]): SkippableStepDto {
+  return {
+    id,
+    expandedStepIds: childIds.map((childId) => `${id}/${childId}`),
+    children: childIds.map((childId) => makeStep(`${id}/${childId}`)),
+  };
+}
+
+const CONFIG_STEPS: Record<string, SkippableStepDto[]> = {
+  [BUILTIN_CONFIG_KEY]: [
+    ...[
+      "mise-trust",
+      "write-test-first",
+      "implement-after-tests",
+      "verify-wiring",
+      "only-english",
+      "simplify-pass",
+    ].map(makeStep),
+    makeGroup("review-pass", ["review-uncommitted", "fix-review-result"]),
+  ],
+  [TEAM_CONFIG_PATH]: ["research", "write-tests", "implement", "review"].map(makeStep),
+  [AUTO_CONFIG_PATH]: ["plan", "implement", "verify"].map(makeStep),
+};
+
+const AFTER_PR_STEPS: Record<string, SkippableStepDto[]> = {
+  [BUILTIN_CONFIG_KEY]: [
+    "pr-ready",
+    "sync-base",
+    "resolve-conflict",
+    "push-after-sync",
+    "wait-ci",
+    "fix-ci-error",
+    "merge",
+  ].map(makeStep),
 };
 
 const sessions: MockSession[] = [
@@ -97,8 +132,12 @@ function resolveConfigKey(baseDir: string, configPath?: string | null): string {
   return BUILTIN_CONFIG_KEY;
 }
 
-function stepsFor(baseDir: string, configPath?: string | null): string[] {
+function stepsFor(baseDir: string, configPath?: string | null): SkippableStepDto[] {
   return CONFIG_STEPS[resolveConfigKey(baseDir, configPath)] ?? CONFIG_STEPS[BUILTIN_CONFIG_KEY];
+}
+
+function afterPrStepsFor(baseDir: string, configPath?: string | null): SkippableStepDto[] {
+  return AFTER_PR_STEPS[resolveConfigKey(baseDir, configPath)] ?? [];
 }
 
 function latestHistorySummary() {
@@ -126,7 +165,9 @@ function defaultSkippedSteps(baseDir: string, configPath?: string | null): strin
   const steps = stepsFor(baseDir, configPath);
   const history = historyEntries.find((entry) => entry.resolvedConfigKey === resolvedConfigKey);
   if (!history) return [];
-  return steps.filter((step) => history.skippedSteps.includes(step));
+  return steps
+    .flatMap(({ expandedStepIds }) => expandedStepIds)
+    .filter((stepId) => history.skippedSteps.includes(stepId));
 }
 
 function emitChannel(serializedChannel: unknown, events: unknown[]) {
@@ -186,8 +227,9 @@ mockIPC((cmd, payload?: unknown) => {
           name: "team.yaml",
           path: TEAM_CONFIG_PATH,
           description: "team-shared: parallel implement + auto-PR",
+          source: "user",
         },
-        { name: "autoflow.yaml", path: "/Users/takumi/.cruise/autoflow.yaml" },
+        { name: "autoflow.yaml", path: "/Users/takumi/.cruise/autoflow.yaml", source: "user" },
       ];
     case "get_new_session_history_summary":
       return latestHistorySummary();
@@ -197,6 +239,7 @@ mockIPC((cmd, payload?: unknown) => {
       const configPath = rawConfigPath == null ? undefined : String(rawConfigPath);
       return {
         steps: stepsFor(baseDir, configPath),
+        afterPrSteps: afterPrStepsFor(baseDir, configPath),
         defaultSkippedSteps: defaultSkippedSteps(baseDir, configPath),
       };
     }

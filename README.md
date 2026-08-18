@@ -295,10 +295,11 @@ cruise resolves the workflow config as follows:
 2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
+   - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
    - `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`), sorted by filename
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. With a single candidate the choice is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No candidate found** -- cruise falls back to a built-in 2-step workflow (`write-tests` -> `implement`); no config file is required, but you'll usually want one.
+4. **No candidate found** -- cruise falls back to a built-in default workflow (the repo's own `cruise.yaml`, embedded at build time); no config file is required, but you'll usually want one.
 
 The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart.
 
