@@ -19,8 +19,9 @@ Config files are resolved in this priority order:
 1. `-c/--config <path>` flag (highest priority; never prompts)
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
-4. `~/.config/cruise/*.yaml` / `*.yml` (ASCII-sorted)
-5. Built-in default (a 2-step `write-tests` → `implement` workflow) — implicit fallback only, never offered as a selectable choice
+4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
+5. `~/.config/cruise/*.yaml` / `*.yml` (ASCII-sorted)
+6. Built-in default (this repo's own `cruise.yaml`, embedded at build time: `sdk: seher` test-first steps + review group + after-PR automation) — implicit fallback only, never offered as a selectable choice
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, when two or more real config files are found, an interactive selector is shown (a single real file is auto-selected).
 

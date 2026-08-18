@@ -353,52 +353,15 @@ impl WorkflowConfig {
 
         warnings
     }
+}
 
-    /// Build the built-in default workflow config in code (no YAML file required).
-    #[must_use]
-    pub fn default_builtin() -> Self {
-        let mut steps = IndexMap::new();
+/// Built-in default workflow config YAML, embedded at compile time.
+///
+/// Single source: the repository's own `cruise.yaml`. Editing that file
+/// changes the built-in default shipped to users with no config file.
+pub const BUILTIN_CONFIG_YAML: &str = include_str!("../cruise.yaml");
 
-        steps.insert(
-            "write-tests".to_string(),
-            StepConfig {
-                prompt: Some(include_str!("../prompts/write-test-first.md").to_string()),
-                ..Default::default()
-            },
-        );
-
-        steps.insert(
-            "implement".to_string(),
-            StepConfig {
-                prompt: Some(include_str!("../prompts/implement-after-tests.md").to_string()),
-                ..Default::default()
-            },
-        );
-
-        Self {
-            command: vec![
-                "claude".to_string(),
-                "--model".to_string(),
-                "{model}".to_string(),
-                "-p".to_string(),
-            ],
-            sdk: None,
-            model: Some("sonnet".to_string()),
-            plan_model: Some("opus".to_string()),
-            max_retries: None,
-            interactive_planning: true,
-            pr_language: None,
-            plan_language: None,
-            languages: None,
-            cleanup_after_pr: false,
-            env: HashMap::new(),
-            groups: HashMap::new(),
-            steps,
-            after_pr: IndexMap::new(),
-            description: None,
-        }
-    }
-
+impl WorkflowConfig {
     /// Apply environment variable overrides to scalar config fields.
     ///
     /// # Errors
@@ -1257,12 +1220,25 @@ steps:
     }
 
     #[test]
-    fn test_default_builtin_has_cleanup_after_pr_false() {
-        // Given / When: built-in default config is constructed
-        let config = WorkflowConfig::default_builtin();
+    fn test_builtin_config_yaml_matches_repo_cruise_yaml() {
+        // Given / When: the embedded built-in config YAML is parsed
+        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
+            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
-        // Then: cleanup_after_pr is false so existing behavior is preserved
-        assert!(!config.cleanup_after_pr);
+        // Then: it mirrors the repo's own cruise.yaml (embedded at compile time)
+        assert_eq!(config.sdk.as_deref(), Some("seher"));
+        assert_eq!(config.model.as_deref(), Some("build"));
+        assert_eq!(config.plan_model.as_deref(), Some("plan"));
+        assert!(config.cleanup_after_pr);
+        // max_retries is unset so DEFAULT_MAX_RETRIES governs
+        assert_eq!(config.max_retries, None);
+        assert!(config.steps.contains_key("write-test-first"));
+        assert!(config.steps.contains_key("implement-after-tests"));
+        assert!(config.groups.contains_key("review"));
+        assert!(config.after_pr.contains_key("merge"));
+
+        // And: it passes full config validation
+        validate_config(&config).unwrap_or_else(|e| panic!("built-in config invalid: {e}"));
     }
 
     #[test]
@@ -3402,14 +3378,6 @@ steps:
 
         // Then: the value survives the round trip
         assert_eq!(reparsed.max_retries, Some(7));
-    }
-
-    #[test]
-    fn test_default_builtin_has_max_retries_none() {
-        // Given/When: built-in default config is constructed
-        let config = WorkflowConfig::default_builtin();
-        // Then: max_retries is unset so DEFAULT_MAX_RETRIES governs, unchanged behavior
-        assert_eq!(config.max_retries, None);
     }
 
     // --- resolve_effective_max_retries ---
