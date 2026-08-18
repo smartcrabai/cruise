@@ -15,7 +15,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 
 - A **session** is a unit of work (one task → one plan → one run → usually one PR).
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
-- `cruise exec` is the **odd one out**: it runs a workflow against the current directory with **no session lifecycle, no worktree, no PR**. Reach for it for quick, throwaway, in-place runs.
+- `cruise exec` is the **odd one out**: it runs a workflow against the current directory with **no session lifecycle, no worktree, no PR**. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
 
 ## Which command do I want?
 
@@ -29,8 +29,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute the next approved (Planned) session | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
+| Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
 | Execute every Planned session back-to-back | `cruise run --all` |
-| Run a config right here, no plan/worktree/PR | `cruise exec "task"` |
 | Browse / approve / resume / delete sessions | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
 | Delete sessions whose PR is merged/closed | `cruise clean` |

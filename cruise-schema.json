@@ -83,6 +83,10 @@
       "type": "integer",
       "minimum": 0,
       "description": "Global loop-protection ceiling; CLI --max-retries overrides. Default: 3."
+    },
+    "force_exec": {
+      "type": "boolean",
+      "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
     }
   },
   "$defs": {

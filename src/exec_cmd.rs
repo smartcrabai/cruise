@@ -1,40 +1,58 @@
 use crate::cli::{ExecArgs, RunArgs};
-use crate::config::validate_config;
+use crate::config::WorkflowConfig;
 use crate::engine;
-use crate::error::{CruiseError, Result};
+use crate::error::Result;
 use crate::paths;
-use crate::resolver::{ConfigSource, resolve_config};
+use crate::resolver::{ConfigSource, load_config_from_source, resolve_config};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+
+pub(crate) struct ExecRequest {
+    pub input: String,
+    pub max_retries: Option<usize>,
+    pub rate_limit_retries: usize,
+    pub dry_run: bool,
+}
 
 pub async fn run(args: ExecArgs) -> Result<()> {
     let (yaml, source) = resolve_config(args.config.as_deref())?;
-    let config = match source.path() {
-        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
-        None => crate::workflow_call::resolve_workflow_calls(
-            crate::config::WorkflowConfig::from_yaml(&yaml)
-                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
-            std::env::current_dir()?,
-        )?,
-    };
-    validate_config(&config)?;
-    let effective_max_retries =
-        crate::config::resolve_effective_max_retries(args.max_retries, &config);
-    crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
+    let config = load_config_from_source(&yaml, &source)?;
+    run_resolved(
+        &config,
+        &yaml,
+        &source,
+        ExecRequest {
+            input: args.input.unwrap_or_default(),
+            max_retries: args.max_retries,
+            rate_limit_retries: args.rate_limit_retries,
+            dry_run: args.dry_run,
+        },
+    )
+    .await
+}
 
-    if args.dry_run {
-        engine::print_dry_run(&config, None);
+pub(crate) async fn run_resolved(
+    config: &WorkflowConfig,
+    yaml: &str,
+    source: &ConfigSource,
+    req: ExecRequest,
+) -> Result<()> {
+    let effective_max_retries =
+        crate::config::resolve_effective_max_retries(req.max_retries, config);
+    crate::config::validate_group_retry_budget(config, effective_max_retries)?;
+
+    if req.dry_run {
+        engine::print_dry_run(config, None);
         return Ok(());
     }
 
     let manager = SessionManager::new(paths::data_dir()?);
-    let input = args.input.unwrap_or_default();
-    let session = setup_exec_session(&manager, &source, &yaml, input)?;
+    let session = setup_exec_session(&manager, source, yaml, req.input)?;
 
     let run_args = RunArgs {
         session: Some(session.id.clone()),
         all: false,
-        max_retries: args.max_retries,
-        rate_limit_retries: args.rate_limit_retries,
+        max_retries: req.max_retries,
+        rate_limit_retries: req.rate_limit_retries,
         dry_run: false,
         cleanup_after_pr: false,
         no_cleanup_after_pr: false,

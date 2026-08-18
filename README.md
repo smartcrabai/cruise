@@ -99,7 +99,8 @@ Commands:
   config       Show or update application-level configuration
 
 Options:
-      --plan <INPUT>   Create a plan in the background and return immediately
+      --plan <INPUT>           Create a plan in the background and return immediately
+      --no-force-exec          Ignore force_exec: true and plan as usual
 ```
 
 #### `cruise plan`
@@ -113,6 +114,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
+      --no-force-exec              Ignore force_exec: true and plan as usual
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
@@ -177,8 +179,9 @@ Options:
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
-
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. The session is still recorded so progress is visible in `cruise list`. Use this when you want to drive a config against the active branch -- the same constraints as the Current-branch workspace mode apply (clean working tree, attached branch).
+
+When `force_exec: true` is set in the workflow config, `cruise "task"`, `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution.
 
 #### `cruise --plan`
 
@@ -257,7 +260,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
-> **`cruise exec`** is a separate path that skips this lifecycle entirely: it executes the workflow in the current directory without planning, worktree creation, or PR creation. See [`cruise exec`](#cruise-exec).
+> **`cruise exec`** is a separate path that skips this lifecycle entirely: it executes the workflow in the current directory without planning, worktree creation, or PR creation. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
 
 ### `cruise list` Actions
 
@@ -323,7 +326,8 @@ description: |             # one-line summary shown next to the filename in sele
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
 pr_language: English      # language for auto-generated PR title/body (optional, default: English)
-plan_language: English    # language for built-in planning prompts (optional, default: English)
+# force_exec: false          # execute direct plan entry points in place (use --no-force-exec to opt out)
+plan_language: English       # language used by built-in planning prompts (optional, default: English)
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...

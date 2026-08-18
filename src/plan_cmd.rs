@@ -55,6 +55,55 @@ fn cli_plan_ctx<'a>(
         cancel_token,
     }
 }
+/// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
+fn force_exec_opt_out(no_force_exec: bool, grill: bool, has_images: bool) -> Option<&'static str> {
+    if no_force_exec {
+        Some("--no-force-exec")
+    } else if grill {
+        Some("--grill")
+    } else if has_images {
+        Some("image attachment")
+    } else {
+        None
+    }
+}
+
+async fn run_force_exec(
+    target: PlanTarget,
+    input: String,
+    rate_limit_retries: usize,
+    dry_run: bool,
+    background: bool,
+) -> Result<()> {
+    let PlanTarget::Local {
+        yaml,
+        source,
+        config,
+    } = target
+    else {
+        unreachable!();
+    };
+    let message = if background {
+        "force_exec: running in the foreground; no background plan, \
+         worktree, or PR will be created"
+    } else {
+        "force_exec: running the workflow directly in the current directory \
+         (no plan, no worktree, no PR)"
+    };
+    eprintln!("{}", style(message).dim());
+    crate::exec_cmd::run_resolved(
+        &config,
+        &yaml,
+        &source,
+        crate::exec_cmd::ExecRequest {
+            input,
+            max_retries: None,
+            rate_limit_retries,
+            dry_run,
+        },
+    )
+    .await
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -93,6 +142,24 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     };
     for p in &args.images {
         images.push(PathBuf::from(p));
+    }
+
+    if let PlanTarget::Local { config, .. } = &target
+        && config.force_exec
+    {
+        match force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty()) {
+            Some(reason) => eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim()),
+            None => {
+                return run_force_exec(
+                    target,
+                    input.trim().to_string(),
+                    args.rate_limit_retries,
+                    args.dry_run,
+                    false,
+                )
+                .await;
+            }
+        }
     }
 
     if args.dry_run {
@@ -219,11 +286,12 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     .await
 }
 
-pub fn launch_background_plan(
+pub async fn launch_background_plan(
     plan_input: &str,
     skip_planning: bool,
     repo: Option<&str>,
     images: &[String],
+    no_force_exec: bool,
 ) -> Result<()> {
     let target = resolve_plan_target(repo, None)?;
 
@@ -234,6 +302,26 @@ pub fn launch_background_plan(
     let mut detected_images: Vec<PathBuf> = Vec::with_capacity(images.len());
     for p in images {
         detected_images.push(PathBuf::from(p));
+    }
+
+    if let PlanTarget::Local { config, .. } = &target
+        && config.force_exec
+    {
+        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty()) {
+            Some(reason) => {
+                eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
+            }
+            None => {
+                return run_force_exec(
+                    target,
+                    input.trim().to_string(),
+                    DEFAULT_RATE_LIMIT_RETRIES,
+                    false,
+                    true,
+                )
+                .await;
+            }
+        }
     }
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
@@ -536,9 +624,17 @@ fn create_planning_session(
 }
 
 /// Where a new plan session sources its working copy and config from.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "local targets carry their already-resolved config to avoid duplicate parsing"
+)]
 enum PlanTarget {
     /// Plan in the current directory using an already-resolved config.
-    Local { yaml: String, source: ConfigSource },
+    Local {
+        yaml: String,
+        source: ConfigSource,
+        config: WorkflowConfig,
+    },
     /// Clone `owner/repo` into a temporary directory and plan there.
     Repo(String),
 }
@@ -557,8 +653,13 @@ fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Res
         }
         _ => {
             let (yaml, source) = crate::resolver::resolve_config(explicit_config)?;
+            let config = crate::resolver::load_config_from_source(&yaml, &source)?;
             eprintln!("{}", style(source.display_string()).dim());
-            Ok(PlanTarget::Local { yaml, source })
+            Ok(PlanTarget::Local {
+                yaml,
+                source,
+                config,
+            })
         }
     }
 }
@@ -572,16 +673,11 @@ fn create_session_for_target(
     input: &str,
 ) -> Result<(WorkflowConfig, SessionState)> {
     match target {
-        PlanTarget::Local { yaml, source } => {
-            let config = match source.path() {
-                Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
-                None => crate::workflow_call::resolve_workflow_calls(
-                    WorkflowConfig::from_yaml(&yaml)
-                        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
-                    std::env::current_dir()?,
-                )?,
-            };
-            validate_config(&config)?;
+        PlanTarget::Local {
+            yaml: _,
+            source,
+            config,
+        } => {
             let session = create_planning_session(manager, &source, input.to_string())?;
             Ok((config, session))
         }
@@ -1445,11 +1541,147 @@ pub async fn regenerate_plan_for_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
-    use crate::session::SessionManager;
-    use crate::test_support::{init_git_repo, lock_process, make_session};
+    use crate::new_session_history::NewSessionHistoryEntry;
+    use crate::session::{SessionManager, SessionPhase, WorkspaceMode};
+    use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
     use std::fs;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    struct ProcessStateGuard {
+        prev_dir: PathBuf,
+        env_guards: Vec<crate::test_support::EnvGuard>,
+        lock: crate::test_support::ProcessLock,
+    }
+
+    impl ProcessStateGuard {
+        fn new(home: &Path) -> Self {
+            let lock = lock_process();
+            let env_guards = crate::test_support::set_fake_home(home);
+            let prev_dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+            Self {
+                prev_dir,
+                env_guards,
+                lock,
+            }
+        }
+
+        fn set_current_dir(&self, dir: &Path) {
+            let _ = &self.lock;
+            std::env::set_current_dir(dir).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        fn prepend_path(&mut self, dir: &Path) {
+            let _ = &self.lock;
+            self.env_guards
+                .push(crate::test_support::prepend_to_path(dir));
+        }
+    }
+
+    impl Drop for ProcessStateGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.prev_dir).is_err() {
+                let _ = std::env::set_current_dir("/");
+            }
+        }
+    }
+
+    fn create_repo_with_origin(tmp: &TempDir) -> PathBuf {
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+
+        let bare = tmp.path().join("origin.git");
+        run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
+        run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare.to_str().unwrap_or_else(|| panic!("non-utf8 path")),
+            ],
+        );
+        repo
+    }
+
+    fn install_logging_gh(bin_dir: &Path, log_path: &Path) {
+        fs::create_dir_all(bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script_path = bin_dir.join("gh");
+            fs::write(
+                &script_path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+                    log_path.display()
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+            let mut perms = fs::metadata(&script_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+    }
+
+    fn plan_args(config_path: &Path, no_force_exec: bool, skip_planning: bool) -> PlanArgs {
+        PlanArgs {
+            input: Some("implement force exec".to_string()),
+            config: Some(
+                config_path
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-utf8 path"))
+                    .to_string(),
+            ),
+            dry_run: false,
+            no_force_exec,
+            skip_planning,
+            grill: false,
+            no_interactive_planning: false,
+            repo: None,
+            rate_limit_retries: 0,
+            images: vec![],
+        }
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_for_flag() {
+        // Given: explicit opt-out
+        let reason = force_exec_opt_out(true, false, false);
+
+        // Then: force_exec is overridden
+        assert_eq!(reason, Some("--no-force-exec"));
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_for_grill() {
+        // Given: explicit grill planning
+        let reason = force_exec_opt_out(false, true, false);
+
+        // Then: force_exec is overridden
+        assert_eq!(reason, Some("--grill"));
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_for_images() {
+        // Given: an attached image
+        let reason = force_exec_opt_out(false, false, true);
+
+        // Then: force_exec is overridden
+        assert_eq!(reason, Some("image attachment"));
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_is_none_when_eligible() {
+        // Given: no opt-out or incompatible planning request
+        let reason = force_exec_opt_out(false, false, false);
+
+        // Then: force_exec remains eligible
+        assert_eq!(reason, None);
+    }
 
     #[test]
     fn test_setup_plan_vars_sets_configured_plan_language() {
@@ -2156,5 +2388,175 @@ steps:
             session.worktree_path.is_none(),
             "worktree_path should be cleared by cleanup_after_approval for repo session"
         );
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_force_exec_plan_entrypoint_runs_directly_without_worktree_or_pr() {
+        // Given: a clean git repo and a workflow that enables force_exec
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(
+            &config_path,
+            r"force_exec: true
+command: [cat]
+steps:
+  write:
+    command: |
+      printf exec-result > exec-out.txt
+",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log);
+        process.prepend_path(&bin_dir);
+
+        // When: the plan entry point is invoked without the opt-out flag
+        let result = run(plan_args(&config_path, false, false)).await;
+
+        // Then: the workflow executes successfully in the current directory
+        assert!(
+            result.is_ok(),
+            "force_exec plan entry point failed: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("exec-out.txt")).unwrap_or_else(|e| panic!("{e:?}")),
+            "exec-result"
+        );
+        assert!(!gh_log.exists(), "force_exec must not invoke gh for a PR");
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
+        let session = manager
+            .list()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .into_iter()
+            .find(|session| {
+                session
+                    .base_dir
+                    .canonicalize()
+                    .is_ok_and(|path| path == repo_canonical)
+            })
+            .unwrap_or_else(|| panic!("expected force_exec session to be recorded"));
+        assert_eq!(session.phase, SessionPhase::Completed);
+        assert_eq!(session.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(session.worktree_path.is_none());
+        assert!(session.pr_url.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_force_exec_opt_out_keeps_normal_plan_path() {
+        // Given: a force_exec config with the explicit opt-out flag
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(
+            &config_path,
+            r"force_exec: true
+command: [cat]
+steps:
+  write:
+    command: |
+      printf should-not-run > direct-output.txt
+",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the plan entry point is invoked with --no-force-exec
+        let result = run(plan_args(&config_path, true, false)).await;
+
+        // Then: a normal plan is created instead of direct execution
+        assert!(result.is_ok(), "normal plan path failed: {result:?}");
+        assert!(
+            !repo.join("direct-output.txt").exists(),
+            "with --no-force-exec, workflow steps must not run in the current directory"
+        );
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
+        let session = manager
+            .list()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .into_iter()
+            .find(|session| {
+                session
+                    .base_dir
+                    .canonicalize()
+                    .is_ok_and(|path| path == repo_canonical)
+            })
+            .unwrap_or_else(|| panic!("expected normal plan session to be recorded"));
+        assert_eq!(session.phase, SessionPhase::Planned);
+        assert_eq!(session.workspace_mode, WorkspaceMode::Worktree);
+        assert!(session.worktree_path.is_some());
+        let plan = fs::read_to_string(session.plan_path(&manager.sessions_dir()))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!plan.trim().is_empty());
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_force_exec_background_entrypoint_runs_foreground_without_session_worktree_or_pr()
+    {
+        // Given: a local force_exec config and a background plan request
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        fs::write(
+            repo.join("cruise.yaml"),
+            r"force_exec: true
+command: [cat]
+steps:
+  write:
+    command: |
+      printf background-result > background-out.txt
+",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log);
+        process.prepend_path(&bin_dir);
+
+        // When: --plan is used without the opt-out flag
+        let result = launch_background_plan("background task", false, None, &[], false).await;
+
+        // Then: execution stays foreground and bypasses planning lifecycle
+        assert!(result.is_ok(), "background force_exec failed: {result:?}");
+        assert_eq!(
+            fs::read_to_string(repo.join("background-out.txt")).unwrap_or_else(|e| panic!("{e:?}")),
+            "background-result"
+        );
+        assert!(!gh_log.exists(), "force_exec must not invoke gh for a PR");
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
+        let session = manager
+            .list()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .into_iter()
+            .find(|session| {
+                session
+                    .base_dir
+                    .canonicalize()
+                    .is_ok_and(|path| path == repo_canonical)
+            })
+            .unwrap_or_else(|| panic!("expected force_exec session to be recorded"));
+        assert_eq!(session.phase, SessionPhase::Completed);
+        assert_eq!(session.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(session.worktree_path.is_none());
+        assert!(session.pr_url.is_none());
     }
 }
