@@ -302,13 +302,11 @@ pub async fn run_plan_prompt_template(
             .as_deref()
             .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id))
     })?;
-    // Carry the seher session id forward only in the tool-based interactive flow,
-    // where plan/fix/ask turns share one tool-capable conversation (pi or claude).
-    // The tool-less flow is stateless (templates read `{plan}` from disk each
-    // turn), so leaving `resume` empty keeps `require_tools` false and
-    // tool-incapable providers (e.g. claude-terminal, claude-headless) eligible
-    // for the fix/ask turns too.
-    if plan_tools_enabled && outcome.session_id.is_some() {
+    // Carry the seher session id forward only for SDK turns that return one.
+    // OMP sessions are closed after each prompt because Cruise rebuilds its
+    // planning tool handlers between turns; assigning `None` also clears any
+    // stale session id from a prior provider/backend.
+    if plan_tools_enabled {
         *resume = outcome.session_id;
     }
     Ok(outcome.result)
