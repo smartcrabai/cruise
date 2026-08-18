@@ -357,9 +357,9 @@ impl WorkflowConfig {
 
 /// Built-in default workflow config YAML, embedded at compile time.
 ///
-/// Single source: the repository's own `cruise.yaml`. Editing that file
-/// changes the built-in default shipped to users with no config file.
-pub const BUILTIN_CONFIG_YAML: &str = include_str!("../cruise.yaml");
+/// Single source: `builtin/cruise.yaml`. Editing that file changes the
+/// built-in default shipped to users with no config file.
+pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/cruise.yaml");
 
 impl WorkflowConfig {
     /// Apply environment variable overrides to scalar config fields.
@@ -1220,12 +1220,12 @@ steps:
     }
 
     #[test]
-    fn test_builtin_config_yaml_matches_repo_cruise_yaml() {
+    fn test_builtin_config_yaml_parses_and_validates() {
         // Given / When: the embedded built-in config YAML is parsed
         let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
             .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
-        // Then: it mirrors the repo's own cruise.yaml (embedded at compile time)
+        // Then: it has the expected built-in defaults (source: builtin/cruise.yaml)
         assert_eq!(config.sdk.as_deref(), Some("seher"));
         assert_eq!(config.model.as_deref(), Some("build"));
         assert_eq!(config.plan_model.as_deref(), Some("plan"));
@@ -1235,7 +1235,8 @@ steps:
         assert!(config.steps.contains_key("write-test-first"));
         assert!(config.steps.contains_key("implement-after-tests"));
         assert!(config.groups.contains_key("review"));
-        assert!(config.after_pr.contains_key("merge"));
+        // after-pr automation must not auto-merge: merging stays a human action
+        assert!(!config.after_pr.contains_key("merge"));
 
         // And: it passes full config validation
         validate_config(&config).unwrap_or_else(|e| panic!("built-in config invalid: {e}"));
@@ -1538,7 +1539,7 @@ steps:
 
     #[test]
     fn test_parse_cruise_yaml() {
-        let yaml = include_str!("../cruise.yaml");
+        let yaml = BUILTIN_CONFIG_YAML;
         let config = WorkflowConfig::from_yaml(yaml)
             .unwrap_or_else(|e| panic!("failed to parse cruise.yaml: {e:?}"));
         assert_eq!(config.sdk, Some("seher".to_string()));
