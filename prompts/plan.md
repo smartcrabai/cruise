@@ -19,3 +19,4 @@ Task:
    - Existing implementation patterns to refer to (file:line number). If similar processing already exists, always specify the source.
    - Scope of impact due to changes. Especially when adding new parameters, list all calling locations where wiring is necessary.
    - Anti-patterns that require particular attention in this task (if applicable).
+   - A rough code-volume target for each independently actionable implementation element (for example, an approximate changed-line count or small/medium/large). Treat it as a soft goal, not a cap; never omit required correctness, error handling, tests, or other required work to meet it.
