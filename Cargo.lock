@@ -263,6 +263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ast_node"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b127110e8724bd19447ac72f31a66a9c06ac6b2b1372d81b6f5f0a2bddc6d1bb"
+dependencies = [
+ "quote",
+ "swc_macros_common",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "asupersync"
 version = "0.3.10"
 dependencies = [
@@ -3521,6 +3532,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hstr"
+version = "4.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23efb2e58d2f27a96edfa907c26016deb120b7ac8c66a19d2748f0e9c145f3cb"
+dependencies = [
+ "hashbrown 0.14.5",
+ "new_debug_unreachable",
+ "once_cell",
+ "rustc-hash",
+ "serde",
+ "triomphe",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5190,7 +5215,7 @@ dependencies = [
  "similar",
  "sqlmodel-core",
  "sqlmodel-sqlite",
- "swc_common",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_codegen",
  "swc_ecma_parser",
@@ -6230,9 +6255,9 @@ dependencies = [
 
 [[package]]
 name = "seher-claude-agent-sdk"
-version = "0.0.52"
+version = "0.0.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "772663992d6bd7cac4bc04acd69e74baf8ec38160829fc1ca29c6258e581988c"
+checksum = "139f1e1d33de1b87eb07b27afae6c4724c9838571c80781090045a801a2cd0b4"
 dependencies = [
  "async-trait",
  "futures",
@@ -6244,9 +6269,9 @@ dependencies = [
 
 [[package]]
 name = "seher-sdk"
-version = "0.0.52"
+version = "0.0.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e0edd5ffdfddbd14f968fc3ae259ada325d9d119a418ab6861ae6d940333d9"
+checksum = "78538d6cc6e5ebe840e7210c4fee12928d13293582b9beb145b51ea1df92dee6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6260,6 +6285,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "swc_common 24.0.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6915,7 +6941,18 @@ version = "9.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "845f31910b5236db42dba106e8277681098d183b9b65b8dfa88ca8abe464aeff"
 dependencies = [
- "hstr",
+ "hstr 3.0.6",
+ "once_cell",
+ "serde",
+]
+
+[[package]]
+name = "swc_atoms"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c70a493080ceb12dabddb96905a3ddac679fbe9c71ddc81a2a769126e8cde7c4"
+dependencies = [
+ "hstr 4.0.1",
  "once_cell",
  "serde",
 ]
@@ -6927,7 +6964,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1c06698254e9b47daaf9bbb062af489a350bd8d10dfaab0cabbd32d46cec69d"
 dependencies = [
  "anyhow",
- "ast_node",
+ "ast_node 5.0.0",
  "better_scoped_tls",
  "bytes-str",
  "either",
@@ -6937,7 +6974,33 @@ dependencies = [
  "rustc-hash",
  "serde",
  "siphasher 0.3.11",
- "swc_atoms",
+ "swc_atoms 9.0.3",
+ "swc_eq_ignore_macros",
+ "swc_visit",
+ "tracing",
+ "unicode-width",
+ "url",
+]
+
+[[package]]
+name = "swc_common"
+version = "24.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d7b9e59d7284543c4e6a2a9e264fee6443cdf33fa9101c113958f078df12e2"
+dependencies = [
+ "anyhow",
+ "ast_node 6.1.0",
+ "better_scoped_tls",
+ "bytes-str",
+ "either",
+ "from_variant",
+ "num-bigint",
+ "once_cell",
+ "parking_lot",
+ "rustc-hash",
+ "serde",
+ "siphasher 0.3.11",
+ "swc_atoms 10.0.0",
  "swc_eq_ignore_macros",
  "swc_visit",
  "tracing",
@@ -6984,8 +7047,8 @@ dependencies = [
  "phf 0.11.3",
  "rustc-hash",
  "string_enum",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_visit",
  "unicode-id-start",
 ]
@@ -7006,8 +7069,8 @@ dependencies = [
  "rustc-hash",
  "serde",
  "swc_allocator",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_codegen_macros",
  "tracing",
@@ -7030,8 +7093,8 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c9adff1f01550ef653e262ad709a2914d3dd6cfd559aea2e28eeeab8f895981"
 dependencies = [
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_visit",
 ]
@@ -7051,8 +7114,8 @@ dependencies = [
  "serde",
  "smartstring",
  "stacker",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "tracing",
 ]
@@ -7070,8 +7133,8 @@ dependencies = [
  "phf 0.11.3",
  "rustc-hash",
  "serde",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_parser",
  "swc_ecma_utils",
@@ -7093,8 +7156,8 @@ dependencies = [
  "serde",
  "sha1 0.10.7",
  "string_enum",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_config",
  "swc_ecma_ast",
  "swc_ecma_hooks",
@@ -7113,8 +7176,8 @@ dependencies = [
  "bytes-str",
  "rustc-hash",
  "serde",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_transforms_base",
  "swc_ecma_transforms_react",
@@ -7134,8 +7197,8 @@ dependencies = [
  "once_cell",
  "par-core",
  "rustc-hash",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_ecma_visit",
  "tracing",
@@ -7149,8 +7212,8 @@ checksum = "e971a258717db3dc8939c38410d8b8cb8126f1b05b9758672daa7cae3e0248c2"
 dependencies = [
  "new_debug_unreachable",
  "num-bigint",
- "swc_atoms",
- "swc_common",
+ "swc_atoms 9.0.3",
+ "swc_common 18.0.1",
  "swc_ecma_ast",
  "swc_visit",
  "tracing",
