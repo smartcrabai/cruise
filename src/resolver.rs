@@ -129,19 +129,18 @@ enum CandidateKind {
 
 /// Appends candidates from a YAML directory to `candidates`, resolving each
 /// path to absolute and constructing the `CandidateKind` via `kind`.
+/// The display label is shortened via `shorten_display_path` (`./` under
+/// `cwd`, `~/` under `home`); the stored `PathBuf` stays absolute.
 fn push_yaml_dir_candidates(
     candidates: &mut Vec<ConfigCandidate>,
     dir: &PathBuf,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
     kind: impl Fn(PathBuf) -> CandidateKind,
 ) {
     for file in collect_yaml_files(dir) {
         let file = to_absolute(file);
-        let filename = file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let label = format!("{filename} ({})", file.display());
+        let label = shorten_display_path(&file, cwd, home);
         candidates.push(ConfigCandidate {
             label,
             source: kind(file),
@@ -164,6 +163,7 @@ fn collect_candidates(
     env_val: Option<String>,
 ) -> Result<Vec<ConfigCandidate>> {
     let mut candidates = Vec::new();
+    let home = home::home_dir();
 
     // 1. CRUISE_CONFIG env var — error if set but file missing (same policy as -c).
     if let Some(env_path) = env_val {
@@ -171,7 +171,10 @@ fn collect_candidates(
         match std::fs::metadata(&buf) {
             Ok(_) => {
                 let abs = to_absolute(buf);
-                let label = format!("CRUISE_CONFIG → {}", abs.display());
+                let label = format!(
+                    "CRUISE_CONFIG → {}",
+                    shorten_display_path(&abs, cwd, home.as_deref())
+                );
                 candidates.push(ConfigCandidate {
                     label,
                     source: CandidateKind::EnvVar(abs),
@@ -194,7 +197,7 @@ fn collect_candidates(
         let path = cwd.join(name);
         if path.is_file() {
             let abs = to_absolute(path.clone());
-            let label = format!("{name} ({})", abs.display());
+            let label = shorten_display_path(&abs, cwd, home.as_deref());
             candidates.push(ConfigCandidate {
                 label,
                 source: CandidateKind::Local(abs),
@@ -208,12 +211,24 @@ fn collect_candidates(
     // misidentified as a config candidate; avoid placing YAML data files there.
     let local_dir = cwd.join(".cruise");
     if local_dir.is_dir() {
-        push_yaml_dir_candidates(&mut candidates, &local_dir, CandidateKind::Local);
+        push_yaml_dir_candidates(
+            &mut candidates,
+            &local_dir,
+            cwd,
+            home.as_deref(),
+            CandidateKind::Local,
+        );
     }
 
     // 3. User-dir config files (~/.config/cruise/*.yaml / *.yml), ASCII-sorted.
     if let Ok(config_dir) = crate::paths::config_dir() {
-        push_yaml_dir_candidates(&mut candidates, &config_dir, CandidateKind::UserDir);
+        push_yaml_dir_candidates(
+            &mut candidates,
+            &config_dir,
+            cwd,
+            home.as_deref(),
+            CandidateKind::UserDir,
+        );
     }
 
     // 4. Built-in default — always last.
@@ -345,6 +360,30 @@ fn to_absolute(path: PathBuf) -> PathBuf {
     std::env::current_dir()
         .map(|cwd| cwd.join(&path))
         .unwrap_or(path)
+}
+
+/// Shorten `path` for interactive display:
+/// `./rel` under `cwd`, `~/rel` under `home`, absolute otherwise.
+fn shorten_display_path(
+    path: &std::path::Path,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> String {
+    // cwd first: it is usually nested under home, and "./" is the shorter form.
+    if let Ok(rel) = path.strip_prefix(cwd)
+        && !rel.as_os_str().is_empty()
+    {
+        return format!("./{}", rel.display());
+    }
+    // Guard `home.parent()`: when home is the filesystem root, every absolute path would match.
+    if let Some(home) = home
+        && home.parent().is_some()
+        && let Ok(rel) = path.strip_prefix(home)
+        && !rel.as_os_str().is_empty()
+    {
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
 }
 
 /// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
@@ -1423,5 +1462,248 @@ mod tests {
         } else {
             panic!("expected Local, got: {source:?}");
         }
+    }
+
+    // ---- shorten_display_path ----
+
+    #[test]
+    fn test_shorten_display_path_direct_child_of_cwd() {
+        // Given: a file directly under cwd
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/home/u");
+
+        // When: shortened
+        let label = shorten_display_path(&cwd.join("cruise.yaml"), cwd, Some(home));
+
+        // Then: ./ prefix
+        assert_eq!(label, "./cruise.yaml");
+    }
+
+    #[test]
+    fn test_shorten_display_path_nested_under_cwd() {
+        // Given: a file nested under cwd
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/home/u");
+
+        // When: shortened
+        let label = shorten_display_path(&cwd.join(".cruise").join("t.yaml"), cwd, Some(home));
+
+        // Then: ./ prefix with nested relative path
+        let expected = format!(
+            "./{}",
+            std::path::Path::new(".cruise").join("t.yaml").display()
+        );
+        assert_eq!(label, expected);
+    }
+
+    #[test]
+    fn test_shorten_display_path_under_home() {
+        // Given: a file under home but not under cwd
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/home/u");
+
+        // When: shortened
+        let label = shorten_display_path(
+            &home.join(".config").join("cruise").join("a.yaml"),
+            cwd,
+            Some(home),
+        );
+
+        // Then: ~/ prefix
+        let expected = format!(
+            "~/{}",
+            std::path::Path::new(".config")
+                .join("cruise")
+                .join("a.yaml")
+                .display()
+        );
+        assert_eq!(label, expected);
+    }
+
+    #[test]
+    fn test_shorten_display_path_cwd_takes_priority_over_home() {
+        // Given: cwd is inside home and path is under both
+        let home = std::path::Path::new("/home/u");
+        let cwd = home.join("proj");
+        let path = cwd.join("cruise.yaml");
+
+        // When: shortened
+        let label = shorten_display_path(&path, &cwd, Some(home));
+
+        // Then: shorter ./ form wins over ~/
+        assert_eq!(label, "./cruise.yaml");
+    }
+
+    #[test]
+    fn test_shorten_display_path_outside_cwd_and_home_stays_absolute() {
+        // Given: a file under neither cwd nor home
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/home/u");
+        let path = std::path::Path::new("/opt/shared/x.yaml");
+
+        // When: shortened
+        let label = shorten_display_path(path, cwd, Some(home));
+
+        // Then: absolute path unchanged
+        assert_eq!(label, "/opt/shared/x.yaml");
+    }
+
+    #[test]
+    fn test_shorten_display_path_root_home_is_not_shortened() {
+        // Given: home is the filesystem root (would match every absolute path)
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/");
+        let path = std::path::Path::new("/opt/shared/x.yaml");
+
+        // When: shortened
+        let label = shorten_display_path(path, cwd, Some(home));
+
+        // Then: guard prevents ~//...; absolute path unchanged
+        assert_eq!(label, "/opt/shared/x.yaml");
+    }
+
+    #[test]
+    fn test_shorten_display_path_none_home_only_shortens_cwd() {
+        // Given: home is unavailable (None)
+        let cwd = std::path::Path::new("/p");
+
+        // When: a path under cwd and a path elsewhere are shortened
+        let under_cwd = shorten_display_path(&cwd.join("cruise.yaml"), cwd, None);
+        let elsewhere = shorten_display_path(std::path::Path::new("/home/u/a.yaml"), cwd, None);
+
+        // Then: cwd shortening still applies; other paths stay absolute
+        assert_eq!(under_cwd, "./cruise.yaml");
+        assert_eq!(elsewhere, "/home/u/a.yaml");
+    }
+
+    #[test]
+    fn test_shorten_display_path_equal_to_cwd_or_home_not_shortened() {
+        // Given: path equals cwd itself (empty relative remainder)
+        let cwd = std::path::Path::new("/p");
+        let home = std::path::Path::new("/home/u");
+
+        // When: shortened
+        let same_as_cwd = shorten_display_path(cwd, cwd, Some(home));
+        let same_as_home = shorten_display_path(home, cwd, Some(home));
+
+        // Then: guard prevents bare "./" or "~/"; absolute path unchanged
+        assert_eq!(same_as_cwd, "/p");
+        assert_eq!(same_as_home, "/home/u");
+    }
+
+    // ---- collect_candidates label shortening ----
+
+    #[test]
+    fn test_collect_candidates_local_label_is_dot_slash() {
+        // Given: cwd has cruise.yaml; no other config
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            tmp_dir.path().join("cruise.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    command: echo",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+
+        // When: candidates collected
+        let candidates =
+            collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: local candidate label is exactly "./cruise.yaml"
+        let local = candidates
+            .iter()
+            .find(|c| matches!(c.source, CandidateKind::Local(_)))
+            .unwrap_or_else(|| panic!("expected Local candidate"));
+        assert_eq!(local.label, "./cruise.yaml");
+    }
+
+    #[test]
+    fn test_collect_candidates_local_dir_label_is_dot_slash_nested() {
+        // Given: cwd has .cruise/team.yaml; no top-level cruise.yaml
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = tmp_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("team.yaml"),
+            "command: [team]\nsteps:\n  s:\n    command: team",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+
+        // When: candidates collected
+        let candidates =
+            collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: .cruise/ candidate label is "./.cruise/team.yaml"
+        let local = candidates
+            .iter()
+            .find(|c| matches!(c.source, CandidateKind::Local(_)))
+            .unwrap_or_else(|| panic!("expected Local candidate"));
+        let expected = format!(
+            "./{}",
+            std::path::Path::new(".cruise").join("team.yaml").display()
+        );
+        assert_eq!(local.label, expected);
+    }
+
+    #[test]
+    fn test_collect_candidates_user_dir_label_starts_with_tilde() {
+        // Given: no local config; ~/.config/cruise/a.yaml exists
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let config_cruise = fake_home.path().join(".config").join("cruise");
+        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(config_cruise.join("a.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+
+        // When: candidates collected
+        let candidates =
+            collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: user-dir candidate label starts with "~/" and keeps the filename
+        let user_dir = candidates
+            .iter()
+            .find(|c| matches!(c.source, CandidateKind::UserDir(_)))
+            .unwrap_or_else(|| panic!("expected UserDir candidate"));
+        assert!(
+            user_dir.label.starts_with("~/"),
+            "user-dir label must start with '~/', got: {}",
+            user_dir.label
+        );
+        assert!(
+            user_dir.label.ends_with("a.yaml"),
+            "user-dir label must keep the filename, got: {}",
+            user_dir.label
+        );
+    }
+
+    #[test]
+    fn test_collect_candidates_env_label_is_shortened() {
+        // Given: CRUISE_CONFIG points at a file inside cwd
+        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let env_file = tmp_dir.path().join("env.yaml");
+        std::fs::write(&env_file, "command: [echo]").unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+
+        // When: candidates collected
+        let env_val = env_file
+            .to_str()
+            .unwrap_or_else(|| panic!("non-UTF8"))
+            .to_string();
+        let candidates =
+            collect_candidates(tmp_dir.path(), Some(env_val)).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: env candidate label uses the shortened "./rel" form, not the absolute path
+        let env_candidate = candidates
+            .iter()
+            .find(|c| matches!(c.source, CandidateKind::EnvVar(_)))
+            .unwrap_or_else(|| panic!("expected EnvVar candidate"));
+        assert_eq!(env_candidate.label, "CRUISE_CONFIG → ./env.yaml");
     }
 }

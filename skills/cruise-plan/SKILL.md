@@ -118,7 +118,7 @@ Choose by where execution should happen: local session (`cruise run` on this mac
 
 ## Gotchas
 
-- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (the repo's `cruise.yaml`, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c` (foreground form only) to pin a specific config.
+- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c` (foreground form only) to pin a specific config.
 - **A planning worktree is created even with `--skip-planning`** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`); it is reused by `cruise run`. Non-git directories fall back to running in place.
 - **One task = one session.** Don't pack multiple unrelated tasks into one plan; queue several sessions instead (`cruise --plan … --skip-planning` per task).
 - **Plan text is used verbatim** — no LLM cleans it up afterwards. Typos in file paths or step ordering go straight to the implementer.
