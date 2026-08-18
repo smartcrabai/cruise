@@ -159,6 +159,8 @@ export_env() { # $1=name $2=value
 
 # --- sdk: pi is always forced, regardless of what any config declares. ---
 export_env CRUISE_SDK pi
+# --- force_exec is never honored here: action commands decide the mode. ---
+export_env CRUISE_FORCE_EXEC false
 
 # --- provider API keys (at least one credential source is guaranteed
 # non-empty; gate.sh hard-fails otherwise). Masked defensively even though

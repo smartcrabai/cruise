@@ -45,8 +45,9 @@ after-pr:                 # Optional: steps that run after PR creation (see refe
     # ...
 
 cleanup_after_pr: false   # Optional: delete local worktree and branch after PR creation (default: false)
-```
+force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
+```
 `steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). When `sdk` is set it must be `seher` or `pi` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order.
 
 ## `command` vs `sdk`
@@ -125,7 +126,22 @@ cleanup_after_pr: true   # remove worktree + branch once the PR is open
 - Errors during cleanup are downgraded to warnings; the session is still marked `Completed`.
 - Override per-run with `--cleanup-after-pr` / `--no-cleanup-after-pr` CLI flags (takes precedence over config and session-level setting).
 
+
 See [after-pr.md](after-pr.md) for steps that run after PR creation.
+
+## `force_exec`
+
+When `true`, direct plan entry points use the same current-directory execution
+path as `cruise exec`: no planning, worktree, or PR. It applies to
+`cruise "<input>"`, `cruise plan "<input>"`, and `cruise --plan "<input>"`.
+
+```yaml
+force_exec: true
+```
+
+Use `--no-force-exec`, `--repo`, `--grill`, or image attachments to keep normal
+planning. `--skip-planning` and `--no-interactive-planning` do not disable direct
+execution. Background `--plan` runs foreground because no plan worker is needed.
 
 ## Rate-limit retry
 

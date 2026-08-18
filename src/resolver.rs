@@ -37,6 +37,28 @@ impl ConfigSource {
         }
     }
 }
+/// Parse an already-resolved config into a validated [`WorkflowConfig`],
+/// expanding `workflow_call` references.
+///
+/// # Errors
+///
+/// Returns an error when the config cannot be parsed, workflow calls cannot be
+/// resolved, environment overrides are invalid, or validation fails.
+pub fn load_config_from_source(
+    yaml: &str,
+    source: &ConfigSource,
+) -> Result<crate::config::WorkflowConfig> {
+    let config = match source.path() {
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
+        None => crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml(yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+            std::env::current_dir()?,
+        )?,
+    };
+    crate::config::validate_config(&config)?;
+    Ok(config)
+}
 
 /// Resolve a workflow config, returning (`yaml_content`, source).
 ///

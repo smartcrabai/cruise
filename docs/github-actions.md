@@ -247,6 +247,7 @@ The default (no `model`/`plan_model` input) is pi's own auto-selection -- no mod
 - **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or any YAML file under `.cruise/`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up. See [`examples/repo-cruise.yaml`](../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
 - **`config` input empty, and the repository has no config of its own** -- this action generates a default config (`sdk: pi`, `write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `model`/`plan_model`) and exports it as `CRUISE_CONFIG`. See [above](#zero-config-default-pi-auto-selects-the-model) for why `model`/`plan_model` are omitted.
 - **`exec` always uses its own generated config**, regardless of `config` or the two cases above: a minimal `sdk: pi` config with a single `implement` step whose prompt is `"{input}"` (also without `model`/`plan_model`). `cruise exec` binds the whole plan text to `{input}` and never runs a planning step (`plan.md` stays empty), so a `{plan}`-based config would silently receive an empty prompt.
+- The action always exports `CRUISE_FORCE_EXEC=false`, so a repository's `force_exec: true` never changes the action's explicit `run`/`plan`/`fix` command flow. This guard is analogous to the forced `sdk: pi` setting above.
 
 In every case, the `model`/`plan_model` inputs (`CRUISE_MODEL`/`CRUISE_PLAN_MODEL` env overrides, applied by cruise itself) take priority over whatever a config file does or doesn't set.
 
@@ -274,6 +275,8 @@ Blank lines and lines starting with `#` are ignored. Each value is masked (`::ad
 - **Interacts badly with branch protection.** If the default branch requires PRs, status checks, or reviews before merging, cruise's direct push will simply fail (surfaced as a failed run). `exec` is meant for repositories that intentionally allow direct pushes to their default branch, or bypass rules for the actor/token cruise uses.
 - **Is advanced/opt-in.** There is no undo beyond `git revert`. Prefer `run` (which opens a draft PR you can review) unless you specifically want unattended direct pushes.
 - Skips the commit+push step entirely (and reports success) if `cruise exec` produced no file changes.
+
+The action always exports `CRUISE_FORCE_EXEC=false`; repository config cannot silently turn `run`, `plan`, or `fix` into direct execution. Use the explicit `exec` command when direct pushes are intended.
 
 ## How authentication works
 

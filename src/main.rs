@@ -58,6 +58,7 @@ async fn run() -> error::Result<()> {
         plan,
         command,
         input,
+        no_force_exec,
         skip_planning,
         repo,
         images,
@@ -71,18 +72,23 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
-        None if plan.is_some() => plan_cmd::launch_background_plan(
-            &plan.unwrap_or_default(),
-            skip_planning,
-            repo.as_deref(),
-            &images,
-        ),
+        None if plan.is_some() => {
+            plan_cmd::launch_background_plan(
+                &plan.unwrap_or_default(),
+                skip_planning,
+                repo.as_deref(),
+                &images,
+                no_force_exec,
+            )
+            .await
+        }
         None => {
             // Backward compat: no subcommand -> treat as `plan`.
             let plan_args = cli::PlanArgs {
                 input,
                 config: None,
                 dry_run: false,
+                no_force_exec,
                 skip_planning,
                 grill: false,
                 no_interactive_planning: false,

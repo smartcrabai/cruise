@@ -97,6 +97,11 @@ pub struct WorkflowConfig {
     /// worktree-mode sessions that successfully created a PR.
     #[serde(default)]
     pub cleanup_after_pr: bool,
+    /// Execute the workflow directly in the current directory for direct plan
+    /// entry points: `cruise <input>`, `cruise plan`, and `cruise --plan`.
+    /// Defaults to `false`; `--no-force-exec` opts out for one invocation.
+    #[serde(default)]
+    pub force_exec: bool,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -394,6 +399,9 @@ impl WorkflowConfig {
         }
         if let Some(v) = read_env_bool("CRUISE_INTERACTIVE_PLANNING")? {
             self.interactive_planning = v;
+        }
+        if let Some(v) = read_env_bool("CRUISE_FORCE_EXEC")? {
+            self.force_exec = v;
         }
         Ok(())
     }
@@ -1217,6 +1225,41 @@ steps:
 
         // Then: the field defaults to false (non-destructive)
         assert!(!config.cleanup_after_pr);
+    }
+
+    #[test]
+    fn test_force_exec_field() {
+        // Given: workflow YAML enables direct execution without the exec subcommand
+        let yaml = r"
+command: [claude, -p]
+force_exec: true
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: force_exec is enabled
+        assert!(config.force_exec);
+    }
+
+    #[test]
+    fn test_force_exec_defaults_to_false_when_omitted() {
+        // Given: workflow YAML omits force_exec
+        let yaml = r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+";
+
+        // When: the workflow is parsed
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: force_exec defaults to false
+        assert!(!config.force_exec);
     }
 
     #[test]
@@ -2660,6 +2703,7 @@ steps:
                 "plan_language",
                 "languages",
                 "env",
+                "force_exec",
                 "groups",
                 "steps",
                 "after-pr",
@@ -3109,6 +3153,7 @@ steps:
             EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
             EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
             EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
+            EnvGuard::remove("CRUISE_FORCE_EXEC"),
         ]
     }
 
@@ -3213,6 +3258,30 @@ steps:
     }
 
     #[test]
+    fn test_apply_env_overrides_force_exec_parses_true_false_1_0() {
+        for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            let _lock = lock_process();
+            let _guards = clear_all_override_envs();
+            let _force_exec = EnvGuard::set("CRUISE_FORCE_EXEC", value);
+
+            // Given: config with default force_exec=false
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+            // When: bool env override is applied
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+
+            // Then: force_exec reflects the parsed bool value
+            assert_eq!(
+                config.force_exec, expected,
+                "CRUISE_FORCE_EXEC={value:?} should parse to {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn test_apply_env_overrides_invalid_bool_returns_error() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
@@ -3230,6 +3299,32 @@ steps:
         let msg = err_string(result);
         assert!(
             msg.contains("CRUISE_CLEANUP_AFTER_PR"),
+            "error should name the env var, got: {msg}"
+        );
+        assert!(
+            msg.contains("yes"),
+            "error should include the invalid value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_force_exec_invalid_bool_returns_error() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _force_exec = EnvGuard::set("CRUISE_FORCE_EXEC", "yes");
+
+        // Given: CRUISE_FORCE_EXEC is set to an invalid value
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: env overrides are applied
+        let result = config.apply_env_overrides();
+
+        // Then: an error is returned naming the env var and invalid value
+        assert!(result.is_err(), "invalid bool should return an error");
+        let msg = err_string(result);
+        assert!(
+            msg.contains("CRUISE_FORCE_EXEC"),
             "error should name the env var, got: {msg}"
         );
         assert!(

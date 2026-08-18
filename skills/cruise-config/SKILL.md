@@ -59,7 +59,7 @@ The full spec is split into the files below. Load only the sections you need.
 
 | Doc | Contents |
 |-----|----------|
-| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, `pr_language`, `cleanup_after_pr`, hot-reload, rate-limit retry |
+| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, `pr_language`, `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: seher` (mode keys, provider resolution) and `sdk: pi` (direct pi_agent_rust, model references, auth), differences from command mode |
 | [references/steps.md](references/steps.md) | The three step types: prompt, command, option; `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{pr.*}` |

@@ -16,17 +16,17 @@ pub struct Cli {
     /// Pass `stdin` to read the task description from piped stdin explicitly.
     #[arg(long, value_name = "INPUT", conflicts_with = "input")]
     pub plan: Option<String>,
-
-    /// Use the input directly as the plan, skipping LLM generation.
-    ///
-    /// Works with either `--plan <INPUT>` (background) or the positional
-    /// `[INPUT]` (foreground); the given text becomes the plan verbatim.
+    /// Use the input directly as the plan, skipping LLM-based plan generation.
     #[arg(long)]
     pub skip_planning: bool,
 
+    /// Ignore `force_exec: true` in the workflow config and plan as usual.
+    #[arg(long)]
+    pub no_force_exec: bool,
+
     /// GitHub repository (owner/repository) to clone into a temporary
-    /// directory for planning and execution. The clone is removed after the
-    /// plan is approved and again after the PR has been created.
+    /// directory for planning and execution. The clone is removed after
+    /// the plan is approved and again after the PR has been created.
     #[arg(long, value_name = "OWNER/REPO")]
     pub repo: Option<String>,
 
@@ -79,10 +79,13 @@ pub struct PlanArgs {
     /// Print the plan step without executing it.
     #[arg(long)]
     pub dry_run: bool,
-
     /// Use the input directly as the plan; skip LLM-based planning.
     #[arg(long)]
     pub skip_planning: bool,
+
+    /// Ignore `force_exec: true` in the workflow config and plan as usual.
+    #[arg(long)]
+    pub no_force_exec: bool,
 
     /// "Grill me" planning: interview you one question at a time until the design
     /// is fully pinned down, then write the plan. Requires the SDK backend and an
@@ -469,6 +472,24 @@ mod tests {
     }
 
     #[test]
+    fn test_root_no_force_exec_defaults_to_false() {
+        // Given: a root invocation without the opt-out flag
+        let cli = Cli::parse_from(["cruise", "task"]);
+
+        // Then: no_force_exec remains disabled
+        assert!(!cli.no_force_exec);
+    }
+
+    #[test]
+    fn test_root_no_force_exec_flag_sets_true() {
+        // Given: a root invocation with --no-force-exec
+        let cli = Cli::parse_from(["cruise", "--no-force-exec", "task"]);
+
+        // Then: the opt-out is captured
+        assert!(cli.no_force_exec);
+    }
+
+    #[test]
     fn test_root_plan_flag_with_stdin_literal_parses() {
         // Given / When: the new root-level --plan flag is used with the explicit stdin sentinel
         let cli = Cli::try_parse_from(["cruise", "--plan", "stdin"])
@@ -709,6 +730,30 @@ mod tests {
                     "--skip-planning should default to false"
                 );
             }
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_force_exec_defaults_to_false() {
+        // Given: plan subcommand without the opt-out flag
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+
+        // Then: no_force_exec remains disabled
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.no_force_exec),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_plan_no_force_exec_flag_sets_true() {
+        // Given: plan subcommand with --no-force-exec
+        let cli = Cli::parse_from(["cruise", "plan", "--no-force-exec", "task"]);
+
+        // Then: the opt-out is captured
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.no_force_exec),
             _ => panic!("expected Plan subcommand"),
         }
     }
