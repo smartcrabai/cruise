@@ -113,7 +113,7 @@ The interactive menu changes with the session's phase:
 1. `-c/--config <path>` (must exist; no prompt)
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/*.yaml|*.yml`. Multiple candidates → interactive picker (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → a built-in default workflow (the repo's own `cruise.yaml`, embedded at build time).
+4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time).
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 
