@@ -61,6 +61,10 @@ pub enum WorkspaceMode {
 
 /// Persisted state for a single session.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "session state mirrors persisted workflow flags"
+)]
 pub struct SessionState {
     /// Session ID (format: `YYYYMMDDHHmmssNNN`, NNN = milliseconds).
     pub id: String,
@@ -91,6 +95,9 @@ pub struct SessionState {
     /// Branch captured for current-branch mode.
     #[serde(default)]
     pub target_branch: Option<String>,
+    /// Whether a fresh current-branch run may start from a dirty working tree.
+    #[serde(default)]
+    pub allow_dirty_working_tree: bool,
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
@@ -203,6 +210,7 @@ impl SessionState {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
+            allow_dirty_working_tree: false,
             pr_url: None,
             config_path: None,
             updated_at: None,
@@ -929,6 +937,7 @@ mod tests {
         assert_eq!(loaded.title, None);
         assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
         assert_eq!(loaded.target_branch, None);
+        assert!(!loaded.allow_dirty_working_tree);
         assert!(loaded.pr_url.is_none());
     }
 

@@ -179,7 +179,7 @@ Options:
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
-Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. The session is still recorded so progress is visible in `cruise list`. Use this when you want to drive a config against the active branch -- the same constraints as the Current-branch workspace mode apply (clean working tree, attached branch).
+Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. The session is still recorded so progress is visible in `cruise list`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
 When `force_exec: true` is set in the workflow config, `cruise "task"`, `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution.
 
@@ -834,7 +834,7 @@ In non-interactive environments (piped stdin) and with `--all`, worktree mode is
 
 ### Current-branch mode constraints
 
-- Requires a clean working tree (no uncommitted changes) for a fresh run.
+- For a fresh `cruise run` current-branch session, requires a clean working tree (no uncommitted changes). `cruise exec` and `force_exec` sessions are allowed to start dirty, with a warning; cruise does not stash, commit, or reset existing changes.
 - Requires an attached branch (not detached HEAD).
 - On resume, the active branch must match the branch recorded at the start of the session.
 
