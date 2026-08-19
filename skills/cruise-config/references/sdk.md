@@ -1,6 +1,6 @@
 # SDK backends: `sdk: seher` / `sdk: pi`
 
-Setting the top-level `sdk` field runs prompt steps in-process instead of spawning an external `command`. Two values are accepted: `"seher"` and `"pi"`. Any other value is a validation error.
+Setting the top-level `sdk` field selects an SDK execution path instead of the classic external `command` backend. `sdk: pi` runs the Rust pi engine in-process; `sdk: seher` resolves a provider whose concrete backend may be in-process or an external subprocess. Two values are accepted: `"seher"` and `"pi"`. Any other value is a validation error.
 
 ```yaml
 sdk: seher
@@ -24,6 +24,7 @@ Exactly one of `command` / `sdk` must be set:
 ## `sdk: seher` — routed through seher's provider resolution
 
 Before each prompt run, seher resolves a non-rate-limited provider using its own `~/.config/seher/config.yaml`. `model` / `plan_model` / per-step `model` are **reinterpreted as seher mode keys** (which provider/model to use is resolved from that seher configuration, not from a model name):
+When seher resolves a provider with `sdk: pi`, it drives the external TypeScript pi CLI over RPC and tries `pi`, then `bunx` / `npx` as fallbacks. Install one of those runtimes and the pi CLI package where needed. Use a seher provider with `sdk: pi-rust` to keep the in-process Rust engine; its model catalog is the version bundled with seher.
 
 | Context | Resolution order | Default |
 |---------|------------------|---------|
@@ -36,9 +37,9 @@ When every provider is rate-limited, cruise waits and re-polls every 60 seconds 
 
 ### Differences from command mode
 
-- **`env` applies to prompt steps**: top-level and per-step `env:` values are forwarded to the selected seher SDK backend. Backends that spawn Claude pass them to the child process; the in-process pi backend applies them through process environment mutation inside seher.
+- **`env` applies to prompt steps**: top-level and per-step `env:` values are forwarded to the selected seher SDK backend. Claude subprocess backends and RPC backends (`pi` and `omp`) pass values to child processes; RPC backends ignore workflow `PATH`/`PATHEXT` overrides so those variables cannot change helper resolution. Ambient variables are inherited by RPC child processes, while configured/request values override them except for `PATH`/`PATHEXT`; the in-process `pi-rust` backend applies values through process environment mutation inside seher.
 - **`{model}` placeholder is irrelevant**: it only exists for the `command` array.
-- **Interactive planning**: during `cruise plan`, the SDK agent gets custom planning tools — `ask_user` (ask the user a clarifying question), `submit_plan` (write the plan markdown), and `update_plan` (find/replace a section of the existing plan). Custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers. In non-interactive runs (no TTY), `ask_user` is not registered — the prompt instead tells the agent to decide on explicitly stated assumptions — but `submit_plan` and `update_plan` remain available, and a turn that ends without a successful `submit_plan`/`update_plan` call fails instead of falling back to the agent's final message as the plan. The interview-style `cruise plan --grill` mode is built on `ask_user` and therefore requires both an `sdk:` config and interactive planning enabled (`interactive_planning: true`, the default, and no `--no-interactive-planning` flag); cruise errors out otherwise.
+- **Interactive planning**: during `cruise plan`, the SDK agent gets custom planning tools — `ask_user` (ask the user a clarifying question), `submit_plan` (write the plan markdown), and `update_plan` (find/replace a section of the existing plan). Custom tools require a tool-capable seher SDK (`pi`, `omp`, `pi-rust`, or `claude`), so this pins planning to those providers. In non-interactive runs (no TTY), `ask_user` is not registered — the prompt instead tells the agent to decide on explicitly stated assumptions — but `submit_plan` and `update_plan` remain available, and a turn that ends without a successful `submit_plan`/`update_plan` call fails instead of falling back to the agent's final message as the plan. The interview-style `cruise plan --grill` mode is built on `ask_user` and `submit_plan`/`update_plan` and therefore requires an `sdk:` config, interactive planning enabled (`interactive_planning: true`, the default, with no `--no-interactive-planning` flag), and a tool-capable provider.
 - **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing. The one exception is `skip_step` (see below), which is registered only on steps that need it.
 
 ### `skip_step` — declaring intentional no-changes (`if.no-file-changes` steps only)
@@ -90,13 +91,13 @@ Resolved entirely by pi, in this precedence order:
 
 A rate limit retries the **same** provider/model with exponential backoff (2s, doubling up to a 60s cap — identical schedule to command mode), up to the configured `--rate-limit-retries` attempts. There is no other provider to fall back to (unlike `sdk: seher`, which re-resolves a different provider on each retry). Each retry starts a **fresh pi session** (the rate-limited attempt's partial session is abandoned on disk, and the step prompt is re-sent from scratch) — resuming a partially-answered session would duplicate context, so a clean re-run is deliberately preferred.
 
-Known limitation (shared with the seher-resolved pi engine): a step `timeout:` or Ctrl-C makes cruise stop waiting, but the in-flight pi call keeps running on its detached worker thread until it completes on its own — there is no cancellation hook in the underlying runner. If the step sets `env:` overrides, that orphaned call also keeps holding a process-wide env lock, so the next `sdk: pi` step with `env:` may block until the abandoned call finishes. Prefer generous `timeout:` values (or none) for `sdk: pi` steps that set `env:`.
+Known limitation (shared with the seher-resolved `pi-rust` engine): a step `timeout:` or Ctrl-C makes cruise stop waiting, but the in-flight pi call keeps running on its detached worker thread until it completes on its own — there is no cancellation hook in the underlying runner. If the step sets `env:` overrides, that orphaned call also keeps holding a process-wide env lock, so the next `sdk: pi` step with `env:` may block until the abandoned call finishes. Prefer generous `timeout:` values (or none) for `sdk: pi` steps that set `env:`.
 
 ### Differences from `sdk: seher`
 
 - No seher configuration file, no provider-resolution polling, no rate-limit-driven provider hopping.
 - Interactive planning tools (`ask_user` / `submit_plan` / `update_plan`) and `cruise plan --grill` work the same way — pi always supports custom tools, so there is no tool-incapable pi provider to worry about (unlike seher's `claude-terminal` / `claude-headless`).
-- `env` is applied the same way (in-process environment mutation) since pi is in-process either way.
+- `env` is applied through in-process environment mutation because top-level `sdk: pi` uses pi in-process.
 
 ### Endpoint overrides
 

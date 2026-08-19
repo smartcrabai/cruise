@@ -46,8 +46,9 @@ const SDK_POLL_INTERVAL_MS: u64 = 60_000;
 /// a model name in command mode, a seher `mode_key` in `sdk: seher` mode, and a
 /// raw model reference in `sdk: pi` mode (compute it with
 /// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]). `tools`
-/// and `resume` are honored by SDK backends except OMP, whose sessions are
-/// intentionally closed after each prompt because Cruise may rebuild its tools.
+/// and `resume` are honored by SDK backends except the RPC backends `omp` and
+/// `pi`, whose sessions are intentionally closed after each prompt because
+/// Cruise may rebuild its tools.
 pub struct PromptRun<'a> {
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
@@ -59,9 +60,12 @@ pub struct PromptRun<'a> {
     /// Environment variables applied to the prompt run.
     ///
     /// Command mode passes these to the spawned process. `sdk: seher` forwards
-    /// them to the selected seher backend; its in-process pi path applies them
-    /// via process environment mutation inside seher. `sdk: pi` applies them the
-    /// same way, directly (see [`PiRunnerOptions::env`]).
+    /// them to the selected seher backend; external RPC/Claude subprocesses
+    /// pass them to child processes, while `pi-rust` applies them through
+    /// process environment mutation inside seher. RPC backends inherit ambient
+    /// variables, but ignore workflow `PATH`/`PATHEXT` so helper resolution
+    /// cannot be redirected. `sdk: pi` applies them directly (see
+    /// [`PiRunnerOptions::env`]).
     pub env: &'a HashMap<String, String>,
     /// Callback invoked with a human-readable message on each rate-limit retry.
     pub on_retry: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -73,13 +77,15 @@ pub struct PromptRun<'a> {
     pub stream: Option<&'a StreamCallbacks<'a>>,
     /// Custom tools to inject (SDK mode only).
     pub tools: Vec<SeherTool>,
-    /// Prior session id to resume (SDK mode only; OMP starts a fresh session).
+    /// Prior session id to resume (SDK mode only; the RPC backends `omp` and
+    /// `pi` always start a fresh session).
     pub resume: Option<String>,
 }
 
 /// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the seher
 /// session id (for a follow-up `resume`). `session_id` is `None` in command mode
-/// and for OMP, whose sessions are closed after each Cruise prompt.
+/// and for the RPC backends `omp` / `pi`, whose sessions are closed after each
+/// Cruise prompt.
 #[derive(Debug, Clone)]
 pub struct PromptOutcome {
     pub result: PromptResult,
@@ -291,10 +297,12 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// Start `resolved` on the engine its `sdk` kind requires and return the chunk
 /// stream. Routes by `ResolvedAgent::sdk`:
 ///
-/// - `pi` — in-process pi engine. `resolved.model_id` is a full pi model ref
+/// - `pi` — the external pi CLI driven over RPC by seher (`pi`, falling back to
+///   `bunx`/`npx`). `resolved.model_id` is a full pi model ref
 ///   (`"<pi-provider>/<model>[:thinking]"`).
 /// - `omp` — oh-my-pi RPC subprocess. `resolved.model_id` is a full pi model ref.
-/// - `pi-rust` — seher's in-process Rust pi engine.
+/// - `pi-rust` — seher's in-process Rust pi engine (`pi_agent_rust`), whose
+///   model catalog is baked into the crate.
 /// - `claude` — `claude-agent-sdk` (supports custom tools). `resolved.model_id`
 ///   is a plain `claude --model` name.
 /// - `claude-terminal` — local `claude` CLI via tmux. No tools.
@@ -303,10 +311,6 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// `seher::sdk::is_supported_sdk` filters the candidate list to these kinds
 /// before resolution; an unknown kind here indicates the cruise<->seher
 /// dispatch mapping has drifted out of sync with the seher version in use.
-#[expect(
-    clippy::too_many_lines,
-    reason = "backend routing keeps all SDK branches together"
-)]
 fn spawn_agent_stream(
     resolved: &seher::sdk::ResolvedAgent,
     req: &PromptRun<'_>,
@@ -376,9 +380,13 @@ fn spawn_agent_stream(
                 req.resume.clone(),
             )
         }
-        "omp" | "pi-rust" => {
+        "pi" | "omp" | "pi-rust" => {
             let resume = match resolved.sdk.as_str() {
-                "omp" => None,
+                // The RPC backends keep one live child process per session and
+                // reject a resume whose tool set / options fingerprint changed,
+                // and [`finish_sdk_session`] closes their sessions after every
+                // prompt, so there is never a session left to resume.
+                "omp" | "pi" => None,
                 // PiRust can only open its own on-disk sessions. A provider
                 // fallback may hand us a Claude/OMP id; starting fresh is safer
                 // than passing a foreign id that PiRust cannot open.
@@ -387,11 +395,11 @@ fn spawn_agent_stream(
                         .is_file()
                         .then(|| id.to_string())
                 }),
-                _ => unreachable!("shared OMP/PiRust dispatch branch"),
+                _ => unreachable!("shared RPC/PiRust dispatch branch"),
             };
             let mut resolved = resolved.clone();
-            if resolved.sdk == "omp" {
-                merge_omp_env(&mut resolved, req.env);
+            if matches!(resolved.sdk.as_str(), "omp" | "pi") {
+                merge_helper_env(&mut resolved, req.env);
             } else {
                 resolved
                     .env
@@ -409,29 +417,6 @@ fn spawn_agent_stream(
                 },
             )
         }
-        "pi" => {
-            // `resolved.model_id` is a full pi model ref ("<pi-provider>/<model>[:thinking]",
-            // e.g. "openai-codex/gpt-5.5:xhigh") while `resolved.provider` is the seher
-            // config label (e.g. "codex"), which pi does not know about. Split the ref
-            // so pi receives its own provider / model / thinking parts.
-            let (provider, model, thinking) =
-                split_model_ref(&resolved.provider, &resolved.model_id, resolved.effort);
-            let opts = PiRunnerOptions {
-                provider: Some(provider),
-                model: Some(model),
-                api_key: resolved.api.as_ref().and_then(|a| a.key.clone()),
-                thinking,
-                system_prompt: None,
-                working_directory: req.working_dir.map(Path::to_path_buf),
-                env: req
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                tools: req.tools.clone(),
-            };
-            PiRunner::new(opts).stream(req.prompt.to_string(), req.resume.clone())
-        }
         other => unreachable!(
             "seher resolver returned an unsupported sdk kind: {other:?} \
              (cruise dispatch is out of sync with the seher version in use)"
@@ -439,10 +424,19 @@ fn spawn_agent_stream(
     }
 }
 
-/// Merge request variables into OMP without allowing workflow `PATH` values to
-/// select the helper executable. `ResolvedAgent::env` is also the launch
-/// environment used by seher's OMP candidate resolver.
-fn merge_omp_env(resolved: &mut seher::sdk::ResolvedAgent, request_env: &HashMap<String, String>) {
+/// Merge ambient and request variables into an RPC backend's launch
+/// environment without allowing workflow `PATH` values to select the helper
+/// executable. Configured values in `ResolvedAgent::env` take precedence over
+/// ambient defaults; request values take precedence except for `PATH`/`PATHEXT`.
+/// `ResolvedAgent::env` is also the environment seher's OMP / pi candidate
+/// resolvers search for `omp`, `pi`, `bunx` and `npx`.
+fn merge_helper_env(
+    resolved: &mut seher::sdk::ResolvedAgent,
+    request_env: &HashMap<String, String>,
+) {
+    for (key, value) in std::env::vars() {
+        resolved.env.entry(key).or_insert(value);
+    }
     for (key, value) in request_env {
         if matches!(key.as_str(), "PATH" | "PATHEXT") {
             continue;
@@ -451,21 +445,29 @@ fn merge_omp_env(resolved: &mut seher::sdk::ResolvedAgent, request_env: &HashMap
     }
 }
 
-/// OMP sessions are closed after each Cruise prompt because planning rebuilds
-/// its tool handlers between turns; seher fingerprints those handler identities
-/// and cannot resume a session with a different tool set.
+/// RPC-backend sessions are closed after each Cruise prompt because planning
+/// rebuilds its tool handlers between turns; seher fingerprints those handler
+/// identities and cannot resume a session with a different tool set. Closing
+/// also reaps the backend's child process, which seher keeps alive per session.
 fn finish_sdk_session(
     sdk: &str,
     working_dir: Option<&Path>,
     session: Option<String>,
 ) -> Option<String> {
-    if sdk == "omp" {
-        if let Some(session_id) = session.as_deref() {
-            let _ = seher::sdk::close_omp_session(session_id, working_dir);
+    match sdk {
+        "omp" => {
+            if let Some(session_id) = session.as_deref() {
+                let _ = seher::sdk::close_omp_session(session_id, working_dir);
+            }
+            None
         }
-        None
-    } else {
-        session
+        "pi" => {
+            if let Some(session_id) = session.as_deref() {
+                let _ = seher::sdk::close_pi_session(session_id, working_dir);
+            }
+            None
+        }
+        _ => session,
     }
 }
 
@@ -501,7 +503,8 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
 
         let omp_cancel = seher::sdk::CancelToken::new();
         let _omp_cancel_guard = CancelOnDrop(omp_cancel.clone());
-        let session_slot = (resolved.sdk == "omp").then(|| Arc::new(Mutex::new(None)));
+        let session_slot =
+            matches!(resolved.sdk.as_str(), "omp" | "pi").then(|| Arc::new(Mutex::new(None)));
         let rx_std = spawn_agent_stream(&resolved, &req, omp_cancel);
         let outcome =
             match stream_to_outcome(rx_std, on_delta, req.cancel_token, session_slot.clone()).await
@@ -635,7 +638,7 @@ async fn stream_to_outcome(
 // offers no cancellation hook. When `env:` overrides are set, that orphaned
 // run also keeps holding seher's process-wide env mutex, so a subsequent
 // `sdk: pi` step can block until the abandoned call completes. Same
-// limitation as the seher-resolved pi engine; documented in
+// limitation as the seher-resolved `pi-rust` engine; documented in
 // skills/cruise-config/references/sdk.md.
 //
 // Rate-limit retries deliberately start a *fresh* pi session (the original
@@ -930,15 +933,6 @@ pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -
         .to_string()
 }
 
-fn effort_to_thinking(effort: EffortLevel) -> &'static str {
-    match effort {
-        EffortLevel::Low => "low",
-        EffortLevel::Medium => "medium",
-        EffortLevel::High => "high",
-        EffortLevel::XHigh | EffortLevel::Max => "xhigh",
-    }
-}
-
 fn effort_from_suffix(suffix: &str) -> Option<EffortLevel> {
     match suffix.trim().to_lowercase().as_str() {
         "minimal" | "min" | "low" | "1" => Some(EffortLevel::Low),
@@ -965,39 +959,6 @@ fn claude_family_effort(
 ) -> Option<EffortLevel> {
     let (_, suffix_thinking) = split_thinking_suffix(model_id);
     resolved_effort.or_else(|| suffix_thinking.and_then(effort_from_suffix))
-}
-
-/// Split a seher model ref into the `(provider, model, thinking)` triple
-/// expected by [`PiRunnerOptions`].
-///
-/// `ResolvedAgent::model_id` carries a full pi model ref
-/// (`"<pi-provider>/<model>[:thinking]"`, e.g. `"openai-codex/gpt-5.5:xhigh"`),
-/// while `ResolvedAgent::provider` is the seher config label (e.g. `"codex"`),
-/// which pi's model registry does not know about. The leading path segment is
-/// therefore the pi provider. A ref without `/` carries no provider
-/// information, so as a best effort the seher label is passed through as
-/// `fallback_provider` — that only resolves when the label happens to equal a
-/// pi provider id. The trailing `:level` is split off only when it parses as a
-/// pi thinking level (`off`/`low`/`xhigh`/`0`-`4`/…, see
-/// [`split_thinking_suffix`]); any other `:` suffix (e.g. `:free`) stays part
-/// of the model id.
-fn split_model_ref(
-    fallback_provider: &str,
-    model_id: &str,
-    effort: Option<EffortLevel>,
-) -> (String, String, Option<String>) {
-    let (without_thinking, suffix_thinking) = split_thinking_suffix(model_id);
-    let (provider, model) = without_thinking
-        .split_once('/')
-        .unwrap_or((fallback_provider, without_thinking));
-    (
-        provider.to_string(),
-        model.to_string(),
-        effort
-            .map(effort_to_thinking)
-            .map(str::to_string)
-            .or_else(|| suffix_thinking.map(str::to_string)),
-    )
 }
 
 #[cfg(test)]
@@ -1034,68 +995,6 @@ mod tests {
     fn plan_mode_key_defaults_to_plan() {
         assert_eq!(mode_key_for_plan(None, None), DEFAULT_PLAN_MODE_KEY);
         assert_eq!(mode_key_for_plan(None, None), "plan");
-    }
-
-    // -- split_model_ref --------------------------------------------------------
-
-    #[test]
-    fn split_model_ref_extracts_provider_and_thinking() {
-        assert_eq!(
-            split_model_ref("codex", "openai-codex/gpt-5.5:xhigh", None),
-            (
-                "openai-codex".to_string(),
-                "gpt-5.5".to_string(),
-                Some("xhigh".to_string())
-            )
-        );
-    }
-
-    #[test]
-    fn split_model_ref_keeps_slashes_in_model_id() {
-        assert_eq!(
-            split_model_ref("openrouter", "openrouter/moonshotai/kimi-k2.6", None),
-            (
-                "openrouter".to_string(),
-                "moonshotai/kimi-k2.6".to_string(),
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn split_model_ref_falls_back_to_seher_provider_for_bare_model() {
-        assert_eq!(
-            split_model_ref("anthropic", "claude-sonnet-4-5", None),
-            (
-                "anthropic".to_string(),
-                "claude-sonnet-4-5".to_string(),
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn split_model_ref_ignores_non_thinking_colon_suffix() {
-        assert_eq!(
-            split_model_ref("openrouter", "openrouter/meta-llama/llama-3-8b:free", None),
-            (
-                "openrouter".to_string(),
-                "meta-llama/llama-3-8b:free".to_string(),
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn split_model_ref_prefers_resolved_effort_over_suffix() {
-        assert_eq!(
-            split_model_ref("codex", "openai-codex/gpt-5.5:low", Some(EffortLevel::Max)),
-            (
-                "openai-codex".to_string(),
-                "gpt-5.5".to_string(),
-                Some("xhigh".to_string())
-            )
-        );
     }
 
     #[test]
@@ -1496,7 +1395,10 @@ done
     }
 
     #[test]
-    fn omp_env_does_not_override_helper_search_path() {
+    fn rpc_backend_env_does_not_override_helper_search_path() {
+        let _lock = crate::test_support::lock_process();
+        let _ambient = crate::test_support::EnvGuard::set("CRUISE_RPC_AMBIENT", "ambient");
+        let _pathext = crate::test_support::EnvGuard::remove("PATHEXT");
         let mut resolved = seher::sdk::ResolvedAgent {
             provider: "test-provider".to_string(),
             model_id: "test-provider/test-model".to_string(),
@@ -1516,7 +1418,7 @@ done
         .into_iter()
         .collect();
 
-        merge_omp_env(&mut resolved, &request_env);
+        merge_helper_env(&mut resolved, &request_env);
 
         assert_eq!(
             resolved.env.get("PATH").map(String::as_str),
@@ -1527,6 +1429,131 @@ done
             resolved.env.get("PROJECT").map(String::as_str),
             Some("cruise")
         );
+        assert_eq!(
+            resolved.env.get("CRUISE_RPC_AMBIENT").map(String::as_str),
+            Some("ambient")
+        );
+    }
+
+    /// Provider `sdk: pi` must reach seher's *external* pi CLI over RPC, not the
+    /// in-process `pi_agent_rust` engine (which is `sdk: pi-rust` and whose baked
+    /// model catalog rejects model ids newer than the crate). The fake `pi` on
+    /// `PATH` only answers the RPC protocol, so an in-process run cannot pass.
+    #[cfg(unix)]
+    #[test]
+    fn pi_dispatch_streams_through_external_pi_cli() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let _home_guards = crate::test_support::set_fake_home(dir.path());
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
+        let script = bin_dir.join("pi");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+sid=
+extension=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = "--session-id" ]; then sid="$arg"; fi
+  if [ "$previous" = "--extension" ]; then extension="$arg"; fi
+  previous="$arg"
+done
+while IFS= read -r line; do
+  case "$line" in
+    *get_state*) printf '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s"}}\n' "$sid" ;;
+    *prompt*) if [ ! -f "$extension" ] || [ ! -s "$SEHER_PI_TOOL_SPEC" ] || [ -z "$SEHER_PI_BRIDGE_HOST" ] || [ -z "$SEHER_PI_BRIDGE_PORT" ] || [ -z "$SEHER_PI_BRIDGE_TOKEN" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_settled"}' ;;
+    *abort*) exit 0 ;;
+  esac
+done
+"#,
+        )
+        .unwrap_or_else(|e| panic!("write fake pi: {e}"));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("chmod fake pi: {e}"));
+        for name in ["bunx", "npx"] {
+            let blocker = bin_dir.join(name);
+            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
+                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
+            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
+                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
+        }
+
+        // A workflow `PATH` must not steer which `pi` / `bunx` / `npx` seher
+        // launches: dispatch has to keep `resolved.env`'s PATH (`merge_helper_env`),
+        // or the fake pi below becomes unreachable. The non-empty tool list also
+        // requires the external Pi extension bridge to be configured.
+        let env: HashMap<String, String> =
+            [(String::from("PATH"), String::from("/nonexistent/bin"))].into();
+        let echo = SeherTool::new(
+            "echo",
+            "Echo",
+            serde_json::json!({"type": "object"}),
+            std::sync::Arc::new(|input| Ok(input.to_string())),
+        );
+        let req = PromptRun {
+            prompt: "hello",
+            model_or_mode: None,
+            max_retries: 0,
+            env: &env,
+            on_retry: None,
+            cancel_token: None,
+            working_dir: Some(dir.path()),
+            stream: None,
+            tools: vec![echo],
+            // A foreign session id must not be forwarded to the RPC backend: its
+            // sessions are closed after every prompt, so there is none to resume.
+            resume: Some("foreign-session".to_string()),
+        };
+        let resolved = seher::sdk::ResolvedAgent {
+            provider: "codex".to_string(),
+            // Deliberately newer than `pi_agent_rust`'s baked catalog: the
+            // in-process engine rejects it with "Model ... not found".
+            model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
+            mode_key: "build".to_string(),
+            sdk: "pi".to_string(),
+            api: None,
+            skills: seher::sdk::ResolvedSkillsConfig::default(),
+            retry: seher::sdk::RetryConfig::default(),
+            env: [(String::from("PATH"), bin_dir.display().to_string())].into(),
+            effort: None,
+        };
+
+        let rx = spawn_agent_stream(&resolved, &req, seher::sdk::CancelToken::new());
+        let mut output = String::new();
+        let mut session = None;
+        loop {
+            let chunk = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|e| panic!("pi stream did not finish: {e}"));
+            match chunk {
+                StreamChunk::Session(id) => session = Some(id),
+                StreamChunk::Delta(delta) => output.push_str(&delta),
+                StreamChunk::Done(done) => {
+                    if !done.is_empty() {
+                        output = done;
+                    }
+                    break;
+                }
+                StreamChunk::Error(message) => panic!("unexpected pi error: {message}"),
+                StreamChunk::Limit(_) => panic!("unexpected pi rate limit"),
+            }
+        }
+
+        assert_eq!(output, "ok");
+        let session_id = session.unwrap_or_else(|| panic!("pi session id missing"));
+        assert_ne!(session_id, "foreign-session");
+        // finish_sdk_session must reap the RPC child and drop the id.
+        assert!(finish_sdk_session("pi", Some(dir.path()), Some(session_id.clone())).is_none());
+        assert!(!seher::sdk::close_pi_session(&session_id, Some(dir.path())));
+    }
+
+    #[test]
+    fn non_rpc_session_ids_remain_resumable() {
+        let session = Some("resumable-session".to_string());
+        assert_eq!(finish_sdk_session("claude", None, session.clone()), session);
     }
 
     #[test]

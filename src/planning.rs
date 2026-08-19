@@ -222,9 +222,10 @@ fn resolve_planning_env(
 /// so no plan-writing tool is available and the saved plan cannot be mutated;
 /// the agent answers from the plan it reads with pi's built-in tools.
 ///
-/// `resume` carries the seher session id forward so the plan/fix/ask turns share
-/// one conversation. `resume` is updated in place with the session id produced by
-/// this turn (left untouched in command mode).
+/// `resume` carries the seher session id forward when the selected backend
+/// supports resumption, so compatible plan/fix/ask turns can share one
+/// conversation. RPC `pi` / `omp` sessions are closed after each prompt and
+/// therefore start each turn fresh; command mode leaves `resume` untouched.
 ///
 /// # Errors
 ///
@@ -303,9 +304,10 @@ pub async fn run_plan_prompt_template(
             .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id))
     })?;
     // Carry the seher session id forward only for SDK turns that return one.
-    // OMP sessions are closed after each prompt because Cruise rebuilds its
-    // planning tool handlers between turns; assigning `None` also clears any
-    // stale session id from a prior provider/backend.
+    // The RPC backends (`omp`, `pi`) close their sessions after each prompt
+    // because Cruise rebuilds its planning tool handlers between turns;
+    // assigning `None` also clears any stale session id from a prior
+    // provider/backend.
     if plan_tools_enabled {
         *resume = outcome.session_id;
     }

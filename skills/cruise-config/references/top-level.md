@@ -55,7 +55,7 @@ force_exec: false         # Optional: execute direct plan entry points in place 
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: seher` — run prompts in-process, resolving a provider/model through seher's own `~/.config/seher/config.yaml`. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
+- `sdk: seher` — resolve a provider/model through seher's own `~/.config/seher/config.yaml`; the seher dispatcher runs in-process, while the selected provider backend may be in-process or an external subprocess. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
 - `sdk: pi` — run prompts in-process via `pi_agent_rust` **directly**, bypassing seher's provider resolution and config file entirely. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:thinking]"` or a bare `"model"`), not mode keys. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
