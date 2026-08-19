@@ -1109,13 +1109,18 @@ pub(crate) async fn run_prompt_step(
         on_stderr: Some(on_stderr),
     };
     let result = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+        let on_notice = |msg: &str| {
+            spinner.suspend(|| eprintln!("  {}", style(msg).dim()));
+            if let Some(cb) = on_step_log {
+                cb("info", msg);
+            }
+        };
         let run_future = executor.run(crate::executor::PromptRun {
             prompt: &prompt,
             model_or_mode: model_or_mode.as_deref(),
             max_retries: rate_limit_retries,
             env,
-            on_retry: Some(&on_retry),
+            on_notice: Some(&on_notice),
             cancel_token,
             working_dir,
             stream: Some(&stream_callbacks),

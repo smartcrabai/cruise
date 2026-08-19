@@ -16,6 +16,7 @@
 //! `pi_agent_rust`, bypassing seher's provider-resolution layer entirely --
 //! see [`run_pi_direct`] / [`parse_pi_model_ref`].
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,8 +68,9 @@ pub struct PromptRun<'a> {
     /// cannot be redirected. `sdk: pi` applies them directly (see
     /// [`PiRunnerOptions::env`]).
     pub env: &'a HashMap<String, String>,
-    /// Callback invoked with a human-readable message on each rate-limit retry.
-    pub on_retry: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    /// Callback invoked with human-readable progress notices: seher provider
+    /// resolution (`sdk: seher`) and rate-limit retries.
+    pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token.
     pub cancel_token: Option<&'a CancellationToken>,
     /// Working directory for the command / agent.
@@ -272,7 +274,7 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
     let resolved_command = resolved.command;
 
     let retry = |msg: &str| {
-        if let Some(cb) = req.on_retry {
+        if let Some(cb) = req.on_notice {
             cb(msg);
         }
     };
@@ -489,6 +491,9 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
 
     let mut attempts = 0;
     loop {
+        if let Some(cb) = req.on_notice {
+            cb(&resolving_notice(&mode_key, require_tools));
+        }
         // Signal the detached resolver thread to stop polling if this future is
         // cancelled or dropped (e.g. timeout / Ctrl-C) before resolution finishes.
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -500,7 +505,9 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         }?;
         // Resolution finished; the resolver thread has already exited.
         drop(abort_guard);
-
+        if let Some(cb) = req.on_notice {
+            cb(&resolution_notice(&resolved));
+        }
         let omp_cancel = seher::sdk::CancelToken::new();
         let _omp_cancel_guard = CancelOnDrop(omp_cancel.clone());
         let session_slot =
@@ -540,11 +547,8 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
                 let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
                 if attempts < req.max_retries {
                     attempts += 1;
-                    if let Some(cb) = req.on_retry {
-                        cb(&format!(
-                            "Provider rate-limited; re-resolving... ({attempts}/{})",
-                            req.max_retries
-                        ));
+                    if let Some(cb) = req.on_notice {
+                        cb(&rate_limited_notice(&resolved, attempts, req.max_retries));
                     }
                     continue;
                 }
@@ -670,7 +674,7 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
                 if attempts < req.max_retries {
                     attempts += 1;
                     let delay = crate::step::command::calculate_backoff(attempts);
-                    if let Some(cb) = req.on_retry {
+                    if let Some(cb) = req.on_notice {
                         cb(&format!(
                             "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
                             delay.as_secs_f64(),
@@ -961,6 +965,159 @@ fn claude_family_effort(
     resolved_effort.or_else(|| suffix_thinking.and_then(effort_from_suffix))
 }
 
+/// The model id and reasoning effort the resolved provider will actually run
+/// with. Claude-family SDKs take a plain `--model` name plus a separate effort.
+/// Pi-family SDKs split the model reference and derive effort from its suffix.
+fn effective_model(resolved: &seher::sdk::ResolvedAgent) -> (Cow<'_, str>, Option<EffortLevel>) {
+    if matches!(
+        resolved.sdk.as_str(),
+        "claude" | "claude-headless" | "claude-terminal"
+    ) {
+        let model =
+            claude_family_model(&resolved.model_id).map_or(Cow::Borrowed("default"), Cow::Owned);
+        (
+            model,
+            claude_family_effort(&resolved.model_id, resolved.effort),
+        )
+    } else {
+        let (_, model, suffix) =
+            seher::sdk::split_model_ref(&resolved.provider, &resolved.model_id);
+        (
+            Cow::Owned(model),
+            resolved
+                .effort
+                .or_else(|| suffix.as_deref().and_then(effort_from_suffix)),
+        )
+    }
+}
+
+fn resolving_notice(mode_key: &str, require_tools: bool) -> String {
+    let tools_note = if require_tools {
+        " (tool-capable providers only)"
+    } else {
+        ""
+    };
+    format!("seher: resolving provider for mode \"{mode_key}\"{tools_note}")
+}
+
+fn rate_limited_notice(
+    resolved: &seher::sdk::ResolvedAgent,
+    attempts: usize,
+    max_retries: usize,
+) -> String {
+    let (model, _) = effective_model(resolved);
+    format!(
+        "seher: provider={} model={model} rate-limited; re-resolving... ({attempts}/{max_retries})",
+        resolved.provider
+    )
+}
+
+/// Notice describing which seher provider/model a prompt is about to run on.
+/// seher logs nothing itself, so [`PromptRun::on_notice`] is the only place this
+/// can surface.
+fn resolution_notice(resolved: &seher::sdk::ResolvedAgent) -> String {
+    let (model, effort) = effective_model(resolved);
+    let mut msg = format!(
+        "seher: selected provider={} model={model} sdk={} mode={}",
+        resolved.provider, resolved.sdk, resolved.mode_key
+    );
+    if let Some(effort) = effort {
+        msg.push_str(" effort=");
+        msg.push_str(effort.as_str());
+    }
+    msg
+}
+
+#[test]
+fn resolution_notice_reports_provider_model_sdk_mode_and_effort() {
+    let resolved = seher::sdk::ResolvedAgent {
+        provider: "codex".to_string(),
+        model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
+        mode_key: "build".to_string(),
+        sdk: "pi".to_string(),
+        api: None,
+        skills: seher::sdk::ResolvedSkillsConfig::default(),
+        retry: seher::sdk::RetryConfig::default(),
+        env: indexmap::IndexMap::default(),
+        effort: Some(EffortLevel::High),
+    };
+    assert_eq!(
+        resolution_notice(&resolved),
+        "seher: selected provider=codex model=gpt-5.6-luna sdk=pi mode=build effort=high"
+    );
+}
+
+/// The claude-family SDKs get a plain `--model` plus a separate effort, so
+/// the notice must report what is really dispatched, not the raw config id.
+#[test]
+fn resolution_notice_splits_thinking_suffix_for_claude_family() {
+    let resolved = seher::sdk::ResolvedAgent {
+        provider: "claude".to_string(),
+        model_id: "claude-sonnet-4-6:xhigh".to_string(),
+        mode_key: "plan".to_string(),
+        sdk: "claude-terminal".to_string(),
+        api: None,
+        skills: seher::sdk::ResolvedSkillsConfig::default(),
+        retry: seher::sdk::RetryConfig::default(),
+        env: indexmap::IndexMap::default(),
+        effort: None,
+    };
+    assert_eq!(
+        resolution_notice(&resolved),
+        "seher: selected provider=claude model=claude-sonnet-4-6 sdk=claude-terminal mode=plan effort=xhigh"
+    );
+}
+
+#[test]
+fn resolution_notice_reports_claude_default_model() {
+    let resolved = seher::sdk::ResolvedAgent {
+        provider: "claude".to_string(),
+        model_id: ":high".to_string(),
+        mode_key: "build".to_string(),
+        sdk: "claude-terminal".to_string(),
+        api: None,
+        skills: seher::sdk::ResolvedSkillsConfig::default(),
+        retry: seher::sdk::RetryConfig::default(),
+        env: indexmap::IndexMap::default(),
+        effort: None,
+    };
+    assert_eq!(
+        resolution_notice(&resolved),
+        "seher: selected provider=claude model=default sdk=claude-terminal mode=build effort=high"
+    );
+}
+
+#[test]
+fn resolving_notice_reports_tool_requirement() {
+    assert_eq!(
+        resolving_notice("build", false),
+        "seher: resolving provider for mode \"build\""
+    );
+    assert_eq!(
+        resolving_notice("build", true),
+        "seher: resolving provider for mode \"build\" (tool-capable providers only)"
+    );
+}
+
+#[test]
+fn rate_limited_notice_reports_effective_model() {
+    let resolved = seher::sdk::ResolvedAgent {
+        provider: "codex".to_string(),
+        model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
+        mode_key: "build".to_string(),
+        sdk: "pi".to_string(),
+        api: None,
+        skills: seher::sdk::ResolvedSkillsConfig::default(),
+        retry: seher::sdk::RetryConfig::default(),
+        env: indexmap::IndexMap::default(),
+        effort: None,
+    };
+    assert_eq!(
+        rate_limited_notice(&resolved, 1, 2),
+        "seher: provider=codex model=gpt-5.6-luna rate-limited; re-resolving... (1/2)"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,6 +1386,102 @@ mod tests {
             }
         }
     }
+    /// `sdk: seher` must tell the CLI which provider/model seher picked; seher
+    /// itself logs nothing, so `on_notice` is the only carrier.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sdk_run_reports_resolved_provider_through_on_notice() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let _home_guards = crate::test_support::set_fake_home(dir.path());
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
+        let script = bin_dir.join("omp");
+        let tool_marker = dir.path().join("tool-registered");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"ready","protocolVersion":1}'
+while IFS= read -r line; do
+  case "$line" in
+    *get_state*) printf '%s\n' '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"omp-test-session"}}' ;;
+    *set_host_tools*) printf '%s\n' '{"id":"seher-host-tools","type":"response","command":"set_host_tools","success":true,"data":{"toolNames":["echo"]}}'; : > "$OMP_TOOL_MARKER" ;;
+    *prompt*) if [ ! -f "$OMP_TOOL_MARKER" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_end","isTerminal":true,"messages":[]}' ;;
+    *abort*) exit 0 ;;
+  esac
+done
+"#,
+        )
+        .unwrap_or_else(|e| panic!("write fake OMP: {e}"));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("chmod fake OMP: {e}"));
+        for name in ["bunx", "npx"] {
+            let blocker = bin_dir.join(name);
+            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
+                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
+            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
+                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
+        }
+        let codexbar = dir.path().join("codexbar");
+        std::fs::write(&codexbar, "#!/bin/sh\nexit 1\n")
+            .unwrap_or_else(|e| panic!("write codexbar stub: {e}"));
+        std::fs::set_permissions(&codexbar, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("chmod codexbar stub: {e}"));
+        let config_path = dir.path().join("seher.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "providers:\n  test-provider:\n    sdk: omp\n    env:\n      PATH: {}\n      OMP_TOOL_MARKER: {}\n    models:\n      build: test-provider/test-model\n",
+                bin_dir.display(),
+                tool_marker.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("write seher config: {e}"));
+        let _codexbar = crate::test_support::EnvGuard::set("SEHER_CODEXBAR_BIN", &codexbar);
+        let _seher_config = crate::test_support::EnvGuard::set("SEHER_CONFIG", &config_path);
+
+        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let notices_sink = std::sync::Arc::clone(&notices);
+        let on_notice = move |msg: &str| {
+            notices_sink
+                .lock()
+                .unwrap_or_else(|e| panic!("notices lock: {e}"))
+                .push(msg.to_string());
+        };
+        let env = HashMap::new();
+        let echo = SeherTool::new(
+            "echo",
+            "Echo",
+            serde_json::json!({"type": "object"}),
+            std::sync::Arc::new(|input| Ok(input.to_string())),
+        );
+        let outcome = Executor::Sdk
+            .run(PromptRun {
+                prompt: "hello",
+                model_or_mode: Some("build"),
+                max_retries: 0,
+                env: &env,
+                on_notice: Some(&on_notice),
+                cancel_token: None,
+                working_dir: Some(dir.path()),
+                stream: None,
+                tools: vec![echo],
+                resume: None,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("SDK run: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        let notices = notices
+            .lock()
+            .unwrap_or_else(|e| panic!("notices lock: {e}"));
+        assert_eq!(
+            notices[1],
+            "seher: selected provider=test-provider model=test-model sdk=omp mode=build"
+        );
+    }
 
     fn base_req(env: &HashMap<String, String>) -> PromptRun<'_> {
         PromptRun {
@@ -1236,7 +1489,7 @@ mod tests {
             model_or_mode: None,
             max_retries: 0,
             env,
-            on_retry: None,
+            on_notice: None,
             cancel_token: None,
             working_dir: None,
             stream: None,
@@ -1273,7 +1526,7 @@ mod tests {
             model_or_mode: Some("gpt-5.5"),
             max_retries: 0,
             env: &env,
-            on_retry: None,
+            on_notice: None,
             cancel_token: None,
             working_dir: Some(&dir),
             stream: None,
@@ -1337,7 +1590,7 @@ done
             model_or_mode: None,
             max_retries: 0,
             env: &env,
-            on_retry: None,
+            on_notice: None,
             cancel_token: None,
             working_dir: Some(dir.path()),
             stream: None,
@@ -1498,7 +1751,7 @@ done
             model_or_mode: None,
             max_retries: 0,
             env: &env,
-            on_retry: None,
+            on_notice: None,
             cancel_token: None,
             working_dir: Some(dir.path()),
             stream: None,
