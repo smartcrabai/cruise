@@ -24,7 +24,7 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **Secrets caveat**: avoid writing real API keys into `env:` values — config files tend to get committed. Prefer exporting secrets in the shell environment and keeping only non-secret values in `env:`.
 
-**SDK mode caveat**: in `sdk: seher` mode, prompt steps receive `env:` through the selected seher backend. Claude subprocess backends pass the values to the child process; the in-process pi backend applies them through process environment mutation inside seher. In `sdk: pi` mode (pi runs in-process directly, no seher involved), `env:` is applied the same way, via process environment mutation, before each pi call (see [sdk.md](sdk.md)). Command steps still spawn a shell and receive `env:` as usual.
+**SDK mode caveat**: in `sdk: seher` mode, prompt steps receive `env:` through the selected seher backend. Claude subprocess backends and the external pi CLI backend pass values to child processes; RPC backends (`pi` and `omp`) ignore workflow `PATH`/`PATHEXT` overrides so those variables cannot change helper resolution. The in-process `pi-rust` backend applies values through process environment mutation inside seher. Ambient variables are inherited by RPC child processes, and configured/request values override them except for `PATH`/`PATHEXT`. In `sdk: pi` mode (pi runs in-process directly, no seher involved), `env:` is applied the same way, via process environment mutation, before each pi call (see [sdk.md](sdk.md)). Command steps still spawn a shell and receive `env:` as usual.
 
 ## LLM API config (session-title generation)
 

@@ -218,8 +218,9 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
-    // SDK session id, shared across the plan / fix / ask turns so they resume the
-    // same conversation. Stays `None` in command mode.
+    // SDK backends may return a session id for plan / fix / ask turns. RPC
+    // `pi` / `omp` sessions are closed after each prompt, so those backends
+    // start each turn fresh; command mode always leaves this `None`.
     let mut resume: Option<String> = None;
     let interactive = !noninteractive;
 

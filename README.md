@@ -381,7 +381,7 @@ steps:
 
 ### SDK Mode
 
-Instead of spawning an external CLI via `command`, prompt steps can be driven in-process through an SDK by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified. Two values are accepted: `seher` and `pi`.
+Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK by setting the top-level `sdk` field. The seher dispatcher runs in-process, but its selected provider backend may be an external subprocess. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified. Two values are accepted: `seher` and `pi`.
 
 ```yaml
 sdk: seher        # resolve a provider/model through seher's config.yaml
@@ -391,6 +391,8 @@ plan_model: plan  # mode_key for the built-in plan step (falls back to `model`, 
 ```
 
 In `sdk: seher` mode, `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys** rather than LLM model names. When omitted, `model` defaults to `build`; `plan_model` falls back to `model`, or to `plan` when neither is set.
+
+When seher resolves a provider with `sdk: pi`, it drives the external TypeScript pi CLI over RPC and tries `pi`, then `bunx` / `npx` as fallbacks. Install one of those runtimes and the pi CLI package where needed. Use a seher provider with `sdk: pi-rust` to keep the in-process Rust engine; its model catalog is the version bundled with seher.
 
 #### `sdk: pi` -- drive pi_agent_rust directly
 
@@ -415,7 +417,7 @@ Rate limits are retried against the **same** provider/model with exponential bac
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Under `sdk: seher`, custom tools require a tool-capable seher SDK (`pi` or `claude`), so this pins planning to those providers; `sdk: pi` always supports custom tools (there is no tool-incapable pi provider), so this setting matters less there.
+By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Under `sdk: seher`, custom tools require a tool-capable seher SDK (`pi`, `omp`, `pi-rust`, or `claude`), so this pins planning to those providers; `sdk: pi` always supports custom tools (there is no tool-incapable pi provider), so this setting matters less there.
 
 Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). Under `sdk: seher` this makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
 
@@ -665,7 +667,7 @@ The legacy `fail-if-no-file-changes: true` syntax is still supported and is equi
 Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** `fail` and `retry` for that attempt:
 
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
-- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi` / `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
+- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi`, `omp`, `pi-rust`, `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
 
 Either path logs the declared reason so the decision stays visible in the run output.
 
