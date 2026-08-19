@@ -1,4 +1,5 @@
 name: PR Auto-merge
+# Warm-cache verification.
 
 on:
   pull_request:
