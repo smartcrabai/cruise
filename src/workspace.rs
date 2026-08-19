@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use console::style;
+
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionState, WorkspaceMode};
 use crate::worktree;
@@ -30,13 +32,14 @@ impl ExecutionWorkspace {
 ///
 /// In worktree mode this creates or reuses the session worktree. In
 /// current-branch mode this validates that the base repository is on the
-/// expected branch and clean for a fresh run.
+/// expected branch and clean for a fresh run unless dirty execution is
+/// explicitly allowed by the session.
 ///
 /// # Errors
 ///
 /// Returns an error if worktree setup fails, if the current-branch session is
 /// on a different branch than expected, if `HEAD` is detached, or if a fresh
-/// current-branch run starts from a dirty working tree.
+/// current-branch run starts from a dirty working tree without permission.
 pub fn prepare_execution_workspace(
     manager: &SessionManager,
     session: &mut SessionState,
@@ -93,10 +96,16 @@ fn validate_current_branch_session(session: &mut SessionState) -> Result<()> {
     }
 
     if session.current_step.is_none() && is_working_tree_dirty(&session.base_dir)? {
-        return Err(CruiseError::Other(
-            "current-branch mode requires a clean working tree, but the repository is dirty"
-                .to_string(),
-        ));
+        if !session.allow_dirty_working_tree {
+            return Err(CruiseError::Other(
+                "current-branch mode requires a clean working tree, but the repository is dirty"
+                    .to_string(),
+            ));
+        }
+        eprintln!(
+            "{} working tree is dirty; running on top of the existing uncommitted changes",
+            style("!").yellow().bold()
+        );
     }
 
     Ok(())
@@ -249,6 +258,40 @@ mod tests {
             error.to_string().contains("dirty"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn test_prepare_execution_workspace_current_branch_mode_allows_dirty_tree_when_flag_set() {
+        let _lock = lock_process();
+        // Given: a fresh current-branch session that explicitly allows tracked changes
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_home = tmp.path().join(".local").join("share").join("cruise");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        fs::write(repo.join("README.md"), "modified").unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(cruise_home);
+        let mut session = make_session("20260321120004", &repo);
+        session.allow_dirty_working_tree = true;
+
+        // When: preparing the current-branch workspace
+        let workspace =
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::CurrentBranch)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: execution stays in the base repository and captures its branch
+        match &workspace {
+            ExecutionWorkspace::CurrentBranch { path } => {
+                assert_eq!(path, &repo);
+                assert_eq!(session.target_branch.as_deref(), Some("main"));
+            }
+            ExecutionWorkspace::Worktree { ctx, .. } => {
+                panic!(
+                    "expected current branch workspace, got {}",
+                    ctx.path.display()
+                );
+            }
+        }
     }
 
     #[test]

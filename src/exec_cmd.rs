@@ -63,9 +63,10 @@ pub(crate) async fn run_resolved(
 
 /// Create and persist a session for exec mode.
 ///
-/// Sets `workspace_mode = CurrentBranch` and `phase = Planned` so `run_cmd` skips
-/// worktree creation and PR flow.  Writes an empty `plan.md` placeholder so that
-/// configs referencing `{plan}` do not fail with "No such file".
+/// Sets `workspace_mode = CurrentBranch`, allows execution on a dirty working
+/// tree, and sets `phase = Planned` so `run_cmd` skips worktree creation and
+/// PR flow.  Writes an empty `plan.md` placeholder so that configs referencing
+/// `{plan}` do not fail with "No such file".
 pub(crate) fn setup_exec_session(
     manager: &SessionManager,
     source: &ConfigSource,
@@ -78,6 +79,7 @@ pub(crate) fn setup_exec_session(
         SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
     session.config_path = source.path().cloned();
     session.workspace_mode = WorkspaceMode::CurrentBranch;
+    session.allow_dirty_working_tree = true;
     session.phase = SessionPhase::Planned;
     manager.create(&session)?;
 
@@ -290,6 +292,10 @@ mod tests {
             "exec sessions must use CurrentBranch to skip worktree creation"
         );
         assert!(
+            session.allow_dirty_working_tree,
+            "exec sessions must allow tracked changes in the working tree"
+        );
+        assert!(
             matches!(session.phase, SessionPhase::Planned),
             "exec sessions must start in Planned phase (not AwaitingApproval)"
         );
@@ -444,7 +450,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_exec_rejects_dirty_working_tree() {
+    async fn test_exec_runs_on_dirty_working_tree() {
         // Given: a git repo with uncommitted tracked changes (dirty tree)
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let process = ProcessStateGuard::new(tmp.path());
@@ -453,7 +459,7 @@ mod tests {
 
         // Keep config OUTSIDE the repo so the untracked config file itself
         // does not interfere with the dirty-tree check.
-        let config_content = single_command_config("noop", "printf noop");
+        let config_content = single_command_config("write", "printf exec-result > exec-out.txt");
         let config_path = tmp.path().join("cruise.yaml");
         fs::write(&config_path, &config_content).unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -463,15 +469,20 @@ mod tests {
         // When: exec is called on a dirty tree
         let result = run(exec_args_no_op(&config_path)).await;
 
-        // Then: it is rejected with a message mentioning "dirty"
+        // Then: execution succeeds directly in the existing repository
         assert!(
-            result.is_err(),
-            "exec must reject a dirty working tree to avoid overwriting uncommitted changes"
+            result.is_ok(),
+            "exec should allow a dirty working tree: {result:?}"
         );
-        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
-        assert!(
-            message.contains("dirty"),
-            "error message should mention dirty tree, got: {message}"
+        assert_eq!(
+            fs::read_to_string(repo.join("exec-out.txt")).unwrap_or_else(|e| panic!("{e:?}")),
+            "exec-result"
+        );
+
+        // And: pre-existing tracked changes remain untouched
+        assert_eq!(
+            fs::read_to_string(repo.join("README.md")).unwrap_or_else(|e| panic!("{e:?}")),
+            "modified"
         );
     }
 
