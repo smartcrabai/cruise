@@ -520,7 +520,7 @@ async fn generate_title_via_sdk(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: 1,
             env: &env,
-            on_retry: None,
+            on_notice: None,
             cancel_token,
             working_dir: None,
             stream: None,

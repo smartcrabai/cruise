@@ -212,14 +212,14 @@ async fn generate_pr_description(
     }
 
     let output = {
-        let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+        let on_notice = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
         match executor
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
                 model_or_mode: model_or_mode.as_deref(),
                 max_retries: rate_limit_retries,
                 env: &env,
-                on_retry: Some(&on_retry),
+                on_notice: Some(&on_notice),
                 cancel_token,
                 working_dir: Some(worktree_path),
                 stream: None,
@@ -274,14 +274,14 @@ async fn generate_pr_via_sdk_tool(
         "{pr_prompt}\n\n\
          Call the submit_pr_metadata tool with the title and body."
     );
-    let on_retry = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+    let on_notice = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
     match executor
         .run(crate::executor::PromptRun {
             prompt: &prompt,
             model_or_mode,
             max_retries: rate_limit_retries,
             env,
-            on_retry: Some(&on_retry),
+            on_notice: Some(&on_notice),
             cancel_token,
             working_dir: Some(worktree_path),
             stream: None,

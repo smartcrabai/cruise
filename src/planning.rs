@@ -277,14 +277,14 @@ pub async fn run_plan_prompt_template(
     // prompts, so a spinner would clobber interactive input; only spin for the
     // command backend.
     let spinner = (!executor.is_sdk()).then(|| crate::spinner::Spinner::start("Cruising..."));
-    let on_retry = move |msg: &str| eprintln!("{msg}");
+    let on_notice = move |msg: &str| eprintln!("{}", style(msg).dim());
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
             model_or_mode: model_or_mode.as_deref(),
             max_retries: ctx.rate_limit_retries,
             env: &env,
-            on_retry: Some(&on_retry),
+            on_notice: Some(&on_notice),
             cancel_token: ctx.cancel_token,
             working_dir: ctx.working_dir,
             stream: stream_callbacks,
