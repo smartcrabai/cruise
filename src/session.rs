@@ -157,13 +157,16 @@ pub struct SessionState {
     /// creating a duplicate.
     #[serde(default)]
     pub published_issue_url: Option<String>,
+    /// Whether this is a transient session created by `cruise exec`.
+    #[serde(default)]
+    pub exec: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionStateFingerprint([u8; 32]);
 
 impl SessionStateFingerprint {
-    fn from_bytes(bytes: &[u8]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         Self(crate::file_tracker::sha256_digest(bytes))
     }
 }
@@ -226,6 +229,7 @@ impl SessionState {
             has_dag: false,
             current_step_is_node_id: false,
             published_issue_url: None,
+            exec: false,
         }
     }
 
@@ -397,6 +401,7 @@ impl SessionManager {
     ///
     /// Returns an error if the directory cannot be created or the state cannot be written.
     pub fn create(&self, state: &SessionState) -> Result<()> {
+        validate_session_id(&state.id)?;
         let session_dir = self.sessions_dir().join(&state.id);
         std::fs::create_dir_all(&session_dir)?;
         self.save(state)?;
@@ -431,10 +436,17 @@ impl SessionManager {
         self.sessions_dir().join(id).join("state.json")
     }
 
-    pub(crate) fn load_with_fingerprint(
+    /// Load a session and return the fingerprint of its state file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session ID is invalid, the state file cannot be read,
+    /// or the state file cannot be parsed.
+    pub fn load_with_fingerprint(
         &self,
         id: &str,
     ) -> Result<(SessionState, SessionStateFingerprint)> {
+        validate_session_id(id)?;
         let path = self.state_path(id);
         let bytes = std::fs::read(&path)
             .map_err(|e| CruiseError::SessionError(format!("failed to load session {id}: {e}")))?;
@@ -513,7 +525,8 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    /// Return sessions in a runnable phase (pending execution).
+    /// Return sessions in a runnable phase (pending execution), excluding exec
+    /// sessions. Exec sessions can only be resumed by explicitly specifying ID.
     ///
     /// # Errors
     ///
@@ -522,7 +535,7 @@ impl SessionManager {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|s| s.phase.is_runnable())
+            .filter(|s| s.phase.is_runnable() && !s.exec)
             .collect())
     }
 
@@ -540,7 +553,8 @@ impl SessionManager {
             .collect())
     }
 
-    /// Return sessions eligible for `run --all`: Planned or Suspended.
+    /// Return sessions eligible for `run --all`: Planned or Suspended,
+    /// excluding exec sessions.
     ///
     /// # Errors
     ///
@@ -549,7 +563,9 @@ impl SessionManager {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|s| matches!(s.phase, SessionPhase::Planned | SessionPhase::Suspended))
+            .filter(|s| {
+                matches!(s.phase, SessionPhase::Planned | SessionPhase::Suspended) && !s.exec
+            })
             .collect())
     }
 
@@ -623,6 +639,7 @@ impl SessionManager {
     ///
     /// Returns an error if the directory cannot be removed.
     pub fn delete(&self, id: &str) -> Result<()> {
+        validate_session_id(id)?;
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
             std::fs::remove_dir_all(&session_dir)?;
@@ -630,7 +647,51 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Remove Completed sessions whose PR is closed or merged (checked via `gh`).
+    /// Dispose of an exec session after its run returns.
+    ///
+    /// Paused and suspended sessions remain available for explicit resume.
+    /// An untouched initial `Planned` session can be removed after a preflight
+    /// failure; the fingerprint protects a session reset by another process.
+    pub fn dispose_exec_session_if_owned(
+        &self,
+        id: &str,
+        initial_phase: &SessionPhase,
+        initial_fingerprint: SessionStateFingerprint,
+    ) {
+        if validate_session_id(id).is_err() {
+            return;
+        }
+        let remove = |manager: &Self| {
+            if let Err(e) = manager.delete(id) {
+                eprintln!("warning: failed to remove exec session {id}: {e}");
+            }
+        };
+        match self.inspect_state_file(id) {
+            Ok(SessionFileContents::Parsed { state, fingerprint })
+                if matches!(
+                    state.phase,
+                    SessionPhase::Completed | SessionPhase::Failed(_)
+                ) || (matches!(initial_phase, SessionPhase::Planned)
+                    && fingerprint == initial_fingerprint) =>
+            {
+                remove(self);
+            }
+            Ok(SessionFileContents::Parsed { state, .. }) => {
+                eprintln!(
+                    "exec session {id} kept in '{}' phase: cruise run {id}",
+                    state.phase.label()
+                );
+            }
+            Ok(SessionFileContents::Missing | SessionFileContents::Invalid { .. }) | Err(_) => {
+                // A corrupt or already-missing transient session is safe to
+                // remove, but only after the ID has passed validation above.
+                remove(self);
+            }
+        }
+    }
+
+    /// Remove sessions whose PR is closed or merged (checked via `gh`), along
+    /// with terminal sessions that cannot have a PR.
     ///
     /// # Errors
     ///
@@ -640,11 +701,30 @@ impl SessionManager {
         let mut report = CleanupReport::default();
 
         for session in sessions {
+            let plan_available = session.workspace_mode == WorkspaceMode::CurrentBranch
+                && session.phase == SessionPhase::Planned
+                && crate::metadata::plan_markdown_available(
+                    &session.plan_path(&self.sessions_dir()),
+                );
+            if is_unreclaimable_no_pr_session(&session, plan_available) {
+                if let Err(e) = self.cleanup_session_workspace(&session) {
+                    eprintln!("warning: failed to clean up session {}: {}", session.id, e);
+                    continue;
+                }
+                if let Err(e) = self.delete(&session.id) {
+                    eprintln!("warning: failed to remove session {}: {}", session.id, e);
+                    continue;
+                }
+                eprintln!("Removed no-PR session {}.", session.id);
+                report.deleted += 1;
+                report.no_pr_deleted += 1;
+                continue;
+            }
+
             if !matches!(session.phase, SessionPhase::Completed) {
                 continue;
             }
             let Some(ref pr_url) = session.pr_url else {
-                // No PR URL recorded -- skip silently.
                 continue;
             };
 
@@ -680,16 +760,12 @@ impl SessionManager {
             }
 
             // Remove the git worktree (and, for repo-backed sessions, the
-            // temporary clone) if they still exist.
-            if session.repo.is_some() {
-                crate::repo_clone::cleanup_session_workspace(self, &session);
-            } else if let Some(ctx) = session.worktree_context()
-                && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
-            {
-                eprintln!(
-                    "warning: failed to remove worktree for {}: {}",
-                    session.id, e
-                );
+            // temporary clone) if they still exist. Keep the metadata when
+            // cleanup fails so ownership can be recovered and retried.
+            if let Err(e) = self.cleanup_session_workspace(&session) {
+                eprintln!("warning: failed to clean up session {}: {}", session.id, e);
+                report.skipped += 1;
+                continue;
             }
 
             self.delete(&session.id)?;
@@ -698,12 +774,70 @@ impl SessionManager {
 
         Ok(report)
     }
+
+    fn cleanup_session_workspace(&self, session: &SessionState) -> Result<()> {
+        if session.repo.is_some() {
+            crate::repo_clone::cleanup_session_workspace(self, session)
+        } else if let (Some(path), Some(branch)) =
+            (&session.worktree_path, &session.worktree_branch)
+        {
+            // Do not require the worktree directory to exist here: a stale
+            // session can still own a branch that needs to be removed.
+            let ctx = crate::worktree::WorktreeContext {
+                path: path.clone(),
+                branch: branch.clone(),
+                original_dir: session.base_dir.clone(),
+            };
+            crate::worktree::cleanup_worktree(&ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn validate_session_id(id: &str) -> Result<()> {
+    let mut components = Path::new(id).components();
+    if id.is_empty()
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(CruiseError::SessionError(format!(
+            "invalid session ID: {id:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Returns whether a session has no PR path and can therefore be reclaimed
+/// without consulting GitHub.
+fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) -> bool {
+    let terminal = matches!(
+        session.phase,
+        SessionPhase::Completed | SessionPhase::Failed(_)
+    );
+    if session.exec {
+        // Explicitly resumed exec sessions remain transient, but a reset exec
+        // session is still resumable and must not be reclaimed by clean.
+        return terminal;
+    }
+
+    let legacy_current_branch =
+        session.workspace_mode == WorkspaceMode::CurrentBranch && session.pr_url.is_none();
+    if legacy_current_branch && terminal {
+        return true;
+    }
+
+    legacy_current_branch
+        && session.phase == SessionPhase::Planned
+        && session.current_step.is_none()
+        && !plan_available
 }
 
 #[derive(Default)]
 pub struct CleanupReport {
     pub deleted: usize,
     pub skipped: usize,
+    pub no_pr_deleted: usize,
 }
 
 /// Generate a unique session ID from current UTC time plus a UUID suffix.
@@ -3138,6 +3272,125 @@ mod tests {
     }
 
     #[test]
+    fn test_pending_excludes_exec_sessions_but_keeps_explicitly_runnable_sessions() {
+        // Given: runnable sessions, one of which was created by exec
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        for (id, phase, exec) in [
+            ("20260523115000", SessionPhase::Planned, true),
+            ("20260523115001", SessionPhase::Planned, false),
+            ("20260523115002", SessionPhase::Suspended, true),
+            (
+                "20260523115003",
+                SessionPhase::Failed("err".to_string()),
+                false,
+            ),
+        ] {
+            let mut session = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            session.phase = phase;
+            session.exec = exec;
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: asking for automatically pending sessions
+        let pending = manager.pending().unwrap_or_else(|e| panic!("{e:?}"));
+        let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
+
+        // Then: exec sessions are excluded while ordinary runnable sessions remain
+        assert!(!ids.contains(&"20260523115000"));
+        assert!(!ids.contains(&"20260523115002"));
+        assert!(ids.contains(&"20260523115001"));
+        assert!(ids.contains(&"20260523115003"));
+    }
+
+    #[test]
+    fn test_run_all_candidates_excludes_exec_sessions() {
+        // Given: Planned and Suspended sessions, including exec sessions
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        for (id, phase, exec) in [
+            ("20260523116000", SessionPhase::Planned, true),
+            ("20260523116001", SessionPhase::Suspended, true),
+            ("20260523116002", SessionPhase::Planned, false),
+            ("20260523116003", SessionPhase::Suspended, false),
+        ] {
+            let mut session = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            session.phase = phase;
+            session.exec = exec;
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: asking for sessions selected by run --all
+        let candidates = manager
+            .run_all_candidates()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let ids: Vec<&str> = candidates.iter().map(|s| s.id.as_str()).collect();
+
+        // Then: only non-exec Planned/Suspended sessions are returned
+        assert_eq!(ids, vec!["20260523116002", "20260523116003"]);
+    }
+
+    #[test]
+    fn test_exec_flag_defaults_false_and_roundtrips_true() {
+        // Given: a newly created ordinary session
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260523117000";
+        let session = SessionState::new(
+            id.to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: ordinary sessions are not exec sessions
+        assert!(!manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).exec);
+
+        // When: an exec session is marked
+        let mut exec = manager.load(id).unwrap_or_else(|e| panic!("{e:?}"));
+        exec.exec = true;
+        manager.save(&exec).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the flag remains true after loading and saving
+        assert!(manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).exec);
+    }
+
+    #[test]
+    fn test_session_state_remains_compatible_with_legacy_json() {
+        // Given: a legacy state JSON without newer optional fields
+        let json = r#"{
+            "id": "20260523117001",
+            "base_dir": "/repo",
+            "phase": "Planned",
+            "config_source": "cruise.yaml",
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-05-23T00:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        }"#;
+
+        // When: deserializing the old state and serializing it with the new schema
+        let session: SessionState = serde_json::from_str(json).unwrap_or_else(|e| panic!("{e:?}"));
+        let serialized = serde_json::to_value(session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the legacy state still round-trips successfully
+        assert_eq!(serialized["id"], "20260523117001");
+    }
+
+    #[test]
     fn test_run_all_candidates_excludes_draft() {
         // Given: sessions in Draft, Planned, and Suspended phases
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3177,5 +3430,257 @@ mod tests {
             ids.contains(&"20260523120002"),
             "Suspended should be a run_all candidate: {ids:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cleanup matrix covers all retention categories"
+    )]
+    fn test_cleanup_by_pr_status_removes_no_pr_terminal_sessions_without_gh() {
+        // Given: terminal exec/legacy sessions and resumable or plan-backed sessions
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = tmp.path().join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'OPEN\\n'\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut paths = vec![bin_dir.clone()];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = crate::test_support::EnvGuard::set(
+            "PATH",
+            std::env::join_paths(paths).unwrap_or_else(|e| panic!("{e:?}")),
+        );
+
+        let create = |id: &str, phase: SessionPhase, exec: bool, mode: WorkspaceMode| {
+            let mut session = SessionState::new(
+                id.to_string(),
+                PathBuf::from("/repo"),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            session.phase = phase;
+            session.workspace_mode = mode;
+            session.exec = exec;
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        };
+        create(
+            "cleanup-exec-completed",
+            SessionPhase::Completed,
+            true,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-exec-failed",
+            SessionPhase::Failed("err".to_string()),
+            true,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-exec-suspended",
+            SessionPhase::Suspended,
+            true,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-exec-running",
+            SessionPhase::Running,
+            true,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-legacy-completed",
+            SessionPhase::Completed,
+            false,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-legacy-failed",
+            SessionPhase::Failed("err".to_string()),
+            false,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-planned-empty",
+            SessionPhase::Planned,
+            false,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-planned-nonempty",
+            SessionPhase::Planned,
+            false,
+            WorkspaceMode::CurrentBranch,
+        );
+        create(
+            "cleanup-planned-worktree",
+            SessionPhase::Planned,
+            false,
+            WorkspaceMode::Worktree,
+        );
+        create(
+            "cleanup-open-pr",
+            SessionPhase::Completed,
+            false,
+            WorkspaceMode::Worktree,
+        );
+        let mut open_pr = manager
+            .load("cleanup-open-pr")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        open_pr.pr_url = Some("https://github.com/o/r/pull/1".to_string());
+        manager.save(&open_pr).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut planned_in_progress = manager
+            .load("cleanup-planned-nonempty")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        planned_in_progress.current_step = Some("step".to_string());
+        manager
+            .save(&planned_in_progress)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            manager
+                .sessions_dir()
+                .join("cleanup-planned-empty")
+                .join("plan.md"),
+            "",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            manager
+                .sessions_dir()
+                .join("cleanup-planned-nonempty")
+                .join("plan.md"),
+            "# plan",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            manager
+                .sessions_dir()
+                .join("cleanup-planned-worktree")
+                .join("plan.md"),
+            "",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: clean evaluates sessions
+        let report = manager
+            .cleanup_by_pr_status()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only terminal no-PR sessions are removed, without a gh call for them
+        assert_eq!(report.deleted, 5);
+        assert_eq!(report.no_pr_deleted, 5);
+        for id in [
+            "cleanup-exec-completed",
+            "cleanup-exec-failed",
+            "cleanup-legacy-completed",
+            "cleanup-legacy-failed",
+            "cleanup-planned-empty",
+        ] {
+            assert!(
+                !manager.sessions_dir().join(id).exists(),
+                "{id} should be deleted"
+            );
+        }
+        for id in [
+            "cleanup-exec-suspended",
+            "cleanup-exec-running",
+            "cleanup-planned-nonempty",
+            "cleanup-planned-worktree",
+            "cleanup-open-pr",
+        ] {
+            assert!(
+                manager.sessions_dir().join(id).exists(),
+                "{id} should be retained"
+            );
+        }
+        let gh_calls = std::fs::read_to_string(&gh_log).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            gh_calls.lines().count(),
+            1,
+            "only the PR-backed session needs gh"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_no_pr_removes_worktree_and_keeps_reset_exec_session() {
+        // Given: a terminal current-branch session with a real worktree, plus
+        // an exec session reset to its resumable Planned state.
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        crate::test_support::init_git_repo(&repo);
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let (worktree, _) = crate::worktree::setup_session_worktree(
+            &repo,
+            "cleanup-worktree",
+            "task",
+            &tmp.path().join("worktrees"),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut terminal = SessionState::new(
+            "cleanup-worktree".to_string(),
+            repo.clone(),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        terminal.phase = SessionPhase::Completed;
+        terminal.workspace_mode = WorkspaceMode::CurrentBranch;
+        terminal.worktree_path = Some(worktree.path.clone());
+        terminal.worktree_branch = Some(worktree.branch.clone());
+        manager
+            .create(&terminal)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut reset_exec = SessionState::new(
+            "cleanup-reset-exec".to_string(),
+            repo,
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        reset_exec.phase = SessionPhase::Planned;
+        reset_exec.workspace_mode = WorkspaceMode::CurrentBranch;
+        reset_exec.exec = true;
+        manager
+            .create(&reset_exec)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: clean evaluates no-PR sessions.
+        let report = manager
+            .cleanup_by_pr_status()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the terminal session and its branch/worktree are removed, but
+        // the explicitly resumable exec session remains.
+        assert_eq!(report.deleted, 1);
+        assert!(!worktree.path.exists());
+        assert!(!manager.sessions_dir().join("cleanup-worktree").exists());
+        assert!(manager.sessions_dir().join("cleanup-reset-exec").exists());
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", &worktree.branch])
+            .current_dir(worktree.original_dir)
+            .output()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
     }
 }

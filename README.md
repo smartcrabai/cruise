@@ -77,7 +77,7 @@ cruise exec "do this"
 # List and manage sessions interactively
 cruise list
 
-# Remove sessions with closed/merged PRs
+# Remove closed/merged PR sessions and terminal no-PR sessions
 cruise clean
 
 # Legacy: no subcommand is treated as `cruise plan`
@@ -95,7 +95,7 @@ Commands:
   run          Execute a planned session
   exec         Execute the workflow config directly in the current directory
   list         List and manage sessions interactively
-  clean        Remove sessions with closed/merged PRs
+  clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
   config       Show or update application-level configuration
 
 Options:
@@ -179,7 +179,7 @@ Options:
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
-Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. The session is still recorded so progress is visible in `cruise list`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
+Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
 When `force_exec: true` is set in the workflow config, `cruise "task"`, `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution.
 
@@ -223,9 +223,9 @@ Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/c
 cruise clean
 ```
 
-Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is closed or merged are deleted along with their worktrees (and any leftover `--repo` clone). Sessions without a PR URL or with an open PR are skipped.
+Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is closed or merged are deleted along with their worktrees (and any leftover `--repo` clone). Terminal exec/current-branch sessions that cannot have a PR, including legacy exec remnants, are deleted without a GitHub status check. Suspended sessions and ordinary planned sessions remain available for resumption.
 
-> **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached (e.g. the workflow failed before completion, or PR creation returned an error). If a session is unexpectedly skipped by `cruise clean`, check the session logs or re-run PR creation manually with `gh pr create`.
+> **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached. PR-backed sessions without a PR URL are retained; inspect the session logs or re-run PR creation manually with `gh pr create`.
 
 ## Session Management
 
@@ -260,7 +260,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
-> **`cruise exec`** is a separate path that skips this lifecycle entirely: it executes the workflow in the current directory without planning, worktree creation, or PR creation. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
+> **`cruise exec`** is a separate path with a transient lifecycle: it executes in the current directory without planning, worktree creation, or PR creation, and removes its session after terminal completion. Paused or interrupted exec sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
 
 ### `cruise list` Actions
 

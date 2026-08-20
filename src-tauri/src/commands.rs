@@ -10,8 +10,8 @@ use cruise::new_session_history::{
 };
 use cruise::paths;
 use cruise::session::{
-    PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, WorkspaceMode,
-    current_iso8601,
+    PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
+    WorkspaceMode, current_iso8601,
 };
 use cruise::session_edit::CurrentStepUpdate;
 use cruise::step::option::OptionResult;
@@ -53,6 +53,8 @@ pub struct SessionDto {
     pub pr_url: Option<String>,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
+    /// Whether this transient session is excluded from Run All.
+    pub exec: bool,
     pub workspace_mode: WorkspaceMode,
     /// Whether a valid (non-empty) `plan.md` exists for this session.
     pub plan_available: bool,
@@ -103,6 +105,7 @@ impl From<cruise::session::SessionState> for SessionDto {
             pr_url: s.pr_url,
             updated_at: s.updated_at,
             awaiting_input: s.awaiting_input,
+            exec: s.exec,
             workspace_mode: s.workspace_mode,
             plan_available: false,
             pending_ask_question: s.pending_ask_question,
@@ -701,7 +704,7 @@ pub(crate) fn respond_to_ask_impl(
     Ok(())
 }
 
-/// Remove Completed sessions whose PR is closed or merged.
+/// Remove sessions whose PR is closed or merged, plus terminal no-PR sessions.
 #[tauri::command]
 pub async fn clean_sessions() -> std::result::Result<CleanupResultDto, String> {
     let manager = new_session_manager()?;
@@ -1921,7 +1924,7 @@ pub fn discard_session(session_id: String) -> std::result::Result<(), String> {
     if let Ok(session) = manager.load(&session_id)
         && session.repo.is_some()
     {
-        cruise::repo_clone::cleanup_session_workspace(&manager, &session);
+        let _ = cruise::repo_clone::cleanup_session_workspace(&manager, &session);
     }
     manager.delete(&session_id).map_err(|e| e.to_string())?;
     Ok(())
@@ -1940,7 +1943,7 @@ pub fn delete_session(session_id: String) -> std::result::Result<(), String> {
     }
 
     if session.repo.is_some() {
-        cruise::repo_clone::cleanup_session_workspace(&manager, &session);
+        let _ = cruise::repo_clone::cleanup_session_workspace(&manager, &session);
     } else if let Some(ctx) = session.worktree_context()
         && let Err(e) = cruise::worktree::cleanup_worktree(&ctx)
     {
@@ -2138,6 +2141,27 @@ pub async fn ask_session(
 
 // --- run_session / run_all_sessions --------------------------------------------
 
+/// Cleans up an exec session when the GUI execution path returns.
+///
+/// Keeping this guard at the execution boundary covers validation and
+/// workspace-preparation failures as well as normal terminal completion.
+struct ExecSessionCleanup<'a> {
+    manager: &'a SessionManager,
+    id: &'a str,
+    initial_phase: SessionPhase,
+    initial_fingerprint: SessionStateFingerprint,
+}
+
+impl Drop for ExecSessionCleanup<'_> {
+    fn drop(&mut self) {
+        self.manager.dispose_exec_session_if_owned(
+            self.id,
+            &self.initial_phase,
+            self.initial_fingerprint,
+        );
+    }
+}
+
 /// Core session execution logic shared by [`run_session`] and [`run_all_sessions`].
 ///
 /// Loads the session, runs the workflow on a dedicated blocking thread, saves the
@@ -2158,7 +2182,17 @@ async fn execute_single_session(
     manager: &SessionManager,
     cancel_token: cruise::cancellation::CancellationToken,
 ) -> std::result::Result<SessionPhase, String> {
-    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
+    let (mut session, initial_fingerprint) = manager
+        .load_with_fingerprint(session_id)
+        .map_err(|e| e.to_string())?;
+
+    let is_exec = session.exec;
+    let _exec_cleanup = is_exec.then(|| ExecSessionCleanup {
+        manager,
+        id: session_id,
+        initial_phase: session.phase.clone(),
+        initial_fingerprint,
+    });
 
     if !session.phase.is_runnable() {
         return Err(format!(
@@ -2170,8 +2204,12 @@ async fn execute_single_session(
 
     // Repo-backed sessions always run in a worktree on a fresh clone so a PR
     // is always created; current-branch (no-PR) mode is not available.
+    // Exec sessions are also always current-branch: the GUI's explicit resume
+    // entry point must preserve exec's no-worktree/no-PR contract.
     let workspace_mode = if session.repo.is_some() {
         WorkspaceMode::Worktree
+    } else if is_exec {
+        WorkspaceMode::CurrentBranch
     } else {
         workspace_mode
     };
@@ -2387,6 +2425,18 @@ async fn execute_single_session(
     final_session.awaiting_input = false;
 
     match exec_result {
+        Ok(exec) if is_exec && exec.failed > 0 => {
+            let msg = format!("workflow completed with {} failed step(s)", exec.failed);
+            final_session.clear_runner();
+            final_session.phase = SessionPhase::Failed(msg.clone());
+            final_session.completed_at = Some(current_iso8601());
+            let _ = channel.send(WorkflowEvent::WorkflowFailed {
+                session_id: sid_for_cleanup.clone(),
+                error: msg.clone(),
+            });
+            let _ = manager.save(&final_session);
+            Ok(SessionPhase::Failed(msg))
+        }
         Ok(exec) => {
             final_session.clear_runner();
             final_session.phase = SessionPhase::Completed;
@@ -2394,7 +2444,7 @@ async fn execute_single_session(
             // Repo-backed sessions: drop the temporary clone (and its
             // worktree) once the PR has been created.
             if final_session.repo.is_some() && final_session.pr_url.is_some() {
-                cruise::repo_clone::cleanup_session_workspace(manager, &final_session);
+                let _ = cruise::repo_clone::cleanup_session_workspace(manager, &final_session);
                 final_session.worktree_path = None;
             }
             let _ = channel.send(WorkflowEvent::WorkflowCompleted {

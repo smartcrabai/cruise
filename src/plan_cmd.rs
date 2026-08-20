@@ -796,7 +796,7 @@ fn attach_images_or_discard(
 /// the planning worktree and, for repo-backed sessions, the temporary clone.
 fn cleanup_discarded_session_workspace(manager: &SessionManager, session: &SessionState) {
     if session.repo.is_some() {
-        crate::repo_clone::cleanup_session_workspace(manager, session);
+        let _ = crate::repo_clone::cleanup_session_workspace(manager, session);
     } else {
         cleanup_planning_worktree(session);
     }
@@ -2434,21 +2434,17 @@ steps:
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        let session = manager
-            .list()
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .into_iter()
-            .find(|session| {
-                session
+        assert!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .into_iter()
+                .all(|session| session
                     .base_dir
                     .canonicalize()
-                    .is_ok_and(|path| path == repo_canonical)
-            })
-            .unwrap_or_else(|| panic!("expected force_exec session to be recorded"));
-        assert_eq!(session.phase, SessionPhase::Completed);
-        assert_eq!(session.workspace_mode, WorkspaceMode::CurrentBranch);
-        assert!(session.worktree_path.is_none());
-        assert!(session.pr_url.is_none());
+                    .map_or(true, |path| path != repo_canonical)),
+            "terminal force_exec sessions must be removed"
+        );
     }
 
     #[cfg(unix)]
@@ -2544,20 +2540,16 @@ steps:
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        let session = manager
-            .list()
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .into_iter()
-            .find(|session| {
-                session
+        assert!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .into_iter()
+                .all(|session| session
                     .base_dir
                     .canonicalize()
-                    .is_ok_and(|path| path == repo_canonical)
-            })
-            .unwrap_or_else(|| panic!("expected force_exec session to be recorded"));
-        assert_eq!(session.phase, SessionPhase::Completed);
-        assert_eq!(session.workspace_mode, WorkspaceMode::CurrentBranch);
-        assert!(session.worktree_path.is_none());
-        assert!(session.pr_url.is_none());
+                    .map_or(true, |path| path != repo_canonical)),
+            "terminal force_exec sessions must be removed"
+        );
     }
 }

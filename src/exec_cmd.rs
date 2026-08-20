@@ -61,12 +61,14 @@ pub(crate) async fn run_resolved(
     crate::run_cmd::run(run_args).await
 }
 
-/// Create and persist a session for exec mode.
+/// Create and persist a transient session for exec mode.
 ///
 /// Sets `workspace_mode = CurrentBranch`, allows execution on a dirty working
 /// tree, and sets `phase = Planned` so `run_cmd` skips worktree creation and
-/// PR flow.  Writes an empty `plan.md` placeholder so that configs referencing
-/// `{plan}` do not fail with "No such file".
+/// PR flow. The session is removed after terminal execution; only paused or
+/// suspended runs remain for explicit resume. Writes an empty `plan.md`
+/// placeholder so that configs referencing `{plan}` do not fail with "No such
+/// file".
 pub(crate) fn setup_exec_session(
     manager: &SessionManager,
     source: &ConfigSource,
@@ -81,6 +83,7 @@ pub(crate) fn setup_exec_session(
     session.workspace_mode = WorkspaceMode::CurrentBranch;
     session.allow_dirty_working_tree = true;
     session.phase = SessionPhase::Planned;
+    session.exec = true;
     manager.create(&session)?;
 
     let session_dir = manager.sessions_dir().join(&session_id);
@@ -299,6 +302,10 @@ mod tests {
             matches!(session.phase, SessionPhase::Planned),
             "exec sessions must start in Planned phase (not AwaitingApproval)"
         );
+        assert!(
+            session.exec,
+            "exec sessions must be marked as exec sessions"
+        );
         assert_eq!(session.input, "test task");
         // Canonicalize both sides to handle macOS /private/var symlink.
         assert_eq!(
@@ -430,22 +437,225 @@ mod tests {
             "exec should not invoke gh (no PR creation)"
         );
 
-        // And: the session has no worktree path and no PR url
+        // And: the transient exec session is removed after reaching a terminal phase
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
         let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        let exec_session = sessions
-            .iter()
-            .find(|s| s.base_dir.canonicalize().is_ok_and(|p| p == repo_canonical))
-            .unwrap_or_else(|| panic!("expected an exec session to be recorded"));
         assert!(
-            exec_session.worktree_path.is_none(),
-            "exec sessions must not have a worktree path"
+            sessions
+                .iter()
+                .all(|s| !s.base_dir.canonicalize().is_ok_and(|p| p == repo_canonical)),
+            "terminal exec sessions must not remain persisted"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_if_fail_recovery_returns_success() {
+        // Given: a workflow whose first command fails and explicitly recovers
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let config_path = tmp.path().join("cruise.yaml");
+        let config = r#"command: [cat]
+steps:
+  failing:
+    command: "exit 1"
+    if:
+      fail: recover
+  recover:
+    command: "printf recovered > recovered.txt"
+"#;
+        fs::write(&config_path, config).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec runs the recoverable workflow
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: recovery makes the exec command successful and terminal state
+        // is still disposed of like any other completed exec run.
         assert!(
-            exec_session.pr_url.is_none(),
-            "exec sessions must not have a PR url"
+            result.is_ok(),
+            "if.fail recovery should succeed: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("recovered.txt")).unwrap_or_else(|e| panic!("{e:?}")),
+            "recovered"
+        );
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_dispose_exec_session_removes_terminal_sessions() {
+        // Given: exec sessions in every terminal phase
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let phases = [
+            ("completed", SessionPhase::Completed),
+            ("failed", SessionPhase::Failed("command failed".to_string())),
+            ("planned", SessionPhase::Planned),
+        ];
+        for (id, phase) in phases {
+            let mut session = SessionState::new(
+                id.to_string(),
+                tmp.path().to_path_buf(),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            session.phase = phase;
+            session.exec = true;
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: disposing each session after execution has returned
+        for id in ["completed", "failed", "planned"] {
+            let (saved, fingerprint) = manager
+                .load_with_fingerprint(id)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            manager.dispose_exec_session_if_owned(id, &saved.phase, fingerprint);
+        }
+
+        // Then: all terminal exec sessions are removed
+        for id in ["completed", "failed", "planned"] {
+            assert!(
+                !manager.sessions_dir().join(id).exists(),
+                "terminal exec session {id} should be deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dispose_exec_session_keeps_resumable_sessions() {
+        // Given: exec sessions paused in Running and Suspended phases
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        for (id, phase) in [
+            ("running", SessionPhase::Running),
+            ("suspended", SessionPhase::Suspended),
+        ] {
+            let mut session = SessionState::new(
+                id.to_string(),
+                tmp.path().to_path_buf(),
+                "cruise.yaml".to_string(),
+                "task".to_string(),
+            );
+            session.phase = phase;
+            session.exec = true;
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: disposing sessions that can be resumed
+        for id in ["running", "suspended"] {
+            let (saved, fingerprint) = manager
+                .load_with_fingerprint(id)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            manager.dispose_exec_session_if_owned(id, &saved.phase, fingerprint);
+        }
+
+        // Then: both sessions remain available by explicit ID
+        assert!(manager.sessions_dir().join("running").exists());
+        assert!(manager.sessions_dir().join("suspended").exists());
+    }
+
+    #[test]
+    fn test_dispose_exec_session_rejects_path_traversal() {
+        // Given: an exec-looking directory outside the sessions directory
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(outside.join("state.json"), "not json").unwrap_or_else(|e| panic!("{e:?}"));
+        // When: disposal receives a traversal ID
+        let fingerprint = crate::session::SessionStateFingerprint::from_bytes(b"");
+        manager.dispose_exec_session_if_owned("../../outside", &SessionPhase::Planned, fingerprint);
+
+        // Then: the attacker-selected directory is untouched
+        assert!(outside.exists());
+        assert!(outside.join("state.json").exists());
+    }
+
+    #[test]
+    fn test_dispose_exec_session_removes_missing_or_corrupt_state_directory() {
+        // Given: an exec session directory whose state cannot be loaded
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "corrupt";
+        let session_dir = manager.sessions_dir().join(id);
+        fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(session_dir.join("state.json"), "not json").unwrap_or_else(|e| panic!("{e:?}"));
+        // When: disposal cannot load the state
+        let fingerprint = crate::session::SessionStateFingerprint::from_bytes(b"");
+        manager.dispose_exec_session_if_owned(id, &SessionPhase::Planned, fingerprint);
+
+        // Then: best-effort cleanup still removes the transient directory
+        assert!(!session_dir.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_failure_does_not_leave_failed_session() {
+        // Given: a workflow command that exits unsuccessfully
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, single_command_config("fail", "exit 1"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec runs the failing workflow
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: the original execution failure is returned
+        assert!(
+            result.is_err(),
+            "a failing exec command must return an error"
+        );
+        // And: terminal exec state is not retained for future auto-selection
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .iter()
+                .all(|s| !s.base_dir.canonicalize().is_ok_and(|p| p == repo_canonical))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_non_git_directory_does_not_leave_planned_session() {
+        // Given: a non-git directory and an otherwise valid exec config
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let not_a_repo = tmp.path().join("not-a-repo");
+        fs::create_dir(&not_a_repo).unwrap_or_else(|e| panic!("{e:?}"));
+        process.set_current_dir(&not_a_repo);
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, single_command_config("noop", "printf noop"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec attempts to run outside a git repository
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: workspace validation fails
+        assert!(result.is_err(), "exec outside a git repo must fail");
+        // And: the Planned preflight session is cleaned up
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        assert!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .iter()
+                .all(|s| s.base_dir != not_a_repo)
         );
     }
 

@@ -177,7 +177,7 @@ pub fn publish_plan_issue_and_delete(
     }
 
     if session.repo.is_some() {
-        crate::repo_clone::cleanup_session_workspace(manager, &session);
+        let _ = crate::repo_clone::cleanup_session_workspace(manager, &session);
     } else if let Some(ctx) = session.worktree_context()
         && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
     {

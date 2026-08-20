@@ -216,7 +216,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
   const showAutoUpdate = update && updateState === "available" && updateReadiness?.canAutoUpdate;
   const updateGuidance = updateReadiness && !updateReadiness.canAutoUpdate ? updateReadiness.guidance : null;
   const runnableCount = sessions.filter(
-    (s) => s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s),
+    (s) => !s.exec && (s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s)),
   ).length;
 
   return (
