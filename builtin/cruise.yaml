@@ -8,7 +8,7 @@ cleanup_after_pr: true
 groups:
   review:
     if:
-      file-changed: verify-wiring
+      file-changed: verify-plan-implementation
     max_retries: 2
     steps:
       review-uncommitted:
@@ -217,6 +217,25 @@ steps:
     if:
       no-file-changes:
         retry: true
+  verify-plan-implementation:
+    prompt: |-
+      Verify that the implementation fully satisfies every requirement in {plan} before wiring verification.
+
+      **Steps:**
+      1. Read {plan} completely. Treat every requirement, acceptance criterion, constraint, and requested integration as mandatory.
+      2. Inspect all relevant production code, tests, and execution paths, not only the current diff.
+      3. Map each plan item to concrete implemented behavior. Check normal, error, boundary, and integration behavior where the plan requires them.
+      4. If anything is missing, partial, stubbed, test-only, or inconsistent with {plan}, implement the smallest complete fix now. Add or update tests only when needed to cover the missing behavior.
+      5. If you changed files, run the build or type checker and the tests and confirm they pass. Do not stop at defining symbols; ensure planned behavior is actually executed.
+      6. If all plan items are already implemented, make no changes and state that explicitly.
+
+      **Required output (include the heading)**
+
+      ## Plan Implementation Verification Result
+
+      - For each plan item, state the implemented behavior with file:line references, or the fix made
+      - State build and test results when changes were made
+      - State any plan item intentionally not implemented, with the reason
   verify-wiring:
     prompt: |-
       Verify that the implemented feature is actually wired into the production execution paths.
@@ -240,9 +259,6 @@ steps:
       - For each new symbol, where it is referenced from production code (file:line)
       - If unwired code was fixed, what was done and the rerun build/test results
       - Anything judged as not needing wiring, with the reason
-  only-english:
-    prompt: |-
-      /only-english
   simplify-pass:
     prompt: |-
       Review the changes made in this task (uncommitted changes plus commits since the base branch)
@@ -304,6 +320,9 @@ steps:
       - What was cut, and which rung of the ladder drove the decision
       - Over-engineering candidates left in place, with the reason
       - Build and test results
+  only-english:
+    prompt: |-
+      /only-english
   review-pass:
     group: review
 after-pr:
