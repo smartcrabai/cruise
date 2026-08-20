@@ -95,10 +95,8 @@ pub fn setup_session_worktree(
 ///
 /// # Errors
 ///
-/// Returns an error only if the `git` process itself fails to spawn (e.g. git is not found).
-/// If the git command exits with a non-zero status (e.g. the worktree or branch no longer
-/// exists), the failure is logged as a warning and `Ok(())` is returned -- cleanup is
-/// best-effort and partial failures do not propagate.
+/// Returns an error if the `git` process cannot be spawned or either cleanup command exits
+/// unsuccessfully.
 pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
     let output = Command::new("git")
         .args(["worktree", "remove", "--force"])
@@ -109,7 +107,10 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("warning: git worktree remove failed: {}", stderr.trim());
+        return Err(CruiseError::WorktreeError(format!(
+            "git worktree remove failed: {}",
+            stderr.trim()
+        )));
     }
 
     let output = Command::new("git")
@@ -120,7 +121,10 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("warning: git branch -D failed: {}", stderr.trim());
+        return Err(CruiseError::WorktreeError(format!(
+            "git branch -D failed: {}",
+            stderr.trim()
+        )));
     }
 
     Ok(())

@@ -319,7 +319,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                 }
                 "Delete" => {
                     if session.repo.is_some() {
-                        crate::repo_clone::cleanup_session_workspace(&manager, &session);
+                        let _ = crate::repo_clone::cleanup_session_workspace(&manager, &session);
                     }
                     manager.delete(&session.id)?;
                     eprintln!("{} Session {} deleted.", style("v").green(), session.id);
@@ -334,10 +334,19 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
 }
 
+/// Load sessions for the interactive picker and reconcile stale runners.
+fn load_sessions_for_picker(manager: &crate::session::SessionManager) -> Result<Vec<SessionState>> {
+    let mut sessions = manager.list()?;
+    for session in &mut sessions {
+        let _ = manager.reconcile_running_phase(session, false);
+    }
+    Ok(sessions)
+}
+
 /// Prompts the user to select a session from the list.
 /// Returns `Ok(None)` if the list is empty or the user cancels.
 fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<SessionState>> {
-    let sessions = manager.list()?;
+    let sessions = load_sessions_for_picker(manager)?;
     if sessions.is_empty() {
         eprintln!("No sessions found.");
         return Ok(None);
@@ -659,6 +668,7 @@ fn format_suffix(s: &SessionState) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     // -----------------------------------------------------------------------
     // session_actions
@@ -847,6 +857,37 @@ mod tests {
                 "Delete should be second-to-last for {phase:?}: {actions:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_load_sessions_for_picker_reconciles_stale_running_session() {
+        // Given: a Running session with a PID that is no longer alive
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let id = "20260523119000";
+        let mut session = SessionState::new(
+            id.to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        session.phase = SessionPhase::Running;
+        session.runner_pid = Some(999_999_999);
+        session.runner_started_at = Some(1);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loading sessions for the interactive picker
+        let loaded = load_sessions_for_picker(&manager).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the stale Running state is made resumable before display
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, id);
+        assert!(matches!(loaded[0].phase, SessionPhase::Suspended));
+        assert!(loaded[0].runner_pid.is_none());
+        assert!(matches!(
+            manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).phase,
+            SessionPhase::Suspended
+        ));
     }
 
     fn make_session(id: &str, input: &str, phase: SessionPhase) -> SessionState {

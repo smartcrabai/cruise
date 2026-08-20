@@ -32,6 +32,8 @@ export interface Session {
   prUrl?: string;
   updatedAt?: string;
   awaitingInput?: boolean;
+  /** Transient exec sessions are excluded from Run All. */
+  exec?: boolean;
   /** Whether a valid (non-empty) plan.md exists for this session. */
   planAvailable?: boolean;
   /** Persisted planning ask_user question while phase === "Awaiting Input". */

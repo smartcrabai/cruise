@@ -13,7 +13,7 @@ use crate::config::validate_config;
 use crate::engine::{NodeCheckpoint, execute_steps_with_dag, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
-use crate::option_handler::CliOptionHandler;
+use crate::option_handler::{CliOptionHandler, OptionHandler};
 use crate::session::PLAN_VAR;
 use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
@@ -255,7 +255,29 @@ pub async fn run(args: RunArgs) -> Result<()> {
         return run_all(args).await;
     }
 
-    match run_single(args, WorkspaceOverride::RespectSession).await {
+    // An exec session may be resumed explicitly after StepPaused or Ctrl+C.
+    // Keep its manager so the same disposal path handles both initial and
+    // resumed exec runs.
+    let explicit_exec = if args.dry_run {
+        None
+    } else {
+        args.session.clone().and_then(|id| {
+            let data_dir = crate::paths::data_dir().ok()?;
+            let manager = SessionManager::new(data_dir);
+            manager
+                .load_with_fingerprint(&id)
+                .ok()
+                .filter(|(s, _)| s.exec)
+                .map(|(session, fingerprint)| (manager, id, session.phase, fingerprint))
+        })
+    };
+    let option_handler = CliOptionHandler;
+    let result = run_single(args, WorkspaceOverride::RespectSession, &option_handler).await;
+    if let Some((manager, id, phase, fingerprint)) = explicit_exec {
+        manager.dispose_exec_session_if_owned(&id, &phase, fingerprint);
+    }
+
+    match result {
         Err(CruiseError::StepPaused) => {
             eprintln!("Session paused. Resume with `cruise run`.");
             Ok(())
@@ -265,7 +287,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Result<()> {
+async fn run_single(
+    args: RunArgs,
+    workspace_override: WorkspaceOverride,
+    option_handler: &dyn OptionHandler,
+) -> Result<()> {
     let cleanup_override = args.cleanup_after_pr_override();
     let current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
@@ -445,7 +471,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
         on_step_start: &on_step_start,
         on_step_log: Some(&on_step_log),
         cancel_token: Some(&cancel_token),
-        option_handler: &CliOptionHandler,
+        option_handler,
         config_reloader: config_reloader.as_deref(),
         working_dir: Some(execution_workspace.path()),
         skipped_steps: &skipped_steps,
@@ -485,25 +511,32 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
                 "v completed -- run: {}, skipped: {}, failed: {}",
                 exec.run, exec.skipped, exec.failed
             ));
-            match &execution_workspace {
-                ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
-                ExecutionWorkspace::Worktree { ctx, .. } => {
-                    tokio::select! {
-                        result = crate::worktree_pr::handle_worktree_pr(
-                            ctx,
-                            &compiled,
-                            &mut vars,
-                            &mut tracker,
-                            session,
-                            args.rate_limit_retries,
-                            effective_max_retries,
-                            &skipped_steps,
-                            Some(&cancel_token),
-                        ) => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel_token.cancel();
-                            Err(CruiseError::Interrupted)
-                        },
+            if session.exec && exec.failed > 0 {
+                Err(CruiseError::Other(format!(
+                    "workflow completed with {} failed step(s)",
+                    exec.failed
+                )))
+            } else {
+                match &execution_workspace {
+                    ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
+                    ExecutionWorkspace::Worktree { ctx, .. } => {
+                        tokio::select! {
+                            result = crate::worktree_pr::handle_worktree_pr(
+                                ctx,
+                                &compiled,
+                                &mut vars,
+                                &mut tracker,
+                                session,
+                                args.rate_limit_retries,
+                                effective_max_retries,
+                                &skipped_steps,
+                                Some(&cancel_token),
+                            ) => result,
+                            _ = tokio::signal::ctrl_c() => {
+                                cancel_token.cancel();
+                                Err(CruiseError::Interrupted)
+                            },
+                        }
                     }
                 }
             }
@@ -545,7 +578,7 @@ async fn run_single(args: RunArgs, workspace_override: WorkspaceOverride) -> Res
     {
         // Step out of the soon-to-be-removed worktree before deleting it.
         let _ = std::env::set_current_dir(&current_dir_guard.original);
-        crate::repo_clone::cleanup_session_workspace(&manager, session);
+        let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
         session.worktree_path = None;
         eprintln!(
             "{} removed temporary clone for {}",
@@ -717,6 +750,7 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
 
 async fn run_all(args: RunArgs) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
+    let option_handler = CliOptionHandler;
     let mut seen: HashSet<String> = HashSet::new();
     let mut results: Vec<SessionState> = Vec::new();
 
@@ -736,7 +770,12 @@ async fn run_all(args: RunArgs) -> Result<()> {
             cleanup_after_pr: args.cleanup_after_pr,
             no_cleanup_after_pr: args.no_cleanup_after_pr,
         };
-        let run_result = Box::pin(run_single(session_args, WorkspaceOverride::ForceWorktree)).await;
+        let run_result = Box::pin(run_single(
+            session_args,
+            WorkspaceOverride::ForceWorktree,
+            &option_handler,
+        ))
+        .await;
         let interrupted = matches!(run_result, Err(CruiseError::Interrupted));
         match run_result {
             Err(CruiseError::StepPaused) => {
@@ -1173,6 +1212,125 @@ mod tests {
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
         }
+    }
+
+    struct PauseOptionHandler;
+
+    impl crate::option_handler::OptionHandler for PauseOptionHandler {
+        fn select_option(
+            &self,
+            _choices: &[crate::step::OptionChoice],
+            _plan: Option<&str>,
+        ) -> crate::error::Result<crate::step::option::OptionResult> {
+            Err(CruiseError::StepPaused)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_workflow_pause_keeps_session_resumable() {
+        // Given: an exec session whose workflow pauses at an option step
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let id = "20260820000002";
+        let mut session = SessionState::new(
+            id.to_string(),
+            repo,
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::CurrentBranch;
+        session.allow_dirty_working_tree = true;
+        session.exec = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            id,
+            r#"command: [cat]
+steps:
+  choose:
+    option:
+      - selector: continue
+        next: done
+  done:
+    command: "true"
+"#,
+        );
+
+        // When: the workflow is run and the option interaction is cancelled
+        let result = run_single(
+            run_args(id),
+            WorkspaceOverride::RespectSession,
+            &PauseOptionHandler,
+        )
+        .await;
+
+        // Then: the pause is returned and the exec session is persisted for
+        // explicit resumption instead of being marked terminal.
+        assert!(matches!(result, Err(CruiseError::StepPaused)));
+        let saved = manager.load(id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).exec);
+        assert!(matches!(saved.phase, SessionPhase::Running));
+        assert!(saved.current_step.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_explicit_exec_resume_removes_terminal_session() {
+        // Given: an exec session that is already terminal when explicitly resumed
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _process = ProcessStateGuard::new(tmp.path());
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let id = "20260820000000";
+        let mut session = SessionState::new(
+            id.to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        session.phase = SessionPhase::Completed;
+        session.exec = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: cruise run is invoked with the explicit exec session ID
+        let result = run(run_args(id)).await;
+
+        // Then: the original run error is preserved and terminal exec state is removed
+        assert!(result.is_err());
+        assert!(!manager.sessions_dir().join(id).exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_explicit_exec_dry_run_keeps_planned_session() {
+        // Given: a planned exec session with a valid config
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _process = ProcessStateGuard::new(tmp.path());
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let id = "20260820000001";
+        let mut session = SessionState::new(
+            id.to_string(),
+            PathBuf::from("/repo"),
+            "cruise.yaml".to_string(),
+            "task".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.exec = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, id, &single_command_config("noop", "printf noop"));
+
+        // When: dry-run inspects the explicit exec session
+        let mut args = run_args(id);
+        args.dry_run = true;
+        let result = run(args).await;
+
+        // Then: inspection does not consume the resumable session
+        assert!(result.is_ok(), "dry-run should succeed: {result:?}");
+        assert!(manager.sessions_dir().join(id).exists());
     }
 
     fn blocking_conflict_config() -> String {

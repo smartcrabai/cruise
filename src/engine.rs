@@ -595,10 +595,23 @@ async fn step_loop_iteration(
     if step_failed {
         match if_fail {
             Some(FailAction::Goto(name)) => {
+                // A failure handled by an explicit if.fail jump is part of a
+                // successful recovery path, not an unresolved workflow
+                // failure. Keep the attempt visible in the step log, but do
+                // not report it in ExecutionResult::failed.
+                if outcome.failed {
+                    state.counters.failed -= 1;
+                }
                 eprintln!("  {} step failed, jumping to: {}", style("R").cyan(), name);
                 if_fail_next = Some(name.clone());
             }
             Some(FailAction::Detailed(d)) if d.retry => {
+                // This attempt is recovered by the retry path. Keep failed
+                // limited to unresolved failures rather than counting an
+                // intermediate attempt as a failed workflow.
+                if outcome.failed {
+                    state.counters.failed -= 1;
+                }
                 eprintln!(
                     "  {} step failed, will retry (if.fail.retry)",
                     style("R").cyan()
@@ -4370,6 +4383,10 @@ steps:
             result.run >= 2,
             "expected recover and done to run, but only {} steps ran",
             result.run
+        );
+        assert_eq!(
+            result.failed, 0,
+            "a failure handled by if.fail: recover is not an unresolved failure"
         );
     }
 
