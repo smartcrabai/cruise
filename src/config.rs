@@ -1282,6 +1282,35 @@ steps:
         // after-pr automation must not auto-merge: merging stays a human action
         assert!(!config.after_pr.contains_key("merge"));
 
+        // And: `only-english` runs after `simplify-pass`. Reversed, the
+        // simplify step sees the translation diff as unrequested scope and
+        // reverts it -- together with the rest of the uncommitted task work.
+        let order: Vec<&str> = config
+            .steps
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+        let simplify = order.iter().position(|s| *s == "simplify-pass");
+        let english = order.iter().position(|s| *s == "only-english");
+        assert!(
+            matches!((simplify, english), (Some(s), Some(e)) if s < e),
+            "expected simplify-pass before only-english, got: {order:?}"
+        );
+
+        // And: review fixes re-enter the flow at plan verification, so a
+        // review-driven change is re-checked against {plan} before wiring.
+        let review = config
+            .groups
+            .get("review")
+            .unwrap_or_else(|| panic!("built-in config must define the 'review' group"));
+        assert_eq!(
+            review
+                .if_condition
+                .as_ref()
+                .and_then(|c| c.file_changed.as_deref()),
+            Some("verify-plan-implementation")
+        );
+
         // And: it passes full config validation
         validate_config(&config).unwrap_or_else(|e| panic!("built-in config invalid: {e}"));
     }
