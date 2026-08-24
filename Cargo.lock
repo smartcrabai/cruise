@@ -6254,9 +6254,9 @@ dependencies = [
 
 [[package]]
 name = "seher-claude-agent-sdk"
-version = "0.0.55"
+version = "0.0.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56eeebb4354ab58f06a81532cec5443bd6f47f4114f0b3209f01ec1230aa2b12"
+checksum = "508e81f565e6051346bf85486f5a6277b52fc3f9880a361e45f34ecbe9d1c554"
 dependencies = [
  "async-trait",
  "futures",
@@ -6268,9 +6268,9 @@ dependencies = [
 
 [[package]]
 name = "seher-sdk"
-version = "0.0.55"
+version = "0.0.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "436d9fc5b17b861837ffd1664c9ef270528b3e0499c94052f7c2de8b45c3cd7b"
+checksum = "b777c4893319b7f1ceddc140372f3858de48745b80d14cde26e043f96c502f83"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6284,7 +6284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "swc_common 24.0.0",
+ "swc_common 25.0.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6983,9 +6983,9 @@ dependencies = [
 
 [[package]]
 name = "swc_common"
-version = "24.0.0"
+version = "25.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5d7b9e59d7284543c4e6a2a9e264fee6443cdf33fa9101c113958f078df12e2"
+checksum = "872e3beee92f0d63a7948ac03266c72a91cabf4c54d660ce992d448135ab5aec"
 dependencies = [
  "anyhow",
  "ast_node 6.1.0",
