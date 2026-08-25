@@ -6254,9 +6254,9 @@ dependencies = [
 
 [[package]]
 name = "seher-claude-agent-sdk"
-version = "0.0.56"
+version = "0.0.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "508e81f565e6051346bf85486f5a6277b52fc3f9880a361e45f34ecbe9d1c554"
+checksum = "b946617b27f7fe665645e508d662fd7e3e6efa136a36038203c49201c0ed44cd"
 dependencies = [
  "async-trait",
  "futures",
@@ -6268,9 +6268,9 @@ dependencies = [
 
 [[package]]
 name = "seher-sdk"
-version = "0.0.56"
+version = "0.0.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b777c4893319b7f1ceddc140372f3858de48745b80d14cde26e043f96c502f83"
+checksum = "db650338cf007d27e47bee84d3d08b445e900e7769186bed002ad5c08a287049"
 dependencies = [
  "async-trait",
  "chrono",
