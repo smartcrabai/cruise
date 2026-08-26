@@ -987,7 +987,8 @@ mod tests {
 
     use crate::test_binary_support::PathEnvGuard;
     use crate::test_support::{
-        EnvGuard, group_retry_budget_config_with, init_git_repo, run_git_ok,
+        EnvGuard, group_retry_budget_config_with, init_git_repo, mixed_conditional_cycle_config,
+        run_git_ok,
     };
     use crate::worktree;
 
@@ -2212,6 +2213,92 @@ Previously, emojis were used as user icons."#;
         assert!(
             !repo.join("out.txt").exists(),
             "dry-run must not execute any step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_dry_run_also_fails_fast_on_mixed_conditional_cycle() {
+        // Given: a session whose config has a flat cycle mixing a conditional
+        // back-edge (c --if.file-changed--> a) with unconditional sequential
+        // edges; this shape always deadlocks under loop protection
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260826090001";
+        let session =
+            make_current_branch_session(session_id, &repo, "mixed cycle check dry run", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &mixed_conditional_cycle_config());
+
+        // When: run() is called with --dry-run
+        let mut args = run_args(session_id);
+        args.dry_run = true;
+        let result = run(args).await;
+
+        // Then: --dry-run does not bypass the fail-fast validation and the
+        // error names the offending cycle steps
+        assert!(
+            result.is_err(),
+            "dry-run should still surface the mixed conditional cycle error: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("a -> b -> c -> a"),
+            "error should name the witness cycle, got: {message}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "dry-run must not execute any step"
+        );
+        assert!(
+            !manager.run_log_path(session_id).exists(),
+            "no run.log should be written when validation fails before execution starts"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_fails_fast_on_mixed_conditional_cycle() {
+        // Given: a session whose config has a flat cycle mixing a conditional
+        // back-edge (c --if.file-changed--> a) with unconditional sequential
+        // edges; this shape always deadlocks under loop protection
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260826090002";
+        let session = make_current_branch_session(session_id, &repo, "mixed cycle check", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, session_id, &mixed_conditional_cycle_config());
+
+        // When: run() is called WITHOUT --dry-run
+        let args = run_args(session_id);
+        let result = run(args).await;
+
+        // Then: it fails fast before any step executes and the error names
+        // the offending cycle steps
+        assert!(
+            result.is_err(),
+            "expected the mixed conditional cycle to fail fast: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("a -> b -> c -> a"),
+            "error should name the witness cycle, got: {message}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "validation must happen before any step executes"
+        );
+        assert!(
+            !manager.run_log_path(session_id).exists(),
+            "no run.log should be written when validation fails before execution starts"
         );
     }
 

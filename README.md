@@ -634,6 +634,8 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
+> **Warning:** A top-level cycle that mixes an `if.file-changed` jump back with unconditional sequential edges -- exactly the `test` → `review` → `test` shape above -- is rejected at startup, since it always exceeds the loop-protection ceiling once the conditional edge has exhausted its retries. Confine such retry loops inside a [step group](#step-groups) with `max_retries`.
+
 #### No file changes detection (`if.no-file-changes`)
 
 When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
@@ -702,6 +704,8 @@ steps:
 ```
 
 `if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`), so a misconfigured retry loop will not run forever.
+
+A step cycle that mixes a conditional jump (`if.file-changed` / `if.fail` goto) with unconditional sequential edges is rejected at startup: once the conditional edge exhausts its retries, the unconditional edges would always exceed the loop-protection ceiling. Confine such loops inside a group under `groups:` with `max_retries`, as in the example below, so exhausted retries degrade into a graceful skip. A group retry loop without `max_retries` has no such graceful skip and is treated as an unsafe conditional edge.
 
 **Constraints:**
 - `if.fail` is rejected at the group level and in `after-pr` steps.
@@ -962,6 +966,18 @@ command:
   - claude
   - -p
 
+groups:
+  fix-loop:
+    if:
+      file-changed: test    # if the fix modified files, rerun the tests
+    max_retries: 2          # retries exhausted -> continue to commit
+    steps:
+      apply-fix:
+        prompt: |
+          The following test errors occurred. Please fix them:
+          ---
+          {prev.stderr}
+
 steps:
   implement:
     prompt: "{input}"
@@ -970,16 +986,13 @@ steps:
     command: cargo test
 
   fix:
-    prompt: |
-      The following test errors occurred. Please fix them:
-      ---
-      {prev.stderr}
-    if:
-      file-changed: test    # after fix, if it modified files, jump back to test
+    group: fix-loop
 
   commit:
-    command: git add -A && git commit -m "feat: {input}"
+    command: "git add -A && git commit -m 'feat: {input}'"
 ```
+
+The retry loop is confined inside a group so that exhausted retries degrade into a graceful skip instead of a flat step cycle, which is rejected at startup.
 
 ## Config Hot-Reload
 

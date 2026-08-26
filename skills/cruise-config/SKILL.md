@@ -86,3 +86,4 @@ After writing or editing a config, verify each of the following:
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order — does that match the intended flow?
+12. **Retry loops**: is any top-level step cycle mixing conditional jumps (`if.file-changed`, `if.fail` goto) with unconditional sequential edges? Such cycles are rejected at startup — confine retry loops inside a group under `groups:` with `max_retries` (see [references/flow-control.md](references/flow-control.md)).
