@@ -53,13 +53,11 @@ steps:
       - cargo fmt --all -- --check
       - cargo clippy --all-targets --all-features -- -D warnings
       - cargo test --all-features
-    if:
-      fail: fix-test-error # non-zero exit jumps here instead of stopping the run
 
-  # Reached two ways: via the `test` step's `if.fail` jump (tests failed), or
-  # sequentially right after a passing `test` (in which case `skip:
-  # prev.success` skips it and the workflow ends). `next: test` loops back
-  # to re-run the checks after the fix.
+  # Reached sequentially right after `test`, pass or fail (a failed command
+  # step does not abort the run; `skip: prev.success` skips this step when
+  # the tests passed). `next: test` loops back to re-run the checks after
+  # the fix.
   fix-test-error:
     skip: prev.success
     prompt: |
