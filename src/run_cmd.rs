@@ -4034,8 +4034,7 @@ steps:
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         let state_path = manager.state_path(&session.id);
-        std::fs::write(&state_path, "not json at all")
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(&state_path, "not json at all").unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: the summary loop reloads the result state
         let state = load_run_all_result_state(&manager, &session);
