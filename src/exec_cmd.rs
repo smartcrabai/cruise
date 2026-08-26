@@ -56,6 +56,7 @@ pub(crate) async fn run_resolved(
         dry_run: false,
         cleanup_after_pr: false,
         no_cleanup_after_pr: false,
+        parallelism: None,
     };
 
     crate::run_cmd::run(run_args).await
