@@ -1,6 +1,7 @@
 //! Bounded-concurrency batch scheduler for `run --all`.
 //!
-//! Used by the GUI (`src-tauri/src/commands.rs`) for parallel session execution.
+//! Used by the CLI (`src/run_cmd.rs`) and the GUI (`src-tauri/src/commands.rs`)
+//! for parallel session execution.
 //!
 //! ## Scheduling rules
 //! 1. Seed from [`SessionManager::run_all_remaining`] to get the initial candidate list.
@@ -53,16 +54,23 @@ pub struct BatchSessionResult {
     pub batch_index: usize,
     /// Session ID.
     pub session_id: String,
+    /// Snapshot of the session state captured when this session was scheduled.
+    ///
+    /// The CLI summary path uses this as a fallback when the on-disk state
+    /// file has become unreadable by the time the worker finishes.
+    pub scheduled_state: SessionState,
     /// The outcome of executing the session.
     pub outcome: Result<()>,
 }
 
-/// Convenience wrapper for tests: run all pending sessions with a fixed concurrency limit.
+/// Convenience wrapper: run all pending sessions with a fixed concurrency limit.
 ///
 /// Delegates to [`run_all_with_dynamic_parallelism`] with a constant `parallelism_fn`.
-/// Only compiled in test builds; production callers use the dynamic variant directly.
-#[cfg(test)]
-pub(crate) async fn run_all_with_parallelism<F, Fut>(
+///
+/// # Errors
+///
+/// Returns an error if `parallelism` is 0 or the session list cannot be read.
+pub async fn run_all_with_parallelism<F, Fut>(
     manager: &SessionManager,
     parallelism: usize,
     cancel_token: CancellationToken,
@@ -120,11 +128,11 @@ where
     // which would otherwise cause O(N^2) deque growth for large batches.
     let mut queued: HashSet<String> = HashSet::new();
     let mut next_batch_index: usize = 0;
-    // Stores (batch_index, session_id, outcome) from completed tasks.
+    // Stores results from completed tasks (each carries its scheduled state snapshot).
     let mut completed: Vec<BatchSessionResult> = Vec::new();
 
-    // JoinSet for in-flight tasks; each task yields (batch_index, session_id, outcome).
-    let mut join_set: tokio::task::JoinSet<(usize, String, Result<()>)> =
+    // JoinSet for in-flight tasks; each task yields (batch_index, session_id, scheduled state, outcome).
+    let mut join_set: tokio::task::JoinSet<(usize, String, SessionState, Result<()>)> =
         tokio::task::JoinSet::new();
 
     // Seed: fetch initial candidates.
@@ -158,8 +166,8 @@ where
             let run_fn_clone = run_fn.clone();
             let token_clone = cancel_token.clone();
             join_set.spawn(async move {
-                let outcome = run_fn_clone(session, token_clone).await;
-                (batch_index, session_id, outcome)
+                let outcome = run_fn_clone(session.clone(), token_clone).await;
+                (batch_index, session_id, session, outcome)
             });
         }
 
@@ -184,10 +192,11 @@ where
         };
 
         match task_result {
-            Ok((batch_index, session_id, outcome)) => {
+            Ok((batch_index, session_id, state, outcome)) => {
                 completed.push(BatchSessionResult {
                     batch_index,
                     session_id,
+                    scheduled_state: state,
                     outcome,
                 });
             }
@@ -341,6 +350,38 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "20260101000001");
         assert!(results[0].outcome.is_ok(), "expected Ok outcome");
+    }
+
+    #[tokio::test]
+    async fn test_scheduled_state_snapshot_reflects_schedule_time_state() {
+        // Given: one planned session whose worker mutates the on-disk phase
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+        let cancel = CancellationToken::new();
+
+        // When: the batch runs (instant_completer marks the session Completed on disk)
+        let results =
+            run_all_with_parallelism(&manager, 1, cancel, instant_completer(Arc::clone(&manager)))
+                .await
+                .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+
+        // Then: the snapshot still holds the schedule-time Planned state even
+        // though the on-disk state has been mutated to Completed by now.
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0].scheduled_state.phase, SessionPhase::Planned),
+            "scheduled_state must be the schedule-time snapshot, got {:?}",
+            results[0].scheduled_state.phase
+        );
+        let on_disk = manager
+            .load("20260101000001")
+            .unwrap_or_else(|e| panic!("reload session: {e}"));
+        assert!(
+            matches!(on_disk.phase, SessionPhase::Completed),
+            "worker should have marked the session Completed on disk, got {:?}",
+            on_disk.phase
+        );
     }
 
     #[tokio::test]
