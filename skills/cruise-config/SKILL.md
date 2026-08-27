@@ -63,7 +63,7 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: seher` (mode keys, provider resolution) and `sdk: pi` (direct pi_agent_rust, model references, auth), differences from command mode |
 | [references/steps.md](references/steps.md) | The three step types: prompt, command, option; `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{pr.*}` |
-| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
+| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge rules, the `llm:` section for session-title generation |
@@ -80,9 +80,9 @@ After writing or editing a config, verify each of the following:
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `command` / `if:`?
-6. **`if.no-file-changes`**: is exactly one of `fail` / `retry` set to true? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
+6. **`if.no-file-changes`**: is the value either `retry` or `failed`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
 7. **`if.fail`**: is the value either an existing step name or `{ retry: true }`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
-8. **`after-pr`**: does it avoid `fail-if-no-file-changes`, `if.no-file-changes`, and `if.fail`?
+8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`?
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order — does that match the intended flow?
