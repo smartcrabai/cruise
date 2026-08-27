@@ -42,8 +42,7 @@ steps:
       Tests have been written according to {plan}. Implement the code to
       make them pass. Update {plan} if necessary.
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   # Verify the implementation. Swap these commands for your own stack's
   # (e.g. `npm test`, `pytest`, `go test ./...`) -- the ones below are

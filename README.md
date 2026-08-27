@@ -633,38 +633,34 @@ steps:
 
 #### No file changes detection (`if.no-file-changes`)
 
-When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
+When a step has `if.no-file-changes` set to `retry` or `failed`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
 
-- **`fail: true`** -- Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
-- **`retry: true`** -- Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
+- **`failed`** -- Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
+- **`retry`** -- Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
 
 ```yaml
 steps:
   implement:
     prompt: "Implement the feature described in {plan}"
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   fix:
     prompt: "Fix the issue"
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
 ```
 
 **Constraints:**
-- `fail` and `retry` are mutually exclusive -- exactly one must be true.
+- The value must be either `retry` or `failed`; any other value (including the removed object form `{ fail: true }` / `{ retry: true }`) is a parse error.
 - Cannot be used in `after-pr` steps (rejected at validation time).
 - Cannot be used at the group level (`if` in group definitions).
-- Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
 - Can be combined with `if: file-changed` on the same step, but when both are present, `no-file-changes` takes priority for change detection.
-
-The legacy `fail-if-no-file-changes: true` syntax is still supported and is equivalent to `if: { no-file-changes: { fail: true } }`.
+- The legacy `fail-if-no-file-changes: true` field is rejected as an unknown field; migrate to `if: { no-file-changes: failed }`.
 
 ##### Declaring intentional no-changes
 
-Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** `fail` and `retry` for that attempt:
+Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** actions (`failed` and `retry`) for that attempt:
 
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
 - **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi`, `omp`, `pi-rust`, `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
@@ -673,7 +669,7 @@ Either path logs the declared reason so the decision stays visible in the run ou
 
 #### Failure handling (`if.fail`)
 
-`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: fail` trigger.
+`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
 
 Two forms are accepted:
 

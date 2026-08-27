@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::config::FailAction;
+use crate::config::{FailAction, NoFileChangesAction};
 use crate::error::{CruiseError, Result};
 use crate::workflow::CompiledWorkflow;
 
@@ -69,9 +69,9 @@ pub enum TransitionReason {
     Next,
     /// `if.file-changed:` triggered a jump to the named step.
     IfFileChanged { target: String },
-    /// `if.no-file-changes.retry: true` re-executes the current step.
+    /// `if.no-file-changes: retry` re-executes the current step.
     IfNoFileChangesRetry,
-    /// `if.no-file-changes.fail: true` terminates the workflow.
+    /// `if.no-file-changes: failed` terminates the workflow.
     IfNoFileChangesFail,
     /// `if.fail:` jumped to the named step.
     IfFailGoto { target: String },
@@ -276,9 +276,9 @@ fn compute_successors(
         && let Some(max) = meta.max_retries
         && key.group_counts.get(cs).copied().unwrap_or(0) >= max
     {
-        let target = sequential_next(&compiled.steps, &meta.last_step).cloned();
+        let target = crate::engine::get_next_step(&compiled.steps, &meta.last_step, None);
         let new_key = target
-            .as_ref()
+            .as_deref()
             .map_or_else(|| key.clone(), |t| key.for_step(t));
         return Ok(vec![(
             TransitionReason::GroupRetryExhausted,
@@ -309,16 +309,16 @@ fn compute_successors(
             );
 
             if step_config.next.is_some()
-                && let Some(fallback_target) = sequential_next(&compiled.steps, step)
+                && let Some(fallback_target) =
+                    crate::engine::get_next_step(&compiled.steps, step, None)
                 && fallback_target != target
             {
-                let fallback_key = key.for_step(fallback_target);
-                push_unbudgeted_transition(
-                    &mut successors,
+                let fallback_key = key.for_step(&fallback_target);
+                successors.push((
                     TransitionReason::SkipFallback,
                     Some(fallback_target),
-                    &fallback_key,
-                );
+                    fallback_key,
+                ));
             }
         }
         None => {
@@ -351,18 +351,17 @@ fn compute_successors(
 
     // `if.no-file-changes:` branches.
     if let Some(nfc) = nfc_cond {
-        if nfc.retry {
-            let new_key = key.for_step(step).with_edge_increment(step, step);
-            push_transition(
+        match nfc {
+            NoFileChangesAction::Retry => push_self_retry_transition(
                 &mut successors,
                 TransitionReason::IfNoFileChangesRetry,
-                Some(step),
-                &new_key,
+                key,
                 step,
                 max_retries,
-            );
-        } else if nfc.fail {
-            successors.push((TransitionReason::IfNoFileChangesFail, None, key.clone()));
+            ),
+            NoFileChangesAction::Failed => {
+                successors.push((TransitionReason::IfNoFileChangesFail, None, key.clone()));
+            }
         }
     }
 
@@ -382,17 +381,13 @@ fn compute_successors(
                     max_retries,
                 );
             }
-            FailAction::Detailed(d) if d.retry => {
-                let new_key = key.for_step(step).with_edge_increment(step, step);
-                push_transition(
-                    &mut successors,
-                    TransitionReason::IfFailRetry,
-                    Some(step),
-                    &new_key,
-                    step,
-                    max_retries,
-                );
-            }
+            FailAction::Detailed(d) if d.retry => push_self_retry_transition(
+                &mut successors,
+                TransitionReason::IfFailRetry,
+                key,
+                step,
+                max_retries,
+            ),
             FailAction::Detailed(_) => {}
         }
     }
@@ -409,26 +404,12 @@ fn compute_successors(
             let target = item
                 .next
                 .clone()
-                .or_else(|| sequential_next(&compiled.steps, step).cloned());
-            if let Some(ref t) = item.next {
+                .or_else(|| crate::engine::get_next_step(&compiled.steps, step, None));
+            if let Some(ref t) = target {
                 let new_key = key.for_step(t).with_edge_increment(step, t);
                 push_transition(
                     &mut successors,
-                    TransitionReason::OptionChoice {
-                        selector: selector.clone(),
-                    },
-                    Some(t),
-                    &new_key,
-                    step,
-                    max_retries,
-                );
-            } else if let Some(ref t) = target {
-                let new_key = key.for_step(t).with_edge_increment(step, t);
-                push_transition(
-                    &mut successors,
-                    TransitionReason::OptionChoice {
-                        selector: selector.clone(),
-                    },
+                    TransitionReason::OptionChoice { selector },
                     Some(t),
                     &new_key,
                     step,
@@ -436,9 +417,7 @@ fn compute_successors(
                 );
             } else {
                 successors.push((
-                    TransitionReason::OptionChoice {
-                        selector: selector.clone(),
-                    },
+                    TransitionReason::OptionChoice { selector },
                     None,
                     key.clone(),
                 ));
@@ -477,6 +456,17 @@ fn compute_successors(
     Ok(successors)
 }
 
+fn push_self_retry_transition(
+    successors: &mut Vec<(TransitionReason, Option<String>, StateKey)>,
+    reason: TransitionReason,
+    key: &StateKey,
+    step: &str,
+    max_retries: usize,
+) {
+    let new_key = key.for_step(step).with_edge_increment(step, step);
+    push_transition(successors, reason, Some(step), &new_key, step, max_retries);
+}
+
 fn push_transition(
     successors: &mut Vec<(TransitionReason, Option<String>, StateKey)>,
     reason: TransitionReason,
@@ -495,15 +485,6 @@ fn push_transition(
         }
         None => successors.push((reason, None, new_key.clone())),
     }
-}
-
-fn push_unbudgeted_transition(
-    successors: &mut Vec<(TransitionReason, Option<String>, StateKey)>,
-    reason: TransitionReason,
-    target: Option<&str>,
-    new_key: &StateKey,
-) {
-    successors.push((reason, target.map(str::to_string), new_key.clone()));
 }
 
 fn is_within_budget(key: &StateKey, max_retries: usize, from: &str, to: &str) -> bool {
@@ -525,23 +506,7 @@ fn explicit_or_sequential_next(
         }
         return Ok(Some(target.to_string()));
     }
-    Ok(sequential_next(&compiled.steps, current).cloned())
-}
-
-fn sequential_next<'a>(
-    steps: &'a IndexMap<String, crate::config::StepConfig>,
-    current: &str,
-) -> Option<&'a String> {
-    let mut found = false;
-    for name in steps.keys() {
-        if found {
-            return Some(name);
-        }
-        if name == current {
-            found = true;
-        }
-    }
-    None
+    Ok(crate::engine::get_next_step(&compiled.steps, current, None))
 }
 
 /// Persist a DAG as minified JSON.
@@ -928,6 +893,102 @@ steps:
                 .successors
                 .iter()
                 .any(|s| s.reason == TransitionReason::Sequential)
+        );
+    }
+
+    #[test]
+    fn test_dag_no_file_changes_failed_is_terminal() {
+        // Given: a step with `if.no-file-changes: failed`.
+        // When: the execution DAG is built, the no-change branch is a terminal
+        // edge (workflow aborts), alongside the normal sequential exit.
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  implement:
+    command: echo implement
+    if:
+      no-file-changes: failed
+  done:
+    command: echo done
+",
+        );
+
+        let dag = build_dag(&compiled, 2).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let implement = &dag.nodes[&dag.start];
+        assert_eq!(implement.step_name, "implement");
+        assert_eq!(implement.successors.len(), 2);
+        assert!(
+            implement.successors.iter().any(|s| {
+                s.reason == TransitionReason::IfNoFileChangesFail && s.target.is_none()
+            })
+        );
+        assert!(implement.successors.iter().any(|s| {
+            s.reason == TransitionReason::Sequential
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "done")
+        }));
+    }
+
+    #[test]
+    fn test_dag_no_file_changes_retry_self_edge_caps_at_max_retries() {
+        // Given: a step with `if.no-file-changes: retry`.
+        // When: the execution DAG is built, the no-change branch is a self-edge
+        // back to the same step; once the self-edge budget (max_retries) is
+        // exhausted, the retry transition becomes terminal (loop protection).
+        let compiled = compile_yaml(
+            r"
+command: [echo]
+steps:
+  work:
+    command: echo work
+    if:
+      no-file-changes: retry
+  done:
+    command: echo done
+",
+        );
+
+        let dag = build_dag(&compiled, 1).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let work = &dag.nodes[&dag.start];
+        assert_eq!(work.step_name, "work");
+        assert_eq!(work.successors.len(), 2);
+
+        // First visit: the self-edge is within budget and loops back to `work`.
+        assert!(work.successors.iter().any(|s| {
+            s.reason == TransitionReason::IfNoFileChangesRetry
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "work")
+        }));
+        assert!(work.successors.iter().any(|s| {
+            s.reason == TransitionReason::Sequential
+                && s.target
+                    .as_ref()
+                    .is_some_and(|id| dag.nodes[id].step_name == "done")
+        }));
+
+        // Second visit (self-edge count already at max_retries=1): the retry
+        // transition must be terminal so every DAG path terminates.
+        let revisit_id = work
+            .successors
+            .iter()
+            .find_map(|s| {
+                if s.reason == TransitionReason::IfNoFileChangesRetry {
+                    s.target.as_ref()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("expected an in-budget no-file-changes retry edge"));
+        let revisited = &dag.nodes[revisit_id];
+        assert!(
+            revisited.successors.iter().any(|s| {
+                s.reason == TransitionReason::IfNoFileChangesRetry && s.target.is_none()
+            })
         );
     }
 
