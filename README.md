@@ -237,11 +237,14 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 | Kind | Path |
 |------|------|
-| User YAML configs and application settings | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
+| User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` (default: `~/.config/cruise/workflows/`) |
+| Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
 
-> **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
+> **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`*.yml` into `~/.config/cruise/workflows/`, `config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
+>
+> **Workflow configs previously in `~/.config/cruise/*.yaml` / `*.yml`?** Automatic user-config discovery now looks for workflow YAMLs only in the `workflows/` subdirectory. Move them to `~/.config/cruise/workflows/`; cruise prints a warning if it finds YAML files left directly in `~/.config/cruise/`.
 
 ### Session Lifecycle
 
@@ -299,7 +302,7 @@ cruise resolves the workflow config as follows:
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
-   - `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`), sorted by filename
+   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. With a single candidate the choice is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.

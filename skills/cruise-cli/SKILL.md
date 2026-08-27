@@ -112,7 +112,7 @@ The interactive menu changes with the session's phase:
 
 1. `-c/--config <path>` (must exist; no prompt)
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
-3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/*.yaml|*.yml`. Multiple candidates → interactive picker (TTY) or highest-priority auto-pick (non-interactive).
+3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker (TTY) or highest-priority auto-pick (non-interactive).
 4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time).
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
@@ -121,11 +121,12 @@ The interactive menu changes with the session's phase:
 
 | Kind | Path (default) |
 |------|----------------|
-| User YAML configs + app settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
+| User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` → `~/.config/cruise/workflows/` |
+| App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` |
 | State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
-> Older versions kept everything under `~/.cruise/`. If migrating, move configs to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees.
+> Older versions kept everything under `~/.cruise/`. If migrating, move workflow YAMLs to `~/.config/cruise/workflows/`, `config.json` to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees. Cruise also warns if workflow YAMLs are left directly in `~/.config/cruise/` (legacy location) instead of the `workflows/` subdirectory.
 
 ## Operational notes & gotchas
 

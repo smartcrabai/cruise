@@ -20,10 +20,12 @@ Config files are resolved in this priority order:
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
-5. `~/.config/cruise/*.yaml` / `*.yml` (ASCII-sorted)
+5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
 6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + review group + after-PR automation) — implicit fallback only, never offered as a selectable choice
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, when two or more real config files are found, an interactive selector is shown (a single real file is auto-selected).
+
+> User workflow YAMLs left directly in `~/.config/cruise/` are no longer discovered. Cruise emits a one-time warning and tells you to move them into `~/.config/cruise/workflows/`.
 
 ## Minimal config
 

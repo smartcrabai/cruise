@@ -6,7 +6,7 @@ use crate::error::{CruiseError, Result};
 
 /// Application-level configuration persisted at `~/.config/cruise/config.json`.
 ///
-/// This is distinct from per-workflow YAML configs (which live in `~/.cruise/sessions/`).
+/// This is distinct from per-workflow YAML configs (which live in `~/.config/cruise/workflows/`).
 ///
 /// ## Behaviour
 /// - Missing file -> returns [`AppConfig::default()`].
