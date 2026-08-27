@@ -1,7 +1,7 @@
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Session, SkippableStepDto } from "../types";
+import { BUILTIN_CONFIG_PATH, type Session, type SkippableStepDto } from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   Channel: class {
@@ -69,6 +69,25 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("SessionConfigEditor", () => {
+  describe("Built-in default pin (configPath = __builtin__)", () => {
+    it("does not synthesize a duplicate config entry for the sentinel", async () => {
+      // Given: the session is pinned to the built-in default and listConfigs
+      // returns only real files (the backend never emits the sentinel)
+      mockListConfigs.mockResolvedValue([
+        { name: "cruise.yaml", path: "/home/user/project/cruise.yaml" },
+      ]);
+      render(<SessionConfigEditor {...defaultProps} configPath={BUILTIN_CONFIG_PATH} />);
+
+      // Then: exactly one option carries the sentinel value — the static
+      // "Built-in default" option, never a synthetic per-file entry; and it is selected
+      const select = await screen.findByLabelText("Config");
+      await waitFor(() => {
+        expect(select).toHaveValue(BUILTIN_CONFIG_PATH);
+      });
+      expect(select.querySelectorAll(`option[value="${BUILTIN_CONFIG_PATH}"]`)).toHaveLength(1);
+    });
+  });
+
   describe("Save button visibility control", () => {
     it("Save button is not shown when there are no changes", async () => {
       // Given
@@ -293,7 +312,7 @@ describe("SessionConfigEditor", () => {
       // Then
       await waitFor(() => {
         expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
-          configPath: undefined,
+          configPath: "",
           skippedSteps: ["step-a"],
         });
       });

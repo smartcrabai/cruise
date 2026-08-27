@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -8,20 +8,29 @@ use console::Term;
 
 const FRAMES: &[char] = &['-', '/', '|', '\\', '-', '/', '|', '\\', '-', '/'];
 
+/// Process-wide lock serializing all spinner output across instances.
+///
+/// Concurrent batch workers (`run --all --parallelism N`) each run their own
+/// `Spinner`; without a shared lock the independent animation threads interleave
+/// `\r`-prefixed frame rewrites and `clear_line`s with each other's (and other
+/// workers') stderr lines, garbling the terminal. Every spinner frame write,
+/// suspend, and teardown clears goes through this one lock.
+static TERMINAL_LOCK: Mutex<()> = Mutex::new(());
+
+fn terminal_lock() -> MutexGuard<'static, ()> {
+    TERMINAL_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// An animated terminal spinner that cleans up on drop.
 pub struct Spinner {
     stop: Arc<AtomicBool>,
-    /// Held by the animation thread each frame; grab to pause animation.
-    lock: Arc<Mutex<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Spinner {
     pub fn start(msg: &str) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let lock = Arc::new(Mutex::new(()));
         let stop_clone = stop.clone();
-        let lock_clone = lock.clone();
         let msg = msg.to_string();
 
         let handle = std::thread::spawn(move || {
@@ -29,30 +38,26 @@ impl Spinner {
             let mut i = 0usize;
             while !stop_clone.load(Ordering::Relaxed) {
                 {
-                    let _guard = lock_clone
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _guard = terminal_lock();
                     let _ = term.write_str(&format!("\r  {} {}", FRAMES[i % FRAMES.len()], msg));
                 }
                 std::thread::sleep(Duration::from_millis(80));
                 i += 1;
             }
+            let _guard = terminal_lock();
             let _ = term.clear_line();
         });
 
         Spinner {
             stop,
-            lock,
             handle: Some(handle),
         }
     }
 
     /// Pause animation, run `f` (e.g. print a message), then resume.
+    #[expect(clippy::unused_self)]
     pub fn suspend<F: FnOnce()>(&self, f: F) {
-        let _guard = self
-            .lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = terminal_lock();
         let _ = Term::stderr().clear_line();
         f();
     }

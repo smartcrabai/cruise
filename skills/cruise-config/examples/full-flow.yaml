@@ -64,8 +64,7 @@ steps:
       Tests are written for {plan}. Implement to make them pass.
       Update {plan} if necessary.
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   test:
     command:
