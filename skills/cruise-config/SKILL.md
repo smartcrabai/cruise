@@ -61,11 +61,11 @@ The full spec is split into the files below. Load only the sections you need.
 
 | Doc | Contents |
 |-----|----------|
-| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, `pr_language`, `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
+| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan` and deprecated fields), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: seher` (mode keys, provider resolution) and `sdk: pi` (direct pi_agent_rust, model references, auth), differences from command mode |
 | [references/steps.md](references/steps.md) | The three step types: prompt, command, option; `instruction`, `timeout` |
-| [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{pr.*}` |
-| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` |
+| [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{plan.language}`, `{pr.*}` |
+| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge rules, the `llm:` section for session-title generation |

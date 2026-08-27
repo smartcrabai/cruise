@@ -5,7 +5,7 @@ use crate::{cli::ConfigArgs, error::Result};
 /// Handle the `cruise config` subcommand.
 ///
 /// - No flags: print the current configuration to stdout.
-/// - `--set-parallelism N`: validate and persist the new value, then print it.
+/// - `--set-parallelism N`: validate and persist the desktop GUI's concurrency limit, then print it.
 ///
 /// # Errors
 ///

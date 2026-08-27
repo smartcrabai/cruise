@@ -14,7 +14,7 @@ use crate::error::{CruiseError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    /// Maximum number of sessions to execute concurrently in `run --all` mode.
+    /// Maximum number of sessions the desktop GUI executes concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]

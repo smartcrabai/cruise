@@ -1052,7 +1052,7 @@ pub async fn create_session(
     channel: tauri::ipc::Channel<PlanEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
-    use cruise::config::{WorkflowConfig, validate_config};
+    use cruise::config::validate_config;
     use cruise::session::{SessionManager, SessionState};
 
     let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
@@ -1065,11 +1065,11 @@ pub async fn create_session(
         &base_dir,
         config_path.as_deref(),
     )?;
-    let mut config = match WorkflowConfig::from_yaml(&yaml) {
+    let mut config = match load_gui_workflow_config(&yaml) {
         Ok(config) => config,
         Err(e) => {
             remove_session_clone(&manager, &session_id);
-            return Err(format!("config parse error: {e}"));
+            return Err(e);
         }
     };
     if let Err(e) = validate_config(&config) {
@@ -1341,7 +1341,7 @@ pub(crate) fn create_draft_session_impl(
     skipped_steps: Vec<String>,
     image_attachments: Vec<String>,
 ) -> std::result::Result<String, String> {
-    use cruise::config::{WorkflowConfig, validate_config};
+    use cruise::config::validate_config;
 
     let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let session_id = SessionManager::new_session_id();
@@ -1352,11 +1352,11 @@ pub(crate) fn create_draft_session_impl(
         &base_dir,
         config_path.as_deref(),
     )?;
-    let config = match WorkflowConfig::from_yaml(&yaml) {
+    let config = match load_gui_workflow_config(&yaml) {
         Ok(config) => config,
         Err(e) => {
             remove_session_clone(manager, &session_id);
-            return Err(format!("config parse error: {e}"));
+            return Err(e);
         }
     };
     if let Err(e) = validate_config(&config) {
@@ -1501,8 +1501,7 @@ pub fn get_new_session_config_defaults(
     repo: Option<String>,
 ) -> std::result::Result<NewSessionConfigDefaultsDto, String> {
     let (_, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
-    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let config = load_gui_workflow_config(&yaml)?;
     cruise::config::validate_config(&config)
         .map_err(|e| format!("Failed to validate config: {e}"))?;
     let steps = cruise::workflow::list_skippable_steps(&config)
@@ -1608,8 +1607,7 @@ pub fn update_session_settings(
 
     let (base, yaml, source) =
         resolve_gui_session_paths(&session.base_dir.to_string_lossy(), config_path.as_deref())?;
-    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| format!("config parse error: {e}"))?;
+    let config = load_gui_workflow_config(&yaml)?;
     cruise::config::validate_config(&config).map_err(|e| e.to_string())?;
 
     match current_step_update {
@@ -2612,6 +2610,19 @@ pub async fn run_all_sessions(
     Ok(())
 }
 
+/// Parse a workflow config for a GUI entry point and apply process-level overrides.
+///
+/// GUI session creation uses the resolved YAML directly instead of going through
+/// the CLI resolver, so it must apply the same environment handling explicitly.
+fn load_gui_workflow_config(
+    yaml: &str,
+) -> std::result::Result<cruise::config::WorkflowConfig, String> {
+    let mut config = cruise::config::WorkflowConfig::from_yaml(yaml)
+        .map_err(|e| format!("config parse error: {e}"))?;
+    config.apply_env_overrides().map_err(|e| e.to_string())?;
+    Ok(config)
+}
+
 /// Normalize a raw GUI `base_dir` string (expand leading `~`) and resolve the
 /// workflow config relative to that directory.
 ///
@@ -2779,7 +2790,7 @@ pub fn clear_new_session_draft() -> std::result::Result<(), String> {
 mod tests {
     use super::*;
     use cruise::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
-    use cruise::test_support::{init_git_repo, make_session};
+    use cruise::test_support::{EnvGuard, init_git_repo, lock_process, make_session};
 
     use std::fs;
     use std::path::Path;
@@ -3478,6 +3489,26 @@ mod tests {
     }
 
     // --- resolve_gui_session_paths -------------------------------------------
+
+    #[test]
+    fn test_load_gui_workflow_config_applies_environment_overrides() {
+        let _lock = lock_process();
+        let _model = EnvGuard::set("CRUISE_MODEL", "opus");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let _sdk = EnvGuard::remove("CRUISE_SDK");
+        let _language_pr = EnvGuard::remove("CRUISE_LANGUAGE_PR");
+        let _language_plan = EnvGuard::remove("CRUISE_LANGUAGE_PLAN");
+        let _cleanup = EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR");
+        let _interactive = EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING");
+        let _force_exec = EnvGuard::remove("CRUISE_FORCE_EXEC");
+
+        let config = load_gui_workflow_config(
+            "command: [claude, -p]\nmodel: sonnet\nsteps:\n  s:\n    command: echo hi\n",
+        )
+        .unwrap_or_else(|e| panic!("config should load: {e}"));
+
+        assert_eq!(config.model.as_deref(), Some("opus"));
+    }
 
     #[test]
     fn test_resolve_gui_session_paths_local_config_beats_user_dir() {

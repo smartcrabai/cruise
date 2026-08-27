@@ -53,6 +53,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
    - **Ask** → ask a question; the answer is shown, then the menu reappears.
    - **Execute now** → skip approval and run immediately.
 
+   After **Approve** or **Execute now**, the step-skip selector lets you omit steps for this run; cancelling it returns to the action menu without approving or executing.
+
 3. **Run.** `cruise run` picks up a `Planned` session, prompts for a **workspace mode** (below), reuses/creates the worktree, executes the workflow steps, creates a PR with `gh pr create`, then runs any `after-pr` steps. The session ends as `Completed` (or `Failed`). Transient exec sessions are excluded from automatic selection and `run --all`; resume them only with an explicit ID.
 
 4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` and deletes the session + worktree (and any leftover `--repo` clone) once the PR is merged or closed.
@@ -79,7 +81,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 
 | Mode | What it does | When to use |
 |------|--------------|-------------|
-| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched; supports parallel sessions. **Requires `gh` CLI.** |
+| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched and supports independent PR-backed sessions. **Requires `gh` CLI.** |
 | **Current branch** | Runs in place on the active branch. No worktree, no auto-PR. | Quick iterations on the current branch. Normal runs need a **clean working tree** and an **attached branch** (not detached HEAD); `exec`/`force_exec` may start dirty. On resume the branch must match. |
 
 Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely).
@@ -133,6 +135,7 @@ The interactive menu changes with the session's phase:
 
 - **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
+- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
 - **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).

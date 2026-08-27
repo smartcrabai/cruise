@@ -164,7 +164,7 @@ Options:
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
-`--all` runs every Planned or Suspended session. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is shown as `Failed` and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
 
@@ -260,7 +260,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
    - **Ask** -- Ask a question; the answer is shown before the menu reappears.
    - **Execute now** -- Skip approval and run immediately.
 
-   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config.
+   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config. Cancelling the selector returns to the approve-plan menu without approving or executing the session.
 
 5. **`cruise run`** -- Picks up the approved session, reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
@@ -331,9 +331,14 @@ description: |             # one-line summary shown next to the filename in sele
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
-pr_language: English      # language for auto-generated PR title/body (optional, default: English)
+max_retries: 4
+languages:                # prompt languages (optional; defaults to English)
+  pr: English             # language for auto-generated PR title/body
+  plan: English           # language used by built-in planning prompts
+# Deprecated compatibility fields:
+# pr_language: English
+# plan_language: English
 # force_exec: false          # execute direct plan entry points in place (use --no-force-exec to opt out)
-plan_language: English       # language used by built-in planning prompts (optional, default: English)
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -434,20 +439,20 @@ interactive_planning: false   # tool-less, file-based planning; allows claude-te
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
 
-### PR Language
+### Prompt Languages
 
-The `pr_language` field controls the language used for the auto-generated PR title and body. Defaults to `"English"` when omitted.
+The nested `languages.pr` field controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Both default to `"English"` when omitted. The effective values are available to built-in templates as `{pr.language}` and `{plan.language}`.
 
-```yaml
-pr_language: Japanese     # PR title/body will be generated in Japanese
-```
-
-### Plan Language
-
-The `plan_language` field controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Defaults to `"English"` when omitted. The normalized value is available to built-in planning templates as `{plan.language}`.
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values. Blank environment values are ignored. The deprecated top-level `pr_language` and `plan_language` fields remain supported, but the nested fields take precedence.
 
 ```yaml
-plan_language: Japanese   # generated/updated plans and plan answers will be in Japanese
+languages:
+  pr: Japanese       # PR title/body will be generated in Japanese
+  plan: Japanese     # generated/updated plans and plan answers will be in Japanese
+
+# Deprecated compatibility fields:
+# pr_language: Japanese
+# plan_language: Japanese
 ```
 
 ### Session Title Generation
@@ -462,6 +467,8 @@ No additional configuration is required.
 ### Environment Variables
 
 Environment variables can be set at two levels. Step-level values override top-level values for that step only. Values support template variable substitution.
+
+The CLI and desktop GUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`.
 
 ```yaml
 env:                        # top-level: applied to all steps
@@ -717,6 +724,8 @@ Steps can be grouped to coordinate retry loops across multiple steps. A group re
 Groups can define their steps inline and are invoked from the main `steps` section with `group: <name>`:
 
 ```yaml
+max_retries: 4
+
 groups:
   review:
     if:
@@ -815,9 +824,10 @@ steps:
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
+| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, or the default) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
-| `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
+| `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, or the default) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 
@@ -877,6 +887,7 @@ command:
 
 model: sonnet
 plan_model: opus
+max_retries: 4
 
 groups:
   review:
