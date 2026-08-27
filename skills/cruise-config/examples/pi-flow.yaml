@@ -22,18 +22,16 @@ steps:
       Tests are written for {plan}. Implement to make them pass.
     timeout: 30m
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   test:
     command:
       - cargo fmt --all
       - cargo test
-    if:
-      fail: fix-test-error    # jump on non-zero exit / timeout
 
   fix-test-error:
-    # Failure jumps here; passing tests skip it. `next: test` reruns checks.
+    # Reached sequentially after `test`, pass or fail (a failed command step
+    # does not abort the run; prev.success = "true" -> skipped).
     skip: prev.success
     prompt: |
       The following error occurred. Please correct it:

@@ -64,7 +64,7 @@ pub enum CruiseError {
     #[error("run aborted to preserve external session state: {0}")]
     SessionStateConflictAborted(String),
 
-    #[error("step '{0}' made no workspace file changes (fail-if-no-file-changes)")]
+    #[error("step '{0}' made no workspace file changes (if.no-file-changes: failed)")]
     StepMadeNoFileChanges(String),
 
     #[error("step '{step}' timed out after {after_secs}s")]

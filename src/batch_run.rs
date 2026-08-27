@@ -1,7 +1,7 @@
 //! Bounded-concurrency batch scheduler for `run --all`.
 //!
-//! Used by the CLI (`src/run_cmd.rs`) and GUI (`src-tauri/src/commands.rs`) for
-//! parallel session execution.
+//! Used by the CLI (`src/run_cmd.rs`) and the GUI (`src-tauri/src/commands.rs`)
+//! for parallel session execution.
 //!
 //! ## Scheduling rules
 //! 1. Seed from [`SessionManager::run_all_remaining`] to get the initial candidate list.
@@ -68,8 +68,7 @@ pub struct BatchSessionResult {
 /// Eligible sessions are `Planned` or `Suspended` sessions that are not transient
 /// exec sessions. Delegates to [`run_all_with_dynamic_parallelism`] with a constant
 /// `parallelism_fn`.
-#[cfg(test)]
-pub(crate) async fn run_all_with_parallelism<F, Fut>(
+pub async fn run_all_with_parallelism<F, Fut>(
     manager: &SessionManager,
     parallelism: usize,
     cancel_token: CancellationToken,
@@ -354,6 +353,38 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "20260101000001");
         assert!(results[0].outcome.is_ok(), "expected Ok outcome");
+    }
+
+    #[tokio::test]
+    async fn test_scheduled_state_snapshot_reflects_schedule_time_state() {
+        // Given: one planned session whose worker mutates the on-disk phase
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = Arc::new(SessionManager::new(tmp.path().to_path_buf()));
+        make_planned_session(&manager, "20260101000001", tmp.path());
+        let cancel = CancellationToken::new();
+
+        // When: the batch runs (instant_completer marks the session Completed on disk)
+        let results =
+            run_all_with_parallelism(&manager, 1, cancel, instant_completer(Arc::clone(&manager)))
+                .await
+                .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+
+        // Then: the snapshot still holds the schedule-time Planned state even
+        // though the on-disk state has been mutated to Completed by now.
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0].scheduled_state.phase, SessionPhase::Planned),
+            "scheduled_state must be the schedule-time snapshot, got {:?}",
+            results[0].scheduled_state.phase
+        );
+        let on_disk = manager
+            .load("20260101000001")
+            .unwrap_or_else(|e| panic!("reload session: {e}"));
+        assert!(
+            matches!(on_disk.phase, SessionPhase::Completed),
+            "worker should have marked the session Completed on disk, got {:?}",
+            on_disk.phase
+        );
     }
 
     #[tokio::test]

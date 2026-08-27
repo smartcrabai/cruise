@@ -40,7 +40,7 @@ function renderGroup(entries: ConfigEntry[], label: string, baseDir: string | un
 
 /**
  * Shared `<select>` for choosing a workflow config file or the built-in default,
- * grouping file options by discovery source (`local` under the base dir, `user` under the user config dir,
+ * grouping file options by discovery source (`local` under the base dir, `user` under the user workflow dir,
  * anything without a `source` under "Other").
  */
 export function ConfigSelect({
@@ -64,12 +64,12 @@ export function ConfigSelect({
       disabled={disabled}
       className={className}
     >
-      <option value="">Auto (base dir / user config / builtin)</option>
+      <option value="">Auto (base dir / user workflows / builtin)</option>
       <option value={BUILTIN_CONFIG_PATH}>Built-in default</option>
       {renderGroup(localEntries, `Base dir (${baseDir || "."})`, baseDir)}
       {renderGroup(
         userEntries,
-        `User config (${dirOf(userEntries[0]?.path ?? "")})`,
+        `User workflows (${dirOf(userEntries[0]?.path ?? "")})`,
         baseDir,
       )}
       {renderGroup(otherEntries, "Other", baseDir)}

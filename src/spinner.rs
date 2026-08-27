@@ -9,6 +9,12 @@ use console::Term;
 const FRAMES: &[char] = &['-', '/', '|', '\\', '-', '/', '|', '\\', '-', '/'];
 
 /// Process-wide lock serializing all spinner output across instances.
+///
+/// Concurrent batch workers (`run --all --parallelism N`) each run their own
+/// `Spinner`; without a shared lock the independent animation threads interleave
+/// `\r`-prefixed frame rewrites and `clear_line`s with each other's (and other
+/// workers') stderr lines, garbling the terminal. Every spinner frame write,
+/// suspend, and teardown clears goes through this one lock.
 static TERMINAL_LOCK: Mutex<()> = Mutex::new(());
 
 fn terminal_lock() -> MutexGuard<'static, ()> {
@@ -49,6 +55,7 @@ impl Spinner {
     }
 
     /// Pause animation, run `f` (e.g. print a message), then resume.
+    #[expect(clippy::unused_self)]
     pub fn suspend<F: FnOnce()>(&self, f: F) {
         let _guard = terminal_lock();
         let _ = Term::stderr().clear_line();

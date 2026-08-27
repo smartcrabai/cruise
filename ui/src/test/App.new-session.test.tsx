@@ -1728,7 +1728,7 @@ describe("App: New Session -- ConfigSelect groups entries by source", () => {
     });
     vi.mocked(commands.listConfigs).mockResolvedValue([
       { path: "/my/project/cruise.yaml", name: "cruise.yaml", source: "local" },
-      { path: "/home/user/.config/cruise/default.yaml", name: "default.yaml", source: "user" },
+      { path: "/home/user/.config/cruise/workflows/default.yaml", name: "default.yaml", source: "user" },
     ]);
 
     render(<App />);
@@ -1741,13 +1741,15 @@ describe("App: New Session -- ConfigSelect groups entries by source", () => {
     });
     const groups = Array.from(select.querySelectorAll("optgroup"));
     const localGroup = groups.find((g) => g.label === "Base dir (/my/project)");
-    const userGroup = groups.find((g) => g.label === "User config (/home/user/.config/cruise)");
+    const userGroup = groups.find(
+      (g) => g.label === "User workflows (/home/user/.config/cruise/workflows)"
+    );
 
     expect(localGroup?.querySelector("option")?.getAttribute("value")).toBe(
       "/my/project/cruise.yaml"
     );
     expect(userGroup?.querySelector("option")?.getAttribute("value")).toBe(
-      "/home/user/.config/cruise/default.yaml"
+      "/home/user/.config/cruise/workflows/default.yaml"
     );
   });
 });

@@ -30,7 +30,7 @@ interface HistoryEntry {
   skippedSteps: string[];
 }
 
-const TEAM_CONFIG_PATH = "/Users/takumi/.cruise/team.yaml";
+const TEAM_CONFIG_PATH = "/Users/takumi/.config/cruise/workflows/team.yaml";
 const AUTO_CONFIG_PATH = "/Users/takumi/projects/demo/cruise.yaml";
 
 function makeStep(id: string): SkippableStepDto {
@@ -220,7 +220,7 @@ mockIPC((cmd, payload?: unknown) => {
       return "";
     case "list_configs":
       // baseDir and repo are accepted in the payload but ignored in the browser demo;
-      // the fixed list simulates user-dir configs only.
+      // the fixed list simulates user workflow configs only.
       return [
         {
           name: "team.yaml",
@@ -228,7 +228,11 @@ mockIPC((cmd, payload?: unknown) => {
           description: "team-shared: parallel implement + auto-PR",
           source: "user",
         },
-        { name: "autoflow.yaml", path: "/Users/takumi/.cruise/autoflow.yaml", source: "user" },
+        {
+          name: "autoflow.yaml",
+          path: "/Users/takumi/.config/cruise/workflows/autoflow.yaml",
+          source: "user",
+        },
       ];
     case "get_new_session_history_summary":
       return latestHistorySummary();

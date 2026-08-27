@@ -152,7 +152,9 @@ pub struct RunArgs {
     pub all: bool,
 
     /// Maximum number of sessions executed concurrently by `--all`.
-    /// Defaults to 1 when omitted; must be at least 1 and requires `--all`.
+    ///
+    /// Defaults to 1 (sequential execution) when omitted. Only valid
+    /// together with `--all`; must be at least 1.
     #[arg(long, value_name = "N")]
     pub parallelism: Option<usize>,
 
@@ -930,12 +932,24 @@ mod tests {
         assert_eq!(cli.plan, None);
     }
 
+    // -- run --parallelism flag -------------------------------------------------
+
+    #[test]
+    fn test_run_parallelism_defaults_to_none() {
+        let cli = Cli::parse_from(["cruise", "run", "--all"]);
+        match cli.command {
+            Some(Commands::Run(args)) => assert_eq!(args.parallelism, None),
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
     #[test]
     fn test_run_all_with_parallelism_parses_value() {
-        let cli = Cli::parse_from(["cruise", "run", "--all", "--parallelism", "4"]);
+        let cli = Cli::parse_from(["cruise", "run", "--all", "--dry-run", "--parallelism", "4"]);
         match cli.command {
             Some(Commands::Run(args)) => {
                 assert!(args.all);
+                assert!(args.dry_run);
                 assert_eq!(args.parallelism, Some(4));
             }
             _ => panic!("expected Run subcommand"),

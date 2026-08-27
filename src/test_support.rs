@@ -182,6 +182,31 @@ steps:
     )
 }
 
+/// A workflow config with a flat step cycle that mixes one unsafe conditional
+/// back-edge (`c` jumps back to `a` on `if.file-changed`) with unconditional
+/// sequential edges. Once the back-edge has fired G times, the sequential
+/// edges need a G+1th traversal and hit `LoopProtection`, regardless of G.
+#[must_use]
+pub fn mixed_conditional_cycle_config() -> String {
+    r"
+command:
+  - cat
+steps:
+  a:
+    command: |
+      printf a > out.txt
+  b:
+    command: |
+      printf b > out.txt
+  c:
+    command: |
+      printf c > out.txt
+    if:
+      file-changed: a
+"
+    .to_string()
+}
+
 /// Create a minimal `Planned` session for use in tests.
 #[must_use]
 pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
