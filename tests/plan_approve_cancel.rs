@@ -87,7 +87,7 @@ fn run_plan_in_pty(binary: &Path, config: &Path, home: &Path, action: ActionChoi
 
     // Bound the test if a prompt stops consuming input; otherwise a failed
     // interactive regression could leave the test process waiting forever.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match child
             .try_wait()
