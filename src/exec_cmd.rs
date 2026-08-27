@@ -56,6 +56,7 @@ pub(crate) async fn run_resolved(
         dry_run: false,
         cleanup_after_pr: false,
         no_cleanup_after_pr: false,
+        parallelism: None,
     };
 
     crate::run_cmd::run(run_args).await
@@ -108,7 +109,9 @@ pub(crate) fn setup_exec_session(
 mod tests {
     use super::*;
     use crate::session::{SessionPhase, WorkspaceMode};
-    use crate::test_support::{group_retry_budget_config_with, init_git_repo, run_git_ok};
+    use crate::test_support::{
+        group_retry_budget_config_with, init_git_repo, mixed_conditional_cycle_config, run_git_ok,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -802,6 +805,75 @@ steps:
         assert!(
             !repo.join("out.txt").exists(),
             "dry-run must not execute any step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_dry_run_also_fails_fast_on_mixed_conditional_cycle() {
+        // Given: a config with a flat cycle mixing a conditional back-edge
+        // (c --if.file-changed--> a) with unconditional sequential edges
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, mixed_conditional_cycle_config())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut args = exec_args_no_op(&config_path);
+        args.dry_run = true;
+
+        // When: exec is called with --dry-run
+        let result = run(args).await;
+
+        // Then: --dry-run does not bypass the fail-fast validation and the
+        // error names the offending cycle steps
+        assert!(
+            result.is_err(),
+            "dry-run should still surface the mixed conditional cycle error: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("a -> b -> c -> a"),
+            "error should name the witness cycle, got: {message}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "dry-run must not execute any step"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_fails_fast_on_mixed_conditional_cycle() {
+        // Given: a config with a flat cycle mixing a conditional back-edge
+        // (c --if.file-changed--> a) with unconditional sequential edges
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let config_path = tmp.path().join("cruise.yaml");
+        fs::write(&config_path, mixed_conditional_cycle_config())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: exec is called WITHOUT --dry-run
+        let result = run(exec_args_no_op(&config_path)).await;
+
+        // Then: it fails fast before any step executes and the error names
+        // the offending cycle
+        assert!(
+            result.is_err(),
+            "expected the mixed conditional cycle to fail fast: {result:?}"
+        );
+        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
+        assert!(
+            message.contains("a -> b -> c -> a"),
+            "error should name the witness cycle, got: {message}"
+        );
+        assert!(
+            !repo.join("out.txt").exists(),
+            "validation must happen before any step executes"
         );
     }
 

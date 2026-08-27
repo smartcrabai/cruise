@@ -66,6 +66,7 @@ steps:
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
 - A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.
+- A group `if.file-changed` back-edge that closes a top-level step cycle is rejected at startup unless the group sets `max_retries` — without it the jump has no graceful skip and counts as an unsafe conditional edge (see [Loop protection](flow-control.md#loop-protection)).
 
 ## Group execution behavior
 

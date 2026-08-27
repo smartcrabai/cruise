@@ -203,7 +203,7 @@ function edgeLabel(edge: DagEdgeDto): string | null {
     case "ifNoFileChangesRetry":
       return "retry (no file changes)";
     case "ifNoFileChangesFail":
-      return "fail (no file changes)";
+      return "failed (no file changes)";
     case "ifFail":
       return edge.selector ? `if-fail: ${edge.selector}` : "if-fail";
     case "ifFailRetry":

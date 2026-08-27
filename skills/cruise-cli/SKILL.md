@@ -31,6 +31,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Execute a specific session | `cruise run <session-id>` |
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
 | Execute every Planned session back-to-back | `cruise run --all` |
+| Run all planned sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Browse / approve / resume / delete sessions | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
@@ -132,7 +133,7 @@ The interactive menu changes with the session's phase:
 
 - **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
-- **`--all` runs sequentially** in the CLI regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**).
+- **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
 - **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
@@ -151,6 +152,9 @@ cruise run
 
 # Drain the queue
 cruise run --all                 # every Planned session, worktree mode, summary table at the end
+
+# Drain the queue with bounded concurrency (this invocation only)
+cruise run --all --parallelism 4
 
 # Throwaway run against the current branch, no PR
 cruise exec "tidy up the imports in src/"

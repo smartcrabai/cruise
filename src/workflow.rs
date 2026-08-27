@@ -854,34 +854,6 @@ steps:
         );
     }
 
-    #[test]
-    fn test_compile_group_step_preserves_fail_if_no_file_changes() {
-        // Given: a group whose sub-step has fail-if-no-file-changes: true
-        let yaml = r"
-command: [echo]
-groups:
-  review:
-    steps:
-      implement:
-        command: cargo build
-        fail-if-no-file-changes: true
-steps:
-  run-review:
-    group: review
-";
-        // When: compiled
-        let c = compiled(yaml);
-        // Then: the expanded step preserves fail_if_no_file_changes
-        let step = c
-            .steps
-            .get("run-review/implement")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(
-            step.fail_if_no_file_changes,
-            "fail_if_no_file_changes should be preserved after compilation"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // list_skippable_steps tests
     // -----------------------------------------------------------------------

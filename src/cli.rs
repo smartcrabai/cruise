@@ -138,16 +138,23 @@ pub struct PlanWorkerArgs {
     pub rate_limit_retries: usize,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct RunArgs {
     /// Session ID to execute (if omitted, picks from pending sessions).
     #[arg(conflicts_with = "all")]
     pub session: Option<String>,
 
-    /// Run all planned sessions sequentially.
+    /// Run all planned sessions.
     #[arg(long)]
     pub all: bool,
+
+    /// Maximum number of sessions executed concurrently by `--all`.
+    ///
+    /// Defaults to 1 (sequential execution) when omitted. Only valid
+    /// together with `--all`; must be at least 1.
+    #[arg(long, value_name = "N")]
+    pub parallelism: Option<usize>,
 
     /// Maximum number of times a single loop edge may be traversed.
     ///
@@ -920,5 +927,38 @@ mod tests {
         assert!(cli.skip_planning);
         assert_eq!(cli.input, None);
         assert_eq!(cli.plan, None);
+    }
+
+    // -- run --parallelism flag -------------------------------------------------
+
+    #[test]
+    fn test_run_parallelism_defaults_to_none() {
+        // Given: `cruise run --all` without --parallelism
+        let cli = Cli::parse_from(["cruise", "run", "--all"]);
+        // When/Then: no override is captured (sequential default resolved later)
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(
+                    args.parallelism, None,
+                    "--parallelism should default to None"
+                );
+            }
+            _ => panic!("expected Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_run_all_with_parallelism_parses_value() {
+        // Given: `cruise run --all --parallelism 4`, also combined with --dry-run
+        let cli = Cli::parse_from(["cruise", "run", "--all", "--dry-run", "--parallelism", "4"]);
+        // When/Then: the override and all flags are captured together
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.all, "--all should be set");
+                assert!(args.dry_run);
+                assert_eq!(args.parallelism, Some(4));
+            }
+            _ => panic!("expected Run subcommand"),
+        }
     }
 }

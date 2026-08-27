@@ -67,36 +67,37 @@ steps:
 
 When no files change, the workflow proceeds to the next step normally (or follows `next:` if set).
 
-## `if: no-file-changes:` — detect no-change
+> A top-level step cycle that mixes this conditional jump back with unconditional sequential edges (the `test → review → test` shape above) is rejected at startup. Confine such retry loops inside a group under `groups:` with `max_retries` (see [groups.md](groups.md)).
 
-Specifies behavior when a step completes without modifying any workspace files. `fail` and `retry` are mutually exclusive.
+## `if.no-file-changes` — detect no-change
+
+Specifies behavior when a step completes without modifying any workspace files. The value is either `retry` or `failed`.
 
 ```yaml
 steps:
   implement:
     prompt: "Implement {plan}"
     if:
-      no-file-changes:
-        fail: true            # abort with Failed if no files changed
+      no-file-changes: failed        # abort with Failed if no files changed
 
   fix:
     prompt: "Fix the issue"
     if:
-      no-file-changes:
-        retry: true           # re-execute the same step until files change
+      no-file-changes: retry         # re-execute the same step until files change
 ```
 
 ### Constraints on `if.no-file-changes`
 
-- Exactly one of `fail` / `retry` must be `true`. Both true or both false is a validation error.
+- The value must be `retry` or `failed`; any other value (including the removed object form `{ fail: true }` / `{ retry: true }`) is a parse error.
 - Cannot be used inside `after-pr` steps.
 - Cannot be used in a group-level `if:`.
-- Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
 - Can coexist with `if: file-changed` on the same step, but then `file-changed` is **ignored entirely** — `no-file-changes` takes over change detection.
+
+> Migration: the legacy `fail-if-no-file-changes: true` field is rejected as an unknown field. Use `no-file-changes: failed` under the step's `if:` instead.
 
 ### Declaring intentional no-changes
 
-Sometimes a step legitimately makes no file changes — for example, the plan explicitly says "don't add tests for this step" — and the agent reaching that conclusion again on every retry is not a bug to route around, it's the correct answer being rejected. Two ways to tell cruise the no-change is deliberate, both of which disable **both** `fail` and `retry` for that attempt (a `fail: true` step does not abort; a `retry: true` step does not re-run):
+Sometimes a step legitimately makes no file changes — for example, the plan explicitly says "don't add tests for this step" — and the agent reaching that conclusion again on every retry is not a bug to route around, it's the correct answer being rejected. Two ways to tell cruise the no-change is deliberate, both of which disable **both** actions (`failed` and `retry`) for that attempt (a `failed` step does not abort; a `retry` step does not re-run):
 
 1. **Output marker** — the step's raw output contains a line starting with `NO_CHANGES_INTENTIONAL:` (leading whitespace on the line is ignored; trailing text on that line is the reason). Works with every backend — `command:` mode and both `sdk:` modes — since it's plain text scanning with no tool support required. A mid-line mention (e.g. quoted in passing, or inside a code block) does **not** count — the marker must anchor the start of a line.
 
@@ -105,8 +106,7 @@ Sometimes a step legitimately makes no file changes — for example, the plan ex
      write_tests:
        prompt: "Add tests per {plan}. If the plan says not to add tests here, reply with a line starting with `NO_CHANGES_INTENTIONAL: <reason>` instead."
        if:
-         no-file-changes:
-           retry: true
+         no-file-changes: retry
    ```
 
 2. **`skip_step` tool** (SDK mode only) — the agent calls `skip_step(reason)` instead of relying on text matching. Schema-validated, so it can't be missed by an accidental typo in the marker. Only registered on prompt steps that carry an `if.no-file-changes` condition — see `sdk.md` for why (registering custom tools narrows SDK-mode provider resolution to tool-capable backends, so it's kept opt-in per step). Not available in classic `command:` mode: `run_command` never sees the tool list, so a `command:` step can only use the output marker.
@@ -115,7 +115,7 @@ Either path logs the declared reason (`intentional no-changes declared: <reason>
 
 ## `if: fail:` — failure handler
 
-Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a no-file-changes fail directive triggers (`if.no-file-changes.fail` or legacy `fail-if-no-file-changes`). The value is either a step name (jump) or `{ retry: true }` (re-execute the same step).
+Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a `no-file-changes: failed` directive triggers. The value is either a step name (jump) or `{ retry: true }` (re-execute the same step).
 
 ```yaml
 steps:
@@ -138,6 +138,7 @@ steps:
 - Cannot be used in a group-level `if:`.
 - With `if.fail` set, a prompt-step error is caught and routed to the handler instead of aborting the workflow.
 - Without `if.fail`, a failed command step does **not** abort the workflow — it proceeds normally and the next step can branch on `{prev.success}` / `{prev.stderr}`. A `no-file-changes` failure without `if.fail` aborts the workflow.
+- A top-level step cycle whose back-edge is an `if.fail` goto mixed with unconditional sequential edges is rejected at startup (see [Loop protection](#loop-protection)).
 
 ## `timeout:` — per-step time limit
 
@@ -153,27 +154,14 @@ steps:
 - `"30"` = 30 seconds, `"5m"` = 5 minutes, `"1h"` = 1 hour. Empty, zero, or other suffixes are validation errors.
 - A timed-out step is treated as **failed**: `if.fail` (if set) handles it; otherwise the workflow continues to the next step (like a failed command).
 
-## `fail-if-no-file-changes` (legacy)
-
-Equivalent to `if.no-file-changes.fail: true`.
-
-```yaml
-steps:
-  implement:
-    prompt: "{input}"
-    fail-if-no-file-changes: true
-```
-
-Cannot be used inside `after-pr` (validation error). Prefer the new `if.no-file-changes` syntax.
-
 ## Transition rules summary
 
 1. If `skip` resolves to true, or `when.exists` matches no file → skip and go to next.
 2. Execute the step (bounded by `timeout` if set).
-3. Step failed (non-zero exit / prompt error / timeout / no-file-changes fail) and `if.fail` is set → jump to its target, or re-execute on `retry: true`.
-4. `if.no-file-changes.fail: true`, no files changed, and no `if.fail` → stop with Failed.
+3. Step failed (non-zero exit / prompt error / timeout / `no-file-changes: failed`) and `if.fail` is set → jump to its target, or re-execute on `retry: true`.
+4. `no-file-changes: failed`, no files changed, and no `if.fail` → stop with Failed.
 5. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
-6. `if.no-file-changes.retry: true` and no files changed → re-execute the same step.
+6. `no-file-changes: retry` and no files changed → re-execute the same step.
 7. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 8/9).
 8. If `next:` is set → go to that step.
 9. Otherwise → go to the next step in YAML declaration order.
@@ -182,3 +170,5 @@ Cannot be used inside `after-pr` (validation error). Prefer the new `if.no-file-
 ## Loop protection
 
 Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 3), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `retry`.
+
+Additionally, a top-level step cycle that mixes conditional edges (`if.file-changed` jumps and `if.fail` goto targets) with unconditional sequential edges is rejected at startup: once the conditional back-edge has fired `max_retries` times, the unconditional edges would always exceed the ceiling, whatever its value. Purely unconditional cycles and group-confined retry loops (a group with `max_retries`) are still accepted -- the latter degrade into a graceful skip when retries are exhausted; a group retry loop without `max_retries` has no such skip and counts as an unsafe conditional edge.
