@@ -112,7 +112,7 @@ Arguments:
   [INPUT]  Task description
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
       --no-force-exec              Ignore force_exec: true and plan as usual
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
@@ -141,7 +141,7 @@ Arguments:
   [INPUT]  Task description (omit to prompt interactively; reads from stdin when piped)
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
 ```
 
 Saves the input as a `Draft` session without invoking the LLM. The plan can be generated later by choosing **Generate Plan** from `cruise list`. Useful when you have an idea you want to capture immediately but don't want to start (or pay for) planning yet.
@@ -155,7 +155,7 @@ Arguments:
   [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
 
 Options:
-      --all                        Run all planned sessions
+      --all                        Run all planned or suspended sessions
       --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
@@ -164,7 +164,7 @@ Options:
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
-`--all` runs every Planned session. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned or Suspended session. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
 
@@ -177,7 +177,7 @@ Arguments:
   [INPUT]  Task description bound to {input} (optional if your config doesn't reference {input})
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -232,7 +232,7 @@ Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is
 
 ## Session Management
 
-Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`).
+Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Sessions whose workflow has no filesystem config path—including an explicit `-c __builtin__` selection—store the resolved YAML in `sessions/<session-id>/config.yaml` so they remain runnable without rediscovery.
 
 ### Runtime File Layout
 
@@ -300,17 +300,17 @@ The interactive session list shows a menu of actions depending on the session's 
 
 cruise resolves the workflow config as follows:
 
-1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown.
+1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown. The special value `-c __builtin__` explicitly selects the built-in default workflow (see 4. below) even when config files exist.
 2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
-   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. With a single candidate the choice is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. A **Built-in default** entry is always offered at the end of the list, so the built-in default remains selectable even when config files are found; with only that entry present, it is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart.
+The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart. The GUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
 
 ## Config File Reference
 
@@ -1025,14 +1025,14 @@ Both the desktop GUI and the CLI support running multiple sessions concurrently 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
 - Launches up to `N` sessions concurrently.
-- Re-scans for newly added Planned sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
+- Re-scans for newly added eligible sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
 - Results are returned in scheduling order regardless of completion order.
 
 ## New Session Form Persistence
 
 The desktop GUI persists two pieces of state across sessions:
 
-- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
+- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path—including the `__builtin__` sentinel for **Built-in default**—, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
 - **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.
 
 ## GitHub Actions

@@ -1,5 +1,5 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import type { SkippableStepDto } from "./types";
+import { BUILTIN_CONFIG_PATH as BUILTIN_CONFIG_KEY, type SkippableStepDto } from "./types";
 
 type SessionPhase =
   | "Awaiting Approval"
@@ -30,7 +30,6 @@ interface HistoryEntry {
   skippedSteps: string[];
 }
 
-const BUILTIN_CONFIG_KEY = "__builtin__";
 const TEAM_CONFIG_PATH = "/Users/takumi/.config/cruise/workflows/team.yaml";
 const AUTO_CONFIG_PATH = "/Users/takumi/projects/demo/cruise.yaml";
 

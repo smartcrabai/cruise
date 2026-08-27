@@ -51,12 +51,12 @@ pub(crate) async fn run_resolved(
     let run_args = RunArgs {
         session: Some(session.id.clone()),
         all: false,
+        parallelism: None,
         max_retries: req.max_retries,
         rate_limit_retries: req.rate_limit_retries,
         dry_run: false,
         cleanup_after_pr: false,
         no_cleanup_after_pr: false,
-        parallelism: None,
     };
 
     crate::run_cmd::run(run_args).await

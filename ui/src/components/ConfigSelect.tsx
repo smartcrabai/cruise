@@ -1,4 +1,4 @@
-import type { ConfigEntry } from "../types";
+import { BUILTIN_CONFIG_PATH, type ConfigEntry } from "../types";
 
 interface ConfigSelectProps {
   id: string;
@@ -34,9 +34,13 @@ function renderOptions(entries: ConfigEntry[], baseDir: string | undefined) {
   ));
 }
 
+function renderGroup(entries: ConfigEntry[], label: string, baseDir: string | undefined) {
+  return entries.length > 0 ? <optgroup label={label}>{renderOptions(entries, baseDir)}</optgroup> : null;
+}
+
 /**
- * Shared `<select>` for choosing a workflow config file, grouping options by
- * discovery source (`local` under the base dir, `user` under the user workflow dir,
+ * Shared `<select>` for choosing a workflow config file or the built-in default,
+ * grouping file options by discovery source (`local` under the base dir, `user` under the user workflow dir,
  * anything without a `source` under "Other").
  */
 export function ConfigSelect({
@@ -61,19 +65,14 @@ export function ConfigSelect({
       className={className}
     >
       <option value="">Auto (base dir / user workflows / builtin)</option>
-      {localEntries.length > 0 && (
-        <optgroup label={`Base dir (${baseDir || "."})`}>
-          {renderOptions(localEntries, baseDir)}
-        </optgroup>
+      <option value={BUILTIN_CONFIG_PATH}>Built-in default</option>
+      {renderGroup(localEntries, `Base dir (${baseDir || "."})`, baseDir)}
+      {renderGroup(
+        userEntries,
+        `User workflows (${dirOf(userEntries[0]?.path ?? "")})`,
+        baseDir,
       )}
-      {userEntries.length > 0 && (
-        <optgroup label={`User workflows (${dirOf(userEntries[0].path)})`}>
-          {renderOptions(userEntries, baseDir)}
-        </optgroup>
-      )}
-      {otherEntries.length > 0 && (
-        <optgroup label="Other">{renderOptions(otherEntries, baseDir)}</optgroup>
-      )}
+      {renderGroup(otherEntries, "Other", baseDir)}
     </select>
   );
 }

@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -18,9 +18,7 @@ const FRAMES: &[char] = &['-', '/', '|', '\\', '-', '/', '|', '\\', '-', '/'];
 static TERMINAL_LOCK: Mutex<()> = Mutex::new(());
 
 fn terminal_lock() -> MutexGuard<'static, ()> {
-    TERMINAL_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    TERMINAL_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// An animated terminal spinner that cleans up on drop.

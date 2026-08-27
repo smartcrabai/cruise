@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
-import type { Session } from "../types";
+import { BUILTIN_CONFIG_PATH, type Session } from "../types";
 import * as commands from "../lib/commands";
 import * as desktopNotifications from "../lib/desktopNotifications";
 
@@ -1479,6 +1479,34 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     await act(async () => { control.emitPlanGenerated(); });
   });
 
+  it("passes the built-in sentinel through the New Session entry point", async () => {
+    // Given: a discoverable local config and a pending session creation request
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/tmp/project/cruise.yaml", name: "cruise.yaml", source: "local" },
+    ]);
+    const control = setupTwoPhaseCreateSession("sess-builtin");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.selectOptions(screen.getByLabelText("Config"), BUILTIN_CONFIG_PATH);
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "use built-in config",
+    );
+
+    // When: the user submits the New Session form with Built-in default selected
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    // Then: the entry point sends the sentinel to the backend, rather than Auto
+    expect(commands.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ configPath: BUILTIN_CONFIG_PATH }),
+      expect.anything(),
+    );
+
+    // Cleanup
+    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanGenerated(); });
+  });
+
   it("checkbox is disabled while session creation is in progress", async () => {
     // Given: createSession is pending (session creation in progress)
     const control = setupTwoPhaseCreateSession("sess-pending");
@@ -1647,6 +1675,40 @@ describe("App: New Session -- listConfigs reacts to source changes", () => {
     // Then: config select is reset to "" (Auto)
     expect(screen.getByLabelText("Config")).toHaveValue("");
   });
+
+  it("keeps configPath '__builtin__' when the updated list does not contain it", async () => {
+    // Given: form opens with the built-in default pinned via history
+    vi.mocked(commands.listConfigs).mockResolvedValue([
+      { path: "/my/project/cruise.yaml", name: "cruise.yaml" },
+    ]);
+    vi.mocked(commands.getNewSessionHistorySummary).mockResolvedValue({
+      lastRequestedConfigPath: BUILTIN_CONFIG_PATH,
+      lastWorkingDir: "/my/project",
+      recentWorkingDirs: [],
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Built-in default is selected from history (never part of listConfigs output)
+    expect(screen.getByLabelText("Config")).toHaveValue(BUILTIN_CONFIG_PATH);
+
+    // When: working directory changes and the refreshed list lacks the sentinel
+    vi.mocked(commands.listConfigs).mockResolvedValue([]);
+    const baseDirInput2 = screen.getByPlaceholderText("e.g. /Users/you/projects/myapp");
+    fireEvent.change(baseDirInput2, { target: { value: "/other/project" } });
+    vi.advanceTimersByTime(300);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Then: the pinned built-in default selection survives the refresh
+    expect(screen.getByLabelText("Config")).toHaveValue(BUILTIN_CONFIG_PATH);
+  });
 });
 
 // --- ConfigSelect grouping wiring in NewSessionForm ---------------------------
@@ -1675,7 +1737,7 @@ describe("App: New Session -- ConfigSelect groups entries by source", () => {
     // Then: the rendered select groups each entry under the matching optgroup label
     const select = await screen.findByLabelText("Config");
     await waitFor(() => {
-      expect(select.querySelectorAll("option")).toHaveLength(3); // Auto + 2 entries
+      expect(select.querySelectorAll("option")).toHaveLength(4); // Auto + Built-in default + 2 entries
     });
     const groups = Array.from(select.querySelectorAll("optgroup"));
     const localGroup = groups.find((g) => g.label === "Base dir (/my/project)");

@@ -148,6 +148,13 @@ export interface DirEntry {
 
 // --- Session creation ---------------------------------------------------------
 
+/**
+ * Sentinel config value selecting the built-in default config.
+ * Mirrors `crate::new_session_history::BUILTIN_CONFIG_KEY` in the Rust backend;
+ * the resolver treats it as "use the built-in default", never as a file path.
+ */
+export const BUILTIN_CONFIG_PATH = "__builtin__";
+
 /** Where a config file was discovered by the backend. */
 export type ConfigEntrySource = "local" | "user";
 

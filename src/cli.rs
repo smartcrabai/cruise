@@ -72,7 +72,8 @@ pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
 
-    /// Path to the workflow config file.
+    /// Path to the workflow config file. The special value `__builtin__`
+    /// selects the built-in default workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
@@ -122,7 +123,8 @@ pub struct DraftArgs {
     /// Task description.
     pub input: Option<String>,
 
-    /// Path to the workflow config file.
+    /// Path to the workflow config file. The special value `__builtin__`
+    /// selects the built-in default workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 }
@@ -145,7 +147,7 @@ pub struct RunArgs {
     #[arg(conflicts_with = "all")]
     pub session: Option<String>,
 
-    /// Run all planned sessions.
+    /// Run all planned and suspended sessions.
     #[arg(long)]
     pub all: bool,
 
@@ -218,7 +220,8 @@ pub struct ExecArgs {
     /// Task description bound to {input}. Optional if your config doesn't reference {input}.
     pub input: Option<String>,
 
-    /// Path to the workflow config file.
+    /// Path to the workflow config file. The special value `__builtin__`
+    /// selects the built-in default workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
@@ -933,28 +936,19 @@ mod tests {
 
     #[test]
     fn test_run_parallelism_defaults_to_none() {
-        // Given: `cruise run --all` without --parallelism
         let cli = Cli::parse_from(["cruise", "run", "--all"]);
-        // When/Then: no override is captured (sequential default resolved later)
         match cli.command {
-            Some(Commands::Run(args)) => {
-                assert_eq!(
-                    args.parallelism, None,
-                    "--parallelism should default to None"
-                );
-            }
+            Some(Commands::Run(args)) => assert_eq!(args.parallelism, None),
             _ => panic!("expected Run subcommand"),
         }
     }
 
     #[test]
     fn test_run_all_with_parallelism_parses_value() {
-        // Given: `cruise run --all --parallelism 4`, also combined with --dry-run
         let cli = Cli::parse_from(["cruise", "run", "--all", "--dry-run", "--parallelism", "4"]);
-        // When/Then: the override and all flags are captured together
         match cli.command {
             Some(Commands::Run(args)) => {
-                assert!(args.all, "--all should be set");
+                assert!(args.all);
                 assert!(args.dry_run);
                 assert_eq!(args.parallelism, Some(4));
             }

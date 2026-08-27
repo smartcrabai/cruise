@@ -611,6 +611,7 @@ fn cleanup_planning_worktree(session: &SessionState) {
 
 fn create_planning_session(
     manager: &SessionManager,
+    yaml: &str,
     source: &ConfigSource,
     input: String,
 ) -> Result<SessionState> {
@@ -620,6 +621,18 @@ fn create_planning_session(
         SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
     session.config_path = source.path().cloned();
     manager.create(&session)?;
+
+    if session.config_path.is_none()
+        && let Err(error) = std::fs::write(
+            manager.sessions_dir().join(&session_id).join("config.yaml"),
+            yaml,
+        )
+    {
+        // Do not leave a persisted session that cannot be loaded because its
+        // builtin config snapshot was not written.
+        let _ = manager.delete(&session_id);
+        return Err(error.into());
+    }
 
     Ok(session)
 }
@@ -675,11 +688,11 @@ fn create_session_for_target(
 ) -> Result<(WorkflowConfig, SessionState)> {
     match target {
         PlanTarget::Local {
-            yaml: _,
+            yaml,
             source,
             config,
         } => {
-            let session = create_planning_session(manager, &source, input.to_string())?;
+            let session = create_planning_session(manager, &yaml, &source, input.to_string())?;
             Ok((config, session))
         }
         PlanTarget::Repo(repo) => {
@@ -1210,12 +1223,12 @@ async fn run_approve_loop(
                 let run_args = crate::cli::RunArgs {
                     session: Some(session.id.clone()),
                     all: false,
+                    parallelism: None,
                     max_retries: None,
                     rate_limit_retries,
                     dry_run: false,
                     cleanup_after_pr: false,
                     no_cleanup_after_pr: false,
-                    parallelism: None,
                 };
                 return crate::run_cmd::run(run_args).await;
             }
@@ -1647,6 +1660,27 @@ mod tests {
             rate_limit_retries: 0,
             images: vec![],
         }
+    }
+
+    #[test]
+    fn test_create_planning_session_persists_builtin_config() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join("sessions"));
+        let yaml = crate::config::BUILTIN_CONFIG_YAML;
+
+        let session = create_planning_session(
+            &manager,
+            yaml,
+            &ConfigSource::Builtin,
+            "use builtin".to_string(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let config_path = manager.sessions_dir().join(&session.id).join("config.yaml");
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap_or_else(|e| panic!("{e:?}")),
+            yaml
+        );
     }
 
     #[test]

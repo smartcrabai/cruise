@@ -303,15 +303,8 @@ pub async fn execute_steps_with_dag(
         let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
         let active_ctx = ExecutionContext {
             compiled: active_compiled,
-            max_retries: ctx.max_retries,
-            rate_limit_retries: ctx.rate_limit_retries,
-            on_step_start: ctx.on_step_start,
-            cancel_token: ctx.cancel_token,
-            option_handler: ctx.option_handler,
             config_reloader: None,
-            working_dir: ctx.working_dir,
-            skipped_steps: ctx.skipped_steps,
-            on_step_log: ctx.on_step_log,
+            ..*ctx
         };
 
         // Snapshot the runtime context in effect right before this node runs:
@@ -3684,7 +3677,7 @@ steps:
         let token = CancellationToken::new();
         let token_clone = token.clone();
         // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
-        let call_count = std::sync::Mutex::new(0usize);
+        let call_count = std::sync::atomic::AtomicUsize::new(0);
         let ctx = ExecutionContext {
             compiled: &compiled,
             max_retries: 10,
@@ -3705,14 +3698,11 @@ steps:
             &mut dag,
             &start,
             &|_cp, _dag| {
-                let mut n = call_count
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if *n >= 1 {
+                if call_count.load(std::sync::atomic::Ordering::Relaxed) >= 1 {
                     // step2 (second call): cancel so the token check fires after on_node_start
                     token_clone.cancel();
                 }
-                *n += 1;
+                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             },
         )

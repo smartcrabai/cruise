@@ -22,7 +22,7 @@ use crate::{
 
 /// Interval between periodic candidate re-scans when idle worker slots are available.
 ///
-/// A new `Planned` session added while the batch is running will be picked up
+/// A new eligible session added while the batch is running will be picked up
 /// within at most this interval, even if no in-flight worker has completed yet.
 const PERIODIC_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -56,16 +56,18 @@ pub struct BatchSessionResult {
     pub session_id: String,
     /// Snapshot of the session state captured when this session was scheduled.
     ///
-    /// The CLI summary path uses this as a fallback when the on-disk state
-    /// file has become unreadable by the time the worker finishes.
+    /// Retained for callers that need to render a fallback result when the
+    /// on-disk state cannot be reloaded after execution.
     pub scheduled_state: SessionState,
     /// The outcome of executing the session.
     pub outcome: Result<()>,
 }
 
-/// Convenience wrapper: run all pending sessions with a fixed concurrency limit.
+/// Convenience wrapper: run all eligible sessions with a fixed concurrency limit.
 ///
-/// Delegates to [`run_all_with_dynamic_parallelism`] with a constant `parallelism_fn`.
+/// Eligible sessions are `Planned` or `Suspended` sessions that are not transient
+/// exec sessions. Delegates to [`run_all_with_dynamic_parallelism`] with a constant
+/// `parallelism_fn`.
 ///
 /// # Errors
 ///
@@ -88,8 +90,11 @@ where
     run_all_with_dynamic_parallelism(manager, move || parallelism, cancel_token, run_fn).await
 }
 
-/// Run all pending sessions with bounded concurrency where the parallelism limit can change
-/// at runtime.
+/// Run all eligible sessions with bounded concurrency where the parallelism limit can
+/// change at runtime.
+///
+/// Eligible sessions are `Planned` or `Suspended` sessions that are not transient exec
+/// sessions.
 ///
 /// # Arguments
 ///
@@ -128,10 +133,11 @@ where
     // which would otherwise cause O(N^2) deque growth for large batches.
     let mut queued: HashSet<String> = HashSet::new();
     let mut next_batch_index: usize = 0;
-    // Stores results from completed tasks (each carries its scheduled state snapshot).
+    // Stores (batch_index, session_id, scheduled state, outcome) from completed tasks.
     let mut completed: Vec<BatchSessionResult> = Vec::new();
 
-    // JoinSet for in-flight tasks; each task yields (batch_index, session_id, scheduled state, outcome).
+    // JoinSet for in-flight tasks; each task yields
+    // (batch_index, session_id, scheduled state, outcome).
     let mut join_set: tokio::task::JoinSet<(usize, String, SessionState, Result<()>)> =
         tokio::task::JoinSet::new();
 
@@ -166,8 +172,9 @@ where
             let run_fn_clone = run_fn.clone();
             let token_clone = cancel_token.clone();
             join_set.spawn(async move {
-                let outcome = run_fn_clone(session.clone(), token_clone).await;
-                (batch_index, session_id, session, outcome)
+                let scheduled_state = session.clone();
+                let outcome = run_fn_clone(session, token_clone).await;
+                (batch_index, session_id, scheduled_state, outcome)
             });
         }
 
@@ -180,7 +187,7 @@ where
         let task_result_opt = tokio::select! {
             result = join_set.join_next() => result,
             () = tokio::time::sleep(PERIODIC_SCAN_INTERVAL) => {
-                if !cancel_token.is_cancelled() {
+                if !cancel_token.is_cancelled() && join_set.len() < parallelism_fn() {
                     enqueue_fresh(manager, &seen, &mut queued, &mut candidates)?;
                 }
                 continue;
@@ -192,11 +199,11 @@ where
         };
 
         match task_result {
-            Ok((batch_index, session_id, state, outcome)) => {
+            Ok((batch_index, session_id, scheduled_state, outcome)) => {
                 completed.push(BatchSessionResult {
                     batch_index,
                     session_id,
-                    scheduled_state: state,
+                    scheduled_state,
                     outcome,
                 });
             }
