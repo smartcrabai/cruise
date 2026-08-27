@@ -1,6 +1,7 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+mod batch_run;
 mod cancellation;
 mod clean_cmd;
 mod cli;

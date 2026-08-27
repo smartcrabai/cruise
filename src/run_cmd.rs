@@ -1,8 +1,8 @@
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use console::style;
 use inquire::InquireError;
@@ -49,7 +49,14 @@ enum SessionStateConflictChoice {
     Overwrite,
 }
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Returns a safe fallback directory when `set_current_dir` fails.
+#[cfg(test)]
 fn fallback_root() -> PathBuf {
     #[cfg(windows)]
     {
@@ -58,26 +65,6 @@ fn fallback_root() -> PathBuf {
     #[cfg(not(windows))]
     {
         PathBuf::from("/")
-    }
-}
-
-struct CurrentDirGuard {
-    original: PathBuf,
-}
-
-impl CurrentDirGuard {
-    fn capture() -> Result<Self> {
-        Ok(Self {
-            original: std::env::current_dir()?,
-        })
-    }
-}
-
-impl Drop for CurrentDirGuard {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.original).is_err() {
-            let _ = std::env::set_current_dir(fallback_root());
-        }
     }
 }
 
@@ -228,24 +215,40 @@ fn record_session_state_conflict_choice(choice: &str) {
     }
 }
 
-fn load_run_all_result_state(
-    manager: &SessionManager,
-    fallback: &SessionState,
-) -> Result<SessionState> {
-    let contents = manager.inspect_state_file(&fallback.id)?;
-    if let SessionFileContents::Parsed { state, .. } = contents {
-        Ok(*state)
-    } else {
-        let state_path = manager.state_path(&fallback.id);
-        let message = session_state_conflict_message(&state_path, &contents);
+fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) -> SessionState {
+    let failed = |message: String| {
         let mut state = fallback.clone();
         state.phase = SessionPhase::Failed(message);
         state.completed_at = Some(current_iso8601());
-        Ok(state)
+        state
+    };
+    let state_path = manager.state_path(&fallback.id);
+
+    match manager.inspect_state_file(&fallback.id) {
+        Ok(SessionFileContents::Parsed { state, .. }) => *state,
+        Ok(contents) => failed(session_state_conflict_message(&state_path, &contents)),
+        Err(e) => failed(format!(
+            "{}: failed to reload session state: {}",
+            state_path.display(),
+            e.detailed_message()
+        )),
     }
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    if let Some(parallelism) = args.parallelism {
+        if parallelism == 0 {
+            return Err(CruiseError::Other(
+                "--parallelism must be at least 1".to_string(),
+            ));
+        }
+        if !args.all {
+            return Err(CruiseError::Other(
+                "--parallelism is only valid together with --all".to_string(),
+            ));
+        }
+    }
+
     if args.all {
         if args.session.is_some() {
             return Err(CruiseError::Other(
@@ -271,8 +274,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 .map(|(session, fingerprint)| (manager, id, session.phase, fingerprint))
         })
     };
-    let option_handler = CliOptionHandler;
-    let result = run_single(args, WorkspaceOverride::RespectSession, &option_handler).await;
+    let cancel_token = CancellationToken::new();
+    let result = run_single(
+        args,
+        WorkspaceOverride::RespectSession,
+        &CliOptionHandler,
+        cancel_token,
+    )
+    .await;
     if let Some((manager, id, phase, fingerprint)) = explicit_exec {
         manager.dispose_exec_session_if_owned(&id, &phase, fingerprint);
     }
@@ -291,9 +300,9 @@ async fn run_single(
     args: RunArgs,
     workspace_override: WorkspaceOverride,
     option_handler: &dyn OptionHandler,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
     let cleanup_override = args.cleanup_after_pr_override();
-    let current_dir_guard = CurrentDirGuard::capture()?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = args
         .session
@@ -388,7 +397,6 @@ async fn run_single(
             session.base_dir.display()
         );
     }
-    std::env::set_current_dir(session.base_dir.clone())?;
     let execution_workspace =
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
     log_execution_workspace(&execution_workspace);
@@ -397,8 +405,6 @@ async fn run_single(
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
         save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
-    std::env::set_current_dir(execution_workspace.path())?;
-
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path);
@@ -411,27 +417,28 @@ async fn run_single(
         &mut vars,
         &mut tracker,
     );
-    let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>> =
-        session.config_path.as_ref().map(|path| {
-            let path = path.clone();
-            let last_mtime = Cell::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
+    let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync>> =
+        session.config_path.as_deref().map(|path| {
+            let path = path.to_path_buf();
+            let last_mtime = Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
             Box::new(move || {
                 let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                if current_mtime == last_mtime.get() {
+                let mut last = lock_unpoisoned(&last_mtime);
+                if current_mtime == *last {
                     return Ok(None);
                 }
                 let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
                 let compiled = crate::workflow::compile(config)?;
-                last_mtime.set(current_mtime);
+                *last = current_mtime;
                 Ok(Some(compiled))
-            }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>>>
+            }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync>
         });
     let log_path = manager.run_log_path(&session_id);
     let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");
     let skipped_steps = session.skipped_steps.clone();
-    let session_cell = RefCell::new(&mut session);
-    let session_fingerprint = Cell::new(initial_fingerprint);
+    let session_cell = Mutex::new(&mut session);
+    let session_fingerprint = Mutex::new(initial_fingerprint);
     let logger_for_start = logger.clone();
     let logger_for_step_start = logger.clone();
     let on_step_start = |step: &str| {
@@ -440,13 +447,14 @@ async fn run_single(
     };
     let on_node_start = |cp: &NodeCheckpoint<'_>, dag: &crate::dag::ExecutionDag| {
         logger_for_start.write(cp.step_name);
-        let mut s = session_cell.borrow_mut();
+        let mut s = lock_unpoisoned(&session_cell);
         s.current_step = Some(cp.node_id.clone());
         s.current_step_is_node_id = true;
         s.has_dag = true;
+        let mut fingerprint_guard = lock_unpoisoned(&session_fingerprint);
         let fingerprint =
-            save_session_state_with_conflict_resolution(&manager, &s, session_fingerprint.get())?;
-        session_fingerprint.set(fingerprint);
+            save_session_state_with_conflict_resolution(&manager, &s, *fingerprint_guard)?;
+        *fingerprint_guard = fingerprint;
         // Persist the DAG (including the runtime context just snapshotted
         // onto this node) alongside the session state. Best-effort: a save
         // failure must not abort the run, since the DAG is a resumption
@@ -463,7 +471,6 @@ async fn run_single(
     let on_step_log = |stream: &str, line: &str| {
         logger.write(&format!("[{stream}] {line}"));
     };
-    let cancel_token = CancellationToken::new();
     let ctx = crate::engine::ExecutionContext {
         compiled: &compiled,
         max_retries: effective_max_retries,
@@ -503,7 +510,9 @@ async fn run_single(
             e
         );
     }
-    let session = session_cell.into_inner();
+    let session = session_cell
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let overall_result = match exec_result {
         Ok(exec) => {
@@ -576,8 +585,6 @@ async fn run_single(
         && matches!(session.phase, SessionPhase::Completed)
         && session.pr_url.is_some()
     {
-        // Step out of the soon-to-be-removed worktree before deleting it.
-        let _ = std::env::set_current_dir(&current_dir_guard.original);
         let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
         session.worktree_path = None;
         eprintln!(
@@ -596,8 +603,6 @@ async fn run_single(
         && session.pr_url.is_some()
         && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
     {
-        // Step out of the soon-to-be-removed worktree before deleting it.
-        let _ = std::env::set_current_dir(&current_dir_guard.original);
         if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
             eprintln!(
                 "{} warning: post-PR cleanup failed: {}",
@@ -615,7 +620,11 @@ async fn run_single(
         session.worktree_branch = None;
     }
 
-    save_session_state_with_conflict_resolution(&manager, session, session_fingerprint.get())?;
+    save_session_state_with_conflict_resolution(
+        &manager,
+        session,
+        *lock_unpoisoned(&session_fingerprint),
+    )?;
     overall_result
 }
 
@@ -749,51 +758,54 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
 }
 
 async fn run_all(args: RunArgs) -> Result<()> {
+    let parallelism = args.parallelism.unwrap_or(1);
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let option_handler = CliOptionHandler;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut results: Vec<SessionState> = Vec::new();
+    let cancel_token = CancellationToken::new();
 
-    loop {
-        let remaining = manager.run_all_remaining(&seen)?;
-        let Some(session) = remaining.into_iter().next() else {
-            break;
-        };
-        seen.insert(session.id.clone());
+    let batch_results = crate::batch_run::run_all_with_dynamic_parallelism(
+        &manager,
+        move || parallelism,
+        cancel_token,
+        move |session: SessionState, session_cancel: CancellationToken| {
+            let base_args = args.clone();
+            Box::pin(async move {
+                let session_args = RunArgs {
+                    session: Some(session.id),
+                    all: false,
+                    parallelism: None,
+                    ..base_args
+                };
+                run_single(
+                    session_args,
+                    WorkspaceOverride::ForceWorktree,
+                    &CliOptionHandler,
+                    session_cancel,
+                )
+                .await
+            })
+        },
+    )
+    .await?;
 
-        let session_args = RunArgs {
-            session: Some(session.id.clone()),
-            all: false,
-            max_retries: args.max_retries,
-            rate_limit_retries: args.rate_limit_retries,
-            dry_run: args.dry_run,
-            cleanup_after_pr: args.cleanup_after_pr,
-            no_cleanup_after_pr: args.no_cleanup_after_pr,
-        };
-        let run_result = Box::pin(run_single(
-            session_args,
-            WorkspaceOverride::ForceWorktree,
-            &option_handler,
-        ))
-        .await;
-        let interrupted = matches!(run_result, Err(CruiseError::Interrupted));
-        match run_result {
+    let mut results = Vec::with_capacity(batch_results.len());
+    for batch_result in batch_results {
+        match &batch_result.outcome {
             Err(CruiseError::StepPaused) => {
-                eprintln!("session {} paused by user", session.id);
+                eprintln!("session {} paused by user", batch_result.session_id);
             }
-            Err(e) if !interrupted => {
+            Err(CruiseError::Interrupted) | Ok(()) => {}
+            Err(e) => {
                 eprintln!(
                     "warning: session {} encountered an error: {}",
-                    session.id,
+                    batch_result.session_id,
                     e.detailed_message()
                 );
             }
-            Ok(()) | Err(_) => {}
         }
-        results.push(load_run_all_result_state(&manager, &session)?);
-        if interrupted {
-            break;
-        }
+        results.push(load_run_all_result_state(
+            &manager,
+            &batch_result.scheduled_state,
+        ));
     }
 
     let summary = format_run_all_summary(&results);
@@ -1206,6 +1218,7 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
@@ -1266,6 +1279,7 @@ steps:
             run_args(id),
             WorkspaceOverride::RespectSession,
             &PauseOptionHandler,
+            CancellationToken::new(),
         )
         .await;
 
@@ -2013,6 +2027,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
@@ -2056,6 +2071,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
@@ -2970,6 +2986,7 @@ steps:
         let result = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
@@ -3049,6 +3066,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
@@ -3827,6 +3845,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
@@ -3890,6 +3909,37 @@ steps:
                 .join("session2-output.txt")
                 .exists(),
             "session_2 command should have written session2-output.txt in its worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_run_all_result_state_falls_back_when_state_file_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let session = SessionState::new(
+            "20260826000000".to_string(),
+            tmp.path().to_path_buf(),
+            "cruise.yaml".to_string(),
+            "unreadable state".to_string(),
+        );
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        let state_path = manager.state_path(&session.id);
+        let original = std::fs::metadata(&state_path)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o000))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let state = load_run_all_result_state(&manager, &session);
+
+        std::fs::set_permissions(&state_path, original).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(state.phase, SessionPhase::Failed(ref message) if message.contains("failed to reload session state")),
+            "unreadable state should become a failed summary row: {:?}",
+            state.phase
         );
     }
 }

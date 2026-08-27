@@ -13,7 +13,7 @@ pub enum ConfigSource {
     Local(PathBuf),
     /// Selected from `~/.config/cruise/`.
     UserDir(PathBuf),
-    /// No file found; using built-in default.
+    /// Using the built-in default, either as the fallback or by explicit selection.
     Builtin,
 }
 
@@ -26,6 +26,13 @@ impl ConfigSource {
                 format!("config: {}", p.display())
             }
         }
+    }
+
+    /// Returns whether a persisted source string represents the built-in default.
+    #[must_use]
+    pub fn is_builtin_source(source: &str) -> bool {
+        source == crate::new_session_history::BUILTIN_CONFIG_KEY
+            || source == "config: (builtin default)"
     }
 
     /// Returns the path to the config file, or `None` for the built-in default.
@@ -63,16 +70,20 @@ pub fn load_config_from_source(
 /// Resolve a workflow config, returning (`yaml_content`, source).
 ///
 /// Resolution order:
-/// 1. `explicit` (`-c` flag) -- error if file does not exist.
+/// 1. `explicit` (`-c` flag) -- error if file does not exist. The special value
+///    `__builtin__` ([`crate::new_session_history::BUILTIN_CONFIG_KEY`]) selects the
+///    built-in default config without touching the filesystem.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
 /// 4. `./.cruise/*.yaml` / `*.yml` (sorted by filename).
-/// 5. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
+/// 5. `~/.config/cruise/*.yaml` / `*.yml` -- interactive selector includes a trailing
+///    "Built-in default" entry so the built-in default can be chosen explicitly.
 ///
 /// # Errors
 ///
-/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
-/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
+/// Falls back to the embedded built-in workflow when no config file is found.
+/// [`CruiseError::ConfigNotFound`] is returned only when an explicitly requested
+/// file or `CRUISE_CONFIG` path does not exist.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
     use std::io::IsTerminal;
     let cwd = std::env::current_dir()
@@ -89,7 +100,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 ///
 /// This is safe to call from concurrent Tauri request handlers because it does not
 /// mutate `std::env::current_dir()`.  Resolution order is identical to [`resolve_config`]:
-/// 1. `explicit` -- error if file does not exist.
+/// 1. `explicit` -- error if file does not exist; `__builtin__` selects the built-in default.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
 /// 4. `.cruise/*.yaml` / `*.yml` under `cwd` (sorted by filename).
@@ -97,8 +108,9 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 ///
 /// # Errors
 ///
-/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
-/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
+/// Falls back to the embedded built-in workflow when no config file is found.
+/// [`CruiseError::ConfigNotFound`] is returned only when an explicitly requested
+/// file or `CRUISE_CONFIG` path does not exist.
 pub fn resolve_config_in_dir(
     explicit: Option<&str>,
     cwd: &std::path::Path,
@@ -106,7 +118,7 @@ pub fn resolve_config_in_dir(
     resolve_config_in_dir_with_interactive(explicit, cwd, false)
 }
 
-/// A candidate config file for the interactive selector.
+/// A candidate config source for the interactive selector.
 #[derive(Debug)]
 struct ConfigCandidate {
     label: String,
@@ -252,6 +264,15 @@ fn resolve_config_in_dir_with_interactive(
 ) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
+        // Built-in sentinel (`__builtin__`): select the built-in default without any
+        // filesystem access. Resolved here once so every caller (CLI `-c`, GUI
+        // create_session / repo mode / session edit) gets the same behaviour.
+        if path == crate::new_session_history::BUILTIN_CONFIG_KEY {
+            return Ok((
+                crate::config::BUILTIN_CONFIG_YAML.to_string(),
+                ConfigSource::Builtin,
+            ));
+        }
         let buf = PathBuf::from(path);
         let yaml = std::fs::read_to_string(&buf).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -272,58 +293,40 @@ fn resolve_config_in_dir_with_interactive(
         || matches!(
             candidates.first().map(|c| &c.source),
             Some(CandidateKind::EnvVar(_))
-        ) {
-        // Non-interactive, or CRUISE_CONFIG is set: take the highest-priority candidate.
+        )
+        || candidates.len() == 1
+    {
+        // Non-interactive, CRUISE_CONFIG is set, or only the built-in entry remains:
+        // take the highest-priority candidate without prompting.
         candidates.into_iter().next().ok_or_else(|| {
             CruiseError::Other("internal error: candidate list was empty".to_string())
         })?
     } else {
-        // Interactive: offer only real files — Builtin is an implicit fallback, not a
-        // choice the user should be able to accidentally select (Issue #2).
-        let real: Vec<ConfigCandidate> = candidates
-            .into_iter()
-            .filter(|c| !matches!(c.source, CandidateKind::Builtin))
-            .collect();
-        if real.is_empty() {
-            ConfigCandidate {
-                label: "Built-in default".to_string(),
-                source: CandidateKind::Builtin,
-            }
-        } else if real.len() == 1 {
-            real.into_iter().next().ok_or_else(|| {
-                CruiseError::Other(
-                    "internal error: filtered candidate list became empty".to_string(),
-                )
-            })?
-        } else {
-            prompt_select_among_candidates(real)?
-        }
+        // Interactive: offer all candidates — "Built-in default" is always last, so
+        // cursor position 0 still lands on the highest-priority file and Enter-spam
+        // keeps selecting it, while the built-in default remains explicitly selectable
+        // even when config files exist.
+        prompt_select_among_candidates(candidates)?
     };
 
     // 4. Read the chosen candidate and return.
     materialize_candidate(chosen)
 }
 
-/// Convert a `ConfigCandidate` to a `(yaml, ConfigSource)` pair by reading the file.
+/// Convert a `ConfigCandidate` to a `(yaml, ConfigSource)` pair.
 fn materialize_candidate(candidate: ConfigCandidate) -> Result<(String, ConfigSource)> {
-    match candidate.source {
-        CandidateKind::EnvVar(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::EnvVar(path)))
+    let (path, source): (PathBuf, fn(PathBuf) -> ConfigSource) = match candidate.source {
+        CandidateKind::EnvVar(path) => (path, ConfigSource::EnvVar),
+        CandidateKind::Local(path) => (path, ConfigSource::Local),
+        CandidateKind::UserDir(path) => (path, ConfigSource::UserDir),
+        CandidateKind::Builtin => {
+            return Ok((
+                crate::config::BUILTIN_CONFIG_YAML.to_string(),
+                ConfigSource::Builtin,
+            ));
         }
-        CandidateKind::Local(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::Local(path)))
-        }
-        CandidateKind::UserDir(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::UserDir(path)))
-        }
-        CandidateKind::Builtin => Ok((
-            crate::config::BUILTIN_CONFIG_YAML.to_string(),
-            ConfigSource::Builtin,
-        )),
-    }
+    };
+    read_config_file(&path).map(|yaml| (yaml, source(path)))
 }
 
 fn read_config_file(path: &std::path::Path) -> Result<String> {
@@ -1141,24 +1144,20 @@ mod tests {
     }
 
     #[test]
-    fn test_interactive_false_nothing_returns_builtin() {
-        // Given: empty dir, no env var, no user-dir files; interactive mode is off
+    fn test_nothing_returns_builtin_without_prompt() {
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _guard = DirGuard::new();
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        // When: resolved non-interactively with nothing available
-        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: falls back to built-in default
-        assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin, got: {source:?}"
-        );
-        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        for interactive in [false, true] {
+            let (yaml, source) =
+                resolve_config_in_dir_with_interactive(None, repo_dir.path(), interactive)
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(matches!(source, ConfigSource::Builtin));
+            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        }
     }
 
     #[test]
@@ -1193,6 +1192,42 @@ mod tests {
             matches!(source, ConfigSource::Explicit(_)),
             "expected Explicit, got: {source:?}"
         );
+    }
+
+    // ---- explicit __builtin__ sentinel (Built-in default selection) ----
+
+    #[test]
+    fn test_explicit_builtin_sentinel_wins_over_files_and_env() {
+        let env_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            env_file.path(),
+            "command: [envvar]\nsteps:\n  s:\n    command: envvar",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_path = env_file
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"))
+            .to_string();
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _env_guard = EnvGuard::set("CRUISE_CONFIG", std::ffi::OsStr::new(&env_path));
+
+        for interactive in [false, true] {
+            let (yaml, source) = resolve_config_in_dir_with_interactive(
+                Some(crate::new_session_history::BUILTIN_CONFIG_KEY),
+                repo_dir.path(),
+                interactive,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+            assert!(matches!(source, ConfigSource::Builtin));
+        }
     }
 
     // ---- builtin roundtrip ----

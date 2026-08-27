@@ -88,12 +88,19 @@ impl From<cruise::session::SessionState> for SessionDto {
             SessionPhase::Failed(e) => ("Failed".to_string(), Some(e.clone())),
             other => (other.label().to_string(), None),
         };
+        let config_path = s
+            .config_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| {
+                cruise::resolver::ConfigSource::is_builtin_source(&s.config_source)
+                    .then(|| BUILTIN_CONFIG_KEY.to_string())
+            });
         Self {
             id: s.id,
             phase: phase_label,
             phase_error,
             config_source: s.config_source,
-            config_path: s.config_path.map(|p| p.to_string_lossy().into_owned()),
+            config_path,
             base_dir: s.base_dir.to_string_lossy().into_owned(),
             repo: s.repo,
             input: s.input,
@@ -1572,10 +1579,24 @@ pub fn update_session_settings(
         }
     }
 
+    let session_uses_builtin = session.config_path.is_none()
+        && cruise::resolver::ConfigSource::is_builtin_source(&session.config_source);
+    // Older clients represented a built-in selection as a missing path. Treat
+    // that representation as the sentinel so saving settings cannot switch it
+    // back to automatic config discovery. The GUI sends an explicit empty string
+    // when the user selects Auto, which must remain distinguishable from an
+    // omitted value so a pinned built-in session can be unpinned.
+    let explicitly_requested_auto = config_path.as_deref() == Some("");
+    let config_path = if explicitly_requested_auto {
+        None
+    } else {
+        config_path.or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()))
+    };
     let old_config_path = session
         .config_path
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
 
     // Failed/Suspended: config path must stay the same
     if is_failed_or_suspended && old_config_path != config_path {
@@ -1622,11 +1643,7 @@ pub fn update_session_settings(
     }
 
     session.config_source = source.display_string();
-    session.config_path = if config_path.is_some() {
-        source.path().cloned()
-    } else {
-        None
-    };
+    session.config_path = config_path.as_ref().and(source.path()).cloned();
     session.skipped_steps = skipped_steps;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());
@@ -3591,6 +3608,44 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_gui_session_paths_builtin_config_key_selects_builtin() {
+        // Given: base_dir contains cruise.yaml, and config_path is the built-in
+        // sentinel "__builtin__" (sent by the GUI when the user picks
+        // "Built-in default" in ConfigSelect)
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = cruise::test_support::lock_process();
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: GUI session paths are resolved with the sentinel as config_path
+        let (_, yaml, source) = resolve_gui_session_paths(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None")),
+            Some(BUILTIN_CONFIG_KEY),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: built-in default yaml is returned as ConfigSource::Builtin
+        // (never Explicit with a fake path, which would break session persistence)
+        assert_eq!(
+            yaml,
+            cruise::config::BUILTIN_CONFIG_YAML,
+            "expected built-in default yaml, got: {yaml}"
+        );
+        assert!(
+            matches!(source, cruise::resolver::ConfigSource::Builtin),
+            "expected ConfigSource::Builtin, got: {source:?}"
+        );
+    }
+
+    #[test]
     fn test_resolve_gui_session_paths_normalized_base_matches_absolute_input() {
         // Given: base_dir is already an absolute path (no tilde)
         let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3712,6 +3767,21 @@ mod tests {
     }
 
     // --- Post-plan session editing tests -----------------------------------------
+
+    #[test]
+    fn test_session_dto_preserves_builtin_config_selection() {
+        let mut session = cruise::session::SessionState::new(
+            "20260410000000".to_string(),
+            std::path::PathBuf::from("/repo"),
+            cruise::resolver::ConfigSource::Builtin.display_string(),
+            "test input".to_string(),
+        );
+        session.config_path = None;
+
+        let dto = SessionDto::from(session);
+
+        assert_eq!(dto.config_path.as_deref(), Some(BUILTIN_CONFIG_KEY));
+    }
 
     #[test]
     fn test_session_dto_includes_config_path_and_skipped_steps() {
@@ -3986,6 +4056,53 @@ mod tests {
         assert!(
             config_yaml_path.exists(),
             "builtin config switch should write config.yaml to session dir"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_allows_auto_for_builtin_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(repo.join("cruise.yaml"), "command: [echo]\nsteps: {}\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000008";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.config_source = BUILTIN_CONFIG_KEY.to_string();
+        session.config_path = None;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // The GUI represents an explicit Auto selection with an empty string;
+        // omitted/null remains reserved for legacy callers that mean "unchanged".
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            Some(String::new()),
+            vec![],
+            CurrentStepUpdate::Unchanged,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(saved.config_path.is_none());
+        assert_eq!(saved.config_source, result.config_source);
+        assert_eq!(
+            saved.config_source,
+            format!("config: {}", repo.join("cruise.yaml").display())
+        );
+        assert_ne!(
+            saved.config_source,
+            cruise::resolver::ConfigSource::Builtin.display_string()
+        );
+        assert_eq!(
+            fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "command: [echo]\nsteps: {}\n"
         );
     }
 

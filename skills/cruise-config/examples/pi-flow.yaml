@@ -33,8 +33,7 @@ steps:
       fail: fix-test-error    # jump on non-zero exit / timeout
 
   fix-test-error:
-    # Reached two ways: via if.fail jump (test failed -> runs) or
-    # sequentially after a passing test (prev.success = "true" -> skipped).
+    # Failure jumps here; passing tests skip it. `next: test` reruns checks.
     skip: prev.success
     prompt: |
       The following error occurred. Please correct it:

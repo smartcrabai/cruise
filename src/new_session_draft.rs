@@ -13,7 +13,8 @@ pub struct NewSessionDraft {
     /// User-typed task description.
     #[serde(default)]
     pub input: String,
-    /// Explicit config path selected in the dropdown, or `None` for auto mode.
+    /// Explicit config path or built-in sentinel selected in the dropdown, or `None` for auto mode.
+    /// The `__builtin__` sentinel selects the embedded built-in default.
     #[serde(default)]
     pub requested_config_path: Option<String>,
     /// Working directory for the session.

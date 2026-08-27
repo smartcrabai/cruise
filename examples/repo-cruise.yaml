@@ -56,10 +56,7 @@ steps:
     if:
       fail: fix-test-error # non-zero exit jumps here instead of stopping the run
 
-  # Reached two ways: via the `test` step's `if.fail` jump (tests failed), or
-  # sequentially right after a passing `test` (in which case `skip:
-  # prev.success` skips it and the workflow ends). `next: test` loops back
-  # to re-run the checks after the fix.
+  # Failure jumps here; passing tests skip it. `next: test` reruns checks.
   fix-test-error:
     skip: prev.success
     prompt: |

@@ -16,14 +16,14 @@ cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p`
 
 Config files are resolved in this priority order:
 
-1. `-c/--config <path>` flag (highest priority; never prompts)
+1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` selects the built-in default workflow even when config files exist
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
 5. `~/.config/cruise/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + review group + after-PR automation) — implicit fallback only, never offered as a selectable choice
+6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + review group + after-PR automation) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
 
-In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, when two or more real config files are found, an interactive selector is shown (a single real file is auto-selected).
+In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
 
 ## Minimal config
 
