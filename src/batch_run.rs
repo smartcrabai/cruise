@@ -68,6 +68,10 @@ pub struct BatchSessionResult {
 /// Eligible sessions are `Planned` or `Suspended` sessions that are not transient
 /// exec sessions. Delegates to [`run_all_with_dynamic_parallelism`] with a constant
 /// `parallelism_fn`.
+///
+/// # Errors
+///
+/// Returns an error if `parallelism` is 0 or the session list cannot be read.
 pub async fn run_all_with_parallelism<F, Fut>(
     manager: &SessionManager,
     parallelism: usize,

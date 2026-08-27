@@ -1,6 +1,7 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+#[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
 mod cancellation;
 mod clean_cmd;
