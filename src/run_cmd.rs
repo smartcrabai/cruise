@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use console::style;
 use inquire::InquireError;
@@ -48,6 +48,12 @@ enum WorkspaceOverride {
 enum SessionStateConflictChoice {
     Abort,
     Overwrite,
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Returns a safe fallback directory when `set_current_dir` fails.
@@ -219,34 +225,26 @@ fn record_session_state_conflict_choice(choice: &str) {
 }
 
 fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) -> SessionState {
-    let contents = match manager.inspect_state_file(&fallback.id) {
-        Ok(contents) => contents,
-        // The scheduled-state snapshot exists precisely so one unreadable
-        // state file (e.g. permissions changed mid-batch) degrades to a
-        // Failed summary row instead of aborting the whole `run --all`
-        // epilogue after every worker has already finished.
+    let state_path = manager.state_path(&fallback.id);
+    match manager.inspect_state_file(&fallback.id) {
+        Ok(SessionFileContents::Parsed { state, .. }) => *state,
+        Ok(contents) => {
+            let mut state = fallback.clone();
+            state.phase =
+                SessionPhase::Failed(session_state_conflict_message(&state_path, &contents));
+            state.completed_at = Some(current_iso8601());
+            state
+        }
         Err(e) => {
-            let state_path = manager.state_path(&fallback.id);
-            let message = format!(
+            let mut state = fallback.clone();
+            state.phase = SessionPhase::Failed(format!(
                 "{}: failed to reload session state: {}",
                 state_path.display(),
                 e.detailed_message()
-            );
-            let mut state = fallback.clone();
-            state.phase = SessionPhase::Failed(message);
+            ));
             state.completed_at = Some(current_iso8601());
-            return state;
+            state
         }
-    };
-    if let SessionFileContents::Parsed { state, .. } = contents {
-        *state
-    } else {
-        let state_path = manager.state_path(&fallback.id);
-        let message = session_state_conflict_message(&state_path, &contents);
-        let mut state = fallback.clone();
-        state.phase = SessionPhase::Failed(message);
-        state.completed_at = Some(current_iso8601());
-        state
     }
 }
 
@@ -290,12 +288,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 .map(|(session, fingerprint)| (manager, id, session.phase, fingerprint))
         })
     };
-    let option_handler = CliOptionHandler;
     let cancel_token = CancellationToken::new();
     let result = run_single(
         args,
         WorkspaceOverride::RespectSession,
-        &option_handler,
+        &CliOptionHandler,
         cancel_token,
         &NoopObserver,
     )
@@ -440,15 +437,12 @@ async fn run_single(
         &mut tracker,
     );
     let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync>> =
-        session.config_path.as_ref().map(|path| {
-            let path = path.clone();
-            let last_mtime =
-                std::sync::Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
+        session.config_path.as_deref().map(|path| {
+            let path = path.to_path_buf();
+            let last_mtime = Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
             Box::new(move || {
                 let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                let mut last = last_mtime
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut last = lock_unpoisoned(&last_mtime);
                 if current_mtime == *last {
                     return Ok(None);
                 }
@@ -462,8 +456,8 @@ async fn run_single(
     let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");
     let skipped_steps = session.skipped_steps.clone();
-    let session_cell = std::sync::Mutex::new(&mut session);
-    let session_fingerprint = std::sync::Mutex::new(initial_fingerprint);
+    let session_cell = Mutex::new(&mut session);
+    let session_fingerprint = Mutex::new(initial_fingerprint);
     let logger_for_start = logger.clone();
     let logger_for_step_start = logger.clone();
     let on_step_start = |step: &str| {
@@ -473,19 +467,14 @@ async fn run_single(
     };
     let on_node_start = |cp: &NodeCheckpoint<'_>, dag: &crate::dag::ExecutionDag| {
         logger_for_start.write(cp.step_name);
-        let mut s = session_cell
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut s = lock_unpoisoned(&session_cell);
         s.current_step = Some(cp.node_id.clone());
         s.current_step_is_node_id = true;
         s.has_dag = true;
-        {
-            let mut fp = session_fingerprint
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let fingerprint = save_session_state_with_conflict_resolution(&manager, &s, *fp)?;
-            *fp = fingerprint;
-        }
+        let mut fingerprint_guard = lock_unpoisoned(&session_fingerprint);
+        let fingerprint =
+            save_session_state_with_conflict_resolution(&manager, &s, *fingerprint_guard)?;
+        *fingerprint_guard = fingerprint;
         // Persist the DAG (including the runtime context just snapshotted
         // onto this node) alongside the session state. Best-effort: a save
         // failure must not abort the run, since the DAG is a resumption
@@ -656,9 +645,7 @@ async fn run_single(
     save_session_state_with_conflict_resolution(
         &manager,
         session,
-        *session_fingerprint
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *lock_unpoisoned(&session_fingerprint),
     )?;
     overall_result
 }
@@ -809,9 +796,9 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     let dashboard_for_workers = dashboard.clone();
     let manager_for_workers = manager.clone();
 
-    let batch_result = crate::batch_run::run_all_with_parallelism(
+    let batch_result = crate::batch_run::run_all_with_dynamic_parallelism(
         &manager,
-        parallelism,
+        move || parallelism,
         cancel_token,
         move |session: SessionState, session_cancel: CancellationToken| {
             let base_args = args.clone();
@@ -865,24 +852,20 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     crate::console_mode::set_quiet(false);
     let batch_results = batch_result?;
 
-    let mut results: Vec<SessionState> = Vec::new();
-    for batch_result in &batch_results {
-        // Interrupted sessions stay silent: the user pressed Ctrl+C, so a
-        // per-session "encountered an error" warning would only bury the
-        // signal in noise.
-        let interrupted = matches!(batch_result.outcome, Err(CruiseError::Interrupted));
+    let mut results = Vec::with_capacity(batch_results.len());
+    for batch_result in batch_results {
         match &batch_result.outcome {
             Err(CruiseError::StepPaused) => {
                 eprintln!("session {} paused by user", batch_result.session_id);
             }
-            Err(e) if !interrupted => {
+            Err(CruiseError::Interrupted) | Ok(()) => {}
+            Err(e) => {
                 eprintln!(
                     "warning: session {} encountered an error: {}",
                     batch_result.session_id,
                     e.detailed_message()
                 );
             }
-            Ok(()) | Err(_) => {}
         }
         results.push(load_run_all_result_state(
             &manager,
@@ -1303,12 +1286,12 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         }
     }
 
@@ -2182,12 +2165,12 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         };
 
         // When: call run()
@@ -2226,12 +2209,12 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         };
 
         // When: call run() with 0 planned sessions
@@ -3227,12 +3210,12 @@ steps:
         let result = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         })
         .await;
         assert!(result.is_ok(), "expected run --all to succeed: {result:?}");
@@ -3307,12 +3290,12 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         });
         let mutate_fut = mutate_state_after_first_step(
             &manager,
@@ -4086,12 +4069,12 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            parallelism: None,
         });
 
         let add_and_unblock_fut = async {

@@ -26,6 +26,20 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **SDK mode caveat**: in `sdk: seher` mode, prompt steps receive `env:` through the selected seher backend. Claude subprocess backends and the external pi CLI backend pass values to child processes; RPC backends (`pi` and `omp`) ignore workflow `PATH`/`PATHEXT` overrides so those variables cannot change helper resolution. The in-process `pi-rust` backend applies values through process environment mutation inside seher. Ambient variables are inherited by RPC child processes, and configured/request values override them except for `PATH`/`PATHEXT`. In `sdk: pi` mode (pi runs in-process directly, no seher involved), `env:` is applied the same way, via process environment mutation, before each pi call (see [sdk.md](sdk.md)). Command steps still spawn a shell and receive `env:` as usual.
 
+## Process-level config overrides
+
+The CLI and desktop GUI apply these environment variables when loading a
+workflow config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`,
+`CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`,
+`CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are
+trimmed and blank values are ignored. Boolean values must be `true`, `false`,
+`1`, or `0`; any other value is an error naming the offending variable.
+
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
+`languages.pr` and `languages.plan` settings. When these variables are unset,
+nested language fields take precedence over the deprecated top-level fields,
+then the default is `English`.
+
 ## LLM API config (session-title generation)
 
 After plan approval, cruise can call an OpenAI-compatible API to generate a concise session title (up to 80 characters). The title is shown in `cruise list` and the GUI sidebar.

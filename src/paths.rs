@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use crate::error::Result;
 
+/// Directory name containing user workflow YAML files under the Cruise config directory.
+pub(crate) const WORKFLOWS_DIR_NAME: &str = "workflows";
+
 /// Returns `$XDG_CONFIG_HOME/cruise` or `$HOME/.config/cruise`.
 ///
 /// # Errors
@@ -9,6 +12,15 @@ use crate::error::Result;
 /// Returns an error if neither `XDG_CONFIG_HOME` nor the home directory can be determined.
 pub fn config_dir() -> Result<PathBuf> {
     xdg_or_home("XDG_CONFIG_HOME", &[".config"])
+}
+
+/// Returns `<config_dir>/workflows` — the user workflow YAML directory.
+///
+/// # Errors
+///
+/// Returns an error if neither `XDG_CONFIG_HOME` nor the home directory can be determined.
+pub fn workflows_dir() -> Result<PathBuf> {
+    config_dir().map(|d| d.join(WORKFLOWS_DIR_NAME))
 }
 
 /// Returns `$XDG_DATA_HOME/cruise` or `$HOME/.local/share/cruise`.
@@ -75,6 +87,42 @@ mod tests {
         let dir = config_dir().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
         // Then: returns $HOME/.config/cruise
         assert_eq!(dir, tmp.path().join(".config").join("cruise"));
+    }
+
+    // -- workflows_dir() ----------------------------------------------------
+
+    #[test]
+    fn test_workflows_dir_uses_xdg_config_home_when_set() {
+        // Given: XDG_CONFIG_HOME points to a custom location
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("xdg-config").as_os_str());
+        // When: workflows_dir() is called
+        let dir = workflows_dir().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        // Then: returns $XDG_CONFIG_HOME/cruise/workflows
+        assert_eq!(
+            dir,
+            tmp.path()
+                .join("xdg-config")
+                .join("cruise")
+                .join("workflows")
+        );
+    }
+
+    #[test]
+    fn test_workflows_dir_falls_back_to_home_dot_config_when_xdg_unset() {
+        // Given: XDG_CONFIG_HOME is unset, HOME points to a fake path
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        // When: workflows_dir() is called
+        let dir = workflows_dir().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+        // Then: returns $HOME/.config/cruise/workflows
+        assert_eq!(
+            dir,
+            tmp.path().join(".config").join("cruise").join("workflows")
+        );
     }
 
     // -- data_dir() ---------------------------------------------------------

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type {
-  AppConfig,
-  ChoiceDto,
-  ConfigEntry,
-  PlanEvent,
-  Session,
-  SessionPhase,
-  SkippableStepDto,
-  WorkflowEvent,
-  WorkspaceMode,
+import {
+  BUILTIN_CONFIG_PATH,
+  type AppConfig,
+  type ChoiceDto,
+  type ConfigEntry,
+  type PlanEvent,
+  type Session,
+  type SessionPhase,
+  type SkippableStepDto,
+  type WorkflowEvent,
+  type WorkspaceMode,
 } from "./types";
 import {
   approveSession,
@@ -1475,7 +1476,11 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
           if (!active) return;
           setConfigs(newConfigs);
           onDraftChange((prev) => {
-            if (prev.configPath !== "" && !newConfigs.some((c) => c.path === prev.configPath)) {
+            if (
+              prev.configPath !== "" &&
+              prev.configPath !== BUILTIN_CONFIG_PATH &&
+              !newConfigs.some((c) => c.path === prev.configPath)
+            ) {
               return { ...prev, configPath: "" };
             }
             return prev;

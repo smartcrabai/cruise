@@ -2,6 +2,7 @@ mod app_config;
 mod ask_handler;
 mod attachments;
 mod batch_dashboard;
+#[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
 mod cancellation;
 mod clean_cmd;
@@ -10,6 +11,8 @@ mod condition;
 mod config;
 mod config_cmd;
 mod console_mode;
+#[cfg_attr(not(test), expect(dead_code))]
+mod configs;
 mod dag;
 mod display;
 mod draft_cmd;
@@ -48,6 +51,8 @@ mod workflow_call;
 mod workspace;
 mod worktree;
 mod worktree_pr;
+#[cfg_attr(not(test), expect(dead_code))]
+mod yaml_metadata;
 
 // Multi-threaded runtime: parallel `run --all` workers execute blocking
 // terminal prompts inline in their tasks; on a single-threaded runtime any

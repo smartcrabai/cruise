@@ -6,7 +6,7 @@ use crate::error::{CruiseError, Result};
 
 /// Application-level configuration persisted at `~/.config/cruise/config.json`.
 ///
-/// This is distinct from per-workflow YAML configs (which live in `~/.cruise/sessions/`).
+/// This is distinct from per-workflow YAML configs (which live in `~/.config/cruise/workflows/`).
 ///
 /// ## Behaviour
 /// - Missing file -> returns [`AppConfig::default()`].
@@ -14,7 +14,7 @@ use crate::error::{CruiseError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    /// Maximum number of sessions to execute concurrently in `run --all` mode.
+    /// Maximum number of sessions the desktop GUI executes concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]

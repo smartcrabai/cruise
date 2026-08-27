@@ -215,9 +215,6 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
     if !step.env.is_empty() {
         invalid_fields.push("env");
     }
-    if step.fail_if_no_file_changes {
-        invalid_fields.push("fail-if-no-file-changes");
-    }
 
     if invalid_fields.is_empty() {
         return Ok(());
