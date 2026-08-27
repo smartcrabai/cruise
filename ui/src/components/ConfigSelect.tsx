@@ -36,7 +36,7 @@ function renderOptions(entries: ConfigEntry[], baseDir: string | undefined) {
 
 /**
  * Shared `<select>` for choosing a workflow config file, grouping options by
- * discovery source (`local` under the base dir, `user` under the user config dir,
+ * discovery source (`local` under the base dir, `user` under the user workflow dir,
  * anything without a `source` under "Other").
  */
 export function ConfigSelect({
@@ -60,14 +60,14 @@ export function ConfigSelect({
       disabled={disabled}
       className={className}
     >
-      <option value="">Auto (base dir / user config / builtin)</option>
+      <option value="">Auto (base dir / user workflows / builtin)</option>
       {localEntries.length > 0 && (
         <optgroup label={`Base dir (${baseDir || "."})`}>
           {renderOptions(localEntries, baseDir)}
         </optgroup>
       )}
       {userEntries.length > 0 && (
-        <optgroup label={`User config (${dirOf(userEntries[0].path)})`}>
+        <optgroup label={`User workflows (${dirOf(userEntries[0].path)})`}>
           {renderOptions(userEntries, baseDir)}
         </optgroup>
       )}

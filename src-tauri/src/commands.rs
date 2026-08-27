@@ -861,7 +861,8 @@ impl Drop for GuiPlanCtx {
 pub enum ConfigEntrySource {
     /// Under the session/working `base_dir` (root file or `.cruise/`).
     Local,
-    /// Under the user config dir (`$XDG_CONFIG_HOME/cruise` or `~/.config/cruise`).
+    /// Under the user workflow dir (`$XDG_CONFIG_HOME/cruise/workflows` or
+    /// `~/.config/cruise/workflows`).
     User,
 }
 
@@ -910,15 +911,8 @@ pub struct NewSessionDraftDto {
 /// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
 /// Every returned entry is tagged with `source`.
 fn read_configs_in(dir: &std::path::Path, source: ConfigEntrySource) -> Vec<ConfigEntryDto> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut configs: Vec<ConfigEntryDto> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
-        })
+    let mut configs: Vec<ConfigEntryDto> = cruise::configs::legacy_user_config_files(dir)
+        .into_iter()
         .map(|p| {
             let name = p
                 .file_name()
@@ -974,9 +968,9 @@ fn collect_local_configs(base_dir: &std::path::Path) -> Vec<ConfigEntryDto> {
 }
 
 /// Collect configs for the GUI from all sources in priority order:
-/// local (from `base_dir`) → user-dir.
+/// local (from `base_dir`) → user workflow configs.
 ///
-/// When `is_repo_mode` is true or `base_dir` is `None`, only user-dir configs are returned.
+/// When `is_repo_mode` is true or `base_dir` is `None`, only user workflow configs are returned.
 /// Duplicate absolute paths (e.g., symlinked files) are removed, keeping the first occurrence.
 fn collect_configs_for_gui(
     base_dir: Option<&std::path::Path>,
@@ -1008,8 +1002,8 @@ fn collect_configs_for_gui(
 /// List available workflow config files.
 ///
 /// When `base_dir` is provided and `repo` is `None`, local configs from the working directory
-/// are included first (in resolver priority order), followed by user-dir configs.
-/// When `base_dir` is absent, only user-dir configs are returned.
+/// are included first (in resolver priority order), followed by user workflow configs.
+/// When `base_dir` is absent, only user workflow configs are returned.
 ///
 /// When `repo` is set (a repo-backed session), `is_repo_mode` is `true` and local configs are
 /// skipped even if `base_dir` also points at a (possibly transient) repo clone directory.
@@ -1018,9 +1012,9 @@ pub fn list_configs(
     base_dir: Option<String>,
     repo: Option<String>,
 ) -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let user_config_dir = cruise::paths::config_dir().map_err(|e| e.to_string())?;
+    let user_workflows_dir = cruise::paths::workflows_dir().map_err(|e| e.to_string())?;
+    cruise::configs::warn_legacy_user_configs();
     let is_repo_mode = repo.is_some();
-
     let normalized_base_dir = base_dir
         .as_deref()
         .filter(|d| !d.is_empty())
@@ -1029,7 +1023,7 @@ pub fn list_configs(
     Ok(collect_configs_for_gui(
         normalized_base_dir.as_deref(),
         is_repo_mode,
-        &user_config_dir,
+        &user_workflows_dir,
     ))
 }
 
@@ -3470,7 +3464,7 @@ mod tests {
 
     #[test]
     fn test_resolve_gui_session_paths_local_config_beats_user_dir() {
-        // Given: base_dir contains cruise.yaml; ~/.cruise/default.yaml also exists
+        // Given: base_dir contains cruise.yaml; ~/.config/cruise/workflows/default.yaml also exists
         // (Regression: GUI used to resolve config from process cwd, picking user-dir default
         //  instead of the repo-local file.)
         let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3481,10 +3475,14 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = fake_home.path().join(".cruise");
-        fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = fake_home
+            .path()
+            .join(".config")
+            .join("cruise")
+            .join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
-            cruise_home.join("default.yaml"),
+            workflows_dir.join("default.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3961,7 +3959,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         // Use an empty fake HOME so the resolver falls through to the built-in default
-        // (no local cruise.yaml in repo, no CRUISE_CONFIG, no ~/.cruise/*.yaml files).
+        // (no local cruise.yaml in repo, no CRUISE_CONFIG, no user workflow YAML files).
         let _home_guard = cruise::test_support::EnvGuard::set("HOME", tmp.path().as_os_str());
         let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
 
@@ -4759,6 +4757,39 @@ mod tests {
         // And: the surviving entry is the Local one (local entries are chained before user
         // entries, and dedup keeps the first occurrence of a given canonical path)
         assert_eq!(configs[0].source, ConfigEntrySource::Local);
+    }
+
+    // ---- list_configs (user-dir discovery via cruise::paths::workflows_dir) ----
+
+    #[test]
+    fn test_list_configs_ignores_legacy_top_level_yaml() {
+        // Given: a legacy top-level YAML and a current workflow YAML
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let cruise_dir = tmp.path().join(".config").join("cruise");
+        let workflows_dir = cruise_dir.join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            cruise_dir.join("legacy.yaml"),
+            "command: [legacy]\nsteps:\n  s1:\n    command: echo legacy\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            workflows_dir.join("current.yaml"),
+            "command: [current]\nsteps:\n  s1:\n    command: echo current\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the GUI lists configs through the Tauri entry point
+        let configs =
+            list_configs(None, None).unwrap_or_else(|e| panic!("list_configs failed: {e}"));
+
+        // Then: the legacy file is excluded and the workflow file is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "current.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::User);
+        assert!(configs[0].path.ends_with("workflows/current.yaml"));
     }
 
     // --- respond_to_ask_impl --------------------------------------------------

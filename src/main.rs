@@ -8,6 +8,8 @@ mod cli;
 mod condition;
 mod config;
 mod config_cmd;
+#[cfg_attr(not(test), expect(dead_code))]
+mod configs;
 mod dag;
 mod display;
 mod draft_cmd;
@@ -45,6 +47,8 @@ mod workflow_call;
 mod workspace;
 mod worktree;
 mod worktree_pr;
+#[cfg_attr(not(test), expect(dead_code))]
+mod yaml_metadata;
 
 // Multi-threaded runtime: parallel `run --all` workers execute blocking
 // terminal prompts inline in their tasks; on a single-threaded runtime any
