@@ -155,7 +155,8 @@ Arguments:
   [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
 
 Options:
-      --all                        Run all planned sessions sequentially
+      --all                        Run all planned sessions
+      --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -163,7 +164,9 @@ Options:
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
-`--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned session. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+
+`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
 
 #### `cruise exec`
 
@@ -215,7 +218,7 @@ Options:
       --set-parallelism <N>   Set the max number of sessions the desktop GUI runs concurrently in `run --all` mode (must be >= 1)
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI `cruise run --all` always runs sessions sequentially regardless of this value.
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise clean`
 
@@ -631,6 +634,8 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
+> **Warning:** A top-level cycle that mixes an `if.file-changed` jump back with unconditional sequential edges -- exactly the `test` → `review` → `test` shape above -- is rejected at startup, since it always exceeds the loop-protection ceiling once the conditional edge has exhausted its retries. Confine such retry loops inside a [step group](#step-groups) with `max_retries`.
+
 #### No file changes detection (`if.no-file-changes`)
 
 When a step has `if.no-file-changes` set to `retry` or `failed`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
@@ -695,6 +700,8 @@ steps:
 ```
 
 `if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`), so a misconfigured retry loop will not run forever.
+
+A step cycle that mixes a conditional jump (`if.file-changed` / `if.fail` goto) with unconditional sequential edges is rejected at startup: once the conditional edge exhausts its retries, the unconditional edges would always exceed the loop-protection ceiling. Confine such loops inside a group under `groups:` with `max_retries`, as in the example below, so exhausted retries degrade into a graceful skip. A group retry loop without `max_retries` has no such graceful skip and is treated as an unsafe conditional edge.
 
 **Constraints:**
 - `if.fail` is rejected at the group level and in `after-pr` steps.
@@ -955,6 +962,18 @@ command:
   - claude
   - -p
 
+groups:
+  fix-loop:
+    if:
+      file-changed: test    # if the fix modified files, rerun the tests
+    max_retries: 2          # retries exhausted -> continue to commit
+    steps:
+      apply-fix:
+        prompt: |
+          The following test errors occurred. Please fix them:
+          ---
+          {prev.stderr}
+
 steps:
   implement:
     prompt: "{input}"
@@ -963,16 +982,13 @@ steps:
     command: cargo test
 
   fix:
-    prompt: |
-      The following test errors occurred. Please fix them:
-      ---
-      {prev.stderr}
-    if:
-      file-changed: test    # after fix, if it modified files, jump back to test
+    group: fix-loop
 
   commit:
-    command: git add -A && git commit -m "feat: {input}"
+    command: "git add -A && git commit -m 'feat: {input}'"
 ```
+
+The retry loop is confined inside a group so that exhausted retries degrade into a graceful skip instead of a flat step cycle, which is rejected at startup.
 
 ## Config Hot-Reload
 
@@ -998,15 +1014,16 @@ On resume, cruise restores more than just the current step: while running, each 
 
 ## Parallel Session Execution
 
-The desktop GUI supports running multiple sessions concurrently during `run --all`. The parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+Both the desktop GUI and the CLI support running multiple sessions concurrently during `run --all`.
+
+- **GUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI setting is neither read nor modified.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
 - Launches up to `N` sessions concurrently.
 - Re-scans for newly added Planned sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
 - Results are returned in scheduling order regardless of completion order.
-
-The CLI `cruise run --all` always runs sessions sequentially regardless of the parallelism setting.
 
 ## New Session Form Persistence
 

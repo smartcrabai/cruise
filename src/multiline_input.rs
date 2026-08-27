@@ -72,6 +72,20 @@ impl Prompt for CruisePrompt {
 ///
 /// Returns `Err(CruiseError::IoError)` on terminal I/O failure.
 pub(crate) fn prompt_multiline(message: &str) -> Result<InputResult> {
+    // Serialize against option-step menus and other interactive prompts so
+    // parallel batch workers (`run --all --parallelism N`) never open two
+    // raw-mode editors on the same tty at once.
+    let _guard = crate::option_handler::prompt_lock_guard();
+    prompt_multiline_locked(message)
+}
+
+/// Run the raw-mode editor without acquiring the prompt lock.
+///
+/// For the nested case where the caller already holds the prompt lock: an
+/// option-step menu ([`crate::option_handler::CliOptionHandler::select_option`])
+/// holds it across its text-input choice, and `std::sync::Mutex` is not
+/// reentrant — re-acquiring here would self-deadlock.
+pub(crate) fn prompt_multiline_locked(message: &str) -> Result<InputResult> {
     // SDK turns may have run before this prompt; recover the terminal if a
     // child process left the foreground process group dead (otherwise the
     // raw-mode switch below stops the process with SIGTTOU).

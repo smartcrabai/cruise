@@ -1,6 +1,7 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+mod batch_run;
 mod cancellation;
 mod clean_cmd;
 mod cli;
@@ -45,7 +46,10 @@ mod workspace;
 mod worktree;
 mod worktree_pr;
 
-#[tokio::main(flavor = "current_thread")]
+// Multi-threaded runtime: parallel `run --all` workers execute blocking
+// terminal prompts inline in their tasks; on a single-threaded runtime any
+// open menu would freeze every other concurrently running session.
+#[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
         eprintln!("Error: {}", e.detailed_message());

@@ -1215,6 +1215,7 @@ async fn run_approve_loop(
                     dry_run: false,
                     cleanup_after_pr: false,
                     no_cleanup_after_pr: false,
+                    parallelism: None,
                 };
                 return crate::run_cmd::run(run_args).await;
             }

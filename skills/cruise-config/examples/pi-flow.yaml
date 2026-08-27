@@ -28,12 +28,10 @@ steps:
     command:
       - cargo fmt --all
       - cargo test
-    if:
-      fail: fix-test-error    # jump on non-zero exit / timeout
 
   fix-test-error:
-    # Reached two ways: via if.fail jump (test failed -> runs) or
-    # sequentially after a passing test (prev.success = "true" -> skipped).
+    # Reached sequentially after `test`, pass or fail (a failed command step
+    # does not abort the run; prev.success = "true" -> skipped).
     skip: prev.success
     prompt: |
       The following error occurred. Please correct it:

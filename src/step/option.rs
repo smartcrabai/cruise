@@ -58,7 +58,9 @@ pub fn run_option(choices: &[OptionChoice], description: Option<&str>) -> Result
             text_input: None,
         }),
         OptionChoice::TextInput { label, next } => {
-            let text = crate::multiline_input::prompt_multiline(label)?.into_result()?;
+            // The prompt lock is already held by `CliOptionHandler::select_option`,
+            // so the nested editor must use the locked (no-reacquire) variant.
+            let text = crate::multiline_input::prompt_multiline_locked(label)?.into_result()?;
 
             Ok(OptionResult {
                 next_step: next.clone(),

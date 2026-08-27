@@ -32,10 +32,10 @@ pub struct ExecutionContext<'a> {
     pub compiled: &'a CompiledWorkflow,
     pub max_retries: usize,
     pub rate_limit_retries: usize,
-    pub on_step_start: &'a dyn Fn(&str) -> Result<()>,
+    pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
     pub cancel_token: Option<&'a CancellationToken>,
     pub option_handler: &'a dyn OptionHandler,
-    pub config_reloader: Option<&'a dyn Fn() -> Result<Option<CompiledWorkflow>>>,
+    pub config_reloader: Option<&'a (dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync)>,
     /// Working directory for child processes spawned by prompt and command steps.
     /// When set, both the LLM subprocess and shell commands run with this as their `cwd`,
     /// ensuring that relative-path file writes land inside the `FileTracker` root.
@@ -252,7 +252,9 @@ pub async fn execute_steps_with_dag(
     tracker: &mut FileTracker,
     dag: &mut crate::dag::ExecutionDag,
     start_node: &crate::dag::NodeId,
-    on_node_start: &dyn Fn(&NodeCheckpoint<'_>, &crate::dag::ExecutionDag) -> Result<()>,
+    on_node_start: &(
+         dyn Fn(&NodeCheckpoint<'_>, &crate::dag::ExecutionDag) -> Result<()> + Send + Sync
+     ),
 ) -> Result<ExecutionResult> {
     let mut current_node_id = start_node.clone();
     let workflow_start = Instant::now();
@@ -1360,7 +1362,9 @@ mod tests {
         tracker_root: std::path::PathBuf,
         max_retries: usize,
         rate_limit_retries: usize,
-        config_reloader: Option<&dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>>>,
+        config_reloader: Option<
+            &(dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>> + Send + Sync),
+        >,
         cancel_token: Option<&CancellationToken>,
         option_handler: &dyn OptionHandler,
         skipped_steps: &[String],
@@ -2706,7 +2710,7 @@ steps:
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let mut called_steps: Vec<String> = Vec::new();
-        let called_ref = std::cell::RefCell::new(&mut called_steps);
+        let called_ref = std::sync::Mutex::new(&mut called_steps);
 
         let ctx = ExecutionContext {
             compiled: &compiled,
@@ -2727,7 +2731,10 @@ steps:
             &mut dag,
             &start,
             &|cp, _dag| {
-                called_ref.borrow_mut().push(cp.step_name.to_string());
+                called_ref
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(cp.step_name.to_string());
                 Ok(())
             },
         )
@@ -3677,7 +3684,7 @@ steps:
         let token = CancellationToken::new();
         let token_clone = token.clone();
         // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
-        let call_count = std::cell::Cell::new(0usize);
+        let call_count = std::sync::Mutex::new(0usize);
         let ctx = ExecutionContext {
             compiled: &compiled,
             max_retries: 10,
@@ -3698,12 +3705,14 @@ steps:
             &mut dag,
             &start,
             &|_cp, _dag| {
-                let n = call_count.get();
-                if n >= 1 {
+                let mut n = call_count
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *n >= 1 {
                     // step2 (second call): cancel so the token check fires after on_node_start
                     token_clone.cancel();
                 }
-                call_count.set(n + 1);
+                *n += 1;
                 Ok(())
             },
         )
@@ -4599,7 +4608,7 @@ steps:
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let mut checkpoints: Vec<(String, String)> = Vec::new();
-        let checkpoints_ref = std::cell::RefCell::new(&mut checkpoints);
+        let checkpoints_ref = std::sync::Mutex::new(&mut checkpoints);
 
         let ctx = ExecutionContext {
             compiled: &compiled,
@@ -4623,7 +4632,8 @@ steps:
             &start,
             &|cp, _dag| {
                 checkpoints_ref
-                    .borrow_mut()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push((cp.node_id.clone(), cp.step_name.to_string()));
                 Ok(())
             },
@@ -4671,7 +4681,7 @@ steps:
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let mut visited: Vec<String> = Vec::new();
-        let visited_ref = std::cell::RefCell::new(&mut visited);
+        let visited_ref = std::sync::Mutex::new(&mut visited);
 
         let ctx = ExecutionContext {
             compiled: &compiled,
@@ -4694,7 +4704,10 @@ steps:
             &mut dag,
             &step2_node,
             &|cp, _dag| {
-                visited_ref.borrow_mut().push(cp.step_name.to_string());
+                visited_ref
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(cp.step_name.to_string());
                 Ok(())
             },
         )
@@ -4862,7 +4875,7 @@ steps:
         let mut tracker =
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
         let mut visited_nodes: Vec<String> = Vec::new();
-        let visited_ref = std::cell::RefCell::new(&mut visited_nodes);
+        let visited_ref = std::sync::Mutex::new(&mut visited_nodes);
 
         let ctx = ExecutionContext {
             compiled: &compiled,
@@ -4885,7 +4898,10 @@ steps:
             &mut dag,
             &second_step1_id,
             &|cp, _dag| {
-                visited_ref.borrow_mut().push(cp.node_id.clone());
+                visited_ref
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(cp.node_id.clone());
                 Ok(())
             },
         )
