@@ -10,9 +10,9 @@ mod cli;
 mod condition;
 mod config;
 mod config_cmd;
-mod console_mode;
 #[cfg_attr(not(test), expect(dead_code))]
 mod configs;
+mod console_mode;
 mod dag;
 mod display;
 mod draft_cmd;
