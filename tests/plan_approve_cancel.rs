@@ -81,7 +81,7 @@ fn run_plan_in_pty(binary: &Path, config: &Path, home: &Path, action: ActionChoi
         if input.write_all(sequence).is_err() {
             break;
         }
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_secs(2));
     }
     drop(input);
 
