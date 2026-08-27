@@ -952,23 +952,19 @@ fn flat_node_default_indices(flat: &[FlatNode], previously_skipped: &[String]) -
         .collect()
 }
 
-pub(crate) enum StepSkipSelection {
-    Confirmed(Vec<String>),
-    Cancelled,
-}
 /// Present a `MultiSelect` prompt so the user can choose which steps to skip.
 ///
-/// Returns [`StepSkipSelection::Cancelled`] when the user cancels or an
-/// interruption is received so the approve flow can continue unblocked.
-/// Steps that were previously skipped are pre-selected via `previously_skipped`.
+/// Returns `None` when the user cancels or an interruption is received so the
+/// caller can return to the action menu. Steps that were previously skipped
+/// are pre-selected via `previously_skipped`.
 pub(crate) fn select_steps_to_skip(
     config: &WorkflowConfig,
     previously_skipped: &[String],
-) -> Result<StepSkipSelection> {
+) -> Result<Option<Vec<String>>> {
     let main_nodes = list_skippable_steps(config)?;
     let after_pr_nodes = list_skippable_after_pr_steps(config)?;
     if main_nodes.is_empty() && after_pr_nodes.is_empty() {
-        return Ok(StepSkipSelection::Confirmed(vec![]));
+        return Ok(Some(vec![]));
     }
 
     let mut flat = flatten_nodes(&main_nodes, "");
@@ -981,43 +977,21 @@ pub(crate) fn select_steps_to_skip(
         .with_default(&defaults)
         .prompt()
     {
-        Ok(selected_nodes) => Ok(StepSkipSelection::Confirmed(collect_expanded_ids(
-            selected_nodes,
-        ))),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            Ok(StepSkipSelection::Cancelled)
-        }
+        Ok(selected_nodes) => Ok(Some(collect_expanded_ids(selected_nodes))),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
         Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
 }
 
-fn apply_skip_step_selection(
-    history: &mut NewSessionHistory,
-    scope: HistoryScope<'_>,
-    resolved_config_key: &str,
-    selection: StepSkipSelection,
-) -> (Vec<String>, bool) {
-    match selection {
-        StepSkipSelection::Confirmed(skipped_steps) => {
-            history.record_skip_selection_for_scope(
-                scope,
-                resolved_config_key,
-                skipped_steps.clone(),
-            );
-            (skipped_steps, true)
-        }
-        StepSkipSelection::Cancelled => (vec![], false),
-    }
-}
-
 /// Let the user choose steps to skip with history-based defaults, then record
-/// the selection for future sessions. History is loaded once.
+/// the selection for future sessions. Returns `None` when the prompt is
+/// cancelled or interrupted. History is loaded once.
 fn select_skipped_steps_with_history(
     session: &SessionState,
     config: &WorkflowConfig,
-) -> Result<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     if config.steps.is_empty() {
-        return Ok(vec![]);
+        return Ok(Some(vec![]));
     }
 
     let key = match session.config_path.as_deref() {
@@ -1037,10 +1011,9 @@ fn select_skipped_steps_with_history(
         .map(|entry| entry.skipped_steps.clone())
         .unwrap_or_default();
 
-    let selection = select_steps_to_skip(config, &previously_skipped)?;
-    let (skipped_steps, should_persist) =
-        apply_skip_step_selection(&mut history, scope, &key, selection);
-    if should_persist {
+    let skipped_steps = select_steps_to_skip(config, &previously_skipped)?;
+    if let Some(steps) = &skipped_steps {
+        history.record_skip_selection_for_scope(scope, &key, steps.clone());
         history.save_best_effort();
     }
 
@@ -1134,8 +1107,13 @@ async fn run_approve_loop(
         };
 
         match selected {
-            "Approve" => {
-                session.skipped_steps = select_skipped_steps_with_history(session, config)?;
+            "Approve" | "Execute now" => {
+                let execute_now = selected == "Execute now";
+                let Some(skipped_steps) = select_skipped_steps_with_history(session, config)?
+                else {
+                    continue;
+                };
+                session.skipped_steps = skipped_steps;
                 tokio::select! {
                     result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
                     _ = tokio::signal::ctrl_c() => {
@@ -1148,16 +1126,33 @@ async fn run_approve_loop(
                         return Err(CruiseError::Interrupted);
                     },
                 }
+                if !execute_now {
+                    eprintln!(
+                        "\n{} Session {} created.",
+                        style("v").green().bold(),
+                        session.id
+                    );
+                    eprintln!(
+                        "  Run with: {}",
+                        style(format!("cruise run {}", session.id)).cyan()
+                    );
+                    return Ok(());
+                }
                 eprintln!(
-                    "\n{} Session {} created.",
-                    style("v").green().bold(),
+                    "\n{} Executing session {}...",
+                    style("->").cyan(),
                     session.id
                 );
-                eprintln!(
-                    "  Run with: {}",
-                    style(format!("cruise run {}", session.id)).cyan()
-                );
-                return Ok(());
+                let run_args = crate::cli::RunArgs {
+                    session: Some(session.id.clone()),
+                    all: false,
+                    max_retries: None,
+                    rate_limit_retries,
+                    dry_run: false,
+                    cleanup_after_pr: false,
+                    no_cleanup_after_pr: false,
+                };
+                return crate::run_cmd::run(run_args).await;
             }
             "Fix" => {
                 let text = match prompt_multiline("Describe the changes needed:")? {
@@ -1187,36 +1182,6 @@ async fn run_approve_loop(
                         return Err(CruiseError::Interrupted);
                     },
                 }
-            }
-            "Execute now" => {
-                session.skipped_steps = select_skipped_steps_with_history(session, config)?;
-                tokio::select! {
-                    result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
-                    _ = tokio::signal::ctrl_c() => {
-                        cancel_token.cancel();
-                        eprintln!("\nCancelled. Session {} discarded.", session.id);
-                        cleanup_discarded_session_workspace(manager, session);
-                        if let Err(del_err) = manager.delete(&session.id) {
-                            eprintln!("warning: failed to clean up session: {del_err}");
-                        }
-                        return Err(CruiseError::Interrupted);
-                    },
-                }
-                eprintln!(
-                    "\n{} Executing session {}...",
-                    style("->").cyan(),
-                    session.id
-                );
-                let run_args = crate::cli::RunArgs {
-                    session: Some(session.id.clone()),
-                    all: false,
-                    max_retries: None,
-                    rate_limit_retries,
-                    dry_run: false,
-                    cleanup_after_pr: false,
-                    no_cleanup_after_pr: false,
-                };
-                return crate::run_cmd::run(run_args).await;
             }
             "Publish as Issue" => {
                 let Some(trigger_cruise) = prompt_trigger_cruise()? else {
@@ -1542,7 +1507,6 @@ pub async fn regenerate_plan_for_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::new_session_history::NewSessionHistoryEntry;
     use crate::session::{SessionManager, SessionPhase, WorkspaceMode};
     use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
     use std::fs;
@@ -1877,87 +1841,21 @@ steps:
     }
 
     #[test]
-    fn test_apply_skip_step_selection_records_confirmed_empty_selection() {
-        let mut history = NewSessionHistory::default();
-        let (skipped_steps, should_persist) = apply_skip_step_selection(
-            &mut history,
-            HistoryScope::Directory("/home/user/proj"),
-            "/config/a.yaml",
-            StepSkipSelection::Confirmed(vec![]),
-        );
+    fn test_select_skipped_steps_with_history_returns_some_for_empty_config() {
+        // Given: a workflow with no executable steps
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let session = make_session("20260825090000", tmp.path());
+        let config = WorkflowConfig::from_yaml("command: [echo]\nsteps: {}\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert!(should_persist);
-        assert!(skipped_steps.is_empty());
-        assert_eq!(history.entries.len(), 1);
+        // When: step skipping is requested
+        let result = select_skipped_steps_with_history(&session, &config);
+
+        // Then: the empty confirmed selection is distinct from cancellation
         assert_eq!(
-            history.entries[0],
-            NewSessionHistoryEntry {
-                selected_at: history.entries[0].selected_at.clone(),
-                input: String::new(),
-                requested_config_path: None,
-                working_dir: "/home/user/proj".to_string(),
-                repo: None,
-                resolved_config_key: "/config/a.yaml".to_string(),
-                skipped_steps: vec![],
-            }
+            result.unwrap_or_else(|e| panic!("{e:?}")),
+            Some(Vec::<String>::new())
         );
-    }
-
-    #[test]
-    fn test_apply_skip_step_selection_does_not_record_cancelled_prompt() {
-        let mut history = NewSessionHistory::default();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: String::new(),
-            input: String::new(),
-            requested_config_path: None,
-            working_dir: String::new(),
-            repo: None,
-            resolved_config_key: "/config/a.yaml".to_string(),
-            skipped_steps: vec!["review".to_string()],
-        });
-
-        let (skipped_steps, should_persist) = apply_skip_step_selection(
-            &mut history,
-            HistoryScope::Directory(""),
-            "/config/a.yaml",
-            StepSkipSelection::Cancelled,
-        );
-
-        assert!(!should_persist);
-        assert!(skipped_steps.is_empty());
-        assert_eq!(history.entries.len(), 1);
-        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
-    }
-
-    #[test]
-    fn test_apply_skip_step_selection_updates_existing_gui_history_entry() {
-        let mut history = NewSessionHistory::default();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: "2026-04-07T00:00:00Z".to_string(),
-            input: String::new(),
-            requested_config_path: Some("/config/a.yaml".to_string()),
-            working_dir: "/Users/test/project".to_string(),
-            repo: None,
-            resolved_config_key: "/config/a.yaml".to_string(),
-            skipped_steps: vec!["plan".to_string()],
-        });
-
-        let (skipped_steps, should_persist) = apply_skip_step_selection(
-            &mut history,
-            HistoryScope::Directory("/Users/test/project"),
-            "/config/a.yaml",
-            StepSkipSelection::Confirmed(vec!["review".to_string()]),
-        );
-
-        assert!(should_persist);
-        assert_eq!(skipped_steps, vec!["review"]);
-        assert_eq!(history.entries.len(), 1);
-        assert_eq!(
-            history.entries[0].requested_config_path.as_deref(),
-            Some("/config/a.yaml")
-        );
-        assert_eq!(history.entries[0].working_dir, "/Users/test/project");
-        assert_eq!(history.entries[0].skipped_steps, vec!["review"]);
     }
 
     // -- generate_title_via_sdk cancellation -----------------------------------

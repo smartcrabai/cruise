@@ -5,6 +5,8 @@ A way to bundle multiple steps together and form a group-level retry loop. Group
 ## Basics
 
 ```yaml
+max_retries: 4
+
 groups:
   review:
     if:
@@ -66,6 +68,7 @@ steps:
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
 - A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.
+- If `if.file-changed` targets a step outside the group, the group's `max_retries` requires one additional unit of the global loop-protection ceiling.
 
 ## Group execution behavior
 

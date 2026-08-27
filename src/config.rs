@@ -815,19 +815,15 @@ pub fn validate_group_retry_budget(
 ) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
-    // Group name -> every call-site step name (from `steps` and `after_pr`)
-    // that references it, in first-seen order. A group can have more than one
-    // call site (see `test_validate_groups_multiple_call_sites_ok`), and each
-    // one is checked below when deciding whether the lenient case 1 applies.
-    let mut group_call_sites: Vec<(&str, Vec<&str>)> = Vec::new();
+    // Group name -> every call-site step name (from `steps` and `after_pr`),
+    // in first-seen order.
+    let mut group_call_sites: IndexMap<&str, Vec<&str>> = IndexMap::new();
     for (step_name, step) in config.steps.iter().chain(config.after_pr.iter()) {
-        let Some(group_name) = step.group.as_deref() else {
-            continue;
-        };
-        if let Some(entry) = group_call_sites.iter_mut().find(|(g, _)| *g == group_name) {
-            entry.1.push(step_name.as_str());
-        } else {
-            group_call_sites.push((group_name, vec![step_name.as_str()]));
+        if let Some(group_name) = step.group.as_deref() {
+            group_call_sites
+                .entry(group_name)
+                .or_default()
+                .push(step_name.as_str());
         }
     }
 
@@ -863,23 +859,30 @@ pub fn validate_group_retry_budget(
                 || first_sub.is_some_and(|sub| target == format!("{call_site}/{sub}"))
         });
 
-        if all_call_sites_reenter_group {
-            if r > effective_max_retries {
-                return Err(CruiseError::InvalidStepConfig(unreachable_group_message(
-                    group_name,
-                    r,
-                    effective_max_retries,
+        let required_budget = if all_call_sites_reenter_group {
+            r
+        } else {
+            let Some(required_budget) = r.checked_add(1) else {
+                let max_group_retries = effective_max_retries.saturating_sub(1);
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group '{group_name}' has max_retries: {r}, but its external retry target '{target}' requires one additional loop-protection edge that cannot be represented. Lower groups.{group_name}.max_retries to at most {max_group_retries}"
                 )));
-            }
-        } else if r + 1 > effective_max_retries {
-            return Err(CruiseError::InvalidStepConfig(
+            };
+            required_budget
+        };
+
+        if required_budget > effective_max_retries {
+            let message = if all_call_sites_reenter_group {
+                unreachable_group_message(group_name, r, effective_max_retries)
+            } else {
                 unreachable_group_message_external_target(
                     group_name,
                     r,
                     target,
                     effective_max_retries,
-                ),
-            ));
+                )
+            };
+            return Err(CruiseError::InvalidStepConfig(message));
         }
     }
 
@@ -3750,6 +3753,24 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // When/Then: still case 1 (re-enters the group's own first step), R == G is safe.
         assert!(validate_group_retry_budget(&config, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_rejects_external_target_overflow() {
+        // Given: the largest representable retry budget with an external target.
+        let max = usize::MAX;
+        let yaml = format!(
+            "command: [claude, -p]\ngroups:\n  review:\n    if:\n      file-changed: build\n    max_retries: {max}\n    steps:\n      simplify:\n        prompt: /simplify\nsteps:\n  build:\n    command: echo build\n  review-pass:\n    group: review\n"
+        );
+        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: validation reports the impossible extra edge instead of overflowing.
+        let result = validate_group_retry_budget(&config, max);
+        assert!(
+            result.is_err(),
+            "max retry budget with an external target must be rejected"
+        );
+        assert!(err_string(result).contains("external retry target"));
     }
 
     #[test]
