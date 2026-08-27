@@ -46,12 +46,25 @@ impl OptionHandler for CliOptionHandler {
 /// goes through `prompt_multiline_locked`, which must be called while the
 /// prompt lock is already held.
 static PROMPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROMPT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Acquire the process-wide prompt lock.
 pub(crate) fn prompt_lock_guard() -> std::sync::MutexGuard<'static, ()> {
-    PROMPT_LOCK
+    let guard = PROMPT_LOCK
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    PROMPT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    guard
+}
+
+/// Try to acquire the prompt lock without blocking the dashboard renderer.
+pub(crate) fn try_prompt_lock_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
+    PROMPT_LOCK.try_lock().ok()
+}
+
+/// Return the generation of prompt activity observed by the dashboard.
+pub(crate) fn prompt_epoch() -> u64 {
+    PROMPT_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A test [`OptionHandler`] that panics if called.

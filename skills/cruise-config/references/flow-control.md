@@ -184,6 +184,6 @@ Cannot be used inside `after-pr` (validation error). Prefer the new `if.no-file-
 
 ## Loop protection
 
-Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 3), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `retry`.
+Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 3), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `if.fail` goto / `retry`.
 
 Additionally, a top-level step cycle that mixes conditional edges (`if.file-changed` jumps and `if.fail` goto targets) with unconditional sequential edges is rejected at startup: once the conditional back-edge has fired `max_retries` times, the unconditional edges would always exceed the ceiling, whatever its value. Purely unconditional cycles and group-confined retry loops (a group with `max_retries`) are still accepted -- the latter degrade into a graceful skip when retries are exhausted; a group retry loop without `max_retries` has no such skip and counts as an unsafe conditional edge.

@@ -70,7 +70,7 @@ pub fn should_skip_due_to_when(
     if had_io_error && !any_match {
         // Some entries were unreadable (e.g. permission denied). Treat as
         // "files may exist" to avoid silently skipping a step.
-        eprintln!(
+        crate::status_eprintln!(
             "  warning: when.exists glob '{pattern_abs}' encountered I/O errors; treating as matched"
         );
         return Ok(false);

@@ -32,7 +32,7 @@ pub fn resolve_workflow_calls_from_path(path: impl Into<PathBuf>) -> Result<Work
     let mut stack = CallStack::default();
     let mut config = load_local_workflow(&path, &mut stack)?;
     for warning in config.deprecated_language_warnings() {
-        eprintln!("warning: {warning}");
+        crate::status_eprintln!("warning: {warning}");
     }
     config.apply_env_overrides()?;
     Ok(config)
@@ -53,7 +53,7 @@ pub fn resolve_workflow_calls(
     let mut stack = CallStack::default();
     let mut config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
     for warning in config.deprecated_language_warnings() {
-        eprintln!("warning: {warning}");
+        crate::status_eprintln!("warning: {warning}");
     }
     config.apply_env_overrides()?;
     Ok(config)

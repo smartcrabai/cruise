@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{CruiseError, Result};
+
+pub(crate) type StepLogCallback<'a> = dyn Fn(&str, &str) + Send + Sync + 'a;
 
 /// Result of executing a command step.
 #[derive(Debug, Clone)]
@@ -26,13 +28,34 @@ pub async fn run_commands<S: std::hash::BuildHasher>(
     cwd: Option<&std::path::Path>,
     timeout: Option<Duration>,
 ) -> Result<CommandResult> {
+    run_commands_with_log(cmds, max_retries, env, cwd, timeout, None).await
+}
+
+/// Execute commands and optionally report captured output to the step log.
+///
+/// In quiet console mode, both streams are captured so concurrent batch workers
+/// cannot write directly to the terminal. Outside quiet mode, command output
+/// retains the historical behavior: stdout is inherited and stderr is printed.
+pub(crate) async fn run_commands_with_log<S: std::hash::BuildHasher>(
+    cmds: &[String],
+    max_retries: usize,
+    env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
+    on_step_log: Option<&StepLogCallback<'_>>,
+) -> Result<CommandResult> {
     let mut last_result = CommandResult {
         success: true,
         stderr: String::new(),
     };
 
     for cmd in cmds {
-        last_result = run_command(cmd, max_retries, env, cwd, timeout).await?;
+        last_result = match on_step_log {
+            Some(log) => {
+                run_command_with_log(cmd, max_retries, env, cwd, timeout, Some(log)).await?
+            }
+            None => run_command(cmd, max_retries, env, cwd, timeout).await?,
+        };
         if !last_result.success {
             return Ok(last_result);
         }
@@ -53,10 +76,21 @@ pub async fn run_command<S: std::hash::BuildHasher>(
     cwd: Option<&std::path::Path>,
     timeout: Option<Duration>,
 ) -> Result<CommandResult> {
+    run_command_with_log(cmd, max_retries, env, cwd, timeout, None).await
+}
+
+async fn run_command_with_log<S: std::hash::BuildHasher>(
+    cmd: &str,
+    max_retries: usize,
+    env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
+    on_step_log: Option<&StepLogCallback<'_>>,
+) -> Result<CommandResult> {
     let mut attempts = 0;
 
     loop {
-        let result = execute_command(cmd, env, cwd, timeout).await?;
+        let result = execute_command(cmd, env, cwd, timeout, on_step_log).await?;
 
         if result.success {
             return Ok(result);
@@ -65,7 +99,7 @@ pub async fn run_command<S: std::hash::BuildHasher>(
         if is_rate_limited(&result.stderr) && attempts < max_retries {
             attempts += 1;
             let delay = calculate_backoff(attempts);
-            eprintln!(
+            crate::status_eprintln!(
                 "Rate limit detected. Retrying in {:.1}s... ({}/{})",
                 delay.as_secs_f64(),
                 attempts,
@@ -79,20 +113,27 @@ pub async fn run_command<S: std::hash::BuildHasher>(
     }
 }
 
-/// Run the platform shell with `cmd`, streaming stdout and capturing stderr.
+/// Run the platform shell with `cmd`, inheriting stdout normally and capturing
+/// both streams in quiet console mode.
 async fn execute_command<S: std::hash::BuildHasher>(
     cmd: &str,
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
     timeout: Option<Duration>,
+    on_step_log: Option<&StepLogCallback<'_>>,
 ) -> Result<CommandResult> {
+    let quiet = crate::console_mode::is_quiet();
     let (shell, flag) = crate::platform::shell_command();
     let mut cmd_builder = Command::new(shell);
     cmd_builder
         .arg(flag)
         .arg(cmd)
         .envs(env)
-        .stdout(std::process::Stdio::inherit())
+        .stdout(if quiet {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
         .stderr(std::process::Stdio::piped());
     if let Some(dir) = cwd {
         cmd_builder.current_dir(dir);
@@ -101,9 +142,22 @@ async fn execute_command<S: std::hash::BuildHasher>(
         .spawn()
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
 
+    let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
+    let output_deadline = timeout.map(|duration| Instant::now() + duration);
 
-    let drain_stderr = async {
+    let stdout_task = quiet.then(|| {
+        tokio::spawn(async move {
+            let mut buf = String::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = tokio::io::BufReader::new(&mut pipe)
+                    .read_to_string(&mut buf)
+                    .await;
+            }
+            buf
+        })
+    });
+    let stderr_task = tokio::spawn(async move {
         let mut buf = String::new();
         if let Some(mut pipe) = stderr_pipe {
             let _ = tokio::io::BufReader::new(&mut pipe)
@@ -111,21 +165,36 @@ async fn execute_command<S: std::hash::BuildHasher>(
                 .await;
         }
         buf
-    };
+    });
 
-    let stderr_task = tokio::spawn(drain_stderr);
-
-    let timeout_secs = timeout.map(|d| d.as_secs());
     let status_result = if let Some(duration) = timeout {
         tokio::time::timeout(duration, child.wait()).await
     } else {
         Ok(child.wait().await)
     };
 
+    if status_result.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    let stdout = match stdout_task {
+        Some(task) => collect_output(task, output_deadline).await,
+        None => String::new(),
+    };
+    let stderr = collect_output(stderr_task, output_deadline).await;
+    if quiet && let Some(log) = on_step_log {
+        for line in stdout.lines() {
+            log("stdout", line);
+        }
+        for line in stderr.lines() {
+            log("stderr", line);
+        }
+    }
+
     match status_result {
         Ok(Ok(status)) => {
-            let stderr = stderr_task.await.unwrap_or_default();
-            if !stderr.is_empty() {
+            if !quiet && !stderr.is_empty() {
                 eprint!("{stderr}");
             }
             Ok(CommandResult {
@@ -135,16 +204,32 @@ async fn execute_command<S: std::hash::BuildHasher>(
         }
         Ok(Err(e)) => Err(CruiseError::CommandError(e.to_string())),
         Err(_elapsed) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _stderr = stderr_task.await.unwrap_or_default();
-            let secs = timeout_secs.unwrap_or(0);
-            eprintln!("  step timed out after {secs}s");
+            let secs = timeout.map_or(0, |duration| duration.as_secs());
+            crate::status_eprintln!("  step timed out after {secs}s");
             Err(CruiseError::StepTimeout {
                 step: cmd.to_string(),
                 after_secs: secs,
             })
         }
+    }
+}
+
+async fn collect_output(
+    mut task: tokio::task::JoinHandle<String>,
+    deadline: Option<Instant>,
+) -> String {
+    match deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                result = &mut task => result.unwrap_or_default(),
+                () = tokio::time::sleep(remaining) => {
+                    task.abort();
+                    String::new()
+                }
+            }
+        }
+        None => task.await.unwrap_or_default(),
     }
 }
 
@@ -171,6 +256,14 @@ pub fn calculate_backoff(attempt: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct QuietModeGuard;
+
+    impl Drop for QuietModeGuard {
+        fn drop(&mut self) {
+            crate::console_mode::set_quiet(false);
+        }
+    }
 
     #[test]
     fn test_is_rate_limited_rate_limit() {
@@ -251,6 +344,65 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_quiet_commands_capture_both_streams_for_step_logging() {
+        let _lock = crate::test_support::lock_process();
+        crate::console_mode::set_quiet(true);
+        let _quiet = QuietModeGuard;
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let logs_for_callback = std::sync::Arc::clone(&logs);
+        let on_step_log = move |stream: &str, line: &str| {
+            logs_for_callback
+                .lock()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .push((stream.to_string(), line.to_string()));
+        };
+
+        let result = run_commands_with_log(
+            &["printf stdout; printf stderr >&2".to_string()],
+            0,
+            &HashMap::new(),
+            None,
+            None,
+            Some(&on_step_log),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(result.success);
+        assert_eq!(
+            *logs.lock().unwrap_or_else(|e| panic!("{e}")),
+            vec![
+                ("stdout".to_string(), "stdout".to_string()),
+                ("stderr".to_string(), "stderr".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_quiet_command_does_not_wait_for_descendant_holding_stdout() {
+        let _lock = crate::test_support::lock_process();
+        crate::console_mode::set_quiet(true);
+        let _quiet = QuietModeGuard;
+        let started = Instant::now();
+
+        let result = run_command_with_log(
+            "sleep 2 2>/dev/null & echo done",
+            0,
+            &HashMap::new(),
+            None,
+            Some(Duration::from_secs(1)),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(result.success);
+        assert!(started.elapsed() < Duration::from_millis(1500));
     }
 
     #[cfg(unix)]

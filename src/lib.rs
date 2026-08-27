@@ -34,10 +34,13 @@ pub mod worktree;
 pub mod worktree_pr;
 pub mod yaml_metadata;
 
-// Display utilities (available to library consumers) and CLI input handling (crate-internal only).
+// Display and CLI runtime utilities (available to library consumers) and CLI input handling (crate-internal only).
+pub mod batch_dashboard;
+pub mod console_mode;
 pub mod display;
 pub(crate) mod multiline_input;
 pub(crate) mod platform;
+pub mod run_observer;
 mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]

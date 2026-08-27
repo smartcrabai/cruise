@@ -14,6 +14,7 @@ use crate::engine::{NodeCheckpoint, execute_steps_with_dag, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::{CliOptionHandler, OptionHandler};
+use crate::run_observer::{NoopObserver, RunObserver, RunPhase};
 use crate::session::PLAN_VAR;
 use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
@@ -296,6 +297,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         WorkspaceOverride::RespectSession,
         &option_handler,
         cancel_token,
+        &NoopObserver,
     )
     .await;
     if let Some((manager, id, phase, fingerprint)) = explicit_exec {
@@ -317,6 +319,7 @@ async fn run_single(
     workspace_override: WorkspaceOverride,
     option_handler: &dyn OptionHandler,
     cancel_token: CancellationToken,
+    observer: &dyn RunObserver,
 ) -> Result<()> {
     let cleanup_override = args.cleanup_after_pr_override();
     let manager = SessionManager::new(crate::paths::data_dir()?);
@@ -332,6 +335,8 @@ async fn run_single(
             session.phase.label()
         )));
     }
+
+    observer.on_phase(&session_id, RunPhase::Preparing);
 
     let config = manager.load_config(&session)?;
     validate_config(&config)?;
@@ -368,7 +373,7 @@ async fn run_single(
     if effective_workspace_mode == WorkspaceMode::CurrentBranch
         && let Some(ctx) = session.worktree_context()
     {
-        eprintln!(
+        crate::status_eprintln!(
             "{} cleaning up planning worktree: {}",
             style("->").cyan(),
             ctx.path.display()
@@ -388,7 +393,7 @@ async fn run_single(
                 if dag.nodes.contains_key(&step) {
                     Ok(step)
                 } else {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "{} saved node id '{}' not found in DAG; falling back to start node '{}'",
                         style("!").yellow().bold(),
                         step,
@@ -407,7 +412,7 @@ async fn run_single(
     // Repo-backed sessions execute in a temporary clone; re-create it if the
     // post-approval cleanup (or a previous run) removed it.
     if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
-        eprintln!(
+        crate::status_eprintln!(
             "{} clone: {}",
             style("->").cyan(),
             session.base_dir.display()
@@ -462,6 +467,7 @@ async fn run_single(
     let logger_for_start = logger.clone();
     let logger_for_step_start = logger.clone();
     let on_step_start = |step: &str| {
+        observer.on_phase(&session_id, RunPhase::Step(step.to_string()));
         logger_for_step_start.write(step);
         Ok(())
     };
@@ -485,7 +491,7 @@ async fn run_single(
         // failure must not abort the run, since the DAG is a resumption
         // optimization, not a correctness requirement.
         if let Err(e) = crate::dag::save_dag(dag, &manager.dag_path(&s.id)) {
-            eprintln!(
+            crate::status_eprintln!(
                 "{} warning: failed to persist DAG checkpoint: {}",
                 style("!").yellow(),
                 e
@@ -529,7 +535,7 @@ async fn run_single(
     // *before* a node runs, so the very last node's post-execution state
     // would otherwise never reach disk.
     if let Err(e) = crate::dag::save_dag(&dag, &manager.dag_path(&session_id)) {
-        eprintln!(
+        crate::status_eprintln!(
             "{} warning: failed to persist final DAG checkpoint: {}",
             style("!").yellow(),
             e
@@ -554,6 +560,7 @@ async fn run_single(
                 match &execution_workspace {
                     ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
                     ExecutionWorkspace::Worktree { ctx, .. } => {
+                        observer.on_phase(&session_id, RunPhase::CreatingPr);
                         tokio::select! {
                             result = crate::worktree_pr::handle_worktree_pr(
                                 ctx,
@@ -565,6 +572,7 @@ async fn run_single(
                                 effective_max_retries,
                                 &skipped_steps,
                                 Some(&cancel_token),
+                                Some(&on_step_log),
                             ) => result,
                             _ = tokio::signal::ctrl_c() => {
                                 cancel_token.cancel();
@@ -584,7 +592,7 @@ async fn run_single(
     // Handle Ctrl+C (during steps or PR creation): save as Suspended so the session can be resumed.
     if matches!(overall_result, Err(CruiseError::Interrupted)) {
         logger.write("|| cancelled");
-        eprintln!(
+        crate::status_eprintln!(
             "\n{} Interrupted -- session saved as Suspended.",
             style("||").yellow().bold()
         );
@@ -612,7 +620,7 @@ async fn run_single(
     {
         let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
         session.worktree_path = None;
-        eprintln!(
+        crate::status_eprintln!(
             "{} removed temporary clone for {}",
             style("->").cyan(),
             session.id
@@ -629,13 +637,13 @@ async fn run_single(
         && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
     {
         if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
-            eprintln!(
+            crate::status_eprintln!(
                 "{} warning: post-PR cleanup failed: {}",
                 style("!").yellow(),
                 e
             );
         } else {
-            eprintln!(
+            crate::status_eprintln!(
                 "{} removed worktree and branch for {}",
                 style("->").cyan(),
                 session.id
@@ -708,7 +716,7 @@ fn restore_dag_runtime_context(
     let loaded = match crate::dag::load_dag(&dag_path) {
         Ok(loaded) => loaded,
         Err(e) => {
-            eprintln!(
+            crate::status_eprintln!(
                 "{} warning: failed to load persisted DAG at {}: {} -- resuming without restored runtime context",
                 style("!").yellow(),
                 dag_path.display(),
@@ -739,7 +747,7 @@ fn restore_dag_runtime_context(
         tracker.restore_snapshots(runtime.file_snapshots);
     }
     let step_label = dag.step_name_for_node(start_node).unwrap_or(start_node);
-    eprintln!(
+    crate::status_eprintln!(
         "{} restored runtime context for step '{}' from saved DAG",
         style("->").cyan(),
         step_label
@@ -753,10 +761,10 @@ fn log_resume_message(session: &SessionState) {
     };
     match &session.phase {
         SessionPhase::Running | SessionPhase::Suspended => {
-            eprintln!("{} Resuming from step: {}", style("R").cyan(), step);
+            crate::status_eprintln!("{} Resuming from step: {}", style("R").cyan(), step);
         }
         SessionPhase::Failed(_) => {
-            eprintln!(
+            crate::status_eprintln!(
                 "{} Retrying from failed step: {}",
                 style("R").yellow(),
                 step
@@ -771,7 +779,7 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
     match ws {
         ExecutionWorkspace::Worktree { ctx, reused } => {
             let suffix = if *reused { " (reused)" } else { "" };
-            eprintln!(
+            crate::status_eprintln!(
                 "{} worktree: {}{}",
                 style("->").cyan(),
                 ctx.path.display(),
@@ -779,7 +787,7 @@ fn log_execution_workspace(ws: &ExecutionWorkspace) {
             );
         }
         ExecutionWorkspace::CurrentBranch { path } => {
-            eprintln!("{} current branch: {}", style("->").cyan(), path.display());
+            crate::status_eprintln!("{} current branch: {}", style("->").cyan(), path.display());
         }
     }
 }
@@ -794,31 +802,68 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     // Validation in `run()` guarantees `Some(0)` never reaches here.
     let parallelism = args.parallelism.unwrap_or(1);
     let manager = SessionManager::new(crate::paths::data_dir()?);
+    let dashboard = (!args.dry_run && std::io::stderr().is_terminal()).then(|| {
+        crate::console_mode::set_quiet(true);
+        Arc::new(crate::batch_dashboard::BatchDashboard::start())
+    });
+    let dashboard_for_workers = dashboard.clone();
+    let manager_for_workers = manager.clone();
 
-    let batch_results = crate::batch_run::run_all_with_parallelism(
+    let batch_result = crate::batch_run::run_all_with_parallelism(
         &manager,
         parallelism,
         cancel_token,
         move |session: SessionState, session_cancel: CancellationToken| {
             let base_args = args.clone();
+            let dashboard = dashboard_for_workers.clone();
+            let manager = manager_for_workers.clone();
+            if let Some(dashboard) = &dashboard {
+                // Register before spawning the worker future so row insertion order
+                // matches the scheduler's batch-index order.
+                dashboard.add(&session);
+            }
             Box::pin(async move {
+                let session_id = session.id.clone();
                 let session_args = RunArgs {
-                    session: Some(session.id),
+                    session: Some(session_id.clone()),
                     all: false,
                     parallelism: None,
                     ..base_args
                 };
-                run_single(
+                let noop = NoopObserver;
+                let cli_option_handler = CliOptionHandler;
+                let dashboard_option_handler = dashboard.as_ref().map(|dashboard| {
+                    crate::batch_dashboard::DashboardOptionHandler {
+                        session_id: session_id.clone(),
+                        dashboard: Arc::clone(dashboard),
+                    }
+                });
+                let option_handler: &dyn OptionHandler = dashboard_option_handler
+                    .as_ref()
+                    .map_or(&cli_option_handler, |handler| handler);
+                let observer: &dyn RunObserver = dashboard
+                    .as_deref()
+                    .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
+                let outcome = run_single(
                     session_args,
                     WorkspaceOverride::ForceWorktree,
-                    &CliOptionHandler,
+                    option_handler,
                     session_cancel,
+                    observer,
                 )
-                .await
+                .await;
+                if let Some(dashboard) = &dashboard {
+                    let state = load_run_all_result_state(&manager, &session);
+                    dashboard.finish(&session_id, &state, &outcome);
+                }
+                outcome
             })
         },
     )
-    .await?;
+    .await;
+    drop(dashboard);
+    crate::console_mode::set_quiet(false);
+    let batch_results = batch_result?;
 
     let mut results: Vec<SessionState> = Vec::new();
     for batch_result in &batch_results {
@@ -975,6 +1020,7 @@ mod tests {
     use super::*;
     use crate::cli::DEFAULT_RATE_LIMIT_RETRIES;
     use crate::config::DEFAULT_MAX_RETRIES;
+    use crate::option_handler::NoOpOptionHandler;
     use crate::session::WorkspaceMode;
     use crate::worktree_pr::{
         CommitOutcome, PrAttemptOutcome, attempt_pr_creation, build_pr_prompt,
@@ -983,6 +1029,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
     use crate::test_binary_support::PathEnvGuard;
@@ -1277,6 +1324,75 @@ mod tests {
         }
     }
 
+    struct RecordingRunObserver {
+        events: Mutex<Vec<(String, crate::run_observer::RunPhase)>>,
+    }
+
+    impl crate::run_observer::RunObserver for RecordingRunObserver {
+        fn on_phase(&self, session_id: &str, phase: crate::run_observer::RunPhase) {
+            self.events
+                .lock()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .push((session_id.to_string(), phase));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_observer_reports_preparing_then_first_step() {
+        // Given: a runnable current-branch session with a first workflow step
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260827000100";
+        let session = make_current_branch_session(session_id, &repo, "observer test", "main");
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            r#"command: [cat]
+steps:
+  first:
+    command: "true"
+  second:
+    command: "true"
+"#,
+        );
+        let observer = RecordingRunObserver {
+            events: Mutex::new(Vec::new()),
+        };
+
+        // When: the session is executed through run_single
+        let result = run_single(
+            run_args(session_id),
+            WorkspaceOverride::RespectSession,
+            &NoOpOptionHandler,
+            CancellationToken::new(),
+            &observer,
+        )
+        .await;
+
+        // Then: execution succeeds and reports the coarse lifecycle in order
+        assert!(result.is_ok(), "run should succeed: {result:?}");
+        let events = observer.events.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].0, session_id);
+        assert!(matches!(
+            &events[0].1,
+            crate::run_observer::RunPhase::Preparing
+        ));
+        assert!(matches!(
+            &events[1].1,
+            crate::run_observer::RunPhase::Step(step) if step == "first"
+        ));
+        assert!(matches!(
+            &events[2].1,
+            crate::run_observer::RunPhase::Step(step) if step == "second"
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_exec_workflow_pause_keeps_session_resumable() {
         // Given: an exec session whose workflow pauses at an option step
@@ -1318,6 +1434,7 @@ steps:
             WorkspaceOverride::RespectSession,
             &PauseOptionHandler,
             CancellationToken::new(),
+            &NoopObserver,
         )
         .await;
 
@@ -4259,6 +4376,42 @@ steps:
             !manager.run_log_path(session_id).exists(),
             "no run.log may exist when validation fails before execution"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_all_entrypoint_preserves_detailed_run_log_in_non_tty_mode() {
+        // Given: one planned session and a simple workflow
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260827000101";
+        create_planned_session(&manager, session_id, &repo, "entrypoint log test");
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("build", "printf done > result.txt"),
+        );
+        let bin_dir = tmp.path().join("bin");
+        install_logging_gh(
+            &bin_dir,
+            &tmp.path().join("gh.log"),
+            "https://github.com/acme/app/pull/401",
+        );
+        process.prepend_path(&bin_dir);
+
+        // When: run --all is invoked through the public run command entrypoint
+        let result = run(run_all_args(Some(1))).await;
+
+        // Then: non-TTY fallback completes and detailed step output is retained in run.log
+        assert!(result.is_ok(), "run --all should succeed: {result:?}");
+        let log = fs::read_to_string(manager.run_log_path(session_id))
+            .unwrap_or_else(|e| panic!("run.log should be retained: {e:?}"));
+        assert!(log.contains("--- run started ---"));
+        assert!(log.lines().any(|line| line.ends_with("] build")));
+        assert!(!crate::console_mode::is_quiet());
     }
 
     #[tokio::test(flavor = "current_thread")]
