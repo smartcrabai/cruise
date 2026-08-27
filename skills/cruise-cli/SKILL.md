@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), bounded `run --all --parallelism` execution, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
+description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), bounded `run --all --parallelism` execution and the live `run --all` dashboard, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -30,7 +30,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Execute the next approved (Planned) session | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
-| Execute every Planned or Suspended session back-to-back | `cruise run --all` |
+| Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Browse / approve / resume / delete sessions | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
@@ -137,6 +137,7 @@ The interactive menu changes with the session's phase:
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
 - **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
+- In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
 - **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
@@ -154,7 +155,7 @@ cruise plan --skip-planning "$(cat my-plan.md)"
 cruise run
 
 # Drain the queue
-cruise run --all                 # every Planned or Suspended session, worktree mode, summary table at the end
+cruise run --all                 # every Planned or Suspended session, worktree mode, live dashboard on TTY for non-dry runs, summary at the end
 
 # Drain the queue with bounded concurrency (this invocation only)
 cruise run --all --parallelism 4

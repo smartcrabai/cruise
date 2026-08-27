@@ -147,7 +147,7 @@ pub struct RunArgs {
     #[arg(conflicts_with = "all")]
     pub session: Option<String>,
 
-    /// Run all planned and suspended sessions.
+    /// Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs).
     #[arg(long)]
     pub all: bool,
 

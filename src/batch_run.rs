@@ -22,8 +22,8 @@ use crate::{
 
 /// Interval between periodic candidate re-scans when idle worker slots are available.
 ///
-/// A new eligible session added while the batch is running will be picked up
-/// within at most this interval, even if no in-flight worker has completed yet.
+/// A new eligible `Planned` or `Suspended` session added while the batch is running
+/// will be picked up within at most this interval, even if no in-flight worker has completed yet.
 const PERIODIC_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Fetch newly-added sessions from the manager and append any not already
@@ -63,7 +63,8 @@ pub struct BatchSessionResult {
     pub outcome: Result<()>,
 }
 
-/// Convenience wrapper: run all eligible sessions with a fixed concurrency limit.
+/// Convenience wrapper: run all eligible `Planned` or `Suspended` sessions with a fixed
+/// concurrency limit.
 ///
 /// Eligible sessions are `Planned` or `Suspended` sessions that are not transient
 /// exec sessions. Delegates to [`run_all_with_dynamic_parallelism`] with a constant
@@ -90,15 +91,16 @@ where
     run_all_with_dynamic_parallelism(manager, move || parallelism, cancel_token, run_fn).await
 }
 
-/// Run all eligible sessions with bounded concurrency where the parallelism limit can
-/// change at runtime.
+/// Run all eligible `Planned` or `Suspended` sessions with bounded concurrency where the
+/// parallelism limit can change at runtime.
 ///
 /// Eligible sessions are `Planned` or `Suspended` sessions that are not transient exec
 /// sessions.
 ///
 /// # Arguments
 ///
-/// * `manager`        - Provides candidate enumeration via [`SessionManager::run_all_remaining`].
+/// * `manager`        - Provides `Planned`/`Suspended` candidate enumeration via
+///   [`SessionManager::run_all_remaining`].
 /// * `parallelism_fn` - Called at each scheduling boundary to get the current concurrency limit.
 ///   Must return >= 1; returns an error immediately if it ever returns 0.
 /// * `cancel_token`   - When cancelled, no new sessions are scheduled.

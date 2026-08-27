@@ -2412,6 +2412,7 @@ async fn execute_single_session(
                     effective_max_retries,
                     &skipped_steps_for_pr,
                     None,
+                    None,
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);

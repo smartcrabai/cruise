@@ -9,7 +9,6 @@ use crate::config::{FailAction, NoFileChangesAction, SkipCondition, WorkflowConf
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::OptionHandler;
-use crate::step::command::run_commands;
 use crate::step::prompt::StreamCallbacks;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
@@ -113,7 +112,7 @@ fn check_group_retry_skip(
     if group_retry_counts.get(call_site).copied().unwrap_or(0) < max {
         return None;
     }
-    eprintln!(
+    crate::status_eprintln!(
         "  {} group '{}' max retries ({}) reached, skipping",
         style("->").yellow(),
         call_site,
@@ -172,14 +171,14 @@ fn resolve_if_next(
     // Per-step file-changed check.
     if let Some(target) = step_if_file_changed {
         if tracker.has_files_changed(current_step)? {
-            eprintln!(
+            crate::status_eprintln!(
                 "  {} files changed, jumping to: {}",
                 style("R").cyan(),
                 target
             );
             return Ok(Some(target.to_string()));
         }
-        eprintln!(
+        crate::status_eprintln!(
             "  {} no file changes (if.file-changed check)",
             style(".").dim()
         );
@@ -202,7 +201,7 @@ fn resolve_if_next(
     };
     if tracker.has_files_changed(&group_snapshot_key(call_site))? {
         *group_retry_counts.entry(call_site.to_string()).or_insert(0) += 1;
-        eprintln!(
+        crate::status_eprintln!(
             "  {} files changed in group '{}', jumping to: {}",
             style("R").cyan(),
             call_site,
@@ -210,7 +209,7 @@ fn resolve_if_next(
         );
         Ok(Some(target.clone()))
     } else {
-        eprintln!(
+        crate::status_eprintln!(
             "  {} no file changes in group '{}'",
             style(".").dim(),
             call_site
@@ -369,7 +368,7 @@ pub async fn execute_steps_with_dag(
                 if let Some(id) = next_id {
                     current_node_id = id;
                 } else {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "  {} DAG has no successor for '{}' -> '{}'; stopping early",
                         style("!").yellow(),
                         current_node_id,
@@ -383,7 +382,7 @@ pub async fn execute_steps_with_dag(
 
     let total_elapsed = workflow_start.elapsed();
     let c = &state.counters;
-    eprintln!(
+    crate::status_eprintln!(
         "\n{} ({} run, {} skipped, {} failed) [{}]",
         style("v workflow complete").green().bold(),
         c.run,
@@ -452,7 +451,7 @@ async fn step_loop_iteration(
             current_step.to_string()
         };
         // sakoku-ignore-next-line
-        eprintln!("{} skipping: {}", style("→").yellow(), skip_label);
+        crate::status_eprintln!("{} skipping: {}", style("→").yellow(), skip_label);
         if let Some(log) = ctx.on_step_log {
             log("info", &format!("skipping: {skip_label}"));
         }
@@ -474,7 +473,7 @@ async fn step_loop_iteration(
             .map_or(StepOutcome::Done, StepOutcome::Next));
     }
 
-    eprintln!(
+    crate::status_eprintln!(
         "\n{} {}",
         style(">").cyan().bold(),
         style(current_step).bold()
@@ -545,7 +544,7 @@ async fn step_loop_iteration(
             resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output());
         if let Some(reason) = declared_reason {
             let msg = format!("intentional no-changes declared: {reason}");
-            eprintln!("  {} {msg}", style("i").cyan());
+            crate::status_eprintln!("  {} {msg}", style("i").cyan());
             if let Some(log) = ctx.on_step_log {
                 log("info", &msg);
             }
@@ -554,7 +553,7 @@ async fn step_loop_iteration(
             match nfc {
                 NoFileChangesAction::Failed => (true, false),
                 NoFileChangesAction::Retry => {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "  {} no file changes, will retry (if.no-file-changes: retry)",
                         style("R").cyan()
                     );
@@ -581,7 +580,11 @@ async fn step_loop_iteration(
                 if outcome.failed {
                     state.counters.failed -= 1;
                 }
-                eprintln!("  {} step failed, jumping to: {}", style("R").cyan(), name);
+                crate::status_eprintln!(
+                    "  {} step failed, jumping to: {}",
+                    style("R").cyan(),
+                    name
+                );
                 if_fail_next = Some(name.clone());
             }
             Some(FailAction::Detailed(d)) if d.retry => {
@@ -591,7 +594,7 @@ async fn step_loop_iteration(
                 if outcome.failed {
                     state.counters.failed -= 1;
                 }
-                eprintln!(
+                crate::status_eprintln!(
                     "  {} step failed, will retry (if.fail.retry)",
                     style("R").cyan()
                 );
@@ -649,7 +652,7 @@ async fn step_loop_iteration(
         let edge = (current_step.to_string(), next.clone());
         let count = state.edge_counts.entry(edge).or_insert(0);
         *count += 1;
-        eprintln!(
+        crate::status_eprintln!(
             "  {} {} -> {} [{}] (edge {}/{})",
             style("->").dim(),
             current_step,
@@ -753,7 +756,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()
                     );
@@ -765,7 +768,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(e) if has_if_fail => {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "  {} prompt error: {e}",
                         style(format!("x {}", format_duration(elapsed))).red()
                     );
@@ -787,6 +790,7 @@ async fn execute_step_kind(
                 merged_env,
                 ctx.working_dir,
                 timeout,
+                ctx.on_step_log,
             )
             .await;
             let elapsed = step_start.elapsed();
@@ -803,7 +807,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()
                     );
@@ -850,12 +854,12 @@ pub(crate) fn resolve_env(
 /// Print the step completion line (v success or x failure) with elapsed time.
 pub(crate) fn log_step_result(elapsed: std::time::Duration, success: bool) {
     if success {
-        eprintln!(
+        crate::status_eprintln!(
             "  {}",
             style(format!("v {}", format_duration(elapsed))).green()
         );
     } else {
-        eprintln!(
+        crate::status_eprintln!(
             "  {}",
             style(format!("x {}", format_duration(elapsed))).red()
         );
@@ -1054,7 +1058,7 @@ pub(crate) async fn run_prompt_step(
             let text = crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?;
             vars.set_input(text);
         } else {
-            eprintln!("  {}", style(resolved).dim());
+            crate::status_eprintln!("  {}", style(resolved).dim());
         }
     }
     let prompt = vars.resolve(&step.prompt)?;
@@ -1080,13 +1084,13 @@ pub(crate) async fn run_prompt_step(
 
     let spinner = crate::spinner::Spinner::start("Cruising...");
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        spinner.suspend(|| eprintln!("  {line}"));
+        spinner.suspend(|| crate::status_eprintln!("  {line}"));
         if let Some(cb) = on_step_log {
             cb("stdout", line);
         }
     };
     let on_stderr: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        spinner.suspend(|| eprintln!("  {} {}", style("stderr:").dim(), line));
+        spinner.suspend(|| crate::status_eprintln!("  {} {}", style("stderr:").dim(), line));
         if let Some(cb) = on_step_log {
             cb("stderr", line);
         }
@@ -1097,7 +1101,7 @@ pub(crate) async fn run_prompt_step(
     };
     let result = {
         let on_notice = |msg: &str| {
-            spinner.suspend(|| eprintln!("  {}", style(msg).dim()));
+            spinner.suspend(|| crate::status_eprintln!("  {}", style(msg).dim()));
             if let Some(cb) = on_step_log {
                 cb("info", msg);
             }
@@ -1153,6 +1157,7 @@ pub(crate) async fn run_command_step(
     env: &HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
     timeout: Option<Duration>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<bool> {
     let cmds: Vec<String> = step
         .command
@@ -1161,10 +1166,23 @@ pub(crate) async fn run_command_step(
         .collect::<Result<Vec<_>>>()?;
 
     for cmd in &cmds {
-        eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
+        crate::status_eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
     }
 
-    let result = run_commands(&cmds, rate_limit_retries, env, working_dir, timeout).await?;
+    let result = if crate::console_mode::is_quiet() {
+        crate::step::command::run_commands_with_log(
+            &cmds,
+            rate_limit_retries,
+            env,
+            working_dir,
+            timeout,
+            on_step_log,
+        )
+        .await?
+    } else {
+        crate::step::command::run_commands(&cmds, rate_limit_retries, env, working_dir, timeout)
+            .await?
+    };
 
     let success = result.success;
     vars.set_prev_success(Some(success));

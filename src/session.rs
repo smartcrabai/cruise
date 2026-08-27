@@ -518,7 +518,7 @@ impl SessionManager {
             let id = entry.file_name().to_string_lossy().to_string();
             match self.load(&id) {
                 Ok(state) => sessions.push(state),
-                Err(e) => eprintln!("warning: {e}"),
+                Err(e) => crate::status_eprintln!("warning: {e}"),
             }
         }
         sessions.sort_by(|a, b| a.id.cmp(&b.id));

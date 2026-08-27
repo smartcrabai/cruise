@@ -155,7 +155,7 @@ Arguments:
   [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
 
 Options:
-      --all                        Run all planned or suspended sessions
+      --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
@@ -167,6 +167,8 @@ Options:
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is shown as `Failed` and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
+
+When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
 #### `cruise exec`
 
@@ -1031,12 +1033,12 @@ On resume, cruise restores more than just the current step: while running, each 
 Both the desktop GUI and the CLI support running multiple sessions concurrently during `run --all`.
 
 - **GUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
-- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI setting is neither read nor modified.
+- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
 - Launches up to `N` sessions concurrently.
-- Re-scans for newly added eligible sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
+- Re-scans for newly added eligible Planned or Suspended sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
 - Results are returned in scheduling order regardless of completion order.
 
 ## New Session Form Persistence

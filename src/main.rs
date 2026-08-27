@@ -1,6 +1,7 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
 mod cancellation;
@@ -11,6 +12,7 @@ mod config;
 mod config_cmd;
 #[cfg_attr(not(test), expect(dead_code))]
 mod configs;
+mod console_mode;
 mod dag;
 mod display;
 mod draft_cmd;
@@ -32,6 +34,7 @@ mod platform;
 mod repo_clone;
 mod resolver;
 mod run_cmd;
+mod run_observer;
 mod sdk_tools;
 mod session;
 mod session_edit;
