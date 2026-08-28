@@ -1308,7 +1308,7 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             }
         }
 
-        let kind_label = if step.prompt.is_some() {
+        let kind_label = if step.prompt.is_some() || step.prompt_file.is_some() {
             "prompt"
         } else if step.command.is_some() && step.option.is_none() {
             "command"

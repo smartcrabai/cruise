@@ -746,9 +746,9 @@ fn build_repo_planning_session(
         input,
     );
     session.repo = Some(repo.to_string());
-    // Configs that live inside the clone (or the builtin default) are copied
-    // into the session directory so they stay readable after the clone is
-    // removed at approval time.
+    // Resolved configs that live inside the clone (or the builtin default) are
+    // serialized into the session directory so they stay readable after the
+    // clone is removed at approval time.
     session.config_path = crate::repo_clone::persistent_config_path(&source, clone_path);
     manager.create(&session)?;
     if session.config_path.is_none() {

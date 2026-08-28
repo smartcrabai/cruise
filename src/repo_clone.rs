@@ -74,8 +74,8 @@ pub fn clone_repo(repo: &str, clone_path: &Path) -> Result<()> {
 /// Config path to persist on a repo-backed session.
 ///
 /// Configs that live inside the temporary clone return `None`: the caller is
-/// expected to copy the YAML into the session directory instead, so it stays
-/// readable after the clone is removed.
+/// expected to copy the resolved YAML into the session directory instead, so it
+/// stays readable after the clone is removed.
 #[must_use]
 pub fn persistent_config_path(
     source: &crate::resolver::ConfigSource,

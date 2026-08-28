@@ -168,6 +168,10 @@
           "type": "string",
           "description": "Reference to another cruise workflow YAML file or supported GitHub URL to inline"
         },
+        "prompt_file": {
+          "type": ["string", "null"],
+          "description": "Path to a file whose contents are used as the prompt. Absolute, ~-prefixed, config-file-relative, or supported GitHub blob/raw URL (a bare file name = same directory). YAML `~` or null denotes the local home directory. Mutually exclusive with prompt."
+        },
         "fail-if-no-file-changes": {
           "type": "boolean",
           "description": "Fail the step if no files were changed"
@@ -177,7 +181,14 @@
           "pattern": "^[1-9][0-9]*[mh]?$",
           "description": "Step timeout. Plain digits = seconds, suffix 'm' = minutes, 'h' = hours. Example: 30, 5m, 1h."
         }
-      }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["prompt", "prompt_file"]
+          }
+        }
+      ]
     },
     "WhenCondition": {
       "type": "object",

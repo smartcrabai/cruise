@@ -6,7 +6,8 @@ use crate::config::WorkflowConfig;
 ///
 /// Prefers parsing the full [`WorkflowConfig`] so config selectors (CLI and GUI) surface
 /// the same `description` that round-trips through session persistence (`WorkflowConfig`
-/// is re-serialized verbatim into `sessions/{id}/config.yaml`, see `src/plan_cmd.rs`).
+/// is re-serialized into `sessions/{id}/config.yaml`, including resolved prompt files; see
+/// `src/plan_cmd.rs`).
 /// Falls back to a minimal `description`-only parse when the YAML doesn't fully validate
 /// as a `WorkflowConfig` (e.g. it's missing `steps`, or is otherwise malformed), so
 /// partial or broken config files still surface a description in the selector.

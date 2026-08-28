@@ -42,7 +42,7 @@ steps:
 
 ## Group-call steps
 
-A call-site step (one with `group: <name>`) must stay a pure invocation. Adding `prompt` / `command` alongside is a validation error.
+A call-site step (one with `group: <name>`) must stay a pure invocation. Adding `prompt` / `prompt_file` / `command` alongside is a validation error.
 
 ```yaml
 # OK
@@ -62,7 +62,7 @@ steps:
 - Steps inside a group definition cannot have nested `group:` references.
 - Steps inside a group definition cannot have an individual `if:` (the group's `if:` applies to the whole group).
 - Call-site steps cannot have an individual `if:`.
-- The legacy style of writing `prompt` / `command` alongside `group:` on a call-site step is rejected.
+- The legacy style of writing `prompt` / `prompt_file` / `command` alongside `group:` on a call-site step is rejected.
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
 - A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.

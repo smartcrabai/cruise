@@ -37,24 +37,43 @@ impl ConfigSource {
         }
     }
 }
-/// Parse an already-resolved config into a validated [`WorkflowConfig`],
-/// expanding `workflow_call` references.
+/// Resolve a workflow config from its source, including `workflow_call` and
+/// `prompt_file` references, against its source directory.
+///
+/// File-backed sources are reloaded from their source path; the supplied `yaml` is
+/// parsed for the built-in source, where `base_dir` supplies the relative-path base.
 ///
 /// # Errors
 ///
-/// Returns an error when the config cannot be parsed, workflow calls cannot be
-/// resolved, environment overrides are invalid, or validation fails.
+/// Returns an error when the config cannot be parsed or references cannot be resolved.
+pub fn resolve_workflow_config(
+    yaml: &str,
+    source: &ConfigSource,
+    base_dir: &std::path::Path,
+) -> Result<crate::config::WorkflowConfig> {
+    match source.path() {
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path),
+        None => crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml(yaml)
+                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+            base_dir,
+        ),
+    }
+}
+
+/// Parse and validate a config, resolving `workflow_call` and `prompt_file` references.
+///
+/// # Errors
+///
+/// Returns an error when the config cannot be parsed, references cannot be resolved,
+/// environment overrides are invalid, or validation fails.
 pub fn load_config_from_source(
     yaml: &str,
     source: &ConfigSource,
 ) -> Result<crate::config::WorkflowConfig> {
     let config = match source.path() {
-        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
-        None => crate::workflow_call::resolve_workflow_calls(
-            crate::config::WorkflowConfig::from_yaml(yaml)
-                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
-            std::env::current_dir()?,
-        )?,
+        Some(_) => resolve_workflow_config(yaml, source, std::path::Path::new("."))?,
+        None => resolve_workflow_config(yaml, source, &std::env::current_dir()?)?,
     };
     crate::config::validate_config(&config)?;
     Ok(config)
@@ -253,13 +272,7 @@ fn resolve_config_in_dir_with_interactive(
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
         let buf = PathBuf::from(path);
-        let yaml = std::fs::read_to_string(&buf).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                CruiseError::ConfigNotFound(path.to_string())
-            } else {
-                CruiseError::Other(format!("failed to read '{path}': {e}"))
-            }
-        })?;
+        let yaml = read_config_file(&buf)?;
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
     }
 
@@ -440,7 +453,7 @@ mod tests {
         }
     }
 
-    use crate::test_support::EnvGuard;
+    use crate::test_support::{EnvGuard, lock_process};
 
     // ---- explicit path ----
 
@@ -463,6 +476,41 @@ mod tests {
     fn test_resolve_explicit_missing() {
         let result = resolve_config(Some("/nonexistent/path/cruise.yaml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_from_source_resolves_prompt_file_through_explicit_entry_point() {
+        let _lock = lock_process();
+        // Given: an explicit config file and a prompt file beside it.
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let prompt_path = dir.path().join("prompts").join("implement.md");
+        std::fs::create_dir_all(
+            prompt_path
+                .parent()
+                .unwrap_or_else(|| panic!("missing parent")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(&prompt_path, "Implement from the entry point.\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let config_path = dir.path().join("cruise.yaml");
+        std::fs::write(
+            &config_path,
+            "command: [echo]\nsteps:\n  implement:\n    prompt_file: prompts/implement.md\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let source = ConfigSource::Explicit(config_path);
+
+        // When: the normal validated config-loading entry point is used.
+        let config =
+            load_config_from_source("ignored yaml", &source).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: prompt_file is resolved and inlined before validation returns.
+        let step = &config.steps["implement"];
+        assert_eq!(
+            step.prompt.as_deref(),
+            Some("Implement from the entry point.\n")
+        );
+        assert_eq!(step.prompt_file, None);
     }
 
     // ---- local cruise.yaml ----

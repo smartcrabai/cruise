@@ -153,7 +153,7 @@ pub struct StepConfig {
     /// Model to use (prompt steps only).
     pub model: Option<String>,
 
-    /// Prompt body (prompt steps only).
+    /// Inline prompt body (prompt steps only; use `prompt` or `prompt_file`).
     pub prompt: Option<String>,
 
     /// Message displayed to the user before this step runs (prompt steps only).
@@ -198,9 +198,30 @@ pub struct StepConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_call: Option<String>,
 
+    /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
+    /// Absolute, `~`-prefixed, or relative to the directory of the config file
+    /// that declares the step (a bare file name means "next to the config file").
+    /// Resolved and inlined at load time by
+    /// `workflow_call::resolve_workflow_calls*`; always `None` afterwards.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_prompt_file",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt_file: Option<String>,
+
     /// If true, the step fails immediately when no workspace file changes are detected.
     #[serde(default, rename = "fail-if-no-file-changes")]
     pub fail_if_no_file_changes: bool,
+}
+
+fn deserialize_prompt_file<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // YAML uses `~` for null, but prompt_file reserves that spelling for the
+    // user's home directory. Missing fields still use the serde default above.
+    Ok(Option::<String>::deserialize(deserializer)?.or_else(|| Some("~".to_string())))
 }
 
 /// A single item in an option step.
@@ -694,9 +715,9 @@ fn validate_step_groups(
                     "step '{step_name}' references undefined group '{group_name}'"
                 )));
             }
-            if step.prompt.is_some() || step.command.is_some() {
+            if step.prompt.is_some() || step.prompt_file.is_some() || step.command.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{step_name}' uses old membership style (group + prompt/command). \
+                    "step '{step_name}' uses old membership style (group + prompt/prompt_file/command). \
                      Please migrate to groups.<name>.steps block style."
                 )));
             }
@@ -871,15 +892,22 @@ pub fn validate_group_retry_budget(
                     effective_max_retries,
                 )));
             }
-        } else if r + 1 > effective_max_retries {
-            return Err(CruiseError::InvalidStepConfig(
-                unreachable_group_message_external_target(
-                    group_name,
-                    r,
-                    target,
-                    effective_max_retries,
-                ),
-            ));
+        } else {
+            let Some(required_budget) = r.checked_add(1) else {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group '{group_name}' has max_retries: {r}, but its external retry target requires one additional loop-protection edge"
+                )));
+            };
+            if required_budget > effective_max_retries {
+                return Err(CruiseError::InvalidStepConfig(
+                    unreachable_group_message_external_target(
+                        group_name,
+                        r,
+                        target,
+                        effective_max_retries,
+                    ),
+                ));
+            }
         }
     }
 
@@ -1803,6 +1831,26 @@ steps:
             msg.contains("old membership style") || msg.contains("groups.<name>.steps"),
             "expected migration hint in: {msg}"
         );
+    }
+
+    #[test]
+    fn test_validate_groups_rejects_prompt_file_old_membership_style() {
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+    prompt_file: prompts/review.md
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(err_string(result).contains("old membership style"));
     }
 
     #[test]
@@ -2799,9 +2847,37 @@ steps:
                 "group",
                 "fail-if-no-file-changes",
                 "timeout",
+                "prompt_file",
             ],
             "StepConfig",
         );
+    }
+
+    #[test]
+    fn test_schema_prompt_file_has_expected_type_and_exclusion_rule() {
+        let schema = load_schema();
+        let step = &schema["$defs"]["StepConfig"];
+        let prompt_file = &step["properties"]["prompt_file"];
+        assert_eq!(
+            prompt_file["type"].as_array().map(|types| {
+                types
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["string", "null"]),
+            "prompt_file must accept strings and YAML null (`~`)"
+        );
+
+        let exclusions = step["allOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("StepConfig allOf must be an array"));
+        assert!(exclusions.iter().any(|rule| {
+            rule["not"]["required"].as_array().is_some_and(|required| {
+                required.iter().any(|v| v.as_str() == Some("prompt"))
+                    && required.iter().any(|v| v.as_str() == Some("prompt_file"))
+            })
+        }));
     }
 
     #[test]
@@ -3897,5 +3973,83 @@ steps:
             validate_group_retry_budget(&config, 3).is_err(),
             "a shared target matching only one of several call sites must not get case 1's looser bound"
         );
+    }
+
+    #[test]
+    fn test_validate_group_retry_budget_rejects_external_target_overflow() {
+        // Given: the largest representable retry budget with an external target.
+        let max = usize::MAX;
+        let yaml = format!(
+            "command: [claude, -p]\ngroups:\n  review:\n    if:\n      file-changed: build\n    max_retries: {max}\n    steps:\n      simplify:\n        prompt: /simplify\nsteps:\n  build:\n    command: echo build\n  review-pass:\n    group: review\n"
+        );
+        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: validation reports the impossible extra edge instead of overflowing.
+        let result = validate_group_retry_budget(&config, max);
+        assert!(
+            result.is_err(),
+            "max retry budget with an external target must be rejected"
+        );
+        assert!(err_string(result).contains("external retry target"));
+    }
+
+    #[test]
+    fn test_prompt_file_field_deserializes_from_snake_case_key() {
+        // Given: YAML that declares a step prompt via a file path.
+        let yaml = r"
+command: [claude, -p]
+steps:
+  implement:
+    prompt_file: prompts/implement.md
+";
+
+        // When: parsed.
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the field is exposed as `prompt_file` alongside an absent `prompt`.
+        assert_eq!(
+            config.steps["implement"].prompt_file.as_deref(),
+            Some("prompts/implement.md")
+        );
+        assert_eq!(config.steps["implement"].prompt, None);
+    }
+
+    #[test]
+    fn test_prompt_file_is_omitted_from_serialization_when_none() {
+        // Given: a workflow whose steps do not use `prompt_file`.
+        let yaml = r"
+command: [claude, -p]
+steps:
+  implement:
+    prompt: do it
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: serialized back to YAML (as done for session config snapshots).
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: no `prompt_file` key leaks into the output.
+        assert!(
+            !serialized.contains("prompt_file"),
+            "serialized YAML was: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_camel_case_prompt_file_key_is_ignored_as_unknown_field() {
+        // Given: YAML that misspells the key in camelCase (`promptFile`).
+        let yaml = r"
+command: [claude, -p]
+steps:
+  implement:
+    promptFile: impl.md
+";
+
+        // When: parsed.
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the unknown key is ignored (no typo detection, per project policy)
+        // and the step has no prompt_file set.
+        assert_eq!(config.steps["implement"].prompt_file, None);
     }
 }

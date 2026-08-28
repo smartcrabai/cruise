@@ -1,0 +1,7 @@
+command:
+  - claude
+  - -p
+
+steps:
+  implement:
+    prompt_file: prompts/implement.md

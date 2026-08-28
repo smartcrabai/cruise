@@ -17,7 +17,10 @@ description: My workflow  # Optional: shown alongside the file name in config se
 model: sonnet             # Optional: default model for prompt steps
                           # (in SDK mode, reinterpreted as a seher mode_key)
 plan_model: opus          # Optional: model for the built-in plan step
-pr_language: English      # Optional: language for auto-generated PR title/body (default: English)
+                          # (in SDK mode, reinterpreted as a seher mode_key)
+languages:                # Optional: prompt languages; defaults to English
+  pr: English             # Language for auto-generated PR title/body
+  plan: English           # Language for built-in planning prompts
 
 llm:                      # Optional: OpenAI-compatible API for session-title generation
   api_key: sk-...
@@ -60,7 +63,7 @@ There are three prompt-execution backends:
 
 ## `command` and the `{model}` placeholder
 
-`{model}` inside the `command` array is a special placeholder resolved at runtime. It is **not** a template variable and cannot be used inside `prompt` / `instruction` / `command` step fields.
+`{model}` inside the `command` array is a special placeholder resolved at runtime. It is **not** a template variable and cannot be used inside `prompt` / `prompt_file` / `instruction` / `command` step fields.
 
 - When an effective model is set: `{model}` is replaced with the model name.
 - When no model is set: both `{model}` and its immediately preceding `--model` flag are removed automatically.
@@ -98,12 +101,25 @@ Free-form text shown alongside the file name in the CLI/GUI config selectors. Pu
 description: Full TDD flow with review loop
 ```
 
-## `pr_language`
+## `languages`
 
-Language used for the auto-generated PR title and body. Defaults to `English`.
+`languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
+
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the default is `English`.
 
 ```yaml
-pr_language: Japanese     # PR title/body generated in Japanese
+languages:
+  pr: Japanese           # PR title/body generated in Japanese
+  plan: Japanese         # plans and plan answers generated in Japanese
+```
+
+For compatibility with older configs:
+
+```yaml
+# Deprecated; use languages.pr instead.
+pr_language: Japanese
+# Deprecated; use languages.plan instead.
+plan_language: Japanese
 ```
 
 ## Hot-reload

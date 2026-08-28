@@ -13,7 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
     WorkspaceMode, current_iso8601,
 };
-use cruise::session_edit::CurrentStepUpdate;
+use cruise::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ pub struct DagDto {
 #[serde(rename_all = "camelCase")]
 pub struct DagStepDto {
     pub name: String,
-    /// "prompt", "command", or "option".
+    /// "prompt" (including `prompt_file`), "command", or "option".
     pub kind: String,
     /// True when this step has at least one terminal transition.
     pub is_terminal: bool,
@@ -244,7 +244,7 @@ fn build_dag_dto(
 
 /// Return a UI-facing step kind label for `config`.
 fn step_kind(config: &cruise::config::StepConfig) -> String {
-    if config.prompt.is_some() {
+    if config.prompt.is_some() || config.prompt_file.is_some() {
         "prompt".to_string()
     } else if config.option.is_some() {
         "option".to_string()
@@ -1051,7 +1051,7 @@ pub async fn create_session(
     channel: tauri::ipc::Channel<PlanEvent>,
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<String, String> {
-    use cruise::config::{WorkflowConfig, validate_config};
+    use cruise::config::validate_config;
     use cruise::session::{SessionManager, SessionState};
 
     let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
@@ -1064,11 +1064,11 @@ pub async fn create_session(
         &base_dir,
         config_path.as_deref(),
     )?;
-    let mut config = match WorkflowConfig::from_yaml(&yaml) {
+    let mut config = match cruise::resolver::resolve_workflow_config(&yaml, &source, &base) {
         Ok(config) => config,
         Err(e) => {
             remove_session_clone(&manager, &session_id);
-            return Err(format!("config parse error: {e}"));
+            return Err(e.to_string());
         }
     };
     if let Err(e) = validate_config(&config) {
@@ -1100,12 +1100,23 @@ pub async fn create_session(
         input.trim().to_string(),
     );
     session.repo = repo.clone();
-    // Configs that live inside the temporary clone are copied into the session
-    // directory below so they stay readable after the clone is removed.
+    // Resolved configs that live inside the temporary clone are serialized into
+    // the session directory below so they stay readable after the clone is removed.
     session.config_path = if repo.is_some() {
         cruise::repo_clone::persistent_config_path(&source, &base)
     } else {
         source.path().cloned()
+    };
+    let config_snapshot = if repo.is_some() && session.config_path.is_none() {
+        Some(
+            serde_yaml::to_string(&config)
+                .map_err(|e| {
+                    format!("failed to serialize resolved workflow config for session: {e}")
+                })
+                .inspect_err(|_| remove_session_clone(&manager, &session_id))?,
+        )
+    } else {
+        None
     };
     session.skipped_steps = skipped_steps;
     if !use_input_as_plan {
@@ -1138,8 +1149,11 @@ pub async fn create_session(
 
     let session_dir = manager.sessions_dir().join(&session_id);
     if session.config_path.is_none() {
-        std::fs::write(session_dir.join("config.yaml"), &yaml)
-            .map_err(|e| format!("failed to write session config: {e}"))?;
+        std::fs::write(
+            session_dir.join("config.yaml"),
+            config_snapshot.as_deref().unwrap_or(&yaml),
+        )
+        .map_err(|e| format!("failed to write session config: {e}"))?;
     }
 
     // Copy attached images into the session dir and rewrite session.input so the
@@ -1340,7 +1354,7 @@ pub(crate) fn create_draft_session_impl(
     skipped_steps: Vec<String>,
     image_attachments: Vec<String>,
 ) -> std::result::Result<String, String> {
-    use cruise::config::{WorkflowConfig, validate_config};
+    use cruise::config::validate_config;
 
     let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let session_id = SessionManager::new_session_id();
@@ -1351,11 +1365,11 @@ pub(crate) fn create_draft_session_impl(
         &base_dir,
         config_path.as_deref(),
     )?;
-    let config = match WorkflowConfig::from_yaml(&yaml) {
+    let config = match cruise::resolver::resolve_workflow_config(&yaml, &source, &base) {
         Ok(config) => config,
         Err(e) => {
             remove_session_clone(manager, &session_id);
-            return Err(format!("config parse error: {e}"));
+            return Err(e.to_string());
         }
     };
     if let Err(e) = validate_config(&config) {
@@ -1370,12 +1384,23 @@ pub(crate) fn create_draft_session_impl(
         input.trim().to_string(),
     );
     session.repo = repo.clone();
-    // Configs that live inside the temporary clone are copied into the session
-    // directory below so they stay readable after the clone is removed.
+    // Resolved configs that live inside the temporary clone are serialized into
+    // the session directory below so they stay readable after the clone is removed.
     session.config_path = if repo.is_some() {
         cruise::repo_clone::persistent_config_path(&source, &base)
     } else {
         source.path().cloned()
+    };
+    let config_snapshot = if repo.is_some() && session.config_path.is_none() {
+        Some(
+            serde_yaml::to_string(&config)
+                .map_err(|e| {
+                    format!("failed to serialize resolved workflow config for session: {e}")
+                })
+                .inspect_err(|_| remove_session_clone(manager, &session_id))?,
+        )
+    } else {
+        None
     };
     session.skipped_steps = skipped_steps;
     session.phase = SessionPhase::Draft;
@@ -1406,7 +1431,10 @@ pub(crate) fn create_draft_session_impl(
 
     let session_dir = manager.sessions_dir().join(&session_id);
     if session.config_path.is_none()
-        && let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml)
+        && let Err(e) = std::fs::write(
+            session_dir.join("config.yaml"),
+            config_snapshot.as_deref().unwrap_or(&yaml),
+        )
     {
         let _ = manager.delete(&session_id);
         remove_session_clone(manager, &session_id);
@@ -1499,9 +1527,10 @@ pub fn get_new_session_config_defaults(
     config_path: Option<String>,
     repo: Option<String>,
 ) -> std::result::Result<NewSessionConfigDefaultsDto, String> {
-    let (_, yaml, source) = resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
-    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let (normalized_base_dir, yaml, source) =
+        resolve_gui_session_paths(&base_dir, config_path.as_deref())?;
+    let config = cruise::resolver::resolve_workflow_config(&yaml, &source, &normalized_base_dir)
+        .map_err(|e| e.to_string())?;
     cruise::config::validate_config(&config)
         .map_err(|e| format!("Failed to validate config: {e}"))?;
     let steps = cruise::workflow::list_skippable_steps(&config)
@@ -1549,120 +1578,16 @@ pub fn update_session_settings(
     skipped_steps: Vec<String>,
     current_step_update: CurrentStepUpdate,
 ) -> std::result::Result<SessionDto, String> {
-    use cruise::session::SessionPhase;
-
-    let mut session = manager.load(session_id).map_err(|e| e.to_string())?;
-
-    let is_failed_or_suspended = matches!(
-        &session.phase,
-        SessionPhase::Failed(_) | SessionPhase::Suspended
-    );
-
-    match &session.phase {
-        SessionPhase::Draft
-        | SessionPhase::AwaitingApproval
-        | SessionPhase::Planned
-        | SessionPhase::Failed(_)
-        | SessionPhase::Suspended => {}
-        other => {
-            return Err(format!(
-                "Cannot edit session in '{}' phase. Only 'Draft', 'Awaiting Approval', 'Planned', 'Failed' and 'Suspended' sessions are editable.",
-                other.label()
-            ));
-        }
-    }
-
-    let old_config_path = session
-        .config_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-
-    // Failed/Suspended: config path must stay the same
-    if is_failed_or_suspended && old_config_path != config_path {
-        return Err(
-            "Cannot change config for a Failed or Suspended session. Only skip steps and current step can be edited.".to_string(),
-        );
-    }
-
-    // current_step can only be set for Failed/Suspended
-    if !matches!(current_step_update, CurrentStepUpdate::Unchanged) && !is_failed_or_suspended {
-        return Err(
-            "Cannot update current step for a session that is not Failed or Suspended.".to_string(),
-        );
-    }
-
-    let (base, yaml, source) =
-        resolve_gui_session_paths(&session.base_dir.to_string_lossy(), config_path.as_deref())?;
-    let config = cruise::config::WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| format!("config parse error: {e}"))?;
-    cruise::config::validate_config(&config).map_err(|e| e.to_string())?;
-
-    match current_step_update {
-        CurrentStepUpdate::Unchanged => {}
-        CurrentStepUpdate::Clear => session.current_step = None,
-        CurrentStepUpdate::Set(step_name) => {
-            let nodes = cruise::workflow::list_skippable_steps(&config)
-                .map_err(|e| format!("step expansion error: {e}"))?;
-            let valid_ids: std::collections::HashSet<&str> = nodes
-                .iter()
-                .flat_map(|n| n.expanded_step_ids.iter().map(String::as_str))
-                .collect();
-            if !valid_ids.contains(step_name.as_str()) {
-                return Err(format!(
-                    "Step '{step_name}' does not exist in the workflow config."
-                ));
-            }
-            if skipped_steps.contains(&step_name) {
-                return Err(format!(
-                    "Cannot set current_step to '{step_name}' because it is in skipped_steps."
-                ));
-            }
-            session.current_step = Some(step_name);
-        }
-    }
-
-    session.config_source = source.display_string();
-    session.config_path = if config_path.is_some() {
-        source.path().cloned()
-    } else {
-        None
-    };
-    session.skipped_steps = skipped_steps;
-    session.plan_error = None;
-    session.updated_at = Some(current_iso8601());
-
-    manager.save(&session).map_err(|e| e.to_string())?;
-
-    let session_dir = manager.sessions_dir().join(session_id);
-    if session.config_path.is_none() {
-        std::fs::write(session_dir.join("config.yaml"), &yaml)
-            .map_err(|e| format!("failed to write session config: {e}"))?;
-    }
-
-    if !is_failed_or_suspended {
-        let resolved_config_key = source.path().map_or_else(
-            || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
-        );
-        let mut history = NewSessionHistory::load_best_effort();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: current_iso8601(),
-            input: session.input.clone(),
-            requested_config_path: config_path,
-            // Repo sessions use a temporary clone as base_dir; never expose it as a
-            // recent directory (mirrors the create_session behaviour).
-            working_dir: if session.repo.is_some() {
-                String::new()
-            } else {
-                base.to_string_lossy().into_owned()
-            },
-            repo: session.repo.clone(),
-            resolved_config_key,
-            skipped_steps: session.skipped_steps.clone(),
-        });
-        history.save_best_effort();
-    }
-
+    let (session, _) = cruise::session_edit::update_session_settings(
+        manager,
+        session_id,
+        SessionSettingsUpdate {
+            config_path,
+            skipped_steps,
+            current_step_update,
+        },
+    )
+    .map_err(|e| e.to_string())?;
     Ok(SessionDto::from_state(session, manager))
 }
 
@@ -3987,6 +3912,47 @@ mod tests {
             config_yaml_path.exists(),
             "builtin config switch should write config.yaml to session dir"
         );
+    }
+
+    #[test]
+    fn test_update_repo_session_reuses_resolved_config_snapshot() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000007-repo";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.repo = Some("owner/repository".to_string());
+        session.config_source = "config: temporary-clone/cruise.yaml".to_string();
+        session.config_path = None;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            manager.sessions_dir().join(session_id).join("config.yaml"),
+            "command: [echo]\nsteps:\n  implement:\n    prompt: resolved prompt\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        update_session_settings(
+            &manager,
+            session_id,
+            None,
+            vec![],
+            CurrentStepUpdate::Unchanged,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let snapshot =
+            fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            snapshot.contains("resolved prompt"),
+            "snapshot was: {snapshot}"
+        );
+        let updated = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(updated.config_source, "config: temporary-clone/cruise.yaml");
     }
 
     #[test]

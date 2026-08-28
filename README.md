@@ -130,7 +130,7 @@ With `--grill`, the plan step becomes an interview: instead of writing the plan 
 
 With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend. This is useful when using tool-incapable providers (e.g. `sdk: claude-terminal`). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
-With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config found inside the clone is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
+With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a resolved workflow config found inside the clone is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed (including inlined `prompt_file` contents). `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
 #### `cruise draft`
 
@@ -212,7 +212,10 @@ With no flags, opens an interactive session browser whose menu depends on each s
 cruise config [OPTIONS]
 
 Options:
-      --set-parallelism <N>   Set the max number of sessions the desktop GUI runs concurrently in `run --all` mode (must be >= 1)
+      --set-parallelism <N>
+          Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
+
+          Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
 ```
 
 Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI `cruise run --all` always runs sessions sequentially regardless of this value.
@@ -325,9 +328,11 @@ description: |             # one-line summary shown next to the filename in sele
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
-pr_language: English      # language for auto-generated PR title/body (optional, default: English)
-# force_exec: false          # execute direct plan entry points in place (use --no-force-exec to opt out)
-plan_language: English       # language used by built-in planning prompts (optional, default: English)
+languages:                # prompt languages (optional; defaults to English)
+  pr: English             # language for auto-generated PR title/body
+  plan: English           # language used by built-in planning prompts
+# force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
+# Deprecated compatibility fields: pr_language and plan_language
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -428,21 +433,24 @@ interactive_planning: false   # tool-less, file-based planning; allows claude-te
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
 
-### PR Language
+### Prompt Languages
 
-The `pr_language` field controls the language used for the auto-generated PR title and body. Defaults to `"English"` when omitted.
-
-```yaml
-pr_language: Japanese     # PR title/body will be generated in Japanese
-```
-
-### Plan Language
-
-The `plan_language` field controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Defaults to `"English"` when omitted. The normalized value is available to built-in planning templates as `{plan.language}`.
+`languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used by cruise's built-in planning prompts. Both default to `"English"` when omitted. `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values; blank environment values are ignored. The deprecated top-level `pr_language` and `plan_language` fields remain supported as fallbacks.
 
 ```yaml
-plan_language: Japanese   # generated/updated plans and plan answers will be in Japanese
+languages:
+  pr: Japanese             # PR title/body will be generated in Japanese
+  plan: Japanese           # generated/updated plans and plan answers will be in Japanese
 ```
+
+For compatibility with older configs:
+
+```yaml
+pr_language: Japanese     # Deprecated; use languages.pr instead.
+plan_language: Japanese   # Deprecated; use languages.plan instead.
+```
+
+The effective values are available to built-in templates as `{pr.language}` and `{plan.language}`.
 
 ### Session Title Generation
 
@@ -480,13 +488,44 @@ steps:
     model: claude-opus-4-5        # model to use (optional; overrides top-level model)
     instruction: |                # system prompt (optional)
       You are a senior engineer.
-    prompt: |                     # prompt body (required)
+    prompt: |                     # prompt body (use either prompt or prompt_file)
       Create an implementation plan for:
       {input}
     timeout: 10m                  # per-step timeout (optional; see Step Timeout)
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
+
+For longer prompts, load the prompt body from a file with `prompt_file`:
+
+```yaml
+steps:
+  implement:
+    prompt_file: prompts/implement.md
+```
+
+`prompt_file` may be an absolute path, a `~/` path, a path relative to the
+configuration file, or a GitHub blob/raw URL. A bare file name is resolved next
+to the configuration file. GitHub URLs are fetched via `gh api` at config-load
+time. Files referenced inside a `workflow_call` are
+resolved relative to the called workflow's directory. File contents are kept
+verbatim and use the same variable expansion as `prompt`; `prompt` and
+`prompt_file` are mutually exclusive. For repo-backed sessions whose config lives in the temporary clone, the session
+snapshot stores the resolved prompt contents, so they remain usable after the
+clone is removed.
+Resolution follows these rules:
+
+| `prompt_file` value | Resolution |
+| --- | --- |
+| Absolute path | Used as-is |
+| `~/...`, `~`, or `~user/...` | Expanded from the current user's or named user's home directory |
+| `./...`, `../...`, or a bare file name | Relative to the directory containing the config file |
+| GitHub blob/raw URL | Fetched from GitHub |
+| Relative path inside a called workflow | Relative to the called workflow's directory (or remote directory) |
+
+Absolute and `~` paths refer to the local filesystem. In a GitHub-hosted
+workflow, relative non-URL values are resolved as paths in the remote directory; local
+`~` paths are rejected. A direct GitHub blob/raw URL can be used explicitly.
 
 #### Command Step (shell execution)
 
@@ -543,7 +582,7 @@ steps:
 
 ### Post-PR Automation (`after-pr`)
 
-Use `after-pr` for steps that should run automatically after `cruise run` successfully creates a pull request. `after-pr` uses the same step format as `steps`, so you can define prompt steps, command steps, and grouped steps there as well.
+Use `after-pr` for steps that should run automatically after `cruise run` successfully creates a pull request. `after-pr` uses the same step format as `steps`, so you can define inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, and grouped steps there as well.
 
 ```yaml
 steps:
@@ -752,7 +791,7 @@ steps:
 
 ### Workflow Composition (`workflow_call`)
 
-A step can delegate to another workflow config file by setting `workflow_call` instead of `prompt`, `command`, or `option`. The called workflow's steps are inlined into the parent at the call site, with each step ID prefixed by the call-site name (e.g. `shared-review/simplify`).
+A step can delegate to another workflow config file by setting `workflow_call` instead of `prompt`, `prompt_file`, `command`, or `option`. The called workflow's steps are inlined into the parent at the call site, with each step ID prefixed by the call-site name (e.g. `shared-review/simplify`).
 
 ```yaml
 steps:
@@ -785,7 +824,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `nex
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 
-All other step fields (`prompt`, `command`, `model`, `if`, `timeout`, `env`, etc.) are rejected at validation time.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `if`, `timeout`, `env`, etc.) are rejected at validation time.
 
 #### Nesting and cycle detection
 
@@ -809,11 +848,12 @@ steps:
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
+| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, or the default) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
-| `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
+| `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, or the default) |
 
-> **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
+> **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `prompt_file`, `instruction`, or `command` step fields.
 
 Literal braces are escaped Rust-`format!`-style: `{{` -> `{` and `}}` -> `}` (e.g. `"{{input}}"` resolves to the literal string `"{input}"`, not a lookup of `input`). An unclosed `{`, a lone `}`, or an empty `{}` is a template syntax error, as is referencing an undefined variable.
 

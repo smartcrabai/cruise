@@ -1,6 +1,6 @@
 # `after-pr`: steps that run after PR creation
 
-Steps that run automatically after `cruise run` creates a pull request via `gh pr create`. The format is identical to top-level `steps:` — prompt, command, option, and group calls are all supported.
+Steps that run automatically after `cruise run` creates a pull request via `gh pr create`. The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, and group calls are all supported.
 
 ## Basics
 

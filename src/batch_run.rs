@@ -48,7 +48,7 @@ fn enqueue_fresh(
 pub struct BatchSessionResult {
     /// Stable position in the scheduling order (first-scheduled = 0).
     ///
-    /// Use this to produce deterministic CLI summaries even when fast sessions
+    /// Use this to produce deterministic batch summaries even when fast sessions
     /// complete before slow ones started earlier.
     pub batch_index: usize,
     /// Session ID.

@@ -199,9 +199,9 @@ pub struct ListArgs {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
-    /// Set the maximum number of sessions to run concurrently in `run --all` mode.
+    /// Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
     ///
-    /// Must be >= 1. Omit to show the current configuration.
+    /// Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
 }

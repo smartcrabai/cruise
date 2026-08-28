@@ -282,10 +282,10 @@ fn expand_steps(
 
     for (step_name, step) in steps {
         if let Some(group_name) = &step.group {
-            // Old membership style: has group + prompt/command -> migration error
-            if step.prompt.is_some() || step.command.is_some() {
+            // Old membership style: has group + prompt/prompt_file/command -> migration error
+            if step.prompt.is_some() || step.prompt_file.is_some() || step.command.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                    "step '{step_name}' uses old membership style (group + prompt/command). \
+                    "step '{step_name}' uses old membership style (group + prompt/prompt_file/command). \
                      Please migrate to groups.<name>.steps block style."
                 )));
             }
