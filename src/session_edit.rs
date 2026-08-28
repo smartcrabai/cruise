@@ -139,30 +139,38 @@ pub fn update_session_settings(
     manager.save(&session)?;
 
     if !is_failed_or_suspended {
-        let resolved_config_key = source.path().map_or_else(
-            || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
-        );
-        let mut history = NewSessionHistory::load_best_effort();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: current_iso8601(),
-            input: session.input.clone(),
-            requested_config_path: requested_config_path.clone(),
-            // Clone paths are temporary; never expose them as recent directories.
-            working_dir: if session.repo.is_some() {
-                String::new()
-            } else {
-                session.base_dir.to_string_lossy().into_owned()
-            },
-            repo: session.repo.clone(),
-            resolved_config_key,
-            skipped_steps: session.skipped_steps.clone(),
-        });
-        history.save_best_effort();
+        record_history(&session, requested_config_path.as_ref(), &source);
     }
 
     let config_changed = old_explicit_config != requested_config_path;
     Ok((session, config_changed))
+}
+
+fn record_history(
+    session: &SessionState,
+    requested_config_path: Option<&String>,
+    source: &crate::resolver::ConfigSource,
+) {
+    let resolved_config_key = source.path().map_or_else(
+        || BUILTIN_CONFIG_KEY.to_string(),
+        |p| resolved_config_key_for_session(p),
+    );
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        input: session.input.clone(),
+        requested_config_path: requested_config_path.cloned(),
+        // Clone paths are temporary; never expose them as recent directories.
+        working_dir: if session.repo.is_some() {
+            String::new()
+        } else {
+            session.base_dir.to_string_lossy().into_owned()
+        },
+        repo: session.repo.clone(),
+        resolved_config_key,
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
 }
 
 fn validate_current_step_name(
