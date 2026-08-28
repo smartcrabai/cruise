@@ -47,6 +47,7 @@ mod test_support;
 mod timeout;
 mod variable;
 mod workflow;
+#[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
 mod workspace;
 mod worktree;
