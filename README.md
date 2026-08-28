@@ -112,7 +112,7 @@ Arguments:
   [INPUT]  Task description
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file (see Config File Resolution)
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
       --no-force-exec              Ignore force_exec: true and plan as usual
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
@@ -141,7 +141,7 @@ Arguments:
   [INPUT]  Task description (omit to prompt interactively; reads from stdin when piped)
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
 ```
 
 Saves the input as a `Draft` session without invoking the LLM. The plan can be generated later by choosing **Generate Plan** from `cruise list`. Useful when you have an idea you want to capture immediately but don't want to start (or pay for) planning yet.
@@ -155,7 +155,8 @@ Arguments:
   [SESSION]  Session ID to execute (if omitted, picks from pending sessions)
 
 Options:
-      --all                        Run all planned sessions sequentially
+      --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
+      --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -163,7 +164,11 @@ Options:
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
-`--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the remaining summary is still printed. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
+
+`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
+
+When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
 #### `cruise exec`
 
@@ -174,7 +179,7 @@ Arguments:
   [INPUT]  Task description bound to {input} (optional if your config doesn't reference {input})
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -215,7 +220,7 @@ Options:
       --set-parallelism <N>   Set the max number of sessions the desktop GUI runs concurrently in `run --all` mode (must be >= 1)
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI `cruise run --all` always runs sessions sequentially regardless of this value.
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise clean`
 
@@ -229,7 +234,7 @@ Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is
 
 ## Session Management
 
-Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`).
+Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Sessions whose workflow has no filesystem config path—including an explicit `-c __builtin__` selection—store the resolved YAML in `sessions/<session-id>/config.yaml` so they remain runnable without rediscovery.
 
 ### Runtime File Layout
 
@@ -237,11 +242,14 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 | Kind | Path |
 |------|------|
-| User YAML configs and application settings | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
+| User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` (default: `~/.config/cruise/workflows/`) |
+| Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
 
-> **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
+> **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`*.yml` into `~/.config/cruise/workflows/`, `config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
+>
+> **Workflow configs previously in `~/.config/cruise/*.yaml` / `*.yml`?** Automatic user-config discovery now looks for workflow YAMLs only in the `workflows/` subdirectory. Move them to `~/.config/cruise/workflows/`; cruise prints a warning if it finds YAML files left directly in `~/.config/cruise/`.
 
 ### Session Lifecycle
 
@@ -254,7 +262,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
    - **Ask** -- Ask a question; the answer is shown before the menu reappears.
    - **Execute now** -- Skip approval and run immediately.
 
-   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config.
+   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config. Cancelling the selector returns to the approve-plan menu without approving or executing the session.
 
 5. **`cruise run`** -- Picks up the approved session, reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps.
 
@@ -294,17 +302,17 @@ The interactive session list shows a menu of actions depending on the session's 
 
 cruise resolves the workflow config as follows:
 
-1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown.
+1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown. The special value `-c __builtin__` explicitly selects the built-in default workflow (see 4. below) even when config files exist.
 2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
-   - `$XDG_CONFIG_HOME/cruise/*.yaml` / `*.yml` (default: `~/.config/cruise/`), sorted by filename
+   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
-   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. With a single candidate the choice is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. A **Built-in default** entry is always offered at the end of the list, so the built-in default remains selectable even when config files are found; with only that entry present, it is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart.
+The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart. The GUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
 
 ## Config File Reference
 
@@ -325,9 +333,13 @@ description: |             # one-line summary shown next to the filename in sele
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
-languages:
+max_retries: 4
+languages:                # prompt languages (optional; locale-derived when omitted)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
+# Deprecated compatibility fields:
+# pr_language: English
+# plan_language: English
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 
 env:                      # environment variables applied to all steps (optional)
@@ -431,7 +443,9 @@ interactive_planning: false   # tool-less, file-based planning; allows claude-te
 
 ### Prompt Languages
 
-`languages.pr` controls the language of generated PR titles/bodies and `languages.plan` controls built-in planning prompts. The deprecated `pr_language` and `plan_language` fields remain supported; the effective planning value is available as `{plan.language}`.
+`languages.pr` controls the language of generated PR titles/bodies and `languages.plan` controls built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Both default to `English` when omitted. The effective values are available to built-in templates as `{pr.language}` and `{plan.language}`.
+
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values. Blank environment values are ignored. The deprecated top-level `pr_language` and `plan_language` fields remain supported, but the nested fields take precedence.
 
 ```yaml
 languages:
@@ -442,6 +456,12 @@ languages:
 For each setting, precedence is `CRUISE_LANGUAGE_PR` or `CRUISE_LANGUAGE_PLAN` > the corresponding `languages.*` field > its deprecated field > locale inference > `English`. Locale inference uses the first non-empty variable in `LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE` (the first entry for colon-separated `LANGUAGE`); unsupported or language-neutral values use `English`.
 
 Locale language codes recognized for inference are `en` (English), `ja` (Japanese), `zh` (Chinese), `ko` (Korean), `de` (German), `fr` (French), `es` (Spanish), `pt` (Portuguese), `it` (Italian), `ru` (Russian), `nl` (Dutch), `sv` (Swedish), `pl` (Polish), `tr` (Turkish), `vi` (Vietnamese), `th` (Thai), `id` (Indonesian), `ar` (Arabic), `hi` (Hindi), `uk` (Ukrainian), `cs` (Czech), `da` (Danish), `fi` (Finnish), `nb`/`no` (Norwegian), `hu` (Hungarian), `el` (Greek), `he` (Hebrew), and `ro` (Romanian). The built-in config keeps PR generation in English and leaves planning language unset for locale inference.
+
+```yaml
+# Deprecated compatibility fields:
+# pr_language: Japanese
+# plan_language: Japanese
+```
 
 ### Session Title Generation
 
@@ -455,6 +475,8 @@ No additional configuration is required.
 ### Environment Variables
 
 Environment variables can be set at two levels. Step-level values override top-level values for that step only. Values support template variable substitution.
+
+The CLI and desktop GUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`.
 
 ```yaml
 env:                        # top-level: applied to all steps
@@ -630,40 +652,38 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
+> **Warning:** A top-level cycle that mixes an `if.file-changed` jump back with unconditional sequential edges -- exactly the `test` → `review` → `test` shape above -- is rejected at startup, since it always exceeds the loop-protection ceiling once the conditional edge has exhausted its retries. Confine such retry loops inside a [step group](#step-groups) with `max_retries`.
+
 #### No file changes detection (`if.no-file-changes`)
 
-When a step has `if: no-file-changes`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
+When a step has `if.no-file-changes` set to `retry` or `failed`, a snapshot of the working directory is taken **before** the step runs. If the step completes without modifying any workspace files, the configured action is taken. Two modes are available:
 
-- **`fail: true`** -- Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
-- **`retry: true`** -- Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
+- **`failed`** -- Abort the workflow with an error and transition the session to the `Failed` state. This is useful for detecting cases where an LLM claims to have implemented something but did not actually modify any files.
+- **`retry`** -- Re-execute the current step. This is useful for retrying a step until it produces meaningful file changes.
 
 ```yaml
 steps:
   implement:
     prompt: "Implement the feature described in {plan}"
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   fix:
     prompt: "Fix the issue"
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
 ```
 
 **Constraints:**
-- `fail` and `retry` are mutually exclusive -- exactly one must be true.
+- The value must be either `retry` or `failed`; any other value (including the removed object form `{ fail: true }` / `{ retry: true }`) is a parse error.
 - Cannot be used in `after-pr` steps (rejected at validation time).
 - Cannot be used at the group level (`if` in group definitions).
-- Cannot be combined with the legacy `fail-if-no-file-changes: true` on the same step.
 - Can be combined with `if: file-changed` on the same step, but when both are present, `no-file-changes` takes priority for change detection.
-
-The legacy `fail-if-no-file-changes: true` syntax is still supported and is equivalent to `if: { no-file-changes: { fail: true } }`.
+- The legacy `fail-if-no-file-changes: true` field is rejected as an unknown field; migrate to `if: { no-file-changes: failed }`.
 
 ##### Declaring intentional no-changes
 
-Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** `fail` and `retry` for that attempt:
+Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** actions (`failed` and `retry`) for that attempt:
 
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
 - **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi`, `omp`, `pi-rust`, `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
@@ -672,7 +692,7 @@ Either path logs the declared reason so the decision stays visible in the run ou
 
 #### Failure handling (`if.fail`)
 
-`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: fail` trigger.
+`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
 
 Two forms are accepted:
 
@@ -699,6 +719,8 @@ steps:
 
 `if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`), so a misconfigured retry loop will not run forever.
 
+A step cycle that mixes a conditional jump (`if.file-changed` / `if.fail` goto) with unconditional sequential edges is rejected at startup: once the conditional edge exhausts its retries, the unconditional edges would always exceed the loop-protection ceiling. Confine such loops inside a group under `groups:` with `max_retries`, as in the example below, so exhausted retries degrade into a graceful skip. A group retry loop without `max_retries` has no such graceful skip and is treated as an unsafe conditional edge.
+
 **Constraints:**
 - `if.fail` is rejected at the group level and in `after-pr` steps.
 - Can be combined with other `if:` keys (`file-changed`, `no-file-changes`) on the same step.
@@ -710,6 +732,8 @@ Steps can be grouped to coordinate retry loops across multiple steps. A group re
 Groups can define their steps inline and are invoked from the main `steps` section with `group: <name>`:
 
 ```yaml
+max_retries: 4
+
 groups:
   review:
     if:
@@ -871,6 +895,7 @@ command:
 
 model: sonnet
 plan_model: opus
+max_retries: 4
 
 groups:
   review:
@@ -959,6 +984,18 @@ command:
   - claude
   - -p
 
+groups:
+  fix-loop:
+    if:
+      file-changed: test    # if the fix modified files, rerun the tests
+    max_retries: 2          # retries exhausted -> continue to commit
+    steps:
+      apply-fix:
+        prompt: |
+          The following test errors occurred. Please fix them:
+          ---
+          {prev.stderr}
+
 steps:
   implement:
     prompt: "{input}"
@@ -967,16 +1004,13 @@ steps:
     command: cargo test
 
   fix:
-    prompt: |
-      The following test errors occurred. Please fix them:
-      ---
-      {prev.stderr}
-    if:
-      file-changed: test    # after fix, if it modified files, jump back to test
+    group: fix-loop
 
   commit:
-    command: git add -A && git commit -m "feat: {input}"
+    command: "git add -A && git commit -m 'feat: {input}'"
 ```
+
+The retry loop is confined inside a group so that exhausted retries degrade into a graceful skip instead of a flat step cycle, which is rejected at startup.
 
 ## Config Hot-Reload
 
@@ -1002,21 +1036,22 @@ On resume, cruise restores more than just the current step: while running, each 
 
 ## Parallel Session Execution
 
-The desktop GUI supports running multiple sessions concurrently during `run --all`. The parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+Both the desktop GUI and the CLI support running multiple sessions concurrently during `run --all`.
+
+- **GUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
 - Launches up to `N` sessions concurrently.
-- Re-scans for newly added Planned sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
+- Re-scans for newly added eligible Planned or Suspended sessions every 200ms while worker slots are available, so sessions created while a batch is running are picked up automatically.
 - Results are returned in scheduling order regardless of completion order.
-
-The CLI `cruise run --all` always runs sessions sequentially regardless of the parallelism setting.
 
 ## New Session Form Persistence
 
 The desktop GUI persists two pieces of state across sessions:
 
-- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
+- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path—including the `__builtin__` sentinel for **Built-in default**—, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
 - **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.
 
 ## GitHub Actions

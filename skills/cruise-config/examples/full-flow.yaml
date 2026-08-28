@@ -8,6 +8,7 @@ description: Full TDD flow with review loop
 
 model: sonnet
 plan_model: opus
+max_retries: 4
 
 groups:
   review:
@@ -63,8 +64,7 @@ steps:
       Tests are written for {plan}. Implement to make them pass.
       Update {plan} if necessary.
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 
   test:
     command:

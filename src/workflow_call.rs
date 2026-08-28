@@ -53,7 +53,7 @@ pub fn resolve_workflow_calls(
 
 fn finalize_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     for warning in config.deprecated_language_warnings() {
-        eprintln!("warning: {warning}");
+        crate::status_eprintln!("warning: {warning}");
     }
     config.apply_env_overrides()?;
     Ok(config)
@@ -214,9 +214,6 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
     }
     if !step.env.is_empty() {
         invalid_fields.push("env");
-    }
-    if step.fail_if_no_file_changes {
-        invalid_fields.push("fail-if-no-file-changes");
     }
 
     if invalid_fields.is_empty() {

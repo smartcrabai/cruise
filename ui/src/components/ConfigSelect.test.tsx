@@ -1,12 +1,12 @@
 import { render, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ConfigEntry } from "../types";
+import { BUILTIN_CONFIG_PATH, type ConfigEntry } from "../types";
 import { ConfigSelect } from "./ConfigSelect";
 
 afterEach(() => cleanup());
 
 const BASE_DIR = "/home/user/project";
-const USER_DIR = "/home/user/.config/cruise";
+const USER_DIR = "/home/user/.config/cruise/workflows";
 
 const LOCAL_ROOT: ConfigEntry = {
   path: `${BASE_DIR}/cruise.yaml`,
@@ -56,7 +56,7 @@ describe("ConfigSelect", () => {
     // Then: it is the Auto entry with the corrected copy
     expect(firstOption).not.toBeNull();
     expect(firstOption).toHaveValue("");
-    expect(firstOption?.textContent).toBe("Auto (base dir / user config / builtin)");
+    expect(firstOption?.textContent).toBe("Auto (base dir / user workflows / builtin)");
   });
 
   it("groups local entries under a 'Base dir (...)' optgroup", () => {
@@ -81,7 +81,7 @@ describe("ConfigSelect", () => {
     expect(localGroup?.querySelector("option")?.value).toBe(LOCAL_ROOT.path);
   });
 
-  it("groups user entries under a 'User config (...)' optgroup derived from the entry path", () => {
+  it("groups user entries under a 'User workflows (...)' optgroup derived from the entry path", () => {
     // Given: a user-sourced entry
     const { container } = render(
       <ConfigSelect
@@ -95,7 +95,7 @@ describe("ConfigSelect", () => {
 
     // When: inspecting the optgroups
     const groups = getOptgroups(container);
-    const userGroup = groups.find((g) => g.label === `User config (${USER_DIR})`);
+    const userGroup = groups.find((g) => g.label === `User workflows (${USER_DIR})`);
 
     // Then: the user group exists and contains the entry, with description appended
     expect(userGroup).toBeDefined();
@@ -185,6 +185,28 @@ describe("ConfigSelect", () => {
     expect(onChange).toHaveBeenCalledWith(LOCAL_ROOT.path);
   });
 
+  it("calls onChange with the built-in sentinel when Built-in default is selected", () => {
+    // Given: a rendered select with a discovered config file
+    const onChange = vi.fn();
+    const { container } = render(
+      <ConfigSelect
+        id="config-select"
+        value=""
+        onChange={onChange}
+        configs={[LOCAL_ROOT]}
+        baseDir={BASE_DIR}
+      />,
+    );
+
+    // When: the user selects the explicit built-in option
+    const select = container.querySelector("select") as HTMLSelectElement;
+    select.value = BUILTIN_CONFIG_PATH;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+
+    // Then: the sentinel is emitted instead of a file path or Auto's empty value
+    expect(onChange).toHaveBeenCalledWith(BUILTIN_CONFIG_PATH);
+  });
+
   it("applies the given id to the underlying select", () => {
     // Given: a custom id
     const { container } = render(
@@ -261,6 +283,49 @@ describe("ConfigSelect", () => {
       "cruise.yaml",
       ".cruise/team.yaml",
     ]);
+  });
+
+  it("renders a 'Built-in default' option with the __builtin__ sentinel value right after 'Auto'", () => {
+    // Given: any set of configs
+    const { container } = render(
+      <ConfigSelect
+        id="config-select"
+        value=""
+        onChange={vi.fn()}
+        configs={[LOCAL_ROOT, USER_ENTRY]}
+        baseDir={BASE_DIR}
+      />,
+    );
+
+    // When: inspecting the first two options of the select
+    const select = container.querySelector("select");
+    const options = select?.querySelectorAll(":scope > option");
+
+    // Then: the second top-level option is the built-in entry, placed after Auto
+    expect(options).toHaveLength(2);
+    expect(options?.[0]).toHaveValue("");
+    expect(options?.[0]?.textContent).toBe("Auto (base dir / user workflows / builtin)");
+    expect(options?.[1]).toHaveValue(BUILTIN_CONFIG_PATH);
+    expect(options?.[1]?.textContent).toBe("Built-in default");
+  });
+
+  it("renders exactly one 'Built-in default' option even when configs are present", () => {
+    // Given: local, user, and other-sourced entries are all present
+    const { container } = render(
+      <ConfigSelect
+        id="config-select"
+        value=""
+        onChange={vi.fn()}
+        configs={[LOCAL_ROOT, USER_ENTRY, NO_SOURCE_ENTRY]}
+        baseDir={BASE_DIR}
+      />,
+    );
+
+    // When: counting options with the sentinel value across the whole select
+    const builtinOptions = container.querySelectorAll(`option[value="${BUILTIN_CONFIG_PATH}"]`);
+
+    // Then: the built-in entry appears exactly once (never duplicated into an optgroup)
+    expect(builtinOptions).toHaveLength(1);
   });
 
   it("strips a trailing slash from baseDir before matching entry paths", () => {

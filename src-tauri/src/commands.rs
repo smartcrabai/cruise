@@ -88,12 +88,19 @@ impl From<cruise::session::SessionState> for SessionDto {
             SessionPhase::Failed(e) => ("Failed".to_string(), Some(e.clone())),
             other => (other.label().to_string(), None),
         };
+        let config_path = s
+            .config_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| {
+                cruise::resolver::ConfigSource::is_builtin_source(&s.config_source)
+                    .then(|| BUILTIN_CONFIG_KEY.to_string())
+            });
         Self {
             id: s.id,
             phase: phase_label,
             phase_error,
             config_source: s.config_source,
-            config_path: s.config_path.map(|p| p.to_string_lossy().into_owned()),
+            config_path,
             base_dir: s.base_dir.to_string_lossy().into_owned(),
             repo: s.repo,
             input: s.input,
@@ -878,7 +885,8 @@ impl Drop for GuiPlanCtx {
 pub enum ConfigEntrySource {
     /// Under the session/working `base_dir` (root file or `.cruise/`).
     Local,
-    /// Under the user config dir (`$XDG_CONFIG_HOME/cruise` or `~/.config/cruise`).
+    /// Under the user workflow dir (`$XDG_CONFIG_HOME/cruise/workflows` or
+    /// `~/.config/cruise/workflows`).
     User,
 }
 
@@ -927,15 +935,8 @@ pub struct NewSessionDraftDto {
 /// sorted `ConfigEntryDto` entries. Files that fail to parse yield `description: None`.
 /// Every returned entry is tagged with `source`.
 fn read_configs_in(dir: &std::path::Path, source: ConfigEntrySource) -> Vec<ConfigEntryDto> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut configs: Vec<ConfigEntryDto> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
-        })
+    let mut configs: Vec<ConfigEntryDto> = cruise::configs::legacy_user_config_files(dir)
+        .into_iter()
         .map(|p| {
             let name = p
                 .file_name()
@@ -991,9 +992,9 @@ fn collect_local_configs(base_dir: &std::path::Path) -> Vec<ConfigEntryDto> {
 }
 
 /// Collect configs for the GUI from all sources in priority order:
-/// local (from `base_dir`) → user-dir.
+/// local (from `base_dir`) → user workflow configs.
 ///
-/// When `is_repo_mode` is true or `base_dir` is `None`, only user-dir configs are returned.
+/// When `is_repo_mode` is true or `base_dir` is `None`, only user workflow configs are returned.
 /// Duplicate absolute paths (e.g., symlinked files) are removed, keeping the first occurrence.
 fn collect_configs_for_gui(
     base_dir: Option<&std::path::Path>,
@@ -1025,8 +1026,8 @@ fn collect_configs_for_gui(
 /// List available workflow config files.
 ///
 /// When `base_dir` is provided and `repo` is `None`, local configs from the working directory
-/// are included first (in resolver priority order), followed by user-dir configs.
-/// When `base_dir` is absent, only user-dir configs are returned.
+/// are included first (in resolver priority order), followed by user workflow configs.
+/// When `base_dir` is absent, only user workflow configs are returned.
 ///
 /// When `repo` is set (a repo-backed session), `is_repo_mode` is `true` and local configs are
 /// skipped even if `base_dir` also points at a (possibly transient) repo clone directory.
@@ -1035,9 +1036,9 @@ pub fn list_configs(
     base_dir: Option<String>,
     repo: Option<String>,
 ) -> std::result::Result<Vec<ConfigEntryDto>, String> {
-    let user_config_dir = cruise::paths::config_dir().map_err(|e| e.to_string())?;
+    let user_workflows_dir = cruise::paths::workflows_dir().map_err(|e| e.to_string())?;
+    cruise::configs::warn_legacy_user_configs();
     let is_repo_mode = repo.is_some();
-
     let normalized_base_dir = base_dir
         .as_deref()
         .filter(|d| !d.is_empty())
@@ -1046,7 +1047,7 @@ pub fn list_configs(
     Ok(collect_configs_for_gui(
         normalized_base_dir.as_deref(),
         is_repo_mode,
-        &user_config_dir,
+        &user_workflows_dir,
     ))
 }
 
@@ -1582,10 +1583,24 @@ pub fn update_session_settings(
         }
     }
 
+    let session_uses_builtin = session.config_path.is_none()
+        && cruise::resolver::ConfigSource::is_builtin_source(&session.config_source);
+    // Older clients represented a built-in selection as a missing path. Treat
+    // that representation as the sentinel so saving settings cannot switch it
+    // back to automatic config discovery. The GUI sends an explicit empty string
+    // when the user selects Auto, which must remain distinguishable from an
+    // omitted value so a pinned built-in session can be unpinned.
+    let explicitly_requested_auto = config_path.as_deref() == Some("");
+    let config_path = if explicitly_requested_auto {
+        None
+    } else {
+        config_path.or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()))
+    };
     let old_config_path = session
         .config_path
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
 
     // Failed/Suspended: config path must stay the same
     if is_failed_or_suspended && old_config_path != config_path {
@@ -2432,6 +2447,7 @@ async fn execute_single_session(
                     effective_max_retries,
                     &skipped_steps_for_pr,
                     None,
+                    None,
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);
@@ -2811,7 +2827,7 @@ pub fn clear_new_session_draft() -> std::result::Result<(), String> {
 mod tests {
     use super::*;
     use cruise::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
-    use cruise::test_support::{init_git_repo, make_session};
+    use cruise::test_support::{EnvGuard, init_git_repo, lock_process, make_session};
 
     use std::fs;
     use std::path::Path;
@@ -3564,8 +3580,30 @@ mod tests {
     }
 
     #[test]
+    fn test_load_gui_workflow_config_applies_environment_overrides() {
+        let _lock = lock_process();
+        let _model = EnvGuard::set("CRUISE_MODEL", "opus");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let _sdk = EnvGuard::remove("CRUISE_SDK");
+        let _language_pr = EnvGuard::remove("CRUISE_LANGUAGE_PR");
+        let _language_plan = EnvGuard::remove("CRUISE_LANGUAGE_PLAN");
+        let _cleanup = EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR");
+        let _interactive = EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING");
+        let _force_exec = EnvGuard::remove("CRUISE_FORCE_EXEC");
+
+        let config = load_gui_workflow_config(
+            "command: [claude, -p]\nmodel: sonnet\nsteps:\n  s:\n    command: echo hi\n",
+            &cruise::resolver::ConfigSource::Builtin,
+            std::path::Path::new("."),
+        )
+        .unwrap_or_else(|e| panic!("config should load: {e}"));
+
+        assert_eq!(config.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
     fn test_resolve_gui_session_paths_local_config_beats_user_dir() {
-        // Given: base_dir contains cruise.yaml; ~/.cruise/default.yaml also exists
+        // Given: base_dir contains cruise.yaml; ~/.config/cruise/workflows/default.yaml also exists
         // (Regression: GUI used to resolve config from process cwd, picking user-dir default
         //  instead of the repo-local file.)
         let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3576,10 +3614,14 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let cruise_home = fake_home.path().join(".cruise");
-        fs::create_dir_all(&cruise_home).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = fake_home
+            .path()
+            .join(".config")
+            .join("cruise")
+            .join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
-            cruise_home.join("default.yaml"),
+            workflows_dir.join("default.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3682,6 +3724,44 @@ mod tests {
         assert!(
             matches!(source, cruise::resolver::ConfigSource::Explicit(_)),
             "expected ConfigSource::Explicit, got: {source:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_gui_session_paths_builtin_config_key_selects_builtin() {
+        // Given: base_dir contains cruise.yaml, and config_path is the built-in
+        // sentinel "__builtin__" (sent by the GUI when the user picks
+        // "Built-in default" in ConfigSelect)
+        let repo_dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = cruise::test_support::lock_process();
+        let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
+
+        // When: GUI session paths are resolved with the sentinel as config_path
+        let (_, yaml, source) = resolve_gui_session_paths(
+            repo_dir
+                .path()
+                .to_str()
+                .unwrap_or_else(|| panic!("unexpected None")),
+            Some(BUILTIN_CONFIG_KEY),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        // Then: built-in default yaml is returned as ConfigSource::Builtin
+        // (never Explicit with a fake path, which would break session persistence)
+        assert_eq!(
+            yaml,
+            cruise::config::BUILTIN_CONFIG_YAML,
+            "expected built-in default yaml, got: {yaml}"
+        );
+        assert!(
+            matches!(source, cruise::resolver::ConfigSource::Builtin),
+            "expected ConfigSource::Builtin, got: {source:?}"
         );
     }
 
@@ -3807,6 +3887,21 @@ mod tests {
     }
 
     // --- Post-plan session editing tests -----------------------------------------
+
+    #[test]
+    fn test_session_dto_preserves_builtin_config_selection() {
+        let mut session = cruise::session::SessionState::new(
+            "20260410000000".to_string(),
+            std::path::PathBuf::from("/repo"),
+            cruise::resolver::ConfigSource::Builtin.display_string(),
+            "test input".to_string(),
+        );
+        session.config_path = None;
+
+        let dto = SessionDto::from(session);
+
+        assert_eq!(dto.config_path.as_deref(), Some(BUILTIN_CONFIG_KEY));
+    }
 
     #[test]
     fn test_session_dto_includes_config_path_and_skipped_steps() {
@@ -4090,7 +4185,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
         // Use an empty fake HOME so the resolver falls through to the built-in default
-        // (no local cruise.yaml in repo, no CRUISE_CONFIG, no ~/.cruise/*.yaml files).
+        // (no local cruise.yaml in repo, no CRUISE_CONFIG, no user workflow YAML files).
         let _home_guard = cruise::test_support::EnvGuard::set("HOME", tmp.path().as_os_str());
         let _env_guard = cruise::test_support::EnvGuard::remove("CRUISE_CONFIG");
 
@@ -4115,6 +4210,53 @@ mod tests {
         assert!(
             config_yaml_path.exists(),
             "builtin config switch should write config.yaml to session dir"
+        );
+    }
+
+    #[test]
+    fn test_update_session_settings_allows_auto_for_builtin_session() {
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(repo.join("cruise.yaml"), "command: [echo]\nsteps: {}\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let session_id = "20260410000008";
+        let mut session = make_session(session_id, &repo);
+        session.phase = SessionPhase::AwaitingApproval;
+        session.config_source = BUILTIN_CONFIG_KEY.to_string();
+        session.config_path = None;
+        session.skipped_steps = vec![];
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // The GUI represents an explicit Auto selection with an empty string;
+        // omitted/null remains reserved for legacy callers that mean "unchanged".
+        let result = update_session_settings(
+            &manager,
+            session_id,
+            Some(String::new()),
+            vec![],
+            CurrentStepUpdate::Unchanged,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(saved.config_path.is_none());
+        assert_eq!(saved.config_source, result.config_source);
+        assert_eq!(
+            saved.config_source,
+            format!("config: {}", repo.join("cruise.yaml").display())
+        );
+        assert_ne!(
+            saved.config_source,
+            cruise::resolver::ConfigSource::Builtin.display_string()
+        );
+        assert_eq!(
+            fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "command: [echo]\nsteps: {}\n"
         );
     }
 
@@ -4888,6 +5030,39 @@ mod tests {
         // And: the surviving entry is the Local one (local entries are chained before user
         // entries, and dedup keeps the first occurrence of a given canonical path)
         assert_eq!(configs[0].source, ConfigEntrySource::Local);
+    }
+
+    // ---- list_configs (user-dir discovery via cruise::paths::workflows_dir) ----
+
+    #[test]
+    fn test_list_configs_ignores_legacy_top_level_yaml() {
+        // Given: a legacy top-level YAML and a current workflow YAML
+        let _lock = cruise::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = cruise::test_support::set_fake_home(tmp.path());
+        let cruise_dir = tmp.path().join(".config").join("cruise");
+        let workflows_dir = cruise_dir.join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            cruise_dir.join("legacy.yaml"),
+            "command: [legacy]\nsteps:\n  s1:\n    command: echo legacy\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            workflows_dir.join("current.yaml"),
+            "command: [current]\nsteps:\n  s1:\n    command: echo current\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the GUI lists configs through the Tauri entry point
+        let configs =
+            list_configs(None, None).unwrap_or_else(|e| panic!("list_configs failed: {e}"));
+
+        // Then: the legacy file is excluded and the workflow file is included
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "current.yaml");
+        assert_eq!(configs[0].source, ConfigEntrySource::User);
+        assert!(configs[0].path.ends_with("workflows/current.yaml"));
     }
 
     // --- respond_to_ask_impl --------------------------------------------------

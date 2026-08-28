@@ -246,7 +246,7 @@ pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>)
 /// Only registered by `engine::run_prompt_step` on prompt steps that carry an
 /// `if.no-file-changes` condition (see the caller for why it isn't registered
 /// on every step). Calling it disables that step's `if.no-file-changes`
-/// `fail` / `retry` for the current attempt -- the same effect as the
+/// `failed` / `retry` for the current attempt -- the same effect as the
 /// `NO_CHANGES_INTENTIONAL:` output marker, which works without any tool
 /// support. Fire-and-forget like [`submit_pr_metadata_tool`]: the reason is
 /// captured into `store` and read back by the caller after the turn ends.

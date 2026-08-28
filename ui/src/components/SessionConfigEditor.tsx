@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import type { ConfigEntry, PlanEvent, SkippableStepDto } from "../types";
+import { BUILTIN_CONFIG_PATH, type ConfigEntry, type PlanEvent, type SkippableStepDto } from "../types";
 import { getNewSessionConfigDefaults, listConfigs, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";
 import { collectExpandedStepIds } from "../lib/stepUtils";
 import { ConfigSelect } from "./ConfigSelect";
@@ -67,7 +67,11 @@ export function SessionConfigEditor({
     void listConfigs(repo ? { repo } : { baseDir: baseDir || "." })
       .then((c) => {
         if (active) {
-          if (currentConfig && !c.some((cfg) => cfg.path === currentConfig)) {
+          if (
+            currentConfig &&
+            currentConfig !== BUILTIN_CONFIG_PATH &&
+            !c.some((cfg) => cfg.path === currentConfig)
+          ) {
             setConfigs([
               ...c,
               { name: currentConfig.split("/").pop() ?? currentConfig, path: currentConfig },
@@ -206,7 +210,9 @@ export function SessionConfigEditor({
 
   const buildSettings = () => {
     const base: { configPath?: string; skippedSteps: string[]; currentStep?: string | null } = {
-      configPath: selectedConfigPath || undefined,
+      // Send an explicit empty value for Auto. The backend distinguishes this
+      // from an omitted value so a built-in-pinned session can be unpinned.
+      configPath: selectedConfigPath,
       skippedSteps: Array.from(selectedSkippedSteps),
     };
     if (hasCurrentStepChanged) {

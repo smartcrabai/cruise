@@ -23,8 +23,48 @@ pub struct CliOptionHandler;
 
 impl OptionHandler for CliOptionHandler {
     fn select_option(&self, choices: &[OptionChoice], plan: Option<&str>) -> Result<OptionResult> {
+        // Serialize against the direct `inquire` prompts in `run_cmd` so
+        // concurrent batch workers never draw overlapping terminal menus.
+        let _guard = prompt_lock_guard();
         crate::step::option::run_option(choices, plan)
     }
+}
+
+/// Process-wide lock serializing interactive terminal prompts.
+///
+/// Shared by [`CliOptionHandler`], the direct `inquire` prompts in `run_cmd`,
+/// and the raw-mode editor in `multiline_input` so concurrent batch workers
+/// never draw overlapping terminal UI. Only the synchronous prompt operation
+/// is serialized; command/agent work between prompts remains fully
+/// concurrent.
+///
+/// The lock is deliberately acquired at leaf prompt sites only:
+/// [`crate::multiline_input::prompt_multiline`] takes it around its raw-mode
+/// editor, and an option-step menu ([`CliOptionHandler::select_option`]) takes
+/// it across the whole menu interaction *including* its nested text-input
+/// editor. Because a `std::sync::Mutex` is not reentrant, that nested editor
+/// goes through `prompt_multiline_locked`, which must be called while the
+/// prompt lock is already held.
+static PROMPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROMPT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Acquire the process-wide prompt lock.
+pub(crate) fn prompt_lock_guard() -> std::sync::MutexGuard<'static, ()> {
+    let guard = PROMPT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    PROMPT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    guard
+}
+
+/// Try to acquire the prompt lock without blocking the dashboard renderer.
+pub(crate) fn try_prompt_lock_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
+    PROMPT_LOCK.try_lock().ok()
+}
+
+/// Return the generation of prompt activity observed by the dashboard.
+pub(crate) fn prompt_epoch() -> u64 {
+    PROMPT_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A test [`OptionHandler`] that panics if called.

@@ -178,8 +178,7 @@ steps:
       - Otherwise, include a line starting at the beginning of a line in your output: `NO_CHANGES_INTENTIONAL: <reason>`.
       Either one lets the workflow move on to the next step despite the lack of file changes.
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
   implement-after-tests:
     prompt: |
       Following the plan in {plan}, implement the code so that the tests pass.
@@ -214,8 +213,7 @@ steps:
       ## Test Result
       - Test command and result
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
   verify-plan-implementation:
     prompt: |-
       Verify that the implementation fully satisfies every requirement in {plan} before wiring verification.
