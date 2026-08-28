@@ -305,7 +305,9 @@ impl WorkflowConfig {
 
     /// Resolve the effective PR language.
     ///
-    /// Precedence: `languages.pr` > `pr_language` > default (`English`).
+    /// After [`WorkflowConfig::apply_env_overrides`], precedence is
+    /// `CRUISE_LANGUAGE_PR` > `languages.pr` > `pr_language` > locale >
+    /// default (`English`).
     /// Blank/whitespace values fall back to the default.
     #[must_use]
     pub fn effective_pr_language(&self) -> String {
@@ -316,7 +318,9 @@ impl WorkflowConfig {
 
     /// Resolve the effective planning language.
     ///
-    /// Precedence: `languages.plan` > `plan_language` > default (`English`).
+    /// After [`WorkflowConfig::apply_env_overrides`], precedence is
+    /// `CRUISE_LANGUAGE_PLAN` > `languages.plan` > `plan_language` > locale >
+    /// default (`English`).
     /// Blank/whitespace values fall back to the default.
     #[must_use]
     pub fn effective_plan_language(&self) -> String {
@@ -361,7 +365,7 @@ impl WorkflowConfig {
 pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/cruise.yaml");
 
 impl WorkflowConfig {
-    /// Apply environment variable overrides to scalar config fields.
+    /// Apply environment variable overrides and locale-derived language defaults.
     ///
     /// # Errors
     ///
@@ -388,6 +392,23 @@ impl WorkflowConfig {
                 .get_or_insert_with(LanguagesConfig::default)
                 .plan = Some(v);
         }
+
+        // Infer languages only when neither the new nor deprecated field was
+        // explicitly configured. Environment overrides above take precedence.
+        let languages = self.languages.as_ref();
+        if (languages.and_then(|l| l.pr.as_ref()).is_none() && self.pr_language.is_none()
+            || languages.and_then(|l| l.plan.as_ref()).is_none() && self.plan_language.is_none())
+            && let Some(language) = infer_language_from_locale()
+        {
+            let languages = self.languages.get_or_insert_with(LanguagesConfig::default);
+            if languages.pr.is_none() && self.pr_language.is_none() {
+                languages.pr = Some(language.clone());
+            }
+            if languages.plan.is_none() && self.plan_language.is_none() {
+                languages.plan = Some(language);
+            }
+        }
+
         if let Some(v) = read_env_bool("CRUISE_CLEANUP_AFTER_PR")? {
             self.cleanup_after_pr = v;
         }
@@ -406,6 +427,60 @@ fn read_env_string(name: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+const LOCALE_ENV_VARS: [&str; 4] = ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"];
+
+fn infer_language_from_locale() -> Option<String> {
+    // Locale precedence follows POSIX semantics: once the first non-empty
+    // variable is selected, an unsupported value must not fall through to a
+    // lower-priority variable.
+    let locale = LOCALE_ENV_VARS
+        .iter()
+        .find_map(|name| read_env_string(name))?;
+    locale_to_language_name(&locale)
+}
+
+fn locale_to_language_name(locale: &str) -> Option<String> {
+    let language = locale
+        .trim()
+        .split([':', '.', '@', '_', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let language_name = match language.as_str() {
+        "en" => "English",
+        "ja" => "Japanese",
+        "zh" => "Chinese",
+        "ko" => "Korean",
+        "de" => "German",
+        "fr" => "French",
+        "es" => "Spanish",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        "ru" => "Russian",
+        "nl" => "Dutch",
+        "sv" => "Swedish",
+        "pl" => "Polish",
+        "tr" => "Turkish",
+        "vi" => "Vietnamese",
+        "th" => "Thai",
+        "id" => "Indonesian",
+        "ar" => "Arabic",
+        "hi" => "Hindi",
+        "uk" => "Ukrainian",
+        "cs" => "Czech",
+        "da" => "Danish",
+        "fi" => "Finnish",
+        "nb" | "no" => "Norwegian",
+        "hu" => "Hungarian",
+        "el" => "Greek",
+        "he" => "Hebrew",
+        "ro" => "Romanian",
+        _ => return None,
+    };
+    Some(language_name.to_string())
 }
 
 fn read_env_bool(name: &str) -> crate::error::Result<Option<bool>> {
@@ -1445,6 +1520,14 @@ steps:
         assert_eq!(config.sdk.as_deref(), Some("seher"));
         assert_eq!(config.model.as_deref(), Some("build"));
         assert_eq!(config.plan_model.as_deref(), Some("plan"));
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.plan.as_deref()),
+            None
+        );
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
+            Some("English")
+        );
         assert!(config.cleanup_after_pr);
         // max_retries is unset so DEFAULT_MAX_RETRIES governs
         assert_eq!(config.max_retries, None);
@@ -2858,6 +2941,7 @@ steps:
                 "if",
                 "env",
                 "group",
+                "workflow_call",
                 "timeout",
             ],
             "StepConfig",
@@ -3272,6 +3356,10 @@ steps:
             EnvGuard::remove("CRUISE_SDK"),
             EnvGuard::remove("CRUISE_LANGUAGE_PR"),
             EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("LC_ALL"),
+            EnvGuard::remove("LC_MESSAGES"),
+            EnvGuard::remove("LANG"),
+            EnvGuard::remove("LANGUAGE"),
             EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
             EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
             EnvGuard::remove("CRUISE_FORCE_EXEC"),
@@ -3352,6 +3440,190 @@ steps:
             config.languages.as_ref().and_then(|l| l.pr.as_deref()),
             Some("Japanese")
         );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_infers_locale_language() {
+        let _lock = lock_process();
+        for (variables, expected) in [
+            (vec![("LANG", "ja_JP.UTF-8")], "Japanese"),
+            (
+                vec![
+                    ("LC_ALL", "de_DE.UTF-8"),
+                    ("LC_MESSAGES", "fr_FR.UTF-8"),
+                    ("LANG", "ja_JP.UTF-8"),
+                    ("LANGUAGE", "ko:en"),
+                ],
+                "German",
+            ),
+            (
+                vec![("LC_MESSAGES", "fr_FR.UTF-8"), ("LANG", "ja_JP.UTF-8")],
+                "French",
+            ),
+            (
+                vec![("LC_ALL", "   "), ("LC_MESSAGES", "de_DE.UTF-8")],
+                "German",
+            ),
+            (vec![("LANGUAGE", "ko:en")], "Korean"),
+            (
+                vec![("LC_ALL", "C.UTF-8"), ("LANG", "ja_JP.UTF-8")],
+                DEFAULT_PLAN_LANGUAGE,
+            ),
+            (vec![("LANG", "C.UTF-8")], DEFAULT_PLAN_LANGUAGE),
+            (vec![("LANG", "POSIX")], DEFAULT_PLAN_LANGUAGE),
+            (vec![("LANG", "xx_YY")], DEFAULT_PLAN_LANGUAGE),
+        ] {
+            let _guards = clear_all_override_envs();
+            let _envs: Vec<_> = variables
+                .into_iter()
+                .map(|(name, value)| EnvGuard::set(name, value))
+                .collect();
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(config.effective_plan_language(), expected);
+            assert_eq!(config.effective_pr_language(), expected);
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_preserves_explicit_plan_language() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        for field in ["languages:\n  plan: English", "plan_language: English"] {
+            let yaml =
+                format!("command: [claude, -p]\n{field}\nsteps:\n  s1:\n    command: echo hi\n");
+            let mut config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(config.effective_plan_language(), "English");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_pr_language_prevents_pr_inference() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: the PR language is explicitly configured while plan language is not
+        let mut config = WorkflowConfig::from_yaml(
+            "command: [claude, -p]\nlanguages:\n  pr: English\nsteps:\n  s1:\n    command: echo hi\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the explicit PR language wins and planning still follows the locale
+        assert_eq!(config.effective_pr_language(), "English");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_keeps_inferred_languages_out_of_deprecated_fields() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: a workflow with no new or deprecated language fields
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: locale inference is applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: inferred values are stored only in the new language settings
+        assert_eq!(config.pr_language, None);
+        assert_eq!(config.plan_language, None);
+        assert_eq!(config.effective_pr_language(), "Japanese");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_pr_env_wins_over_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+        let _pr_language = EnvGuard::set("CRUISE_LANGUAGE_PR", "French");
+
+        // Given: locale inference suggests Japanese and the explicit PR env selects French
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only the PR language is overridden explicitly
+        assert_eq!(config.effective_pr_language(), "French");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_plan_env_wins_over_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+        let _plan_language = EnvGuard::set("CRUISE_LANGUAGE_PLAN", "French");
+
+        // Given: locale inference suggests Japanese and the explicit plan env selects French
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the explicit plan environment override wins
+        assert_eq!(config.effective_plan_language(), "French");
+    }
+
+    #[test]
+    fn test_builtin_config_infers_plan_language_but_keeps_pr_language_english() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: the built-in config leaves planning language unspecified
+        let mut config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
+            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: planning follows the locale while PR generation remains English
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        assert_eq!(config.effective_pr_language(), "English");
+    }
+
+    #[test]
+    fn test_locale_to_language_name_parses_supported_locale_forms() {
+        for (locale, expected) in [
+            ("en-US", Some("English")),
+            ("zh_CN.UTF-8", Some("Chinese")),
+            ("pt_BR@latin", Some("Portuguese")),
+            ("", None),
+        ] {
+            assert_eq!(
+                locale_to_language_name(locale).as_deref(),
+                expected,
+                "locale: {locale}"
+            );
+        }
     }
 
     #[test]

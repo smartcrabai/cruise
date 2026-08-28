@@ -61,7 +61,7 @@ impl TryFrom<StepConfig> for StepKind {
     type Error = CruiseError;
 
     fn try_from(config: StepConfig) -> Result<Self> {
-        // Prompt step: `prompt` field is present.
+        // Prompt step: `prompt` is present.
         if let Some(prompt) = config.prompt {
             return Ok(StepKind::Prompt(PromptStep {
                 model: config.model,

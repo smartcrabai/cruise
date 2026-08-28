@@ -742,14 +742,7 @@ fn build_repo_planning_session(
 ) -> Result<(WorkflowConfig, SessionState)> {
     let (yaml, source) = crate::resolver::resolve_config_in_dir(explicit_config, clone_path)?;
     eprintln!("{}", style(source.display_string()).dim());
-    let config = match source.path() {
-        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path)?,
-        None => crate::workflow_call::resolve_workflow_calls(
-            WorkflowConfig::from_yaml(&yaml)
-                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
-            clone_path,
-        )?,
-    };
+    let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path)?;
     validate_config(&config)?;
 
     let mut session = SessionState::new(
@@ -759,18 +752,14 @@ fn build_repo_planning_session(
         input,
     );
     session.repo = Some(repo.to_string());
-    // Configs that live inside the clone (or the builtin default) are copied
-    // into the session directory so they stay readable after the clone is
-    // removed at approval time.
+    // Configs that live inside the clone (or the builtin default) are serialized
+    // after reference resolution into the session directory so they stay
+    // readable after the clone is removed at approval time.
     session.config_path = crate::repo_clone::persistent_config_path(&source, clone_path);
     manager.create(&session)?;
     if session.config_path.is_none() {
         let session_dir = manager.sessions_dir().join(session_id);
-        let config_to_persist = serde_yaml::to_string(&config).map_err(|e| {
-            CruiseError::Other(format!(
-                "failed to serialize resolved workflow config for session: {e}"
-            ))
-        })?;
+        let config_to_persist = crate::repo_clone::serialize_resolved_config(&config)?;
         std::fs::write(session_dir.join("config.yaml"), config_to_persist)?;
     }
     Ok((config, session))

@@ -228,6 +228,9 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
     let state_path = manager.state_path(&fallback.id);
     match manager.inspect_state_file(&fallback.id) {
         Ok(SessionFileContents::Parsed { state, .. }) => *state,
+        // The scheduled-state snapshot exists precisely so one unreadable
+        // state file degrades to a Failed summary row instead of aborting the
+        // whole `run --all` epilogue.
         Ok(contents) => {
             let mut state = fallback.clone();
             state.phase =

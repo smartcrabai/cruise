@@ -81,3 +81,5 @@ steps:
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours (see [flow-control.md](flow-control.md)) |
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
+| `workflow_call` | string | Workflow file or supported GitHub URL to inline |
+| `fail-if-no-file-changes` | bool | Legacy: fail when no files changed (see [flow-control.md](flow-control.md)) |

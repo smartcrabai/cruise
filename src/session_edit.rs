@@ -88,12 +88,25 @@ pub fn update_session_settings(
         ));
     }
 
-    let (yaml, source) = crate::resolver::resolve_config_in_dir(
-        requested_config_path.as_deref(),
-        &session.base_dir,
-    )?;
-    let config = crate::config::WorkflowConfig::from_yaml(&yaml)
-        .map_err(|e| CruiseError::Other(format!("config parse error: {e}")))?;
+    // Repo-backed sessions may have already removed their temporary clone after
+    // planning. Reuse the self-contained snapshot instead of resolving from the
+    // clone (or silently falling back to the builtin config).
+    let session_dir = manager.sessions_dir().join(session_id);
+    let snapshot_path = session_dir.join("config.yaml");
+    let reuse_repo_snapshot = session.repo.is_some()
+        && requested_config_path.is_none()
+        && session.config_path.is_none()
+        && snapshot_path.is_file();
+    let (yaml, source) = if reuse_repo_snapshot {
+        (
+            std::fs::read_to_string(&snapshot_path)
+                .map_err(|e| CruiseError::Other(format!("failed to read session config: {e}")))?,
+            crate::resolver::ConfigSource::Builtin,
+        )
+    } else {
+        crate::resolver::resolve_config_in_dir(requested_config_path.as_deref(), &session.base_dir)?
+    };
+    let config = crate::resolver::resolve_workflow_config(&yaml, &source, &session.base_dir)?;
     crate::config::validate_config(&config)?;
 
     match current_step_update {
@@ -105,7 +118,9 @@ pub fn update_session_settings(
         }
     }
 
-    session.config_source = source.display_string();
+    if !reuse_repo_snapshot {
+        session.config_source = source.display_string();
+    }
     // When no explicit config was requested, keep config_path = None so that
     // load_config falls back to the session-local config.yaml snapshot below.
     session.config_path = requested_config_path.as_ref().and(source.path()).cloned();
@@ -115,39 +130,47 @@ pub fn update_session_settings(
 
     // Write config.yaml first so that if session.json is saved successfully,
     // load_config will always find a consistent config on disk.
-    let session_dir = manager.sessions_dir().join(session_id);
     if session.config_path.is_none() {
-        std::fs::write(session_dir.join("config.yaml"), &yaml)
+        let snapshot = crate::repo_clone::serialize_resolved_config(&config)?;
+        std::fs::write(&snapshot_path, snapshot)
             .map_err(|e| CruiseError::Other(format!("failed to write session config: {e}")))?;
     }
 
     manager.save(&session)?;
 
     if !is_failed_or_suspended {
-        let resolved_config_key = source.path().map_or_else(
-            || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
-        );
-        let mut history = NewSessionHistory::load_best_effort();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: current_iso8601(),
-            input: session.input.clone(),
-            requested_config_path: requested_config_path.clone(),
-            // Clone paths are temporary; never expose them as recent directories.
-            working_dir: if session.repo.is_some() {
-                String::new()
-            } else {
-                session.base_dir.to_string_lossy().into_owned()
-            },
-            repo: session.repo.clone(),
-            resolved_config_key,
-            skipped_steps: session.skipped_steps.clone(),
-        });
-        history.save_best_effort();
+        record_history(&session, requested_config_path.as_ref(), &source);
     }
 
     let config_changed = old_explicit_config != requested_config_path;
     Ok((session, config_changed))
+}
+
+fn record_history(
+    session: &SessionState,
+    requested_config_path: Option<&String>,
+    source: &crate::resolver::ConfigSource,
+) {
+    let resolved_config_key = source.path().map_or_else(
+        || BUILTIN_CONFIG_KEY.to_string(),
+        |p| resolved_config_key_for_session(p),
+    );
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        input: session.input.clone(),
+        requested_config_path: requested_config_path.cloned(),
+        // Clone paths are temporary; never expose them as recent directories.
+        working_dir: if session.repo.is_some() {
+            String::new()
+        } else {
+            session.base_dir.to_string_lossy().into_owned()
+        },
+        repo: session.repo.clone(),
+        resolved_config_key,
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
 }
 
 fn validate_current_step_name(
@@ -525,16 +548,21 @@ mod tests {
         );
         assert!(reloaded.config_path.is_none());
         assert!(!config_changed);
-        assert_eq!(
-            fs::read_to_string(
-                manager
-                    .sessions_dir()
-                    .join("20260619000012")
-                    .join("config.yaml")
-            )
-            .unwrap_or_else(|e| panic!("{e:?}")),
-            crate::config::BUILTIN_CONFIG_YAML
-        );
+        let saved_config = fs::read_to_string(
+            manager
+                .sessions_dir()
+                .join("20260619000012")
+                .join("config.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let expected_config = crate::resolver::resolve_workflow_config(
+            crate::config::BUILTIN_CONFIG_YAML,
+            &crate::resolver::ConfigSource::Builtin,
+            &repo,
+        )
+        .and_then(|config| crate::repo_clone::serialize_resolved_config(&config))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved_config, expected_config);
     }
 
     #[test]
@@ -570,6 +598,46 @@ mod tests {
             session_dir.join("config.yaml").exists(),
             "config.yaml should be written for builtin/auto-resolved config"
         );
+    }
+
+    #[test]
+    fn test_update_repo_session_reuses_resolved_snapshot_after_clone_cleanup() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("removed-repo");
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619000013", &repo);
+        session.repo = Some("owner/repository".to_string());
+        session.config_path = None;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            manager
+                .sessions_dir()
+                .join("20260619000013")
+                .join("config.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: preserved\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(
+            &manager,
+            "20260619000013",
+            SessionSettingsUpdate {
+                config_path: None,
+                skipped_steps: vec![],
+                current_step_update: CurrentStepUpdate::Unchanged,
+            },
+        );
+
+        assert!(result.is_ok(), "snapshot edit failed: {result:?}");
+        let snapshot = fs::read_to_string(
+            manager
+                .sessions_dir()
+                .join("20260619000013")
+                .join("config.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(snapshot.contains("prompt: preserved"));
     }
 
     // --- Failed / Suspended phase gating (new) ---

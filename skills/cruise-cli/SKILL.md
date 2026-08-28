@@ -69,7 +69,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 
 ### `--repo` (GitHub repo sessions)
 
-`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **clone removed on approval** (branch kept) → `cruise run` re-clones → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and a config found inside the clone is copied to `sessions/<id>/config.yaml` so it survives clone removal. The GUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
+`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **clone removed on approval** (branch kept) → `cruise run` re-clones → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and the resolved workflow config (including the built-in default when no config file is found) is snapshotted to `sessions/<id>/config.yaml` so it survives clone removal and keeps workflow calls usable. The GUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
 
 ## Workspace modes (chosen at `cruise run`)
 
@@ -84,7 +84,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 | **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched and supports independent PR-backed sessions. **Requires `gh` CLI.** |
 | **Current branch** | Runs in place on the active branch. No worktree, no auto-PR. | Quick iterations on the current branch. Normal runs need a **clean working tree** and an **attached branch** (not detached HEAD); `exec`/`force_exec` may start dirty. On resume the branch must match. |
 
-Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely).
+Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely). Repo sessions snapshot the resolved workflow config before clone cleanup, so workflow-call expansions remain usable.
 
 **Copy files into the worktree** by listing relative paths in a `.worktreeinclude` at the repo root (e.g. `.env`, `secrets/`). Absolute paths and `..` are ignored for safety.
 
@@ -135,7 +135,7 @@ The interactive menu changes with the session's phase:
 
 - **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
-- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` and the batch still completes.
+- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
 - In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).

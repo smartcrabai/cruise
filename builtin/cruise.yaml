@@ -3,7 +3,6 @@ model: build
 plan_model: plan
 languages:
   pr: English
-  plan: English
 cleanup_after_pr: true
 groups:
   review:

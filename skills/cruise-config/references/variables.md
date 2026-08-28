@@ -12,8 +12,8 @@ Variables can be referenced as `{name}` inside `prompt` / `command` / `env` / `p
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`"true"` / `"false"` string) |
 | `{plan}` | Absolute path of the session's plan file (set automatically by `cruise run`) |
-| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, or the default) |
-| `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, or the default) |
+| `{plan.language}` | Effective language for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, or locale inference) |
+| `{pr.language}` | Effective language for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, or locale inference) |
 | `{pr.number}` | PR number, available after a PR has been created |
 | `{pr.url}` | PR URL, available after a PR has been created |
 
