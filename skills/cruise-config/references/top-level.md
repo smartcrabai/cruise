@@ -17,7 +17,9 @@ description: My workflow  # Optional: shown alongside the file name in config se
 model: sonnet             # Optional: default model for prompt steps
                           # (in SDK mode, reinterpreted as a seher mode_key)
 plan_model: opus          # Optional: model for the built-in plan step
-pr_language: English      # Optional: language for auto-generated PR title/body (default: English)
+languages:                # Optional: prompt languages; locale-derived when omitted
+  pr: English             # Language for auto-generated PR title/body
+  plan: English           # Language for built-in planning prompts
 
 llm:                      # Optional: OpenAI-compatible API for session-title generation
   api_key: sk-...
@@ -98,12 +100,29 @@ Free-form text shown alongside the file name in the CLI/GUI config selectors. Pu
 description: Full TDD flow with review loop
 ```
 
-## `pr_language`
+## `languages`
 
-Language used for the auto-generated PR title and body. Defaults to `English`.
+`languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
 ```yaml
-pr_language: Japanese     # PR title/body generated in Japanese
+languages:
+  pr: Japanese           # PR title/body generated in Japanese
+  plan: Japanese         # plans and plan answers generated in Japanese
+```
+
+The precedence for each setting is its `CRUISE_LANGUAGE_PR` or
+`CRUISE_LANGUAGE_PLAN` environment variable, the corresponding `languages`
+field, the deprecated top-level field, the first non-empty OS locale variable
+from `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE`, then `English`.
+`LANGUAGE` uses its first colon-separated entry. Unsupported or
+language-neutral locales (such as `C.UTF-8` and `POSIX`) do not fall through to
+lower-priority variables and instead use `English`.
+
+```yaml
+# Deprecated; use languages.pr instead.
+pr_language: Japanese
+# Deprecated; use languages.plan instead.
+plan_language: Japanese
 ```
 
 ## Hot-reload

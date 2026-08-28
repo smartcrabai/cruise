@@ -130,7 +130,7 @@ With `--grill`, the plan step becomes an interview: instead of writing the plan 
 
 With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend. This is useful when using tool-incapable providers (e.g. `sdk: claude-terminal`). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
-With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config found inside the clone is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
+With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and the resolved workflow config (including the built-in default when no config file is found) is snapshotted to `sessions/<session-id>/config.yaml` so workflow calls remain usable after the clone is removed. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
 #### `cruise draft`
 
@@ -163,7 +163,7 @@ Options:
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
 ```
 
-`--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. `--all` and `[SESSION]` are mutually exclusive.
+`--all` runs every Planned session in sequence. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the remaining summary is still printed. `--all` and `[SESSION]` are mutually exclusive.
 
 #### `cruise exec`
 
@@ -325,9 +325,10 @@ description: |             # one-line summary shown next to the filename in sele
 
 model: sonnet             # default model for all prompt steps (optional)
 plan_model: opus          # model used for the built-in plan step (optional)
-pr_language: English      # language for auto-generated PR title/body (optional, default: English)
-# force_exec: false          # execute direct plan entry points in place (use --no-force-exec to opt out)
-plan_language: English       # language used by built-in planning prompts (optional, default: English)
+languages:
+  pr: English             # language for auto-generated PR title/body
+  plan: English           # language used by built-in planning prompts
+# force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 
 env:                      # environment variables applied to all steps (optional)
   API_KEY: sk-...
@@ -428,21 +429,19 @@ interactive_planning: false   # tool-less, file-based planning; allows claude-te
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
 
-### PR Language
+### Prompt Languages
 
-The `pr_language` field controls the language used for the auto-generated PR title and body. Defaults to `"English"` when omitted.
-
-```yaml
-pr_language: Japanese     # PR title/body will be generated in Japanese
-```
-
-### Plan Language
-
-The `plan_language` field controls the language used by cruise's built-in planning prompts, including initial plan generation, plan fixes, and plan Q&A. Defaults to `"English"` when omitted. The normalized value is available to built-in planning templates as `{plan.language}`.
+`languages.pr` controls the language of generated PR titles/bodies and `languages.plan` controls built-in planning prompts. The deprecated `pr_language` and `plan_language` fields remain supported; the effective planning value is available as `{plan.language}`.
 
 ```yaml
-plan_language: Japanese   # generated/updated plans and plan answers will be in Japanese
+languages:
+  pr: Japanese    # PR title/body
+  plan: Japanese  # plans and plan answers
 ```
+
+For each setting, precedence is `CRUISE_LANGUAGE_PR` or `CRUISE_LANGUAGE_PLAN` > the corresponding `languages.*` field > its deprecated field > locale inference > `English`. Locale inference uses the first non-empty variable in `LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE` (the first entry for colon-separated `LANGUAGE`); unsupported or language-neutral values use `English`.
+
+Locale language codes recognized for inference are `en` (English), `ja` (Japanese), `zh` (Chinese), `ko` (Korean), `de` (German), `fr` (French), `es` (Spanish), `pt` (Portuguese), `it` (Italian), `ru` (Russian), `nl` (Dutch), `sv` (Swedish), `pl` (Polish), `tr` (Turkish), `vi` (Vietnamese), `th` (Thai), `id` (Indonesian), `ar` (Arabic), `hi` (Hindi), `uk` (Ukrainian), `cs` (Czech), `da` (Danish), `fi` (Finnish), `nb`/`no` (Norwegian), `hu` (Hungarian), `el` (Greek), `he` (Hebrew), and `ro` (Romanian). The built-in config keeps PR generation in English and leaves planning language unset for locale inference.
 
 ### Session Title Generation
 
@@ -809,9 +808,10 @@ steps:
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
+| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, or locale inference) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
-| `{pr.language}` | Language used for PR title/body generation (from `pr_language`) |
+| `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, or locale inference) |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `instruction`, or `command` step fields.
 

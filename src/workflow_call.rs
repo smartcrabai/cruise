@@ -30,12 +30,8 @@ pub struct GitHubWorkflowRef {
 pub fn resolve_workflow_calls_from_path(path: impl Into<PathBuf>) -> Result<WorkflowConfig> {
     let path = path.into();
     let mut stack = CallStack::default();
-    let mut config = load_local_workflow(&path, &mut stack)?;
-    for warning in config.deprecated_language_warnings() {
-        eprintln!("warning: {warning}");
-    }
-    config.apply_env_overrides()?;
-    Ok(config)
+    let config = load_local_workflow(&path, &mut stack)?;
+    finalize_config(config)
 }
 
 /// Resolve `workflow_call` steps in an already parsed config using the supplied
@@ -51,7 +47,11 @@ pub fn resolve_workflow_calls(
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut stack = CallStack::default();
-    let mut config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    let config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    finalize_config(config)
+}
+
+fn finalize_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     for warning in config.deprecated_language_warnings() {
         eprintln!("warning: {warning}");
     }
@@ -259,7 +259,12 @@ fn github_relative_workflow_url(base_dir: &str, workflow_call: &str) -> String {
         match part {
             "" | "." => {}
             ".." => {
-                path_parts.pop();
+                // Keep relative remote references inside the same repository and
+                // ref. The URL prefix has six components through the ref:
+                // `https://raw.githubusercontent.com/{owner}/{repo}/{ref}`.
+                if path_parts.len() > 6 {
+                    path_parts.pop();
+                }
             }
             _ => path_parts.push(part),
         }
@@ -441,10 +446,16 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
             .unwrap_or_else(|_| unreachable!("base64 alphabet index always fits in u32"));
         buffer = (buffer << 6) | value;
         bits += 6;
-        if bits >= 8 {
+        while bits >= 8 {
             bits -= 8;
             output.push(((buffer >> bits) & 0xff) as u8);
         }
+        // Retain only the unconsumed low bits so the accumulator stays bounded.
+        buffer = if bits == 0 {
+            0
+        } else {
+            buffer & ((1_u32 << bits) - 1)
+        };
     }
 
     Some(output)
@@ -477,6 +488,10 @@ mod tests {
             EnvGuard::remove("CRUISE_SDK"),
             EnvGuard::remove("CRUISE_LANGUAGE_PR"),
             EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("LC_ALL"),
+            EnvGuard::remove("LC_MESSAGES"),
+            EnvGuard::remove("LANG"),
+            EnvGuard::remove("LANGUAGE"),
             EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
             EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
         ]
@@ -1025,6 +1040,33 @@ steps:
 
         // Then: model reflects the env var override, not the YAML value
         assert_eq!(config.model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_workflow_calls_from_path_infers_languages_from_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        let path = write_file(
+            &dir,
+            "cruise.yaml",
+            r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+",
+        );
+
+        // Given: a workflow file with no explicit language configuration
+        // When: it is loaded through the workflow-call entry point
+        let config = resolved_from_path(path);
+
+        // Then: locale inference is applied to the loaded workflow
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        assert_eq!(config.effective_pr_language(), "Japanese");
     }
 
     #[test]

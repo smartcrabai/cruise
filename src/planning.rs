@@ -71,8 +71,9 @@ fn clarification_guidance(interactive: bool) -> &'static str {
 /// Build the variable store used by all plan-related flows.
 ///
 /// Registers both `{plan}` (the session plan file path) and `{plan.language}`
-/// (normalized from `plan_language`, defaulting to English if blank) so CLI and
-/// GUI planning prompts resolve the same variables.
+/// (the effective `languages.plan` value, including environment/locale
+/// resolution applied before planning) so CLI and GUI planning prompts resolve
+/// the same variables.
 #[must_use]
 pub fn setup_plan_vars(
     session_input: String,

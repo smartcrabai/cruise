@@ -228,21 +228,26 @@ fn record_session_state_conflict_choice(choice: &str) {
     }
 }
 
-fn load_run_all_result_state(
-    manager: &SessionManager,
-    fallback: &SessionState,
-) -> Result<SessionState> {
-    let contents = manager.inspect_state_file(&fallback.id)?;
-    if let SessionFileContents::Parsed { state, .. } = contents {
-        Ok(*state)
-    } else {
-        let state_path = manager.state_path(&fallback.id);
-        let message = session_state_conflict_message(&state_path, &contents);
-        let mut state = fallback.clone();
-        state.phase = SessionPhase::Failed(message);
-        state.completed_at = Some(current_iso8601());
-        Ok(state)
-    }
+fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) -> SessionState {
+    let message = match manager.inspect_state_file(&fallback.id) {
+        Ok(SessionFileContents::Parsed { state, .. }) => return *state,
+        // The scheduled-state snapshot exists precisely so one unreadable
+        // state file (e.g. permissions changed mid-batch) degrades to a
+        // Failed summary row instead of aborting the whole `run --all`
+        // epilogue after every worker has already finished.
+        Ok(contents) => {
+            session_state_conflict_message(&manager.state_path(&fallback.id), &contents)
+        }
+        Err(e) => format!(
+            "{}: failed to reload session state: {}",
+            manager.state_path(&fallback.id).display(),
+            e.detailed_message()
+        ),
+    };
+    let mut state = fallback.clone();
+    state.phase = SessionPhase::Failed(message);
+    state.completed_at = Some(current_iso8601());
+    state
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
@@ -790,7 +795,7 @@ async fn run_all(args: RunArgs) -> Result<()> {
             }
             Ok(()) | Err(_) => {}
         }
-        results.push(load_run_all_result_state(&manager, &session)?);
+        results.push(load_run_all_result_state(&manager, &session));
         if interrupted {
             break;
         }
