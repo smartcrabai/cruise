@@ -1,12 +1,18 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+mod batch_dashboard;
+#[cfg_attr(not(test), expect(dead_code))]
+mod batch_run;
 mod cancellation;
 mod clean_cmd;
 mod cli;
 mod condition;
 mod config;
 mod config_cmd;
+#[cfg_attr(not(test), expect(dead_code))]
+mod configs;
+mod console_mode;
 mod dag;
 mod display;
 mod draft_cmd;
@@ -28,6 +34,7 @@ mod platform;
 mod repo_clone;
 mod resolver;
 mod run_cmd;
+mod run_observer;
 mod sdk_tools;
 mod session;
 mod session_edit;
@@ -44,8 +51,13 @@ mod workflow_call;
 mod workspace;
 mod worktree;
 mod worktree_pr;
+#[cfg_attr(not(test), expect(dead_code))]
+mod yaml_metadata;
 
-#[tokio::main(flavor = "current_thread")]
+// Multi-threaded runtime: parallel `run --all` workers execute blocking
+// terminal prompts inline in their tasks; on a single-threaded runtime any
+// open menu would freeze every other concurrently running session.
+#[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
         eprintln!("Error: {}", e.detailed_message());

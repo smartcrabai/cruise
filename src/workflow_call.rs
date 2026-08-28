@@ -55,7 +55,7 @@ pub fn resolve_workflow_calls(
 
 fn finish_resolved_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     for warning in config.deprecated_language_warnings() {
-        eprintln!("warning: {warning}");
+        crate::status_eprintln!("warning: {warning}");
     }
     config.apply_env_overrides()?;
     Ok(config)
@@ -204,7 +204,6 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("if", step.if_condition.is_some()),
         ("timeout", step.timeout.is_some()),
         ("env", !step.env.is_empty()),
-        ("fail-if-no-file-changes", step.fail_if_no_file_changes),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
@@ -615,6 +614,10 @@ mod tests {
             EnvGuard::remove("CRUISE_SDK"),
             EnvGuard::remove("CRUISE_LANGUAGE_PR"),
             EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("LC_ALL"),
+            EnvGuard::remove("LC_MESSAGES"),
+            EnvGuard::remove("LANG"),
+            EnvGuard::remove("LANGUAGE"),
             EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
             EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
         ]
@@ -1227,6 +1230,33 @@ steps:
 
         // Then: model reflects the env var override, not the YAML value
         assert_eq!(config.model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_workflow_calls_from_path_infers_languages_from_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        let path = write_file(
+            &dir,
+            "cruise.yaml",
+            r"
+command: [claude, -p]
+steps:
+  s1:
+    command: echo hi
+",
+        );
+
+        // Given: a workflow file with no explicit language configuration
+        // When: it is loaded through the workflow-call entry point
+        let config = resolved_from_path(path);
+
+        // Then: locale inference is applied to the loaded workflow
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        assert_eq!(config.effective_pr_language(), "Japanese");
     }
 
     #[test]

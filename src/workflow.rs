@@ -61,53 +61,7 @@ pub struct SkippableStepNode {
 /// Returns an error if the config references undefined groups or uses
 /// invalid group configurations.
 pub fn list_skippable_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStepNode>> {
-    let (expanded_steps, _invocations, step_to_invocation) =
-        expand_steps(&config.steps, &config.groups)?;
-    let mut expanded_ids_by_call_site: HashMap<String, Vec<String>> = HashMap::new();
-
-    for expanded_id in expanded_steps.keys() {
-        if let Some(call_site) = step_to_invocation.get(expanded_id) {
-            expanded_ids_by_call_site
-                .entry(call_site.clone())
-                .or_default()
-                .push(expanded_id.clone());
-        }
-    }
-
-    config
-        .steps
-        .iter()
-        .map(|(step_name, step_config)| {
-            if step_config.group.is_some() {
-                let expanded_ids =
-                    expanded_ids_by_call_site.remove(step_name).ok_or_else(|| {
-                        crate::error::CruiseError::InvalidStepConfig(format!(
-                            "group call step '{step_name}' produced no expanded steps"
-                        ))
-                    })?;
-                let children = expanded_ids
-                    .iter()
-                    .cloned()
-                    .map(|expanded_id| SkippableStepNode {
-                        id: expanded_id.clone(),
-                        expanded_step_ids: vec![expanded_id],
-                        children: Vec::new(),
-                    })
-                    .collect();
-                Ok(SkippableStepNode {
-                    id: step_name.clone(),
-                    expanded_step_ids: expanded_ids,
-                    children,
-                })
-            } else {
-                Ok(SkippableStepNode {
-                    id: step_name.clone(),
-                    expanded_step_ids: vec![step_name.clone()],
-                    children: Vec::new(),
-                })
-            }
-        })
-        .collect()
+    list_skippable_step_map(&config.steps, &config.groups)
 }
 
 /// Build a tree of skippable after-pr steps from a [`WorkflowConfig`].
@@ -127,8 +81,14 @@ pub fn list_skippable_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStep
 /// Returns an error if the config references undefined groups or uses
 /// invalid group configurations.
 pub fn list_skippable_after_pr_steps(config: &WorkflowConfig) -> Result<Vec<SkippableStepNode>> {
-    let (expanded_steps, _invocations, step_to_invocation) =
-        expand_steps(&config.after_pr, &config.groups)?;
+    list_skippable_step_map(&config.after_pr, &config.groups)
+}
+
+fn list_skippable_step_map(
+    steps: &IndexMap<String, StepConfig>,
+    groups: &HashMap<String, crate::config::GroupConfig>,
+) -> Result<Vec<SkippableStepNode>> {
+    let (expanded_steps, _invocations, step_to_invocation) = expand_steps(steps, groups)?;
     let mut expanded_ids_by_call_site: HashMap<String, Vec<String>> = HashMap::new();
 
     for expanded_id in expanded_steps.keys() {
@@ -140,8 +100,7 @@ pub fn list_skippable_after_pr_steps(config: &WorkflowConfig) -> Result<Vec<Skip
         }
     }
 
-    config
-        .after_pr
+    steps
         .iter()
         .map(|(step_name, step_config)| {
             if step_config.group.is_some() {
@@ -851,34 +810,6 @@ steps:
         assert!(
             msg.contains("collides"),
             "expected 'collides' in error message, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_compile_group_step_preserves_fail_if_no_file_changes() {
-        // Given: a group whose sub-step has fail-if-no-file-changes: true
-        let yaml = r"
-command: [echo]
-groups:
-  review:
-    steps:
-      implement:
-        command: cargo build
-        fail-if-no-file-changes: true
-steps:
-  run-review:
-    group: review
-";
-        // When: compiled
-        let c = compiled(yaml);
-        // Then: the expanded step preserves fail_if_no_file_changes
-        let step = c
-            .steps
-            .get("run-review/implement")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(
-            step.fail_if_no_file_changes,
-            "fail_if_no_file_changes should be preserved after compilation"
         );
     }
 

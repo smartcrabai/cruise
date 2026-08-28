@@ -251,6 +251,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     let run_args = crate::cli::RunArgs {
                         session: Some(session.id.clone()),
                         all: false,
+                        parallelism: None,
                         max_retries: None,
                         rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                         dry_run: false,

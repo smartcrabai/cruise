@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
+description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), bounded `run --all --parallelism` execution and the live `run --all` dashboard, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -30,7 +30,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Execute the next approved (Planned) session | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
-| Execute every Planned session back-to-back | `cruise run --all` |
+| Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
+| Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Browse / approve / resume / delete sessions | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
@@ -52,6 +53,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
    - **Ask** → ask a question; the answer is shown, then the menu reappears.
    - **Execute now** → skip approval and run immediately.
 
+   After **Approve** or **Execute now**, the step-skip selector lets you omit steps for this run; cancelling it returns to the action menu without approving or executing.
+
 3. **Run.** `cruise run` picks up a `Planned` session, prompts for a **workspace mode** (below), reuses/creates the worktree, executes the workflow steps, creates a PR with `gh pr create`, then runs any `after-pr` steps. The session ends as `Completed` (or `Failed`). Transient exec sessions are excluded from automatic selection and `run --all`; resume them only with an explicit ID.
 
 4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` and deletes the session + worktree (and any leftover `--repo` clone) once the PR is merged or closed.
@@ -66,7 +69,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 
 ### `--repo` (GitHub repo sessions)
 
-`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **clone removed on approval** (branch kept) → `cruise run` re-clones → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and a resolved config found inside the clone is copied to `sessions/<id>/config.yaml` so it survives clone removal (including inlined `prompt_file` contents). The GUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
+`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **clone removed on approval** (branch kept) → `cruise run` re-clones → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and the resolved config (including the built-in default when no config file is found) is copied to `sessions/<id>/config.yaml` so it survives clone removal (including inlined `prompt_file` contents). The GUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
 
 ## Workspace modes (chosen at `cruise run`)
 
@@ -78,10 +81,10 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 
 | Mode | What it does | When to use |
 |------|--------------|-------------|
-| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched; supports parallel sessions. **Requires `gh` CLI.** |
+| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched and supports independent PR-backed sessions. **Requires `gh` CLI.** |
 | **Current branch** | Runs in place on the active branch. No worktree, no auto-PR. | Quick iterations on the current branch. Normal runs need a **clean working tree** and an **attached branch** (not detached HEAD); `exec`/`force_exec` may start dirty. On resume the branch must match. |
 
-Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely).
+Non-interactive runs (piped stdin), `cruise run --all`, and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely). Repo sessions snapshot the resolved workflow config before clone cleanup, so workflow-call expansions remain usable.
 
 **Copy files into the worktree** by listing relative paths in a `.worktreeinclude` at the repo root (e.g. `.env`, `secrets/`). Absolute paths and `..` are ignored for safety.
 
@@ -110,10 +113,10 @@ The interactive menu changes with the session's phase:
 
 `cruise run`/`plan`/`exec` resolve the **workflow YAML** in this order:
 
-1. `-c/--config <path>` (must exist; no prompt)
+1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` selects the built-in default workflow.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
-3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/*.yaml|*.yml`. Multiple candidates → interactive picker (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time).
+3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
+4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 
@@ -121,17 +124,20 @@ The interactive menu changes with the session's phase:
 
 | Kind | Path (default) |
 |------|----------------|
-| User YAML configs + app settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
-| Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` |
+| User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` → `~/.config/cruise/workflows/` |
+| App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
+| Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot) |
 | State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
-> Older versions kept everything under `~/.cruise/`. If migrating, move configs to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees.
+> Older versions kept everything under `~/.cruise/`. If migrating, move workflow YAMLs to `~/.config/cruise/workflows/`, `config.json` to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees. Cruise also warns if workflow YAMLs are left directly in `~/.config/cruise/` (legacy location) instead of the `workflows/` subdirectory.
 
 ## Operational notes & gotchas
 
 - **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
-- **`--all` runs sequentially** in the CLI regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**).
+- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
+- **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
+- In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
 - **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
@@ -149,7 +155,10 @@ cruise plan --skip-planning "$(cat my-plan.md)"
 cruise run
 
 # Drain the queue
-cruise run --all                 # every Planned session, worktree mode, summary table at the end
+cruise run --all                 # every Planned or Suspended session, worktree mode, live dashboard on TTY for non-dry runs, summary at the end
+
+# Drain the queue with bounded concurrency (this invocation only)
+cruise run --all --parallelism 4
 
 # Throwaway run against the current branch, no PR
 cruise exec "tidy up the imports in src/"

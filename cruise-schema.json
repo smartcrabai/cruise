@@ -92,6 +92,7 @@
   "$defs": {
     "StepConfig": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "model": {
           "type": "string",
@@ -172,10 +173,6 @@
           "type": ["string", "null"],
           "description": "Path to a file whose contents are used as the prompt. Absolute, ~-prefixed, config-file-relative, or supported GitHub blob/raw URL (a bare file name = same directory). YAML `~` or null denotes the local home directory. Mutually exclusive with prompt."
         },
-        "fail-if-no-file-changes": {
-          "type": "boolean",
-          "description": "Fail the step if no files were changed"
-        },
         "timeout": {
           "type": "string",
           "pattern": "^[1-9][0-9]*[mh]?$",
@@ -207,12 +204,9 @@
           "description": "Step name to jump to if files were changed during this step's execution"
         },
         "no-file-changes": {
-          "type": "object",
-          "properties": {
-            "fail": { "type": "boolean" },
-            "retry": { "type": "boolean" }
-          },
-          "description": "Action to take when no workspace file changes are detected after this step"
+          "type": "string",
+          "enum": ["retry", "failed"],
+          "description": "Action to take when no workspace file changes are detected after this step: 'retry' re-executes the step, 'failed' aborts the workflow"
         },
         "fail": {
           "oneOf": [

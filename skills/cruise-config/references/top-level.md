@@ -51,7 +51,7 @@ cleanup_after_pr: false   # Optional: delete local worktree and branch after PR 
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
-`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). When `sdk` is set it must be `seher` or `pi` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order.
+`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). When `sdk` is set it must be `seher` or `pi` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
 ## `command` vs `sdk`
 
@@ -105,7 +105,7 @@ description: Full TDD flow with review loop
 
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
-`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the default is `English`.
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, then the default is `English`. Unsupported or language-neutral locales use `English`.
 
 ```yaml
 languages:

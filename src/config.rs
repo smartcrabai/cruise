@@ -149,6 +149,7 @@ pub enum SkipCondition {
 
 /// Per-step configuration. All fields are optional.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct StepConfig {
     /// Model to use (prompt steps only).
     pub model: Option<String>,
@@ -209,10 +210,6 @@ pub struct StepConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub prompt_file: Option<String>,
-
-    /// If true, the step fails immediately when no workspace file changes are detected.
-    #[serde(default, rename = "fail-if-no-file-changes")]
-    pub fail_if_no_file_changes: bool,
 }
 
 fn deserialize_prompt_file<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -239,17 +236,13 @@ pub struct OptionItem {
 }
 
 /// Action to take when no workspace file changes are detected after a step.
-///
-/// Exactly one of `fail` or `retry` must be true.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct NoFileChangesCondition {
-    /// If true, abort the workflow with an error when no file changes are detected.
-    #[serde(default)]
-    pub fail: bool,
-
-    /// If true, re-execute the current step when no file changes are detected.
-    #[serde(default)]
-    pub retry: bool,
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoFileChangesAction {
+    /// `no-file-changes: retry` -- re-execute the current step.
+    Retry,
+    /// `no-file-changes: failed` -- abort the workflow with an error.
+    Failed,
 }
 
 /// Action to take when the step fails (including timeout, non-zero exit, prompt error).
@@ -277,7 +270,7 @@ pub struct IfCondition {
 
     /// Action to take when no workspace file changes are detected after this step.
     #[serde(rename = "no-file-changes")]
-    pub no_file_changes: Option<NoFileChangesCondition>,
+    pub no_file_changes: Option<NoFileChangesAction>,
 
     /// Failure handler. Either a step name (jump) or `{ retry: true }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,7 +326,9 @@ impl WorkflowConfig {
 
     /// Resolve the effective PR language.
     ///
-    /// Precedence: `languages.pr` > `pr_language` > default (`English`).
+    /// After [`WorkflowConfig::apply_env_overrides`], precedence is
+    /// `CRUISE_LANGUAGE_PR` > `languages.pr` > `pr_language` > locale >
+    /// default (`English`).
     /// Blank/whitespace values fall back to the default.
     #[must_use]
     pub fn effective_pr_language(&self) -> String {
@@ -344,7 +339,9 @@ impl WorkflowConfig {
 
     /// Resolve the effective planning language.
     ///
-    /// Precedence: `languages.plan` > `plan_language` > default (`English`).
+    /// After [`WorkflowConfig::apply_env_overrides`], precedence is
+    /// `CRUISE_LANGUAGE_PLAN` > `languages.plan` > `plan_language` > locale >
+    /// default (`English`).
     /// Blank/whitespace values fall back to the default.
     #[must_use]
     pub fn effective_plan_language(&self) -> String {
@@ -389,7 +386,7 @@ impl WorkflowConfig {
 pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/cruise.yaml");
 
 impl WorkflowConfig {
-    /// Apply environment variable overrides to scalar config fields.
+    /// Apply environment variable overrides and locale-derived language defaults.
     ///
     /// # Errors
     ///
@@ -416,6 +413,23 @@ impl WorkflowConfig {
                 .get_or_insert_with(LanguagesConfig::default)
                 .plan = Some(v);
         }
+
+        // Infer languages only when neither the new nor deprecated field was
+        // explicitly configured. Environment overrides above take precedence.
+        let languages = self.languages.as_ref();
+        if (languages.and_then(|l| l.pr.as_ref()).is_none() && self.pr_language.is_none()
+            || languages.and_then(|l| l.plan.as_ref()).is_none() && self.plan_language.is_none())
+            && let Some(language) = infer_language_from_locale()
+        {
+            let languages = self.languages.get_or_insert_with(LanguagesConfig::default);
+            if languages.pr.is_none() && self.pr_language.is_none() {
+                languages.pr = Some(language.clone());
+            }
+            if languages.plan.is_none() && self.plan_language.is_none() {
+                languages.plan = Some(language);
+            }
+        }
+
         if let Some(v) = read_env_bool("CRUISE_CLEANUP_AFTER_PR")? {
             self.cleanup_after_pr = v;
         }
@@ -436,6 +450,60 @@ fn read_env_string(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+const LOCALE_ENV_VARS: [&str; 4] = ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"];
+
+fn infer_language_from_locale() -> Option<String> {
+    // Locale precedence follows POSIX semantics: once the first non-empty
+    // variable is selected, an unsupported value must not fall through to a
+    // lower-priority variable.
+    let locale = LOCALE_ENV_VARS
+        .iter()
+        .find_map(|name| read_env_string(name))?;
+    locale_to_language_name(&locale)
+}
+
+fn locale_to_language_name(locale: &str) -> Option<String> {
+    let language = locale
+        .trim()
+        .split([':', '.', '@', '_', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let language_name = match language.as_str() {
+        "en" => "English",
+        "ja" => "Japanese",
+        "zh" => "Chinese",
+        "ko" => "Korean",
+        "de" => "German",
+        "fr" => "French",
+        "es" => "Spanish",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        "ru" => "Russian",
+        "nl" => "Dutch",
+        "sv" => "Swedish",
+        "pl" => "Polish",
+        "tr" => "Turkish",
+        "vi" => "Vietnamese",
+        "th" => "Thai",
+        "id" => "Indonesian",
+        "ar" => "Arabic",
+        "hi" => "Hindi",
+        "uk" => "Ukrainian",
+        "cs" => "Czech",
+        "da" => "Danish",
+        "fi" => "Finnish",
+        "nb" | "no" => "Norwegian",
+        "hu" => "Hungarian",
+        "el" => "Greek",
+        "he" => "Hebrew",
+        "ro" => "Romanian",
+        _ => return None,
+    };
+    Some(language_name.to_string())
+}
+
 fn read_env_bool(name: &str) -> crate::error::Result<Option<bool>> {
     match std::env::var(name).ok().as_deref().map(str::trim) {
         None | Some("") => Ok(None),
@@ -447,36 +515,11 @@ fn read_env_bool(name: &str) -> crate::error::Result<Option<bool>> {
     }
 }
 
-/// Validate that `fail-if-no-file-changes` is not used in `after-pr` steps.
-///
-/// `after-pr` steps are executed in a warning-only context: any error is
-/// downgraded to a printed warning and the workflow continues.  A step with
-/// `fail-if-no-file-changes: true` would therefore never abort the run as
-/// intended.  Reject it explicitly at validation time instead.
-///
-/// # Errors
-///
-/// Returns an error if any `after-pr` step uses `fail-if-no-file-changes`.
-pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error::Result<()> {
-    use crate::error::CruiseError;
-    for (name, step) in &config.after_pr {
-        if step.fail_if_no_file_changes {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "step '{name}' in after-pr uses fail-if-no-file-changes, which is not supported in after-pr steps"
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Validate `if.no-file-changes` usage across all steps and groups.
 ///
 /// Enforces:
-/// - `fail` and `retry` cannot both be true in the same `no-file-changes` object.
-/// - An empty (all-false) `no-file-changes` object is rejected.
 /// - `if.no-file-changes` in `after-pr` steps is rejected.
 /// - `if.no-file-changes` in group-level `if` is rejected.
-/// - Legacy `fail-if-no-file-changes` and new `if.no-file-changes` cannot both be set on the same step.
 ///
 /// # Errors
 ///
@@ -484,75 +527,31 @@ pub fn validate_fail_if_no_file_changes(config: &WorkflowConfig) -> crate::error
 pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
-    // Reject if.fail at group level.
     for (group_name, group) in &config.groups {
-        if let Some(ref if_cond) = group.if_condition
-            && if_cond.fail.is_some()
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "group '{group_name}' uses if.fail, which is not supported at the group level",
-            )));
-        }
-    }
-
-    // Reject no-file-changes at group level.
-    for (group_name, group) in &config.groups {
-        if let Some(ref if_cond) = group.if_condition
-            && if_cond.no_file_changes.is_some()
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "group '{group_name}' uses if.no-file-changes, which is not supported at the group level",
-            )));
-        }
-    }
-
-    // Reject if.fail in after-pr steps.
-    for (name, step) in &config.after_pr {
-        if let Some(ref if_cond) = step.if_condition
-            && if_cond.fail.is_some()
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "step '{name}' in after-pr uses if.fail, which is not supported in after-pr steps",
-            )));
-        }
-    }
-
-    // Reject no-file-changes in after-pr steps.
-    for (name, step) in &config.after_pr {
-        if let Some(ref if_cond) = step.if_condition
-            && if_cond.no_file_changes.is_some()
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "step '{name}' in after-pr uses if.no-file-changes, which is not supported in after-pr steps",
-            )));
-        }
-    }
-
-    // Validate regular steps.
-    for (name, step) in &config.steps {
-        // Reject legacy + new coexistence.
-        if step.fail_if_no_file_changes
-            && let Some(ref if_cond) = step.if_condition
-            && if_cond.no_file_changes.is_some()
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "step '{name}' uses both fail-if-no-file-changes and if.no-file-changes; use only one",
-            )));
-        }
-
-        if let Some(ref if_cond) = step.if_condition
-            && let Some(ref nfc) = if_cond.no_file_changes
-        {
-            // Mutually exclusive: fail and retry cannot both be true.
-            if nfc.fail && nfc.retry {
+        if let Some(ref if_cond) = group.if_condition {
+            if if_cond.fail.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{name}' if.no-file-changes has both fail and retry set to true; they are mutually exclusive",
+                    "group '{group_name}' uses if.fail, which is not supported at the group level",
                 )));
             }
-            // At least one of fail or retry must be set.
-            if !nfc.fail && !nfc.retry {
+            if if_cond.no_file_changes.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{name}' if.no-file-changes requires either fail or retry to be true",
+                    "group '{group_name}' uses if.no-file-changes, which is not supported at the group level",
+                )));
+            }
+        }
+    }
+
+    for (name, step) in &config.after_pr {
+        if let Some(ref if_cond) = step.if_condition {
+            if if_cond.fail.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' in after-pr uses if.fail, which is not supported in after-pr steps",
+                )));
+            }
+            if if_cond.no_file_changes.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' in after-pr uses if.no-file-changes, which is not supported in after-pr steps",
                 )));
             }
         }
@@ -596,7 +595,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
     Ok(())
 }
 
-/// Run all config validations (groups, fail-if-no-file-changes, if-conditions, timeouts).
+/// Run all config validations (groups, if-conditions, timeouts).
 ///
 /// # Errors
 ///
@@ -604,7 +603,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
     validate_groups(config)?;
-    validate_fail_if_no_file_changes(config)?;
+    validate_mixed_conditional_cycles(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
@@ -836,19 +835,15 @@ pub fn validate_group_retry_budget(
 ) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
-    // Group name -> every call-site step name (from `steps` and `after_pr`)
-    // that references it, in first-seen order. A group can have more than one
-    // call site (see `test_validate_groups_multiple_call_sites_ok`), and each
-    // one is checked below when deciding whether the lenient case 1 applies.
-    let mut group_call_sites: Vec<(&str, Vec<&str>)> = Vec::new();
+    // Group name -> every call-site step name (from `steps` and `after_pr`),
+    // in first-seen order.
+    let mut group_call_sites: IndexMap<&str, Vec<&str>> = IndexMap::new();
     for (step_name, step) in config.steps.iter().chain(config.after_pr.iter()) {
-        let Some(group_name) = step.group.as_deref() else {
-            continue;
-        };
-        if let Some(entry) = group_call_sites.iter_mut().find(|(g, _)| *g == group_name) {
-            entry.1.push(step_name.as_str());
-        } else {
-            group_call_sites.push((group_name, vec![step_name.as_str()]));
+        if let Some(group_name) = step.group.as_deref() {
+            group_call_sites
+                .entry(group_name)
+                .or_default()
+                .push(step_name.as_str());
         }
     }
 
@@ -884,30 +879,30 @@ pub fn validate_group_retry_budget(
                 || first_sub.is_some_and(|sub| target == format!("{call_site}/{sub}"))
         });
 
-        if all_call_sites_reenter_group {
-            if r > effective_max_retries {
-                return Err(CruiseError::InvalidStepConfig(unreachable_group_message(
-                    group_name,
-                    r,
-                    effective_max_retries,
-                )));
-            }
+        let required_budget = if all_call_sites_reenter_group {
+            r
         } else {
             let Some(required_budget) = r.checked_add(1) else {
+                let max_group_retries = effective_max_retries.saturating_sub(1);
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "group '{group_name}' has max_retries: {r}, but its external retry target requires one additional loop-protection edge"
+                    "group '{group_name}' has max_retries: {r}, but its external retry target '{target}' requires one additional loop-protection edge that cannot be represented. Lower groups.{group_name}.max_retries to at most {max_group_retries}"
                 )));
             };
-            if required_budget > effective_max_retries {
-                return Err(CruiseError::InvalidStepConfig(
-                    unreachable_group_message_external_target(
-                        group_name,
-                        r,
-                        target,
-                        effective_max_retries,
-                    ),
-                ));
-            }
+            required_budget
+        };
+
+        if required_budget > effective_max_retries {
+            let message = if all_call_sites_reenter_group {
+                unreachable_group_message(group_name, r, effective_max_retries)
+            } else {
+                unreachable_group_message_external_target(
+                    group_name,
+                    r,
+                    target,
+                    effective_max_retries,
+                )
+            };
+            return Err(CruiseError::InvalidStepConfig(message));
         }
     }
 
@@ -948,10 +943,255 @@ fn unreachable_group_message_external_target(
     )
 }
 
+/// Validate that no step cycle mixes unsafe conditional edges
+/// (`if.file-changed` jumps and `if.fail` goto targets) with unconditional
+/// sequential edges among the top-level `steps`. After-pr steps run through
+/// the same loop protection, but are deliberately out of scope here: the
+/// built-in config's own after-pr CI-retry loop is such a mixed cycle and
+/// relies on runtime loop protection.
+///
+/// Such a cycle always deadlocks under loop protection: once the conditional
+/// back-edge exhausts its retries (`max_retries`), the unconditional edge needs
+/// `max_retries` + 1 traversals, which always exceeds any ceiling G.
+///
+/// # Errors
+///
+/// Returns an error naming the witness cycle when a mixed
+/// conditional/unconditional cycle exists.
+pub fn validate_mixed_conditional_cycles(config: &WorkflowConfig) -> crate::error::Result<()> {
+    let steps = &config.steps;
+    let groups = &config.groups;
+    let names: Vec<&str> = steps.keys().map(String::as_str).collect();
+    let index_of: HashMap<&str, usize> = names
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, name)| (name, i))
+        .collect();
+    let edges = build_step_edges(steps, &names, &index_of, groups);
+
+    // Strongly connected components via mutual reachability (step counts are
+    // practically small, so this naive computation is sufficient); the
+    // component id is the smallest node index in the component.
+    let n = names.len();
+    let mut reach = vec![vec![false; n]; n];
+    for (u, row) in reach.iter_mut().enumerate() {
+        let mut stack = vec![u];
+        row[u] = true;
+        while let Some(v) = stack.pop() {
+            for &(w, _) in &edges[v] {
+                if !row[w] {
+                    row[w] = true;
+                    stack.push(w);
+                }
+            }
+        }
+    }
+    let mut component = vec![usize::MAX; n];
+    for (u, row) in reach.iter().enumerate() {
+        for (v, &fwd) in row.iter().enumerate().skip(u) {
+            if fwd && reach[v][u] {
+                component[v] = component[v].min(u);
+            }
+        }
+    }
+
+    for root in 0..n {
+        // The component id is the smallest member index, so a root that is not
+        // its own id belongs to an already-visited (smaller) component.
+        if component[root] != root {
+            continue;
+        }
+        let in_component = |v: usize| component[v] == root;
+        let members: Vec<usize> = (root..n).filter(|&v| in_component(v)).collect();
+        if members.len() < 2 {
+            // Single-node components cannot mix edge kinds here by design:
+            // conditional self-edges (if.no-file-changes.retry / if.fail.retry)
+            // are excluded from the graph, and an unconditional self-loop is a
+            // pure unconditional cycle left to runtime loop protection.
+            continue;
+        }
+        let mut has_unconditional = false;
+        let mut cond_edge = None;
+        for &v in &members {
+            for &(w, kind) in &edges[v] {
+                if !in_component(w) {
+                    continue;
+                }
+                match kind {
+                    Some(CycleEdgeKind::Unconditional) => has_unconditional = true,
+                    Some(CycleEdgeKind::Conditional) if cond_edge.is_none() => {
+                        cond_edge = Some((v, w));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(witness) = cond_edge
+            .filter(|_| has_unconditional)
+            .and_then(|(u, w)| mixed_cycle_witness(&edges, &names, in_component, u, w))
+        else {
+            // Not a mixed component (purely unconditional cycles stay under
+            // runtime loop protection); a missing witness is unreachable when
+            // a conditional edge exists, but never reject-silently.
+            continue;
+        };
+        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+            "top-level steps form a cycle that mixes conditional and unconditional edges: \
+             {witness}. Once the conditional back-edge (if.file-changed / if.fail goto) has \
+             fired max_retries times under loop protection, the unconditional sequential edge \
+             needs one more traversal than the ceiling allows and always fails with \
+             LoopProtection, whatever the ceiling is. Confine the cycle inside a group under \
+             `groups:` with a `max_retries` so exhausted retries degrade into a graceful skip \
+             instead -- see the built-in config's groups.review for an example"
+        )));
+    }
+    Ok(())
+}
+
+/// Build the outgoing edge lists for the cycle-detection graph.
+///
+/// Each entry is `(target, kind)`; a `None` kind marks a group-retry back-edge
+/// whose exhaustion degrades into a graceful skip (already budget-checked by
+/// [`validate_group_retry_budget`]), so it counts as neither edge kind below.
+fn build_step_edges(
+    steps: &IndexMap<String, StepConfig>,
+    names: &[&str],
+    index_of: &HashMap<&str, usize>,
+    groups: &HashMap<String, GroupConfig>,
+) -> Vec<StepEdgeList> {
+    let mut edges: Vec<StepEdgeList> = vec![Vec::new(); names.len()];
+    for (i, step) in steps.values().enumerate() {
+        // Unconditional edge: explicit `next`, else the next step in YAML order.
+        // On an option step this edge is reachable at runtime only when some
+        // choice leaves `next` unset (the selected choice takes priority over
+        // the sequential/explicit edge); when every choice carries an explicit
+        // `next`, emitting it would create false positives.
+        let has_open_choice = step
+            .option
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| item.next.is_none()));
+        if step.option.is_none() || has_open_choice {
+            let sequential = step
+                .next
+                .as_deref()
+                .or_else(|| names.get(i + 1).copied())
+                .and_then(|target| index_of.get(target).copied());
+            if let Some(target) = sequential {
+                edges[i].push((target, Some(CycleEdgeKind::Unconditional)));
+            }
+        }
+
+        // Option-item `next` edges are user-driven interactive choices,
+        // out of scope for this check; nothing else on option steps is read.
+        if step.option.is_some() {
+            continue;
+        }
+
+        if let Some(group_name) = step.group.as_deref() {
+            // Group call step: its only conditional edge is the group's own
+            // if.file-changed back-edge. With `max_retries` set, exhaustion
+            // degrades into a graceful skip (budget-checked by
+            // [`validate_group_retry_budget`]), so it counts as neither kind;
+            // without it the jump fires unboundedly with no skip -- exactly
+            // like a plain conditional edge.
+            if let Some(group) = groups.get(group_name)
+                && let Some(target) = group
+                    .if_condition
+                    .as_ref()
+                    .and_then(|cond| cond.file_changed.as_deref())
+                    .and_then(|target| index_of.get(target).copied())
+            {
+                edges[i].push((
+                    target,
+                    group
+                        .max_retries
+                        .map_or(Some(CycleEdgeKind::Conditional), |_| None),
+                ));
+            }
+        } else if let Some(cond) = &step.if_condition {
+            if let Some(target) = cond
+                .file_changed
+                .as_deref()
+                .and_then(|target| index_of.get(target).copied())
+            {
+                edges[i].push((target, Some(CycleEdgeKind::Conditional)));
+            }
+            if let Some(FailAction::Goto(target)) = &cond.fail
+                && let Some(&goto_target) = index_of.get(target.as_str())
+            {
+                edges[i].push((goto_target, Some(CycleEdgeKind::Conditional)));
+            }
+            // if.no-file-changes (retry/fail) and if.fail `{retry: true}` are
+            // single-node self-retries or aborts; they never form part of a cycle.
+        }
+    }
+    edges
+}
+
+/// Classification of a top-level step-graph edge used by
+/// [`validate_mixed_conditional_cycles`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleEdgeKind {
+    /// Sequential fall-through or explicit `next`: consumed every time it is reached.
+    Unconditional,
+    /// `if.file-changed` jump or `if.fail` goto: only taken while the condition fires,
+    /// so its traversals are bounded by loop protection's retry ceiling.
+    Conditional,
+}
+
+/// Outgoing edges of one step in the cycle-detection graph.
+type StepEdgeList = Vec<(usize, Option<CycleEdgeKind>)>;
+
+/// Name a witness cycle containing a conditional edge: an SCC can also embed
+/// purely unconditional sub-cycles, and naming one would contradict the error
+/// explanation. For the in-component conditional edge `u -> w`, close the
+/// cycle with a shortest in-component path `w -> .. -> u` (BFS parents),
+/// closed back onto `w`. Returns `None` only if `w` cannot reach `u`, which
+/// same-SCC membership makes unreachable.
+fn mixed_cycle_witness(
+    edges: &[StepEdgeList],
+    names: &[&str],
+    in_component: impl Fn(usize) -> bool,
+    u: usize,
+    w: usize,
+) -> Option<String> {
+    // BFS from w to u within the component; u is guaranteed reachable
+    // from w because both sit in the same SCC.
+    let mut prev: HashMap<usize, usize> = HashMap::from([(w, w)]);
+    let mut queue = std::collections::VecDeque::from([w]);
+    while let Some(v) = queue.pop_front() {
+        if v == u {
+            break;
+        }
+        for &(x, _) in &edges[v] {
+            if in_component(x) && !prev.contains_key(&x) {
+                prev.insert(x, v);
+                queue.push_back(x);
+            }
+        }
+    }
+    // Walk parents from u back to w, print forward [w, .., u], and close the
+    // loop onto w.
+    let mut walked = vec![u];
+    while *walked.last()? != w {
+        walked.push(*prev.get(walked.last()?)?);
+    }
+    walked.reverse(); // [u, ..., w] -> [w, ..., u]
+    walked.push(w);
+    Some(
+        walked
+            .iter()
+            .map(|&v| names[v])
+            .collect::<Vec<_>>()
+            .join(" -> "),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{EnvGuard, err_string, lock_process};
+    use crate::test_support::{EnvGuard, err_string, lock_process, mixed_conditional_cycle_config};
 
     const SAMPLE_YAML: &str = r#"
 command:
@@ -1301,6 +1541,14 @@ steps:
         assert_eq!(config.sdk.as_deref(), Some("seher"));
         assert_eq!(config.model.as_deref(), Some("build"));
         assert_eq!(config.plan_model.as_deref(), Some("plan"));
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.plan.as_deref()),
+            None
+        );
+        assert_eq!(
+            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
+            Some("English")
+        );
         assert!(config.cleanup_after_pr);
         // max_retries is unset so DEFAULT_MAX_RETRIES governs
         assert_eq!(config.max_retries, None);
@@ -1945,86 +2193,6 @@ after-pr:
         }
     }
 
-    #[test]
-    fn test_fail_if_no_file_changes_default_false() {
-        // Given: a step without the fail-if-no-file-changes field
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-";
-        // When: parsed
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        // Then: the field defaults to false
-        let implement = config
-            .steps
-            .get("implement")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(!implement.fail_if_no_file_changes);
-    }
-
-    #[test]
-    fn test_fail_if_no_file_changes_explicit_true() {
-        // Given: a step with fail-if-no-file-changes: true
-        let yaml = r#"
-command: [echo]
-steps:
-  implement:
-    prompt: "Implement: {input}"
-    fail-if-no-file-changes: true
-"#;
-        // When: parsed
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        // Then: the field is true
-        let implement = config
-            .steps
-            .get("implement")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(implement.fail_if_no_file_changes);
-    }
-
-    #[test]
-    fn test_validate_fail_if_no_file_changes_rejects_after_pr_usage() {
-        // Given: an after-pr step with fail-if-no-file-changes: true
-        let yaml = r"
-command: [echo]
-steps:
-  build:
-    command: cargo build
-after-pr:
-  notify:
-    command: echo done
-    fail-if-no-file-changes: true
-";
-        // When: validate_fail_if_no_file_changes is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_fail_if_no_file_changes(&config);
-        // Then: returns an error because after-pr + fail-if-no-file-changes is unsupported
-        assert!(result.is_err());
-        assert!(
-            err_string(result).contains("after-pr"),
-            "error message should mention after-pr"
-        );
-    }
-
-    #[test]
-    fn test_validate_fail_if_no_file_changes_ok_for_normal_steps() {
-        // Given: a normal step with fail-if-no-file-changes: true (no after-pr usage)
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-    fail-if-no-file-changes: true
-";
-        // When: validate_fail_if_no_file_changes is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_fail_if_no_file_changes(&config);
-        // Then: no error
-        assert!(result.is_ok());
-    }
-
     // --- New group schema: groups.<name>.steps ---
 
     #[test]
@@ -2136,65 +2304,57 @@ steps:
     // --- if.no-file-changes parse tests ---
 
     #[test]
-    fn test_if_no_file_changes_fail_parses() {
-        // Given: a step with if.no-file-changes.fail: true
+    fn test_if_no_file_changes_failed_parses() {
+        // Given: a step with if.no-file-changes: failed
         let yaml = r"
 command: [echo]
 steps:
   implement:
     command: cargo build
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 ";
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        // Then: the no_file_changes condition is set with fail=true
-        let implement = config
+        // Then: the no_file_changes condition holds the `failed` action
+        let nfc = config
             .steps
             .get("implement")
-            .unwrap_or_else(|| panic!("step not found"));
-        let if_cond = implement
+            .unwrap_or_else(|| panic!("step not found"))
             .if_condition
             .as_ref()
-            .unwrap_or_else(|| panic!("if_condition not set"));
-        let no_change = if_cond
+            .unwrap_or_else(|| panic!("if_condition not set"))
             .no_file_changes
             .as_ref()
             .unwrap_or_else(|| panic!("no_file_changes not set"));
-        assert!(no_change.fail, "fail should be true");
-        assert!(!no_change.retry, "retry should be false");
+        assert_eq!(*nfc, NoFileChangesAction::Failed);
     }
 
     #[test]
     fn test_if_no_file_changes_retry_parses() {
-        // Given: a step with if.no-file-changes.retry: true
+        // Given: a step with if.no-file-changes: retry
         let yaml = r"
 command: [echo]
 steps:
   implement:
     command: cargo build
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
 ";
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        // Then: the no_file_changes condition is set with retry=true
-        let implement = config
+        // Then: the no_file_changes condition holds the `retry` action
+        let nfc = config
             .steps
             .get("implement")
-            .unwrap_or_else(|| panic!("step not found"));
-        let if_cond = implement
+            .unwrap_or_else(|| panic!("step not found"))
             .if_condition
             .as_ref()
-            .unwrap_or_else(|| panic!("if_condition not set"));
-        let no_change = if_cond
+            .unwrap_or_else(|| panic!("if_condition not set"))
             .no_file_changes
             .as_ref()
             .unwrap_or_else(|| panic!("no_file_changes not set"));
-        assert!(!no_change.fail, "fail should be false");
-        assert!(no_change.retry, "retry should be true");
+        assert_eq!(*nfc, NoFileChangesAction::Retry);
     }
 
     #[test]
@@ -2207,8 +2367,7 @@ steps:
     command: cargo build
     if:
       file-changed: implement
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
 ";
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2222,12 +2381,80 @@ steps:
             .as_ref()
             .unwrap_or_else(|| panic!("if_condition not set"));
         assert_eq!(if_cond.file_changed, Some("implement".to_string()));
+        assert_eq!(if_cond.no_file_changes, Some(NoFileChangesAction::Retry));
+    }
+
+    #[test]
+    fn test_if_no_file_changes_rejects_legacy_object_form() {
+        // Given: a step using the removed object form { fail: true }
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes:
+        fail: true
+";
+        // When: parsed
+        let result = WorkflowConfig::from_yaml(yaml);
+        // Then: parsing fails -- the object form was removed without backward compatibility
         assert!(
-            if_cond
-                .no_file_changes
-                .as_ref()
-                .unwrap_or_else(|| panic!("no_file_changes not set"))
-                .retry
+            result.is_err(),
+            "legacy object form must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_if_no_file_changes_rejects_removed_legacy_field() {
+        // Given: a step using the removed top-level legacy field
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    fail-if-no-file-changes: true
+";
+        // When: parsed
+        let result = WorkflowConfig::from_yaml(yaml);
+        // Then: parsing fails instead of silently ignoring the removed field
+        let err = result.map_or_else(|e| e, |_| panic!("removed legacy field must be rejected"));
+        assert!(
+            err.to_string().contains("fail-if-no-file-changes"),
+            "error should name the removed field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_if_no_file_changes_serializes_as_lowercase_string() {
+        // Given: each supported action
+        // When: serialized for a workflow config
+        let retry =
+            serde_yaml::to_value(NoFileChangesAction::Retry).unwrap_or_else(|e| panic!("{e:?}"));
+        let failed =
+            serde_yaml::to_value(NoFileChangesAction::Failed).unwrap_or_else(|e| panic!("{e:?}"));
+        // Then: actions use the public YAML strings, not Rust variant names or objects
+        assert_eq!(retry.as_str(), Some("retry"));
+        assert_eq!(failed.as_str(), Some("failed"));
+    }
+
+    #[test]
+    fn test_if_no_file_changes_rejects_invalid_value() {
+        // Given: a step with an unknown no-file-changes value ('fail' instead of 'failed')
+        let yaml = r"
+command: [echo]
+steps:
+  implement:
+    command: cargo build
+    if:
+      no-file-changes: fail
+";
+        // When: parsed
+        let result = WorkflowConfig::from_yaml(yaml);
+        // Then: parsing fails because only 'retry' and 'failed' are accepted
+        assert!(
+            result.is_err(),
+            "invalid no-file-changes value must be rejected, got: {result:?}"
         );
     }
 
@@ -2319,51 +2546,8 @@ steps:
     // --- if.no-file-changes validation tests ---
 
     #[test]
-    fn test_validate_if_conditions_rejects_fail_and_retry_both_true() {
-        // Given: a step with both fail: true and retry: true
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-    if:
-      no-file-changes:
-        fail: true
-        retry: true
-";
-        // When: validate_if_conditions is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_if_conditions(&config);
-        // Then: returns an error because fail and retry are mutually exclusive
-        assert!(result.is_err(), "expected Err but got Ok");
-        let msg = err_string(result);
-        assert!(
-            msg.contains("fail") || msg.contains("retry"),
-            "error should mention fail/retry, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_validate_if_conditions_rejects_empty_no_file_changes() {
-        // Given: a step with no-file-changes: {} (all defaults false)
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-    if:
-      no-file-changes: {}
-";
-        // When: validate_if_conditions is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_if_conditions(&config);
-        // Then: returns an error because neither fail nor retry is set
-        assert!(result.is_err(), "expected Err for empty no-file-changes");
-    }
-
-    #[test]
     fn test_validate_if_conditions_rejects_no_file_changes_in_after_pr() {
-        // Given: an after-pr step with if.no-file-changes.fail: true
+        // Given: an after-pr step with if.no-file-changes: failed
         let yaml = r"
 command: [echo]
 steps:
@@ -2373,8 +2557,7 @@ after-pr:
   notify:
     command: echo done
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 ";
         // When: validate_if_conditions is called
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2399,8 +2582,7 @@ command: [echo]
 groups:
   review:
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
     steps:
       simplify:
         prompt: /simplify
@@ -2426,39 +2608,15 @@ steps:
     }
 
     #[test]
-    fn test_validate_if_conditions_rejects_legacy_and_new_syntax_together() {
-        // Given: a step with BOTH old fail-if-no-file-changes and new if.no-file-changes
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-    fail-if-no-file-changes: true
-    if:
-      no-file-changes:
-        fail: true
-";
-        // When: validate_if_conditions is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_if_conditions(&config);
-        // Then: returns an error because both syntaxes cannot coexist
-        assert!(
-            result.is_err(),
-            "expected Err when both legacy and new syntax are used"
-        );
-    }
-
-    #[test]
-    fn test_validate_if_conditions_ok_for_fail_true() {
-        // Given: a step with if.no-file-changes.fail: true (valid)
+    fn test_validate_if_conditions_ok_for_failed() {
+        // Given: a step with if.no-file-changes: failed (valid)
         let yaml = r"
 command: [echo]
 steps:
   implement:
     command: cargo build
     if:
-      no-file-changes:
-        fail: true
+      no-file-changes: failed
 ";
         // When: validate_if_conditions is called
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2468,16 +2626,15 @@ steps:
     }
 
     #[test]
-    fn test_validate_if_conditions_ok_for_retry_true() {
-        // Given: a step with if.no-file-changes.retry: true (valid)
+    fn test_validate_if_conditions_ok_for_retry() {
+        // Given: a step with if.no-file-changes: retry (valid)
         let yaml = r"
 command: [echo]
 steps:
   implement:
     command: cargo build
     if:
-      no-file-changes:
-        retry: true
+      no-file-changes: retry
   done:
     command: echo done
 ";
@@ -2486,26 +2643,6 @@ steps:
         let result = validate_if_conditions(&config);
         // Then: no error
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
-    }
-
-    #[test]
-    fn test_validate_if_conditions_ok_for_legacy_fail_if_no_file_changes_alone() {
-        // Given: a step with legacy fail-if-no-file-changes: true (no new syntax)
-        let yaml = r"
-command: [echo]
-steps:
-  implement:
-    command: cargo build
-    fail-if-no-file-changes: true
-";
-        // When: validate_if_conditions is called
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_if_conditions(&config);
-        // Then: no error -- legacy field alone is accepted (backward compatibility)
-        assert!(
-            result.is_ok(),
-            "legacy fail-if-no-file-changes alone should pass validate_if_conditions, got: {result:?}"
-        );
     }
 
     // --- timeout validation tests ---
@@ -2845,12 +2982,42 @@ steps:
                 "if",
                 "env",
                 "group",
-                "fail-if-no-file-changes",
+                "workflow_call",
                 "timeout",
                 "prompt_file",
             ],
             "StepConfig",
         );
+        assert!(
+            !step_props.contains_key("fail-if-no-file-changes"),
+            "removed fail-if-no-file-changes must not remain in the StepConfig schema"
+        );
+    }
+
+    #[test]
+    fn test_schema_no_file_changes_is_string_enum() {
+        // Given: the IfCondition schema definition
+        let schema = load_schema();
+        let if_props = def_properties(schema, "IfCondition");
+        let nfc = &if_props["no-file-changes"];
+        // Then: no-file-changes is a string enum restricted to retry|failed
+        assert_eq!(
+            nfc["type"].as_str(),
+            Some("string"),
+            "no-file-changes must have type 'string'; got: {nfc}"
+        );
+        let variants = nfc["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no-file-changes must declare an enum; got: {nfc}"));
+        let mut names: Vec<&str> = variants
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .unwrap_or_else(|| panic!("enum entry must be a string"))
+            })
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["failed", "retry"]);
     }
 
     #[test]
@@ -3258,6 +3425,10 @@ steps:
             EnvGuard::remove("CRUISE_SDK"),
             EnvGuard::remove("CRUISE_LANGUAGE_PR"),
             EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+            EnvGuard::remove("LC_ALL"),
+            EnvGuard::remove("LC_MESSAGES"),
+            EnvGuard::remove("LANG"),
+            EnvGuard::remove("LANGUAGE"),
             EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
             EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
             EnvGuard::remove("CRUISE_FORCE_EXEC"),
@@ -3338,6 +3509,190 @@ steps:
             config.languages.as_ref().and_then(|l| l.pr.as_deref()),
             Some("Japanese")
         );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_infers_locale_language() {
+        let _lock = lock_process();
+        for (variables, expected) in [
+            (vec![("LANG", "ja_JP.UTF-8")], "Japanese"),
+            (
+                vec![
+                    ("LC_ALL", "de_DE.UTF-8"),
+                    ("LC_MESSAGES", "fr_FR.UTF-8"),
+                    ("LANG", "ja_JP.UTF-8"),
+                    ("LANGUAGE", "ko:en"),
+                ],
+                "German",
+            ),
+            (
+                vec![("LC_MESSAGES", "fr_FR.UTF-8"), ("LANG", "ja_JP.UTF-8")],
+                "French",
+            ),
+            (
+                vec![("LC_ALL", "   "), ("LC_MESSAGES", "de_DE.UTF-8")],
+                "German",
+            ),
+            (vec![("LANGUAGE", "ko:en")], "Korean"),
+            (
+                vec![("LC_ALL", "C.UTF-8"), ("LANG", "ja_JP.UTF-8")],
+                DEFAULT_PLAN_LANGUAGE,
+            ),
+            (vec![("LANG", "C.UTF-8")], DEFAULT_PLAN_LANGUAGE),
+            (vec![("LANG", "POSIX")], DEFAULT_PLAN_LANGUAGE),
+            (vec![("LANG", "xx_YY")], DEFAULT_PLAN_LANGUAGE),
+        ] {
+            let _guards = clear_all_override_envs();
+            let _envs: Vec<_> = variables
+                .into_iter()
+                .map(|(name, value)| EnvGuard::set(name, value))
+                .collect();
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(config.effective_plan_language(), expected);
+            assert_eq!(config.effective_pr_language(), expected);
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_preserves_explicit_plan_language() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        for field in ["languages:\n  plan: English", "plan_language: English"] {
+            let yaml =
+                format!("command: [claude, -p]\n{field}\nsteps:\n  s1:\n    command: echo hi\n");
+            let mut config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(config.effective_plan_language(), "English");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_pr_language_prevents_pr_inference() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: the PR language is explicitly configured while plan language is not
+        let mut config = WorkflowConfig::from_yaml(
+            "command: [claude, -p]\nlanguages:\n  pr: English\nsteps:\n  s1:\n    command: echo hi\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the explicit PR language wins and planning still follows the locale
+        assert_eq!(config.effective_pr_language(), "English");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_keeps_inferred_languages_out_of_deprecated_fields() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: a workflow with no new or deprecated language fields
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: locale inference is applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: inferred values are stored only in the new language settings
+        assert_eq!(config.pr_language, None);
+        assert_eq!(config.plan_language, None);
+        assert_eq!(config.effective_pr_language(), "Japanese");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_pr_env_wins_over_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+        let _pr_language = EnvGuard::set("CRUISE_LANGUAGE_PR", "French");
+
+        // Given: locale inference suggests Japanese and the explicit PR env selects French
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only the PR language is overridden explicitly
+        assert_eq!(config.effective_pr_language(), "French");
+        assert_eq!(config.effective_plan_language(), "Japanese");
+    }
+
+    #[test]
+    fn test_apply_env_overrides_explicit_plan_env_wins_over_locale() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+        let _plan_language = EnvGuard::set("CRUISE_LANGUAGE_PLAN", "French");
+
+        // Given: locale inference suggests Japanese and the explicit plan env selects French
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the explicit plan environment override wins
+        assert_eq!(config.effective_plan_language(), "French");
+    }
+
+    #[test]
+    fn test_builtin_config_infers_plan_language_but_keeps_pr_language_english() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
+
+        // Given: the built-in config leaves planning language unspecified
+        let mut config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
+            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
+
+        // When: environment overrides are applied
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: planning follows the locale while PR generation remains English
+        assert_eq!(config.effective_plan_language(), "Japanese");
+        assert_eq!(config.effective_pr_language(), "English");
+    }
+
+    #[test]
+    fn test_locale_to_language_name_parses_supported_locale_forms() {
+        for (locale, expected) in [
+            ("en-US", Some("English")),
+            ("zh_CN.UTF-8", Some("Chinese")),
+            ("pt_BR@latin", Some("Portuguese")),
+            ("", None),
+        ] {
+            assert_eq!(
+                locale_to_language_name(locale).as_deref(),
+                expected,
+                "locale: {locale}"
+            );
+        }
     }
 
     #[test]
@@ -3829,6 +4184,24 @@ steps:
     }
 
     #[test]
+    fn test_validate_group_retry_budget_rejects_external_target_overflow() {
+        // Given: the largest representable retry budget with an external target.
+        let max = usize::MAX;
+        let yaml = format!(
+            "command: [claude, -p]\ngroups:\n  review:\n    if:\n      file-changed: build\n    max_retries: {max}\n    steps:\n      simplify:\n        prompt: /simplify\nsteps:\n  build:\n    command: echo build\n  review-pass:\n    group: review\n"
+        );
+        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: validation reports the impossible extra edge instead of overflowing.
+        let result = validate_group_retry_budget(&config, max);
+        assert!(
+            result.is_err(),
+            "max retry budget with an external target must be rejected"
+        );
+        assert!(err_string(result).contains("external retry target"));
+    }
+
+    #[test]
     fn test_validate_group_retry_budget_case2_r_plus_1_equals_g_is_accepted() {
         // Given: case 2 (retry target is an external step 'build'), R + 1 == G.
         let yaml = r"
@@ -3975,81 +4348,267 @@ steps:
         );
     }
 
-    #[test]
-    fn test_validate_group_retry_budget_rejects_external_target_overflow() {
-        // Given: the largest representable retry budget with an external target.
-        let max = usize::MAX;
-        let yaml = format!(
-            "command: [claude, -p]\ngroups:\n  review:\n    if:\n      file-changed: build\n    max_retries: {max}\n    steps:\n      simplify:\n        prompt: /simplify\nsteps:\n  build:\n    command: echo build\n  review-pass:\n    group: review\n"
-        );
-        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+    // -----------------------------------------------------------------------
+    // validate_mixed_conditional_cycles
+    // -----------------------------------------------------------------------
 
-        // When/Then: validation reports the impossible extra edge instead of overflowing.
-        let result = validate_group_retry_budget(&config, max);
+    #[test]
+    fn test_validate_config_rejects_mixed_cycle() {
+        // Given: a cycle a -> b -> c ->(if.file-changed) a mixing one unsafe
+        // conditional back-edge with unconditional sequential edges (the
+        // shared fixture reproduces the failed session's flat step cycle)
+        let config = WorkflowConfig::from_yaml(&mixed_conditional_cycle_config())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: validate_config runs on it
+        let message = err_string(validate_config(&config));
+
+        // Then: it is rejected, naming the witness cycle in order, explaining
+        // the max_retries exhaustion mechanism, and pointing at groups as fix
         assert!(
-            result.is_err(),
-            "max retry budget with an external target must be rejected"
+            message.contains("a -> b -> c -> a"),
+            "error should name the witness cycle, got: {message}"
         );
-        assert!(err_string(result).contains("external retry target"));
-    }
-
-    #[test]
-    fn test_prompt_file_field_deserializes_from_snake_case_key() {
-        // Given: YAML that declares a step prompt via a file path.
-        let yaml = r"
-command: [claude, -p]
-steps:
-  implement:
-    prompt_file: prompts/implement.md
-";
-
-        // When: parsed.
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: the field is exposed as `prompt_file` alongside an absent `prompt`.
-        assert_eq!(
-            config.steps["implement"].prompt_file.as_deref(),
-            Some("prompts/implement.md")
-        );
-        assert_eq!(config.steps["implement"].prompt, None);
-    }
-
-    #[test]
-    fn test_prompt_file_is_omitted_from_serialization_when_none() {
-        // Given: a workflow whose steps do not use `prompt_file`.
-        let yaml = r"
-command: [claude, -p]
-steps:
-  implement:
-    prompt: do it
-";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: serialized back to YAML (as done for session config snapshots).
-        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: no `prompt_file` key leaks into the output.
         assert!(
-            !serialized.contains("prompt_file"),
-            "serialized YAML was: {serialized}"
+            message.contains("max_retries"),
+            "error should explain that the conditional edge exhausts max_retries, got: {message}"
+        );
+        assert!(
+            message.contains("groups"),
+            "error should recommend confining the cycle into groups, got: {message}"
         );
     }
 
     #[test]
-    fn test_camel_case_prompt_file_key_is_ignored_as_unknown_field() {
-        // Given: YAML that misspells the key in camelCase (`promptFile`).
+    fn test_validate_mixed_conditional_cycles_builtin_config_ok() {
+        // Given: the built-in default workflow (its review loop is safely
+        // confined inside groups.review with max_retries)
+        let config =
+            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: the mixed-cycle validator accepts it
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "the built-in config must not be rejected as a mixed cycle"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_allows_pure_unconditional_cycle() {
+        // Given: a cycle made of unconditional `next` edges only (runtime loop
+        // protection is the designed safety net for this shape)
+        let yaml = r"
+command: [claude, -p]
+steps:
+  a:
+    prompt: a
+    next: b
+  b:
+    prompt: b
+    next: a
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: the mixed-cycle validator accepts it
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "a purely unconditional cycle must not be rejected by the mixed-cycle check"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_allows_group_backedge_cycle() {
+        // Given: a group whose if.file-changed retry target is outside the
+        // group (x -> group call -> back to x on file-changed), with a
+        // max_retries that satisfies validate_group_retry_budget under the
+        // default ceiling of 3 (R + 1 <= G)
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    if:
+      file-changed: x
+    max_retries: 2
+    steps:
+      review-it:
+        prompt: review
+steps:
+  x:
+    command: cargo test
+  do-review:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: the grouped back-edge is treated as safe (already guarded
+        // by validate_group_retry_budget) and the cycle is accepted
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "a group-confined retry cycle must not be rejected as a mixed cycle"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_ignores_self_retry() {
+        // Given: a single step whose only conditional edge is a self-retry
         let yaml = r"
 command: [claude, -p]
 steps:
   implement:
-    promptFile: impl.md
+    prompt: implement
+    if:
+      no-file-changes: retry
 ";
-
-        // When: parsed.
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: the unknown key is ignored (no typo detection, per project policy)
-        // and the step has no prompt_file set.
-        assert_eq!(config.steps["implement"].prompt_file, None);
+        // When/Then: self-retries fall through sequentially when the condition
+        // stops firing, so they are not part of any cycle
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "an if.no-file-changes.retry self-edge must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_allows_forward_file_changed_jump() {
+        // Given: an if.file-changed jump that does not close a cycle (forward
+        // edge only, no way back)
+        let yaml = r"
+command: [claude, -p]
+steps:
+  a:
+    prompt: a
+    if:
+      file-changed: b
+  b:
+    prompt: b
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: no SCC contains both kinds of edges, so it is accepted
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "a forward if.file-changed jump without a return edge must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_rejects_if_fail_goto_cycle() {
+        // Given: a cycle whose back-edge is an if.fail goto target
+        let yaml = r"
+command: [claude, -p]
+steps:
+  build:
+    prompt: build
+  test:
+    command: exit 1
+    if:
+      fail: build
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the mixed-cycle validator runs on it
+        let message = err_string(validate_mixed_conditional_cycles(&config));
+
+        // Then: it is rejected, naming the witness cycle
+        assert!(
+            message.contains("build -> test -> build"),
+            "an if.fail goto back-edge must count as an unsafe conditional edge, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_ignores_option_step_next_edges() {
+        // Given: an option step whose interactive choice loops back to an
+        // earlier step (`next` on option items)
+        let yaml = r"
+command: [claude, -p]
+steps:
+  start:
+    prompt: start
+  choose:
+    plan: '{{plan}}'
+    option:
+      - selector: redo
+        next: start
+      - selector: continue
+        next: finish
+  finish:
+    prompt: finish
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: option-step next edges are user-driven choices, out of
+        // scope for this check, so the graph is accepted
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "option-step next edges must be excluded from cycle detection"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_rejects_group_without_max_retries() {
+        // Given: a group whose if.file-changed retry target closes a top-level
+        // cycle, but which sets no max_retries -- at runtime the jump fires
+        // unboundedly and never degrades into a graceful skip (see
+        // check_group_retry_skip), so this is exactly the deadlocking shape
+        let yaml = r"
+command: [claude, -p]
+groups:
+  g:
+    if:
+      file-changed: build
+    steps:
+      inner:
+        prompt: r
+steps:
+  build:
+    prompt: b
+  review:
+    group: g
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the mixed-cycle validator runs on it
+        let message = err_string(validate_mixed_conditional_cycles(&config));
+
+        // Then: it is rejected, naming the witness cycle
+        assert!(
+            message.contains("build -> review -> build"),
+            "a group file-changed back-edge without max_retries must count as an \
+             unsafe conditional edge, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_mixed_conditional_cycles_ignores_unreachable_option_fallthrough() {
+        // Given: an option step where every choice carries an explicit `next`,
+        // so the runtime always follows the selected choice and the sequential
+        // fall-through edge can never fire; the only cycle would go through it
+        let yaml = r"
+command: [claude, -p]
+steps:
+  start:
+    prompt: start
+  menu:
+    prompt: choose
+    option:
+      - selector: restart
+        next: start
+  guard:
+    prompt: guard
+    if:
+      fail:
+        goto: start
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When/Then: the unreachable fall-through edge must not create a
+        // false-positive mixed cycle
+        assert!(
+            validate_mixed_conditional_cycles(&config).is_ok(),
+            "an option step whose choices all set next has no reachable \
+             fall-through edge"
+        );
     }
 }

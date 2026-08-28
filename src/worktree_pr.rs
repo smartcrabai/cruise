@@ -67,11 +67,11 @@ impl PrAttemptOutcome {
 fn report_commit_outcome(commit_outcome: CommitOutcome) {
     match commit_outcome {
         CommitOutcome::Created => {
-            eprintln!("{} Changes committed", style("v").green().bold());
+            crate::status_eprintln!("{} Changes committed", style("v").green().bold());
         }
         CommitOutcome::NoChanges => {
             // sakoku-ignore-next-line
-            eprintln!(
+            crate::status_eprintln!(
                 "{} No new changes to commit; using existing branch commits",
                 style("->").cyan()
             );
@@ -128,6 +128,7 @@ pub async fn handle_worktree_pr(
     max_retries: usize,
     skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<()> {
     let (pr_title, pr_body) =
         generate_pr_description(&ctx.path, compiled, vars, rate_limit_retries, cancel_token)
@@ -137,7 +138,7 @@ pub async fn handle_worktree_pr(
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {
-            eprintln!("{} PR created: {}", style("v").green().bold(), url);
+            crate::status_eprintln!("{} PR created: {}", style("v").green().bold(), url);
             if let Some(number) = extract_last_path_segment(&url) {
                 vars.set_named_value(PR_NUMBER_VAR, number);
             }
@@ -152,6 +153,7 @@ pub async fn handle_worktree_pr(
                 ctx.path.as_path(),
                 skipped_steps,
                 cancel_token,
+                on_step_log,
             )
             .await?;
             Ok(())
@@ -168,7 +170,7 @@ pub async fn handle_worktree_pr(
             if session.repo.is_some() {
                 return Err(CruiseError::Other(format!("PR creation failed: {error}")));
             }
-            eprintln!("warning: PR creation failed: {error}");
+            crate::status_eprintln!("warning: PR creation failed: {error}");
             Ok(())
         }
     }
@@ -185,7 +187,7 @@ async fn generate_pr_description(
 ) -> Result<(String, String)> {
     let pr_prompt = match build_pr_prompt(vars, compiled) {
         Err(e) => {
-            eprintln!("warning: PR prompt resolution failed: {e}");
+            crate::status_eprintln!("warning: PR prompt resolution failed: {e}");
             return Ok((String::new(), String::new()));
         }
         Ok(p) => p,
@@ -212,7 +214,7 @@ async fn generate_pr_description(
     }
 
     let output = {
-        let on_notice = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+        let on_notice = |msg: &str| spinner.suspend(|| crate::status_eprintln!("{msg}"));
         match executor
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
@@ -234,7 +236,7 @@ async fn generate_pr_description(
                 return Err(CruiseError::Interrupted);
             }
             Err(e) => {
-                eprintln!("warning: PR description generation failed: {e}");
+                crate::status_eprintln!("warning: PR description generation failed: {e}");
                 String::new()
             }
         }
@@ -243,7 +245,7 @@ async fn generate_pr_description(
     let (pr_title, pr_body) = parse_pr_metadata(&output);
     if pr_title.is_empty() && !output.trim().is_empty() {
         let truncated: String = output.chars().take(500).collect();
-        eprintln!(
+        crate::status_eprintln!(
             "{} Failed to parse PR metadata from LLM output (first 500 chars):\n{}",
             style("!").yellow(),
             truncated
@@ -274,7 +276,7 @@ async fn generate_pr_via_sdk_tool(
         "{pr_prompt}\n\n\
          Call the submit_pr_metadata tool with the title and body."
     );
-    let on_notice = |msg: &str| spinner.suspend(|| eprintln!("{msg}"));
+    let on_notice = |msg: &str| spinner.suspend(|| crate::status_eprintln!("{msg}"));
     match executor
         .run(crate::executor::PromptRun {
             prompt: &prompt,
@@ -296,13 +298,13 @@ async fn generate_pr_via_sdk_tool(
             {
                 Ok((meta.title, meta.body))
             } else {
-                eprintln!("warning: SDK agent did not call submit_pr_metadata tool");
+                crate::status_eprintln!("warning: SDK agent did not call submit_pr_metadata tool");
                 Ok((String::new(), String::new()))
             }
         }
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
-            eprintln!("warning: PR description generation failed: {e}");
+            crate::status_eprintln!("warning: PR description generation failed: {e}");
             Ok((String::new(), String::new()))
         }
     }
@@ -320,6 +322,7 @@ async fn run_after_pr_steps(
     working_dir: &std::path::Path,
     skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<()> {
     let Some(_first_step) = compiled.after_pr.keys().next() else {
         return Ok(());
@@ -337,13 +340,13 @@ async fn run_after_pr_steps(
         config_reloader: None,
         working_dir: Some(working_dir),
         skipped_steps,
-        on_step_log: None,
+        on_step_log,
     };
     match execute_steps_with_dag(&ctx, vars, tracker, &mut dag, &start, &|_cp, _dag| Ok(())).await {
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => {
-            eprintln!("warning: after-pr steps failed: {e}");
+            crate::status_eprintln!("warning: after-pr steps failed: {e}");
             Ok(())
         }
     }

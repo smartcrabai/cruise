@@ -32,7 +32,6 @@ Regular variables (`{input}`, `{plan}`, etc.) remain usable.
 ## Constraints
 
 - **Errors are downgraded to warnings**: if an `after-pr` step fails, the workflow continues (no fail-fast). The model fits side effects like pushing labels, posting notifications, etc.
-- **`fail-if-no-file-changes` is forbidden**: because failures are downgraded, a fail directive is meaningless and is explicitly rejected.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 

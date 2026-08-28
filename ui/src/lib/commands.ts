@@ -181,7 +181,7 @@ export function listGithubRepos(): Promise<string[]> {
 /** List workflow config files.
  *
  * When `baseDir` is provided and `repo` is absent, local configs from the working directory
- * are included first. When `repo` is provided (repo mode), only user-dir configs are returned.
+ * are included first. When `repo` is provided (repo mode), only user workflow configs are returned.
  */
 export function listConfigs(params?: { baseDir?: string; repo?: string }): Promise<ConfigEntry[]> {
   return invoke<ConfigEntry[]>("list_configs", {

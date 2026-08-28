@@ -62,10 +62,17 @@ pub fn update_session_settings(
         current_step_update,
     } = update;
 
+    let session_uses_builtin = session.config_path.is_none()
+        && crate::resolver::ConfigSource::is_builtin_source(&session.config_source);
+    // Preserve a built-in selection when older callers omit the sentinel because
+    // built-in sessions intentionally store no filesystem config_path.
+    let requested_config_path = requested_config_path
+        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
     let old_explicit_config = session
         .config_path
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
 
     // Failed/Suspended: config path must stay the same
     if is_failed_or_suspended && old_explicit_config != requested_config_path {
@@ -84,7 +91,8 @@ pub fn update_session_settings(
     // Repo-backed sessions may have already removed their temporary clone after
     // planning. Reuse the self-contained snapshot instead of resolving from the
     // clone (or silently falling back to the builtin config).
-    let snapshot_path = manager.sessions_dir().join(session_id).join("config.yaml");
+    let session_dir = manager.sessions_dir().join(session_id);
+    let snapshot_path = session_dir.join("config.yaml");
     let reuse_repo_snapshot = session.repo.is_some()
         && requested_config_path.is_none()
         && session.config_path.is_none()
@@ -115,10 +123,7 @@ pub fn update_session_settings(
     }
     // When no explicit config was requested, keep config_path = None so that
     // load_config falls back to the session-local config.yaml snapshot below.
-    session.config_path = source
-        .path()
-        .cloned()
-        .filter(|_| requested_config_path.is_some());
+    session.config_path = requested_config_path.as_ref().and(source.path()).cloned();
     session.skipped_steps = skipped_steps;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());
@@ -126,8 +131,7 @@ pub fn update_session_settings(
     // Write config.yaml first so that if session.json is saved successfully,
     // load_config will always find a consistent config on disk.
     if session.config_path.is_none() {
-        let snapshot = serde_yaml::to_string(&config)
-            .map_err(|e| CruiseError::Other(format!("failed to serialize session config: {e}")))?;
+        let snapshot = crate::repo_clone::serialize_resolved_config(&config)?;
         std::fs::write(&snapshot_path, snapshot)
             .map_err(|e| CruiseError::Other(format!("failed to write session config: {e}")))?;
     }
@@ -135,29 +139,37 @@ pub fn update_session_settings(
     manager.save(&session)?;
 
     if !is_failed_or_suspended {
-        let resolved_config_key = source.path().map_or_else(
-            || BUILTIN_CONFIG_KEY.to_string(),
-            |p| resolved_config_key_for_session(p),
-        );
-        let mut history = NewSessionHistory::load_best_effort();
-        history.record_selection(NewSessionHistoryEntry {
-            selected_at: current_iso8601(),
-            input: session.input.clone(),
-            requested_config_path: requested_config_path.clone(),
-            // Clone paths are temporary; never expose them as recent directories.
-            working_dir: if session.repo.is_some() {
-                String::new()
-            } else {
-                session.base_dir.to_string_lossy().into_owned()
-            },
-            repo: session.repo.clone(),
-            resolved_config_key,
-            skipped_steps: session.skipped_steps.clone(),
-        });
-        history.save_best_effort();
+        record_history(&session, requested_config_path.as_ref(), &source);
     }
 
     Ok((session, old_explicit_config != requested_config_path))
+}
+
+fn record_history(
+    session: &SessionState,
+    requested_config_path: Option<&String>,
+    source: &crate::resolver::ConfigSource,
+) {
+    let resolved_config_key = source.path().map_or_else(
+        || BUILTIN_CONFIG_KEY.to_string(),
+        |p| resolved_config_key_for_session(p),
+    );
+    let mut history = NewSessionHistory::load_best_effort();
+    history.record_selection(NewSessionHistoryEntry {
+        selected_at: current_iso8601(),
+        input: session.input.clone(),
+        requested_config_path: requested_config_path.cloned(),
+        // Clone paths are temporary; never expose them as recent directories.
+        working_dir: if session.repo.is_some() {
+            String::new()
+        } else {
+            session.base_dir.to_string_lossy().into_owned()
+        },
+        repo: session.repo.clone(),
+        resolved_config_key,
+        skipped_steps: session.skipped_steps.clone(),
+    });
+    history.save_best_effort();
 }
 
 fn validate_current_step_name(
@@ -497,6 +509,62 @@ mod tests {
     // --- Session-local config.yaml for builtin ---
 
     #[test]
+    fn test_update_session_settings_preserves_pinned_builtin_config() {
+        // Given: a session explicitly pinned to the builtin config and a local
+        // config that would otherwise win automatic discovery
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        write_minimal_config(&repo);
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619000012", &repo);
+        session.config_source = crate::resolver::ConfigSource::Builtin.display_string();
+        session.config_path = None;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the CLI edits only skipped steps (it omits config_path)
+        let (_, config_changed) = update_session_settings(
+            &manager,
+            "20260619000012",
+            SessionSettingsUpdate {
+                config_path: None,
+                skipped_steps: vec!["lint".to_string()],
+                current_step_update: CurrentStepUpdate::Unchanged,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the builtin pin is retained rather than replaced by the local file
+        let reloaded = manager
+            .load("20260619000012")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            reloaded.config_source,
+            crate::resolver::ConfigSource::Builtin.display_string()
+        );
+        assert!(reloaded.config_path.is_none());
+        assert!(!config_changed);
+        let saved_config = fs::read_to_string(
+            manager
+                .sessions_dir()
+                .join("20260619000012")
+                .join("config.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let expected_config = crate::resolver::resolve_workflow_config(
+            crate::config::BUILTIN_CONFIG_YAML,
+            &crate::resolver::ConfigSource::Builtin,
+            &repo,
+        )
+        .and_then(|config| crate::repo_clone::serialize_resolved_config(&config))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(saved_config, expected_config);
+    }
+
+    #[test]
     fn test_update_session_settings_writes_session_config_yaml_for_builtin_config() {
         // Given: a Planned session using the builtin config (config_path = None)
         let _lock = crate::test_support::lock_process();
@@ -529,6 +597,46 @@ mod tests {
             session_dir.join("config.yaml").exists(),
             "config.yaml should be written for builtin/auto-resolved config"
         );
+    }
+
+    #[test]
+    fn test_update_repo_session_reuses_resolved_snapshot_after_clone_cleanup() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("removed-repo");
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619000013", &repo);
+        session.repo = Some("owner/repository".to_string());
+        session.config_path = None;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            manager
+                .sessions_dir()
+                .join("20260619000013")
+                .join("config.yaml"),
+            "command: [echo]\nsteps:\n  s:\n    prompt: preserved\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(
+            &manager,
+            "20260619000013",
+            SessionSettingsUpdate {
+                config_path: None,
+                skipped_steps: vec![],
+                current_step_update: CurrentStepUpdate::Unchanged,
+            },
+        );
+
+        assert!(result.is_ok(), "snapshot edit failed: {result:?}");
+        let snapshot = fs::read_to_string(
+            manager
+                .sessions_dir()
+                .join("20260619000013")
+                .join("config.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(snapshot.contains("prompt: preserved"));
     }
 
     #[test]

@@ -11,9 +11,9 @@ pub enum ConfigSource {
     EnvVar(PathBuf),
     /// Found `cruise.yaml` / `cruise.yml` in the current directory.
     Local(PathBuf),
-    /// Selected from `~/.config/cruise/`.
+    /// Selected from `~/.config/cruise/workflows/`.
     UserDir(PathBuf),
-    /// No file found; using built-in default.
+    /// Using the built-in default, either as the fallback or by explicit selection.
     Builtin,
 }
 
@@ -26,6 +26,13 @@ impl ConfigSource {
                 format!("config: {}", p.display())
             }
         }
+    }
+
+    /// Returns whether a persisted source string represents the built-in default.
+    #[must_use]
+    pub fn is_builtin_source(source: &str) -> bool {
+        source == crate::new_session_history::BUILTIN_CONFIG_KEY
+            || source == "config: (builtin default)"
     }
 
     /// Returns the path to the config file, or `None` for the built-in default.
@@ -82,16 +89,20 @@ pub fn load_config_from_source(
 /// Resolve a workflow config, returning (`yaml_content`, source).
 ///
 /// Resolution order:
-/// 1. `explicit` (`-c` flag) -- error if file does not exist.
+/// 1. `explicit` (`-c` flag) -- error if file does not exist. The special value
+///    `__builtin__` ([`crate::new_session_history::BUILTIN_CONFIG_KEY`]) selects the
+///    built-in default config without touching the filesystem.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
 /// 4. `./.cruise/*.yaml` / `*.yml` (sorted by filename).
-/// 5. `~/.config/cruise/*.yaml` / `*.yml` -- auto-select if exactly one, else prompt.
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` -- interactive selector includes a trailing
+///    "Built-in default" entry so the built-in default can be chosen explicitly.
 ///
 /// # Errors
 ///
-/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
-/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
+/// Falls back to the embedded built-in workflow when no config file is found.
+/// [`CruiseError::ConfigNotFound`] is returned only when an explicitly requested
+/// file or `CRUISE_CONFIG` path does not exist.
 pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> {
     use std::io::IsTerminal;
     let cwd = std::env::current_dir()
@@ -108,16 +119,17 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 ///
 /// This is safe to call from concurrent Tauri request handlers because it does not
 /// mutate `std::env::current_dir()`.  Resolution order is identical to [`resolve_config`]:
-/// 1. `explicit` -- error if file does not exist.
+/// 1. `explicit` -- error if file does not exist; `__builtin__` selects the built-in default.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
 /// 4. `.cruise/*.yaml` / `*.yml` under `cwd` (sorted by filename).
-/// 5. `~/.config/cruise/*.yaml` / `*.yml`.
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml`.
 ///
 /// # Errors
 ///
-/// Returns [`CruiseError::ConfigNotFound`] if no config file is found. Specify one with
-/// `-c` or `CRUISE_CONFIG`, or place a config in `~/.config/cruise/`.
+/// Falls back to the embedded built-in workflow when no config file is found.
+/// [`CruiseError::ConfigNotFound`] is returned only when an explicitly requested
+/// file or `CRUISE_CONFIG` path does not exist.
 pub fn resolve_config_in_dir(
     explicit: Option<&str>,
     cwd: &std::path::Path,
@@ -125,7 +137,7 @@ pub fn resolve_config_in_dir(
     resolve_config_in_dir_with_interactive(explicit, cwd, false)
 }
 
-/// A candidate config file for the interactive selector.
+/// A candidate config source for the interactive selector.
 #[derive(Debug)]
 struct ConfigCandidate {
     label: String,
@@ -152,12 +164,12 @@ enum CandidateKind {
 /// `cwd`, `~/` under `home`); the stored `PathBuf` stays absolute.
 fn push_yaml_dir_candidates(
     candidates: &mut Vec<ConfigCandidate>,
-    dir: &PathBuf,
+    dir: &std::path::Path,
     cwd: &std::path::Path,
     home: Option<&std::path::Path>,
     kind: impl Fn(PathBuf) -> CandidateKind,
 ) {
-    for file in collect_yaml_files(dir) {
+    for file in crate::configs::legacy_user_config_files(dir) {
         let file = to_absolute(file);
         let label = shorten_display_path(&file, cwd, home);
         candidates.push(ConfigCandidate {
@@ -239,11 +251,14 @@ fn collect_candidates(
         );
     }
 
-    // 3. User-dir config files (~/.config/cruise/*.yaml / *.yml), ASCII-sorted.
-    if let Ok(config_dir) = crate::paths::config_dir() {
+    // 3. User workflow config files (~/.config/cruise/workflows/*.yaml / *.yml), ASCII-sorted.
+    // Legacy top-level yaml files left directly in config_dir are no longer read;
+    // warn once per process so the user knows to migrate them.
+    crate::configs::warn_legacy_user_configs();
+    if let Ok(workflows_dir) = crate::paths::workflows_dir() {
         push_yaml_dir_candidates(
             &mut candidates,
-            &config_dir,
+            &workflows_dir,
             cwd,
             home.as_deref(),
             CandidateKind::UserDir,
@@ -271,6 +286,15 @@ fn resolve_config_in_dir_with_interactive(
 ) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
+        // Built-in sentinel (`__builtin__`): select the built-in default without any
+        // filesystem access. Resolved here once so every caller (CLI `-c`, GUI
+        // create_session / repo mode / session edit) gets the same behaviour.
+        if path == crate::new_session_history::BUILTIN_CONFIG_KEY {
+            return Ok((
+                crate::config::BUILTIN_CONFIG_YAML.to_string(),
+                ConfigSource::Builtin,
+            ));
+        }
         let buf = PathBuf::from(path);
         let yaml = read_config_file(&buf)?;
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
@@ -285,58 +309,40 @@ fn resolve_config_in_dir_with_interactive(
         || matches!(
             candidates.first().map(|c| &c.source),
             Some(CandidateKind::EnvVar(_))
-        ) {
-        // Non-interactive, or CRUISE_CONFIG is set: take the highest-priority candidate.
+        )
+        || candidates.len() == 1
+    {
+        // Non-interactive, CRUISE_CONFIG is set, or only the built-in entry remains:
+        // take the highest-priority candidate without prompting.
         candidates.into_iter().next().ok_or_else(|| {
             CruiseError::Other("internal error: candidate list was empty".to_string())
         })?
     } else {
-        // Interactive: offer only real files — Builtin is an implicit fallback, not a
-        // choice the user should be able to accidentally select (Issue #2).
-        let real: Vec<ConfigCandidate> = candidates
-            .into_iter()
-            .filter(|c| !matches!(c.source, CandidateKind::Builtin))
-            .collect();
-        if real.is_empty() {
-            ConfigCandidate {
-                label: "Built-in default".to_string(),
-                source: CandidateKind::Builtin,
-            }
-        } else if real.len() == 1 {
-            real.into_iter().next().ok_or_else(|| {
-                CruiseError::Other(
-                    "internal error: filtered candidate list became empty".to_string(),
-                )
-            })?
-        } else {
-            prompt_select_among_candidates(real)?
-        }
+        // Interactive: offer all candidates — "Built-in default" is always last, so
+        // cursor position 0 still lands on the highest-priority file and Enter-spam
+        // keeps selecting it, while the built-in default remains explicitly selectable
+        // even when config files exist.
+        prompt_select_among_candidates(candidates)?
     };
 
     // 4. Read the chosen candidate and return.
     materialize_candidate(chosen)
 }
 
-/// Convert a `ConfigCandidate` to a `(yaml, ConfigSource)` pair by reading the file.
+/// Convert a `ConfigCandidate` to a `(yaml, ConfigSource)` pair.
 fn materialize_candidate(candidate: ConfigCandidate) -> Result<(String, ConfigSource)> {
-    match candidate.source {
-        CandidateKind::EnvVar(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::EnvVar(path)))
+    let (path, source): (PathBuf, fn(PathBuf) -> ConfigSource) = match candidate.source {
+        CandidateKind::EnvVar(path) => (path, ConfigSource::EnvVar),
+        CandidateKind::Local(path) => (path, ConfigSource::Local),
+        CandidateKind::UserDir(path) => (path, ConfigSource::UserDir),
+        CandidateKind::Builtin => {
+            return Ok((
+                crate::config::BUILTIN_CONFIG_YAML.to_string(),
+                ConfigSource::Builtin,
+            ));
         }
-        CandidateKind::Local(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::Local(path)))
-        }
-        CandidateKind::UserDir(path) => {
-            let yaml = read_config_file(&path)?;
-            Ok((yaml, ConfigSource::UserDir(path)))
-        }
-        CandidateKind::Builtin => Ok((
-            crate::config::BUILTIN_CONFIG_YAML.to_string(),
-            ConfigSource::Builtin,
-        )),
-    }
+    };
+    read_config_file(&path).map(|yaml| (yaml, source(path)))
 }
 
 fn read_config_file(path: &std::path::Path) -> Result<String> {
@@ -399,32 +405,6 @@ fn shorten_display_path(
     path.display().to_string()
 }
 
-/// Collect `*.yaml` and `*.yml` files in `dir`, sorted by file name.
-/// Known cruise data subdirectories (`sessions`, `worktrees`, `clones`) are
-/// excluded so they are never mistaken for config files even if they happen to
-/// carry a `.yaml` extension.
-fn collect_yaml_files(dir: &PathBuf) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            // Skip known cruise data subdirectories.
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(name, "sessions" | "worktrees" | "clones") {
-                    return false;
-                }
-            }
-            p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
-        })
-        .collect();
-    files.sort_by_key(|p| p.file_name().unwrap_or_default().to_os_string());
-    files
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +434,10 @@ mod tests {
     }
 
     use crate::test_support::{EnvGuard, lock_process};
+
+    fn user_workflows_dir(home: &std::path::Path) -> PathBuf {
+        home.join(".config").join("cruise").join("workflows")
+    }
 
     // ---- explicit path ----
 
@@ -681,41 +665,11 @@ mod tests {
         assert!(yaml.contains("visible"));
     }
 
-    // ---- collect_yaml_files ----
-
-    #[test]
-    fn test_collect_yaml_files_sorted() {
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(tmp_dir.path().join("b.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(tmp_dir.path().join("a.yml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(tmp_dir.path().join("c.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(tmp_dir.path().join("d.txt"), "").unwrap_or_else(|e| panic!("{e:?}"));
-
-        let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
-        let names: Vec<&str> = files
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or_else(|| panic!("unexpected None"))
-                    .to_str()
-                    .unwrap_or_else(|| panic!("unexpected None"))
-            })
-            .collect();
-        assert_eq!(names, vec!["a.yml", "b.yaml", "c.yaml"]);
-    }
-
-    #[test]
-    fn test_collect_yaml_files_empty_dir() {
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
-        assert!(files.is_empty());
-    }
-
     // ---- resolve_config_in_dir ----
 
     #[test]
     fn test_resolve_in_dir_local_config_beats_user_dir() {
-        // Given: a repo directory has cruise.yaml, and ~/.cruise/default.yaml also exists
+        // Given: a repo directory has cruise.yaml, and ~/.config/cruise/workflows/default.yaml also exists
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             repo_dir.path().join("cruise.yaml"),
@@ -724,10 +678,10 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            config_cruise.join("default.yaml"),
+            workflows_dir.join("default.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -831,13 +785,13 @@ mod tests {
 
     #[test]
     fn test_resolve_in_dir_falls_back_to_user_dir() {
-        // Given: repo dir has no local config; home has exactly one ~/.cruise/*.yaml
+        // Given: repo dir has no local config; home has exactly one ~/.config/cruise/workflows/*.yaml
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            config_cruise.join("myconf.yaml"),
+            workflows_dir.join("myconf.yaml"),
             "command: [userdir]\nsteps:\n  s:\n    command: userdir",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -853,7 +807,7 @@ mod tests {
         let (yaml, source) =
             resolve_config_in_dir(None, repo_dir.path()).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: falls back to user-dir config, not builtin
+        // Then: falls back to a user workflow config, not builtin
         assert!(
             yaml.contains("userdir"),
             "expected userdir config, got: {yaml}"
@@ -1008,6 +962,46 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_in_dir_ignores_legacy_and_prefers_workflows() {
+        // Given: no local config and a legacy top-level user workflow
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let cruise_dir = fake_home.path().join(".config").join("cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            cruise_dir.join("legacy.yaml"),
+            "command: [legacy]\nsteps:\n  s:\n    command: legacy",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+
+        // When: only the legacy file exists
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: it is ignored in favor of the built-in default
+        assert!(matches!(source, ConfigSource::Builtin));
+        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+
+        // And when a workflow is added, it becomes the user-dir candidate
+        let workflows_dir = cruise_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            workflows_dir.join("migrated.yaml"),
+            "command: [migrated]\nsteps:\n  s:\n    command: migrated",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(yaml.contains("migrated"));
+        assert!(
+            matches!(source, ConfigSource::UserDir(path) if path == workflows_dir.join("migrated.yaml"))
+        );
+    }
+
+    #[test]
     fn test_collect_candidates_env_missing_file_returns_error() {
         // Given: env_val points to a nonexistent file
         let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
@@ -1029,10 +1023,10 @@ mod tests {
         // Given: user-dir has b.yaml and a.yaml; no local config
         let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(config_cruise.join("b.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(config_cruise.join("a.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(workflows_dir.join("b.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(workflows_dir.join("a.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
         let _guard = DirGuard::new();
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
 
@@ -1152,15 +1146,15 @@ mod tests {
         // Given: no local config; user-dir has b.yaml and a.yaml; interactive mode is off
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            config_cruise.join("b.yaml"),
+            workflows_dir.join("b.yaml"),
             "command: [beta]\nsteps:\n  s:\n    command: beta",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            config_cruise.join("a.yaml"),
+            workflows_dir.join("a.yaml"),
             "command: [alpha]\nsteps:\n  s:\n    command: alpha",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1189,24 +1183,20 @@ mod tests {
     }
 
     #[test]
-    fn test_interactive_false_nothing_returns_builtin() {
-        // Given: empty dir, no env var, no user-dir files; interactive mode is off
+    fn test_nothing_returns_builtin_without_prompt() {
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _guard = DirGuard::new();
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        // When: resolved non-interactively with nothing available
-        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: falls back to built-in default
-        assert!(
-            matches!(source, ConfigSource::Builtin),
-            "expected Builtin, got: {source:?}"
-        );
-        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        for interactive in [false, true] {
+            let (yaml, source) =
+                resolve_config_in_dir_with_interactive(None, repo_dir.path(), interactive)
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(matches!(source, ConfigSource::Builtin));
+            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        }
     }
 
     #[test]
@@ -1241,6 +1231,42 @@ mod tests {
             matches!(source, ConfigSource::Explicit(_)),
             "expected Explicit, got: {source:?}"
         );
+    }
+
+    // ---- explicit __builtin__ sentinel (Built-in default selection) ----
+
+    #[test]
+    fn test_explicit_builtin_sentinel_wins_over_files_and_env() {
+        let env_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            env_file.path(),
+            "command: [envvar]\nsteps:\n  s:\n    command: envvar",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let env_path = env_file
+            .path()
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected None"))
+            .to_string();
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo_dir.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let _guard = DirGuard::new();
+        let _env_guard = EnvGuard::set("CRUISE_CONFIG", std::ffi::OsStr::new(&env_path));
+
+        for interactive in [false, true] {
+            let (yaml, source) = resolve_config_in_dir_with_interactive(
+                Some(crate::new_session_history::BUILTIN_CONFIG_KEY),
+                repo_dir.path(),
+                interactive,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+            assert!(matches!(source, ConfigSource::Builtin));
+        }
     }
 
     // ---- builtin roundtrip ----
@@ -1288,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_collect_candidates_local_dir_after_single_files_before_userdir() {
-        // Given: cruise.yaml (top-level), .cruise/team.yaml, and ~/.config/cruise/global.yaml
+        // Given: cruise.yaml (top-level), .cruise/team.yaml, and ~/.config/cruise/workflows/global.yaml
         let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             tmp_dir.path().join("cruise.yaml"),
@@ -1304,10 +1330,10 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
-            config_cruise.join("global.yaml"),
+            workflows_dir.join("global.yaml"),
             "command: [global]\nsteps:\n  s:\n    command: global",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1420,53 +1446,6 @@ mod tests {
         assert_eq!(
             first_name, "a.yml",
             ".cruise/ candidates must be ASCII-sorted (a.yml before b.yaml)"
-        );
-    }
-
-    #[test]
-    fn test_collect_yaml_files_excludes_data_subdirs() {
-        // Given: a dir with known cruise data subdirectories and a valid config.
-        // The explicit filter in collect_yaml_files skips entries named
-        // "sessions", "worktrees", or "clones" even before is_file() would
-        // reject them as non-files. This test verifies both the explicit
-        // directory-name filter and the non-recursive traversal (files nested
-        // inside those subdirs are never surfaced).
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let sessions_dir = tmp_dir.path().join("sessions");
-        let worktrees_dir = tmp_dir.path().join("worktrees");
-        let clones_dir = tmp_dir.path().join("clones");
-        std::fs::create_dir_all(&sessions_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::create_dir_all(&worktrees_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::create_dir_all(&clones_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        // Nested yaml files — excluded because traversal is non-recursive.
-        std::fs::write(sessions_dir.join("x.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(worktrees_dir.join("y.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(clones_dir.join("z.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(
-            tmp_dir.path().join("valid.yaml"),
-            "command: [echo]\nsteps:\n  s:\n    command: echo",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let _guard = DirGuard::new();
-
-        // When: collect_yaml_files is called on the directory
-        let files = collect_yaml_files(&tmp_dir.path().to_path_buf());
-
-        // Then: only valid.yaml is returned; data-subdir entries and their
-        // nested files are excluded
-        let names: Vec<String> = files
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(
-            names,
-            vec!["valid.yaml"],
-            "only valid.yaml should be returned, got: {names:?}"
         );
     }
 
@@ -1699,12 +1678,12 @@ mod tests {
 
     #[test]
     fn test_collect_candidates_user_dir_label_starts_with_tilde() {
-        // Given: no local config; ~/.config/cruise/a.yaml exists
+        // Given: no local config; `.config/cruise/workflows/a.yaml` exists
         let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let config_cruise = fake_home.path().join(".config").join("cruise");
-        std::fs::create_dir_all(&config_cruise).unwrap_or_else(|e| panic!("{e:?}"));
-        std::fs::write(config_cruise.join("a.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(workflows_dir.join("a.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
         let _guard = DirGuard::new();
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
 

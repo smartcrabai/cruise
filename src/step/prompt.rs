@@ -67,7 +67,7 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
                     if let Some(cb) = on_retry {
                         cb(&msg);
                     } else {
-                        eprintln!("{msg}");
+                        crate::status_eprintln!("{msg}");
                     }
                     tokio::time::sleep(delay).await;
                     continue;

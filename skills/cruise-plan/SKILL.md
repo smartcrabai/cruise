@@ -1,6 +1,6 @@
 ---
 name: cruise-plan
-description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`, or as a GitHub issue for the @cruise Actions integration. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately — and how to file the plan as an issue (plan in the issue body, optional `@cruise run` trigger comment). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", "create a cruise session from this plan", or "file this plan as an issue" / "プランをissueとして登録". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
+description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`, or as a GitHub issue for the @cruise Actions integration. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately — and how to file the plan as an issue (plan in the issue body, optional `@cruise run` trigger comment). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", "create a cruise session from this plan", or "file this plan as an issue" / "register a plan as an issue". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
 ---
 
 cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the resolved workflow config (built-in default when no config file is found) executes against it. This skill is the contract for doing that well.
@@ -77,6 +77,7 @@ Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards
 cat plan.md | cruise plan --skip-planning            # plan on stdin
 cruise plan --skip-planning "$(cat plan.md)"         # or as the positional arg
 cruise plan --skip-planning -c path/to/cruise.yaml "$(cat plan.md)"   # explicit config
+# Use -c __builtin__ to pin the embedded built-in default workflow.
 ```
 
 When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). Two caveats: auto-approval calls an LLM for title generation when the config has an `llm:` block (the plan itself is still used verbatim), and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag) — prefer the stdin form.
@@ -118,7 +119,7 @@ Choose by where execution should happen: local session (`cruise run` on this mac
 
 ## Gotchas
 
-- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c` (foreground form only) to pin a specific config.
+- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c <path>` (foreground form only) to pin a specific config, or `-c __builtin__` to pin the embedded default.
 - **A planning worktree is created even with `--skip-planning`** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`); it is reused by `cruise run`. Non-git directories fall back to running in place.
 - **One task = one session.** Don't pack multiple unrelated tasks into one plan; queue several sessions instead (`cruise --plan … --skip-planning` per task).
 - **Plan text is used verbatim** — no LLM cleans it up afterwards. Typos in file paths or step ordering go straight to the implementer.
