@@ -13,7 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
     WorkspaceMode, current_iso8601,
 };
-use cruise::session_edit::CurrentStepUpdate;
+use cruise::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,7 @@ pub struct DagDto {
 #[serde(rename_all = "camelCase")]
 pub struct DagStepDto {
     pub name: String,
-    /// "prompt", "command", or "option".
+    /// "prompt" (including `prompt_file`), "command", or "option".
     pub kind: String,
     /// True when this step has at least one terminal transition.
     pub is_terminal: bool,
@@ -251,7 +251,7 @@ fn build_dag_dto(
 
 /// Return a UI-facing step kind label for `config`.
 fn step_kind(config: &cruise::config::StepConfig) -> String {
-    if config.prompt.is_some() {
+    if config.prompt.is_some() || config.prompt_file.is_some() {
         "prompt".to_string()
     } else if config.option.is_some() {
         "option".to_string()

@@ -38,7 +38,17 @@ trimmed and blank values are ignored. Boolean values must be `true`, `false`,
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
 `languages.pr` and `languages.plan` settings. When these variables are unset,
 nested language fields take precedence over the deprecated top-level fields,
-then the default is `English`.
+then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or
+`LANGUAGE`, then the default is `English`. Unsupported or language-neutral
+locales use `English`.
+
+## Prompt language environment variables
+
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
+`languages.pr` and `languages.plan` settings. Blank values are ignored. When
+these variables are unset, nested language fields take precedence over the
+deprecated top-level fields, then locale inference, then the default is
+`English`.
 
 ## LLM API config (session-title generation)
 

@@ -154,7 +154,7 @@ pub struct StepConfig {
     /// Model to use (prompt steps only).
     pub model: Option<String>,
 
-    /// Prompt body (prompt steps only).
+    /// Inline prompt body (prompt steps only; use `prompt` or `prompt_file`).
     pub prompt: Option<String>,
 
     /// Message displayed to the user before this step runs (prompt steps only).
@@ -198,6 +198,27 @@ pub struct StepConfig {
     /// Reference to another cruise workflow YAML file to inline at compile/load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_call: Option<String>,
+
+    /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
+    /// Absolute, `~`-prefixed, or relative to the directory of the config file
+    /// that declares the step (a bare file name means "next to the config file").
+    /// Resolved and inlined at load time by
+    /// `workflow_call::resolve_workflow_calls*`; always `None` afterwards.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_prompt_file",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt_file: Option<String>,
+}
+
+fn deserialize_prompt_file<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // YAML uses `~` for null, but prompt_file reserves that spelling for the
+    // user's home directory. Missing fields still use the serde default above.
+    Ok(Option::<String>::deserialize(deserializer)?.or_else(|| Some("~".to_string())))
 }
 
 /// A single item in an option step.
@@ -693,9 +714,9 @@ fn validate_step_groups(
                     "step '{step_name}' references undefined group '{group_name}'"
                 )));
             }
-            if step.prompt.is_some() || step.command.is_some() {
+            if step.prompt.is_some() || step.prompt_file.is_some() || step.command.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{step_name}' uses old membership style (group + prompt/command). \
+                    "step '{step_name}' uses old membership style (group + prompt/prompt_file/command). \
                      Please migrate to groups.<name>.steps block style."
                 )));
             }
@@ -2061,6 +2082,26 @@ steps:
     }
 
     #[test]
+    fn test_validate_groups_rejects_prompt_file_old_membership_style() {
+        let yaml = r"
+command: [claude, -p]
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+    prompt_file: prompts/review.md
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_groups(&config);
+        assert!(result.is_err());
+        assert!(err_string(result).contains("old membership style"));
+    }
+
+    #[test]
     fn test_validate_groups_rejects_empty_group() {
         let yaml = r"
 command: [echo]
@@ -2943,6 +2984,7 @@ steps:
                 "group",
                 "workflow_call",
                 "timeout",
+                "prompt_file",
             ],
             "StepConfig",
         );
@@ -2976,6 +3018,33 @@ steps:
             .collect();
         names.sort_unstable();
         assert_eq!(names, vec!["failed", "retry"]);
+    }
+
+    #[test]
+    fn test_schema_prompt_file_has_expected_type_and_exclusion_rule() {
+        let schema = load_schema();
+        let step = &schema["$defs"]["StepConfig"];
+        let prompt_file = &step["properties"]["prompt_file"];
+        assert_eq!(
+            prompt_file["type"].as_array().map(|types| {
+                types
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["string", "null"]),
+            "prompt_file must accept strings and YAML null (`~`)"
+        );
+
+        let exclusions = step["allOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("StepConfig allOf must be an array"));
+        assert!(exclusions.iter().any(|rule| {
+            rule["not"]["required"].as_array().is_some_and(|required| {
+                required.iter().any(|v| v.as_str() == Some("prompt"))
+                    && required.iter().any(|v| v.as_str() == Some("prompt_file"))
+            })
+        }));
     }
 
     #[test]

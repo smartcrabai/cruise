@@ -17,13 +17,10 @@ description: My workflow  # Optional: shown alongside the file name in config se
 model: sonnet             # Optional: default model for prompt steps
                           # (in SDK mode, reinterpreted as a seher mode_key)
 plan_model: opus          # Optional: model for the built-in plan step
-max_retries: 4
-languages:                # Optional: prompt languages; locale-derived when omitted
+                          # (in SDK mode, reinterpreted as a seher mode_key)
+languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
   plan: English           # Language for built-in planning prompts
-# Deprecated compatibility fields:
-# pr_language: English
-# plan_language: English
 
 llm:                      # Optional: OpenAI-compatible API for session-title generation
   api_key: sk-...
@@ -66,7 +63,7 @@ There are three prompt-execution backends:
 
 ## `command` and the `{model}` placeholder
 
-`{model}` inside the `command` array is a special placeholder resolved at runtime. It is **not** a template variable and cannot be used inside `prompt` / `instruction` / `command` step fields.
+`{model}` inside the `command` array is a special placeholder resolved at runtime. It is **not** a template variable and cannot be used inside `prompt` / `prompt_file` / `instruction` / `command` step fields.
 
 - When an effective model is set: `{model}` is replaced with the model name.
 - When no model is set: both `{model}` and its immediately preceding `--model` flag are removed automatically.
@@ -108,7 +105,7 @@ description: Full TDD flow with review loop
 
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
-`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then locale inference, then `English`.
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, then the default is `English`. Unsupported or language-neutral locales use `English`.
 
 ```yaml
 languages:
@@ -116,13 +113,7 @@ languages:
   plan: Japanese         # plans and plan answers generated in Japanese
 ```
 
-The precedence for each setting is its `CRUISE_LANGUAGE_PR` or
-`CRUISE_LANGUAGE_PLAN` environment variable, the corresponding `languages`
-field, the deprecated top-level field, the first non-empty OS locale variable
-from `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE`, then `English`.
-`LANGUAGE` uses its first colon-separated entry. Unsupported or
-language-neutral locales (such as `C.UTF-8` and `POSIX`) do not fall through to
-lower-priority variables and instead use `English`.
+For compatibility with older configs:
 
 ```yaml
 # Deprecated; use languages.pr instead.

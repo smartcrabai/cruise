@@ -61,7 +61,13 @@ impl TryFrom<StepConfig> for StepKind {
     type Error = CruiseError;
 
     fn try_from(config: StepConfig) -> Result<Self> {
-        // Prompt step: `prompt` is present.
+        if config.prompt_file.is_some() {
+            return Err(CruiseError::InvalidStepConfig(
+                "prompt_file must be resolved before execution (internal error)".to_string(),
+            ));
+        }
+
+        // Prompt step: `prompt` is present (a `prompt_file` was inlined earlier).
         if let Some(prompt) = config.prompt {
             return Ok(StepKind::Prompt(PromptStep {
                 model: config.model,
@@ -96,7 +102,7 @@ impl TryFrom<StepConfig> for StepKind {
         }
 
         Err(CruiseError::InvalidStepConfig(
-            "step must have a prompt, command, or option field".to_string(),
+            "step must have a prompt, prompt_file, command, or option field".to_string(),
         ))
     }
 }
@@ -306,6 +312,20 @@ mod tests {
         let err = StepKind::try_from(config)
             .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)));
+    }
+
+    #[test]
+    fn test_unresolved_prompt_file_is_rejected() {
+        let config = StepConfig {
+            prompt_file: Some("prompts/implement.md".to_string()),
+            ..Default::default()
+        };
+        let err = StepKind::try_from(config)
+            .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
+        assert_eq!(
+            err.to_string(),
+            "invalid step config: prompt_file must be resolved before execution (internal error)"
+        );
     }
 
     #[test]
