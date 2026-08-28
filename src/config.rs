@@ -1043,7 +1043,7 @@ pub fn validate_mixed_conditional_cycles(config: &WorkflowConfig) -> crate::erro
              needs one more traversal than the ceiling allows and always fails with \
              LoopProtection, whatever the ceiling is. Confine the cycle inside a group under \
              `groups:` with a `max_retries` so exhausted retries degrade into a graceful skip \
-             instead -- see the built-in config's groups.review for an example"
+             instead -- see the built-in config's groups.verify-review for an example"
         )));
     }
     Ok(())
@@ -1554,37 +1554,40 @@ steps:
         assert_eq!(config.max_retries, None);
         assert!(config.steps.contains_key("write-test-first"));
         assert!(config.steps.contains_key("implement-after-tests"));
-        assert!(config.groups.contains_key("review"));
+        assert!(config.groups.contains_key("verify-review"));
         // after-pr automation must not auto-merge: merging stays a human action
         assert!(!config.after_pr.contains_key("merge"));
 
-        // And: `only-english` runs after `simplify-pass`. Reversed, the
-        // simplify step sees the translation diff as unrequested scope and
-        // reverts it -- together with the rest of the uncommitted task work.
-        let order: Vec<&str> = config
+        // And: the review group ends with a fixing review pass after the
+        // verification and simplification steps.
+        let review = config
+            .groups
+            .get("verify-review")
+            .unwrap_or_else(|| panic!("built-in config must define the 'verify-review' group"));
+        let order: Vec<&str> = review
             .steps
             .keys()
             .map(std::string::String::as_str)
             .collect();
-        let simplify = order.iter().position(|s| *s == "simplify-pass");
-        let english = order.iter().position(|s| *s == "only-english");
-        assert!(
-            matches!((simplify, english), (Some(s), Some(e)) if s < e),
-            "expected simplify-pass before only-english, got: {order:?}"
+        assert_eq!(
+            order,
+            vec![
+                "verify-plan-implementation",
+                "verify-wiring",
+                "verify-docs",
+                "simplify-pass",
+                "review-pass"
+            ]
         );
 
         // And: review fixes re-enter the flow at plan verification, so a
         // review-driven change is re-checked against {plan} before wiring.
-        let review = config
-            .groups
-            .get("review")
-            .unwrap_or_else(|| panic!("built-in config must define the 'review' group"));
         assert_eq!(
             review
                 .if_condition
                 .as_ref()
                 .and_then(|c| c.file_changed.as_deref()),
-            Some("verify-plan-implementation")
+            Some("verify-review-pass/verify-plan-implementation")
         );
 
         // And: it passes full config validation
@@ -4382,7 +4385,7 @@ steps:
     #[test]
     fn test_validate_mixed_conditional_cycles_builtin_config_ok() {
         // Given: the built-in default workflow (its review loop is safely
-        // confined inside groups.review with max_retries)
+        // confined inside groups.verify-review with max_retries)
         let config =
             WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
 

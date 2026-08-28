@@ -21,7 +21,7 @@ Config files are resolved in this priority order:
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + review group + after-PR automation) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
+6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + verify-review group + after-PR automation) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
 
