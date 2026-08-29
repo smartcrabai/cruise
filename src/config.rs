@@ -50,6 +50,11 @@ pub struct WorkflowConfig {
     ///   `plan_model` / per-step `model` are plain model references
     ///   (`"provider/model[:thinking]"` or a bare `"model"`; unset lets pi
     ///   auto-select), not mode keys.
+    /// - `"claude"` — drives the `claude` CLI in-process through
+    ///   `claude-agent-sdk`, with no seher provider resolution. `model` /
+    ///   `plan_model` / per-step `model` are plain `claude --model` names with
+    ///   an optional `:effort` suffix (unset lets the CLI pick its default),
+    ///   not mode keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk: Option<String>,
 
@@ -611,14 +616,14 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
 }
 
 /// SDK values accepted by [`validate_sdk`].
-const SUPPORTED_SDKS: &[&str] = &["seher", "pi"];
+const SUPPORTED_SDKS: &[&str] = &["seher", "pi", "claude"];
 
 /// Validate the top-level execution backend selection.
 ///
 /// Exactly one of `command` or `sdk` must be specified:
 /// - both set -> ambiguous, rejected.
 /// - neither set -> nothing to run prompts with, rejected.
-/// - `sdk` set to anything other than `"seher"` / `"pi"` -> rejected.
+/// - `sdk` set to anything other than `"seher"` / `"pi"` / `"claude"` -> rejected.
 ///
 /// An empty `command` list counts as "not specified" so that `sdk`-only configs
 /// (where `command` defaults to `[]`) are accepted.
@@ -3375,6 +3380,18 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(validate_sdk(&config).is_ok(), "sdk: pi should be valid");
+    }
+
+    #[test]
+    fn test_validate_sdk_ok_claude() {
+        let yaml = r"
+sdk: claude
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(validate_sdk(&config).is_ok(), "sdk: claude should be valid");
     }
 
     #[test]

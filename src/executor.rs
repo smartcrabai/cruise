@@ -1,8 +1,9 @@
 //! Prompt-execution backend abstraction.
 //!
-//! Cruise drives prompts through one of three backends: an external `command`
+//! Cruise drives prompts through one of four backends: an external `command`
 //! (the classic `claude -p` path), the in-process **seher SDK**
-//! (`sdk: seher`), or **pi directly** (`sdk: pi`). [`Executor`] hides that
+//! (`sdk: seher`), **pi directly** (`sdk: pi`), or the **`claude` CLI**
+//! (`sdk: claude`). [`Executor`] hides that
 //! choice behind a single [`Executor::run`] call so that `planning.rs`,
 //! `engine.rs`, and the GUI command layer don't need to branch on the backend.
 //!
@@ -15,6 +16,10 @@
 //! (`"provider/model[:thinking]"` or a bare `"model"`) passed straight to
 //! `pi_agent_rust`, bypassing seher's provider-resolution layer entirely --
 //! see [`run_pi_direct`] / [`parse_pi_model_ref`].
+//!
+//! In `sdk: claude` mode they are a plain `claude --model` name with an
+//! optional `:effort` suffix, driven in-process through `claude-agent-sdk` --
+//! see [`run_claude`] and [`crate::backend::claude`].
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -27,6 +32,7 @@ use seher::sdk::{
     SeherTool, StreamChunk as SeherStreamChunk, poll_for_agent,
 };
 
+use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
 use crate::backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix};
 use crate::backend::stream::{ChunkOutcome, ChunkReducer, LimitError, LineBuffer, StreamChunk};
 use crate::backend::tool::CruiseTool;
@@ -103,7 +109,7 @@ const SDK_POLL_INTERVAL_MS: u64 = 60_000;
 ///
 /// Built by the caller and handed to [`Executor::run`]. `model_or_mode` carries
 /// a model name in command mode, a seher `mode_key` in `sdk: seher` mode, and a
-/// raw model reference in `sdk: pi` mode (compute it with
+/// raw model reference in `sdk: pi` / `sdk: claude` mode (compute it with
 /// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]). `tools`
 /// and `resume` are honored by SDK backends except the RPC backends `omp` and
 /// `pi`, whose sessions are intentionally closed after each prompt because
@@ -112,7 +118,7 @@ pub struct PromptRun<'a> {
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
     /// Model name (command mode), `mode_key` (`sdk: seher`), or model
-    /// reference (`sdk: pi`).
+    /// reference (`sdk: pi`, `sdk: claude`).
     pub model_or_mode: Option<&'a str>,
     /// Maximum rate-limit retries.
     pub max_retries: usize,
@@ -124,10 +130,11 @@ pub struct PromptRun<'a> {
     /// process environment mutation inside seher. RPC backends inherit ambient
     /// variables, but ignore workflow `PATH`/`PATHEXT` so helper resolution
     /// cannot be redirected. `sdk: pi` applies them directly (see
-    /// [`PiRunnerOptions::env`]).
+    /// [`PiRunnerOptions::env`]); `sdk: claude` passes them to the `claude`
+    /// child process.
     pub env: &'a HashMap<String, String>,
     /// Callback invoked with human-readable progress notices: seher provider
-    /// resolution (`sdk: seher`) and rate-limit retries.
+    /// resolution (`sdk: seher`) and rate-limit retries (every backend).
     pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token.
     pub cancel_token: Option<&'a CancellationToken>,
@@ -163,25 +170,32 @@ pub enum Executor {
     /// Drive prompts through one of the seher SDKs (`pi`, `omp`, `pi-rust`,
     /// `claude`, `claude-terminal`, `claude-headless`); the concrete backend is
     /// picked by [`spawn_agent_stream`] from the resolved provider's `sdk` field.
-    /// Selected by `sdk: seher` (or any `sdk:` value other than `"pi"`).
+    /// Selected by `sdk: seher` (or any `sdk:` value other than `"pi"` /
+    /// `"claude"`).
     Sdk,
     /// Drive prompts through `pi_agent_rust` directly (`sdk: pi`), bypassing
     /// seher's provider-resolution layer and `~/.config/seher/config.yaml`
     /// entirely. See [`run_pi_direct`].
     Pi,
+    /// Drive the `claude` CLI in-process through `claude-agent-sdk`
+    /// (`sdk: claude`), with no seher provider resolution involved. See
+    /// [`run_claude`].
+    Claude,
 }
 
 impl Executor {
     /// Build an executor from the workflow's backend selection.
     ///
-    /// `sdk: pi` -> [`Executor::Pi`]; any other `sdk` value -> [`Executor::Sdk`];
-    /// no `sdk` -> [`Executor::Command`] wrapping `command`. (Mutual exclusivity
-    /// between `sdk` and `command`, and that `sdk` is one of the accepted
-    /// values, is enforced earlier by [`crate::config::validate_sdk`].)
+    /// `sdk: pi` -> [`Executor::Pi`]; `sdk: claude` -> [`Executor::Claude`]; any
+    /// other `sdk` value -> [`Executor::Sdk`]; no `sdk` -> [`Executor::Command`]
+    /// wrapping `command`. (Mutual exclusivity between `sdk` and `command`, and
+    /// that `sdk` is one of the accepted values, is enforced earlier by
+    /// [`crate::config::validate_sdk`].)
     #[must_use]
     pub fn new(sdk: Option<&str>, command: &[String]) -> Self {
         match sdk {
             Some("pi") => Executor::Pi,
+            Some("claude") => Executor::Claude,
             Some(_) => Executor::Sdk,
             None => Executor::Command {
                 command: command.to_vec(),
@@ -190,14 +204,15 @@ impl Executor {
     }
 
     /// Whether this executor drives prompts through an in-process agent
-    /// backend (`Sdk` or `Pi`) rather than spawning an external `command`.
+    /// backend (`Sdk`, `Pi`, or `Claude`) rather than spawning an external
+    /// `command`.
     #[must_use]
     pub fn is_sdk(&self) -> bool {
-        matches!(self, Executor::Sdk | Executor::Pi)
+        matches!(self, Executor::Sdk | Executor::Pi | Executor::Claude)
     }
 
     /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi`) for an ordinary prompt step.
+    /// model reference (`sdk: pi` / `sdk: claude`) for an ordinary prompt step.
     #[must_use]
     pub fn step_model_or_mode(
         &self,
@@ -205,7 +220,7 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi => {
+            Executor::Command { .. } | Executor::Pi | Executor::Claude => {
                 step_model.or(global_model).map(str::to_string)
             }
             Executor::Sdk => Some(mode_key_for_step(step_model, global_model)),
@@ -213,7 +228,8 @@ impl Executor {
     }
 
     /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi`) for the built-in planning step.
+    /// model reference (`sdk: pi` / `sdk: claude`) for the built-in planning
+    /// step.
     #[must_use]
     pub fn plan_model_or_mode(
         &self,
@@ -221,7 +237,7 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi => {
+            Executor::Command { .. } | Executor::Pi | Executor::Claude => {
                 plan_model.or(global_model).map(str::to_string)
             }
             Executor::Sdk => Some(mode_key_for_plan(plan_model, global_model)),
@@ -233,13 +249,14 @@ impl Executor {
     /// # Errors
     ///
     /// Returns an error if the command fails to spawn / exits non-zero, or if
-    /// seher provider resolution, the seher SDK run, or the direct pi run
-    /// fails.
+    /// seher provider resolution, the seher SDK run, the direct pi run, or the
+    /// `claude` CLI run fails.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         match self {
             Executor::Command { command } => run_command(command, req).await,
             Executor::Sdk => run_sdk(req).await,
             Executor::Pi => run_pi_direct(req).await,
+            Executor::Claude => run_claude(req).await,
         }
     }
 }
@@ -623,17 +640,20 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
     }
 }
 
-/// Bridge a blocking `std::sync::mpsc::Receiver<SeherStreamChunk>` (as returned
-/// by seher's various `stream_*` functions and [`PiRunner::stream`]) into a
-/// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (pi and
-/// seher's backends emit token-level deltas; `StreamCallbacks::on_stdout` is
-/// line-oriented like the command backend) and returning `Err(Interrupted)` as
-/// soon as `cancel_token` fires.
+/// Bridge a blocking `std::sync::mpsc::Receiver` of backend chunks (as returned
+/// by seher's various `stream_*` functions, [`PiRunner::stream`], and
+/// [`stream_claude_agent`]) into a [`ChunkOutcome`], forwarding text deltas to
+/// `on_delta` line-buffered (the SDK backends emit token-level deltas;
+/// `StreamCallbacks::on_stdout` is line-oriented like the command backend) and
+/// returning `Err(Interrupted)` as soon as `cancel_token` fires.
 ///
-/// Shared by [`run_sdk`] and [`run_pi_direct`] so both backends fold a chunk
-/// stream into an outcome identically.
-async fn stream_to_outcome(
-    rx_std: std::sync::mpsc::Receiver<SeherStreamChunk>,
+/// Generic over the chunk type so a backend that already speaks cruise's
+/// [`StreamChunk`] costs nothing to fold, while the seher backends convert on
+/// the bridge thread. Shared by [`run_sdk`], [`run_pi_direct`], and
+/// [`run_claude`] so every backend folds a chunk stream into an outcome
+/// identically.
+async fn stream_to_outcome<C: Into<StreamChunk> + Send + 'static>(
+    rx_std: std::sync::mpsc::Receiver<C>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     cancel_token: Option<&CancellationToken>,
     session_slot: Option<Arc<Mutex<Option<String>>>>,
@@ -645,7 +665,7 @@ async fn stream_to_outcome(
     let bridge_session_slot = session_slot;
     std::thread::spawn(move || {
         while let Ok(chunk) = rx_std.recv() {
-            let chunk = StreamChunk::from(chunk);
+            let chunk: StreamChunk = chunk.into();
             if let StreamChunk::Session(id) = &chunk
                 && let Some(slot) = &bridge_session_slot
                 && let Ok(mut session) = slot.lock()
@@ -756,6 +776,95 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
                 ));
             }
         }
+    }
+}
+
+/// `Claude`-backend execution: drive the `claude` CLI in-process through
+/// `claude-agent-sdk` ([`crate::backend::claude`]), with no seher provider
+/// resolution ([`resolve_provider`]) involved — there is no
+/// `~/.config/seher/config.yaml` and, unlike [`run_sdk`], no fallback provider
+/// to hop to on a rate limit.
+///
+/// A [`ChunkOutcome::Limited`] therefore retries the *same* model with
+/// exponential backoff ([`crate::step::command::calculate_backoff`]: 2s
+/// doubling to a 60s cap), mirroring the command backend's rate-limit handling
+/// rather than [`run_sdk`]'s re-resolve-and-retry loop, up to `req.max_retries`
+/// attempts.
+///
+/// Retries deliberately start from `req.resume` (the caller's session), not the
+/// aborted attempt's session id: re-sending the same prompt into a
+/// partially-answered session would duplicate context.
+///
+/// `req.cancel_token` is forwarded to the backend thread, which stops reading
+/// the CLI's output and closes the transport when it fires — that is what
+/// terminates the `claude` child, since the SDK offers no interrupt.
+async fn run_claude(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+
+    let mut attempts = 0;
+    loop {
+        let rx_std = stream_claude_agent(build_claude_config(&req), req.prompt.to_string());
+        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
+
+        match outcome {
+            ChunkOutcome::Done { output, session } => {
+                return Ok(PromptOutcome {
+                    result: PromptResult {
+                        output,
+                        stderr: String::new(),
+                    },
+                    session_id: session,
+                });
+            }
+            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
+            ChunkOutcome::Limited { message, .. } => {
+                if attempts < req.max_retries {
+                    attempts += 1;
+                    let delay = crate::step::command::calculate_backoff(attempts);
+                    if let Some(cb) = req.on_notice {
+                        cb(&format!(
+                            "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
+                            delay.as_secs_f64(),
+                            req.max_retries
+                        ));
+                    }
+                    tokio::select! {
+                        biased;
+                        () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                    continue;
+                }
+                return Err(CruiseError::CommandError(message));
+            }
+            ChunkOutcome::Closed { .. } => {
+                return Err(CruiseError::Other(
+                    "claude stream closed before completion".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+/// Build a [`ClaudeRunnerConfig`] straight from `req`, with no seher provider
+/// resolution involved. `req.model_or_mode` is a plain `claude --model` name
+/// with an optional `:effort` suffix (see [`Executor::step_model_or_mode`] /
+/// [`Executor::plan_model_or_mode`]); unset leaves `--model` off so the CLI
+/// picks its own default.
+///
+/// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
+/// consumes the config.
+fn build_claude_config(req: &PromptRun<'_>) -> ClaudeRunnerConfig {
+    let (model, suffix) = split_thinking_suffix(req.model_or_mode.unwrap_or_default());
+    ClaudeRunnerConfig {
+        model: (!model.is_empty()).then(|| model.to_string()),
+        effort: suffix.and_then(effort_from_suffix),
+        cwd: req.working_dir.map(Path::to_path_buf),
+        resume_session_id: req.resume.clone(),
+        tools: req.tools.clone(),
+        env: req.env.clone(),
+        cancel: req.cancel_token.cloned(),
+        cli_path: None,
     }
 }
 
@@ -1131,6 +1240,10 @@ mod tests {
         Executor::Pi
     }
 
+    fn claude_executor() -> Executor {
+        Executor::Claude
+    }
+
     #[test]
     fn new_picks_sdk_when_sdk_set() {
         let e = Executor::new(Some("seher"), &[]);
@@ -1139,11 +1252,19 @@ mod tests {
     }
 
     #[test]
-    fn new_picks_sdk_for_any_non_pi_sdk_value() {
-        // Any sdk value other than "pi" dispatches to Executor::Sdk; rejecting
-        // unknown values is validate_sdk's job, not Executor::new's.
+    fn new_picks_sdk_for_any_other_sdk_value() {
+        // Any sdk value other than "pi" / "claude" dispatches to
+        // Executor::Sdk; rejecting unknown values is validate_sdk's job, not
+        // Executor::new's.
         let e = Executor::new(Some("claude-terminal"), &[]);
         assert!(matches!(e, Executor::Sdk));
+    }
+
+    #[test]
+    fn new_picks_claude_when_sdk_is_claude() {
+        let e = Executor::new(Some("claude"), &[]);
+        assert!(e.is_sdk());
+        assert!(matches!(e, Executor::Claude));
     }
 
     #[test]
@@ -1211,6 +1332,23 @@ mod tests {
         assert_eq!(
             e.plan_model_or_mode(Some("openai/gpt-5.5"), None),
             Some("openai/gpt-5.5".to_string())
+        );
+        assert_eq!(e.plan_model_or_mode(None, None), None);
+    }
+
+    #[test]
+    fn claude_model_passes_through_model_reference() {
+        // Claude mode passes model_or_mode straight through as a `claude
+        // --model` name (never reinterpreted as a mode key).
+        let e = claude_executor();
+        assert_eq!(
+            e.step_model_or_mode(Some("claude-sonnet-4-6:high"), Some("opus")),
+            Some("claude-sonnet-4-6:high".to_string())
+        );
+        assert_eq!(e.step_model_or_mode(None, None), None);
+        assert_eq!(
+            e.plan_model_or_mode(Some("claude-opus-4-6"), None),
+            Some("claude-opus-4-6".to_string())
         );
         assert_eq!(e.plan_model_or_mode(None, None), None);
     }
@@ -1467,6 +1605,57 @@ done
         assert_eq!(opts.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(opts.tools.len(), 1);
         assert_eq!(opts.tools[0].name, "echo");
+    }
+
+    // -- build_claude_config ---------------------------------------------------
+
+    #[test]
+    fn build_claude_config_splits_effort_suffix_off_the_model() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("claude-sonnet-4-6:xhigh");
+        let config = build_claude_config(&req);
+        assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(config.effort, Some(EffortLevel::XHigh));
+    }
+
+    #[test]
+    fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
+        let env = HashMap::new();
+        let config = build_claude_config(&base_req(&env));
+        assert_eq!(config.model, None);
+        assert_eq!(config.effort, None);
+    }
+
+    #[test]
+    fn build_claude_config_forwards_tools_env_working_dir_and_resume() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let tool = CruiseTool::new(
+            "echo",
+            "Echo",
+            serde_json::json!({"type": "object"}),
+            std::sync::Arc::new(|_| Ok(String::new())),
+        );
+        let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
+        let req = PromptRun {
+            prompt: "hi",
+            model_or_mode: Some("claude-opus-4-6"),
+            max_retries: 0,
+            env: &env,
+            on_notice: None,
+            cancel_token: None,
+            working_dir: Some(&dir),
+            stream: None,
+            tools: vec![tool],
+            resume: Some("sess-1".to_string()),
+        };
+        let config = build_claude_config(&req);
+        assert_eq!(config.cwd, Some(dir));
+        assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(config.tools.len(), 1);
+        assert_eq!(config.tools[0].name, "echo");
     }
 
     #[cfg(unix)]

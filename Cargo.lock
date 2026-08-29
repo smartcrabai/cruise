@@ -1302,6 +1302,7 @@ dependencies = [
  "anyhow",
  "clap",
  "console",
+ "futures",
  "glob",
  "home",
  "indexmap 2.14.0",
