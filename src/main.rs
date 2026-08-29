@@ -1,6 +1,7 @@
 mod app_config;
 mod ask_handler;
 mod attachments;
+mod backend;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
@@ -23,6 +24,8 @@ mod executor;
 mod file_tracker;
 mod issue_publish;
 mod list_cmd;
+mod login_cmd;
+mod mcp_bridge;
 mod metadata;
 mod multiline_input;
 mod new_session_history;
@@ -33,6 +36,7 @@ mod planning;
 mod platform;
 mod repo_clone;
 mod resolver;
+mod retry;
 mod run_cmd;
 mod run_observer;
 mod sdk_tools;
@@ -45,6 +49,7 @@ mod test_binary_support;
 #[cfg(test)]
 mod test_support;
 mod timeout;
+mod tool_bridge;
 mod variable;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
@@ -85,6 +90,8 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
+        Some(cli::Commands::Login(args)) => login_cmd::run(&args),
+        Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),

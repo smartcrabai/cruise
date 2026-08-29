@@ -13,7 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
     WorkspaceMode, current_iso8601,
 };
-use cruise::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
+use cruise::session_edit::CurrentStepUpdate;
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -827,7 +827,7 @@ impl GuiPlanCtx {
     ///
     /// Note: GUI plan/fix/regenerate are independent one-shot commands with no
     /// in-process approve loop, so each passes `resume: &mut None` and starts a
-    /// fresh seher session. Multi-turn `resume` (sharing one conversation across
+    /// fresh backend session. Multi-turn `resume` (sharing one conversation across
     /// turns) is a CLI-only affordance; persisting the session id across GUI
     /// commands would require additional `AppState` plumbing.
     fn build<'a>(
@@ -1097,13 +1097,13 @@ pub async fn create_session(
 
     // Grill mode interviews the user via the SDK `ask_user` tool, which is only
     // registered in the interactive tool-based planning flow. Reject before
-    // creating the session when the SDK backend is absent or interactive
+    // creating the session when no SDK backend is selected or interactive
     // planning is disabled.
     if grill && !cruise::planning::sdk_plan_tools_enabled(&config) {
         remove_session_clone(&manager, &session_id);
         return Err(
-            "grill mode requires the SDK backend with interactive planning enabled \
-             (`sdk:` must be set and `interactive_planning` must not be disabled)"
+            "grill mode requires an SDK backend with interactive planning enabled \
+             (`command:` must not be set and `interactive_planning` must not be disabled)"
                 .to_string(),
         );
     }
@@ -2268,6 +2268,7 @@ async fn execute_single_session(
     let effective_max_retries = cruise::config::resolve_effective_max_retries(None, &config);
     cruise::config::validate_group_retry_budget(&config, effective_max_retries)
         .map_err(|e| e.to_string())?;
+    let retry_policy = cruise::retry::policy_for_config(config.retry.clone());
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
 
     let mut dag =
@@ -2405,13 +2406,16 @@ async fn execute_single_session(
             };
 
             let handle = tokio::runtime::Handle::current();
-            let result = handle.block_on(execute_steps_with_dag(
-                &ctx,
-                &mut vars,
-                &mut tracker,
-                &mut dag,
-                &start_node,
-                &on_node_start,
+            let result = handle.block_on(cruise::retry::with_active_policy(
+                retry_policy.clone(),
+                execute_steps_with_dag(
+                    &ctx,
+                    &mut vars,
+                    &mut tracker,
+                    &mut dag,
+                    &start_node,
+                    &on_node_start,
+                ),
             ));
 
             match &result {
@@ -2437,17 +2441,20 @@ async fn execute_single_session(
                     .load(&sid_for_pr)
                     .map_err(|e| cruise::error::CruiseError::Other(e.to_string()))?;
                 let skipped_steps_for_pr = session_for_pr.skipped_steps.clone();
-                let pr_result = handle.block_on(cruise::worktree_pr::handle_worktree_pr(
-                    ctx,
-                    &compiled,
-                    &mut vars,
-                    &mut tracker,
-                    &mut session_for_pr,
-                    DEFAULT_RATE_LIMIT_RETRIES,
-                    effective_max_retries,
-                    &skipped_steps_for_pr,
-                    None,
-                    None,
+                let pr_result = handle.block_on(cruise::retry::with_active_policy(
+                    retry_policy,
+                    cruise::worktree_pr::handle_worktree_pr(
+                        ctx,
+                        &compiled,
+                        &mut vars,
+                        &mut tracker,
+                        &mut session_for_pr,
+                        DEFAULT_RATE_LIMIT_RETRIES,
+                        effective_max_retries,
+                        &skipped_steps_for_pr,
+                        None,
+                        None,
+                    ),
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);
@@ -4256,7 +4263,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
                 .unwrap_or_else(|e| panic!("{e:?}")),
-            "command: [echo]\nsteps: {}\n"
+            "command:\n- echo\nmodel: null\ninteractive_planning: true\ncleanup_after_pr: false\nforce_exec: false\nenv: {}\ngroups: {}\nsteps: {}\nafter-pr: {}\n"
         );
     }
 

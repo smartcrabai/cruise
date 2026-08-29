@@ -44,14 +44,13 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          # Kimi for Coding (https://api.kimi.com/coding/) is a pi built-in,
-          # Anthropic-compatible provider, so no `pi_models_json` is needed
-          # -- just its API key (via `env`, since there is no dedicated
-          # `kimi_api_key` input) and an explicit model selection for both
-          # the planning step (plan_model) and the implementation steps
-          # (model). This mirrors this repository's own dogfood workflow at
-          # .github/workflows/cruise.yml.
-          model: kimi-for-coding/kimi-for-coding
-          plan_model: kimi-for-coding/kimi-for-coding
+          # Kimi for Coding (https://api.kimi.com/coding/) is a jcode
+          # built-in provider (id `kimi`), so no `providers` profile is
+          # needed -- just its API key (via `env`, since there is no
+          # dedicated `kimi_api_key` input) and an explicit model selection
+          # for both the planning step (plan_model) and the implementation
+          # steps (model).
+          model: kimi/kimi-for-coding
+          plan_model: kimi/kimi-for-coding
           env: |
             KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}

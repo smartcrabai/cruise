@@ -20,8 +20,8 @@
     },
     "sdk": {
       "type": "string",
-      "enum": ["seher", "pi"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`. \"seher\" resolves a provider/model through seher's config.yaml (model/plan_model become seher mode_keys); \"pi\" drives pi_agent_rust directly in-process, bypassing seher's provider resolution (model/plan_model become plain model references)."
+      "enum": ["jcode", "claude"],
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess under cruise's own JCODE_HOME (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix; sign in with `cruise login`); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
     },
     "model": {
       "type": "string",
@@ -33,7 +33,7 @@
     },
     "interactive_planning": {
       "type": "boolean",
-      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Has no effect in `command` mode."
+      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Applies to any SDK backend, including the default `jcode` one used when neither `sdk` nor `command` is set; it has no effect with a `command` backend, which is always file-based."
     },
     "pr_language": {
       "type": "string",
@@ -87,6 +87,10 @@
     "force_exec": {
       "type": "boolean",
       "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
+    },
+    "retry": {
+      "$ref": "#/$defs/RetryConfig",
+      "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried, on the same model."
     }
   },
   "$defs": {
@@ -275,6 +279,36 @@
             "$ref": "#/$defs/StepConfig"
           },
           "description": "Named steps belonging to this group"
+        }
+      }
+    },
+    "RetryConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_delay_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "First backoff step in milliseconds; doubles per attempt up to an 8s ceiling, then jittered down by up to 25%. Default: 500."
+        },
+        "max_delay_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Longest delay cruise will wait before a retry. The computed backoff is already capped at 8s, so this only binds a server Retry-After hint: a hinted delay above it moves the run to its next fallback model, or fails the step when there is none. Default: 300000."
+        },
+        "model_fallback": {
+          "type": "boolean",
+          "description": "Whether a retryable failure may switch models via fallback_chains. Default: true."
+        },
+        "fallback_chains": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Fallback chains keyed by `provider/model`, `provider/*`, or `default`, each listing the model references to try next. A `provider/*` entry keeps the failing model id and swaps only the provider."
         }
       }
     }

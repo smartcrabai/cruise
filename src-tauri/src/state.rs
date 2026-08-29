@@ -13,8 +13,8 @@ use cruise::step::option::OptionResult;
 ///
 /// Uses [`std::sync::mpsc`] rather than `tokio::sync::oneshot` because the
 /// receive side is called from a sync tool handler that may itself be running
-/// inside a tokio runtime (e.g. the dedicated current-thread runtime that
-/// drives `seher::claude_agent::stream_agent`). `tokio::sync::oneshot`'s
+/// inside a tokio runtime (e.g. the dedicated current-thread runtime cruise's
+/// `sdk: claude` backend uses). `tokio::sync::oneshot`'s
 /// `blocking_recv()` panics with "Cannot block the current thread from within
 /// a runtime" in that case, while `std::sync::mpsc::Receiver::recv()` has no
 /// tokio thread-local dependency and just parks the OS thread.

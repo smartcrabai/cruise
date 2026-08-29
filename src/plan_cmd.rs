@@ -196,18 +196,18 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     }
 
     // Grill mode relies on the SDK `ask_user` tool, which is only registered in
-    // the interactive tool-based planning flow. Reject when the SDK backend is
-    // absent or when `interactive_planning` is disabled, discarding the session
-    // we just created.
+    // the interactive tool-based planning flow. Reject when no SDK backend is
+    // selected or when `interactive_planning` is disabled, discarding the
+    // session we just created.
     if args.grill && !crate::planning::sdk_plan_tools_enabled(&config) {
         if let Err(del_err) = manager.delete(&session.id) {
             eprintln!("warning: failed to clean up session: {del_err}");
         }
         return Err(CruiseError::Other(
-            "--grill requires the SDK backend with interactive planning enabled \
-             (`sdk:` must be set and `interactive_planning` must not be disabled); \
-             the command backend and tool-less planning have no interactive \
-             ask_user tool"
+            "--grill requires an SDK backend with interactive planning enabled \
+             (`command:` must not be set and `interactive_planning` must not be \
+             disabled); the command backend and tool-less planning have no \
+             interactive ask_user tool"
                 .to_string(),
         ));
     }
@@ -218,9 +218,8 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
 
-    // SDK backends may return a session id for plan / fix / ask turns. RPC
-    // `pi` / `omp` sessions are closed after each prompt, so those backends
-    // start each turn fresh; command mode always leaves this `None`.
+    // SDK backends return a session id for plan / fix / ask turns so the turns
+    // share one conversation; command mode always leaves this `None`.
     let mut resume: Option<String> = None;
     let interactive = !noninteractive;
 
@@ -479,7 +478,9 @@ async fn approve_with_title(
     plan_content: &str,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    if config.sdk.is_some() {
+    // The `generate_title` tool needs an SDK backend, which includes the default
+    // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
+    if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
         match generate_title_via_sdk(config, &session.input, plan_content, cancel_token).await {
             Ok(title) => session.title = Some(title),
             Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),

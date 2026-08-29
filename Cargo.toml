@@ -13,7 +13,7 @@ members = [".", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.86"
+version = "0.2.0"
 
 # Config for 'dist'
 [workspace.metadata.dist]
@@ -50,13 +50,14 @@ test-utils = []
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 console = "0.16.2"
+futures = "0.3"
 glob = "0.3"
 home = "0.5"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
 reedline = "0.48"
 reqwest = { version = "0.13", features = ["json"] }
-seher-sdk = "0.0.59"
+seher-claude-agent-sdk = "=0.0.59"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9.34"
@@ -98,4 +99,4 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 
 [patch.crates-io]
-asupersync = { path = "vendor/asupersync" }
+seher-claude-agent-sdk = { path = "vendor/claude-agent-sdk" }

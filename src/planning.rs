@@ -16,9 +16,12 @@ use crate::variable::VariableStore;
 /// Environment variable key for pi's HTTP request timeout.
 const PI_HTTP_REQUEST_TIMEOUT_SECS: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
 
-/// Default 30-minute timeout for planning requests (1800 seconds).
-/// Avoids failing after pi's 60-second default HTTP request timeout when the
-/// selected seher plan backend uses pi.
+/// Default 30-minute timeout for planning requests (1800 seconds), applied to
+/// `command:` backends only.
+///
+/// Avoids failing after pi's 60-second default HTTP request timeout for a
+/// `command:` that drives pi. Cruise's own backends never read it, so they are
+/// not handed the variable at all.
 const DEFAULT_PI_PLANNING_REQUEST_TIMEOUT_SECS: &str = "1800";
 
 // Built-in plan/fix/ask prompt templates, embedded at compile time. The `*_SDK`
@@ -89,16 +92,19 @@ pub fn setup_plan_vars(
 /// Whether SDK-mode planning should drive the plan through the interactive
 /// custom tools (`submit_plan` / `update_plan` / `ask_user`).
 ///
-/// True only when an SDK backend is selected (`sdk: seher` or `sdk: pi`) *and*
-/// `interactive_planning` is left enabled. When false the planning turns fall
-/// back to the file-writing (`command`-style) templates and register no custom
-/// tools. Under `sdk: seher` this keeps tool-incapable providers (e.g.
-/// `sdk: claude-terminal`, `sdk: claude-headless`) eligible; `sdk: pi` always
-/// supports custom tools, so this mainly matters there for the file-based
-/// planning behavior itself, not provider eligibility.
+/// True only when the config selects an SDK backend *and* `interactive_planning`
+/// is left enabled. "Selects an SDK backend" is asked of [`Executor`], not of
+/// `config.sdk` alone: a config that names neither `sdk:` nor `command:` runs on
+/// the default `jcode` backend, and that default must reach the same tool-based
+/// planning flow as an explicit `sdk: jcode`.
+///
+/// Deliberately independent of *which* SDK: both SDK backends support custom
+/// tools, so this only selects between the tool-based and the file-writing
+/// planning flow. When false the planning turns fall back to the file-writing
+/// (`command`-style) templates and register no custom tools.
 #[must_use]
 pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
-    config.sdk.is_some() && config.interactive_planning
+    Executor::new(config.sdk.as_deref(), &config.command).is_sdk() && config.interactive_planning
 }
 
 /// Select the plan-generation template for the configured backend.
@@ -152,7 +158,7 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
 /// `update_plan`), and execution settings. Built once per planning session and
 /// reused across the plan / fix / ask turns.
 pub struct PlanPromptCtx<'a> {
-    /// Workflow configuration (selects command vs SDK backend, model/mode keys).
+    /// Workflow configuration (selects command vs SDK backend, model refs).
     pub config: &'a WorkflowConfig,
     /// UI handler backing the SDK `ask_user` tool (CLI or GUI).
     pub ask: Arc<dyn AskHandler>,
@@ -187,7 +193,7 @@ impl PlanPromptCtx<'_> {
 /// Resolve environment variables for plan-related prompts.
 ///
 /// 1. Resolves workflow top-level `env:` with template semantics (same as normal steps).
-/// 2. Adds `PI_HTTP_REQUEST_TIMEOUT_SECS=1800` only when:
+/// 2. For a `command:` backend only, adds `PI_HTTP_REQUEST_TIMEOUT_SECS=1800` when:
 ///    - The resolved workflow env does NOT already contain `PI_HTTP_REQUEST_TIMEOUT_SECS`
 ///    - The ambient process environment does NOT define `PI_HTTP_REQUEST_TIMEOUT_SECS`
 ///
@@ -195,6 +201,10 @@ impl PlanPromptCtx<'_> {
 /// - Explicit workflow `env:` wins (inserted first)
 /// - Ambient `PI_HTTP_REQUEST_TIMEOUT_SECS` wins (cruise doesn't override)
 /// - The 1800-second default is used only when neither source specifies a value
+///
+/// The SDK backends drive `jcode` / `claude`, neither of which reads the
+/// variable, so they are never handed it: it would only pollute their process
+/// environment and everything they spawn (MCP bridge, agent tool calls).
 fn resolve_planning_env(
     config: &WorkflowConfig,
     vars: &VariableStore,
@@ -202,8 +212,10 @@ fn resolve_planning_env(
     // Resolve workflow top-level env with template semantics
     let mut env = crate::engine::resolve_env(&config.env, &HashMap::new(), vars)?;
 
-    // Insert default only when no workflow or ambient override exists
-    if !env.contains_key(PI_HTTP_REQUEST_TIMEOUT_SECS)
+    // Insert default only for a command backend, and only when no workflow or
+    // ambient override exists.
+    if !Executor::new(config.sdk.as_deref(), &config.command).is_sdk()
+        && !env.contains_key(PI_HTTP_REQUEST_TIMEOUT_SECS)
         && std::env::var_os(PI_HTTP_REQUEST_TIMEOUT_SECS).is_none()
     {
         env.insert(
@@ -221,12 +233,10 @@ fn resolve_planning_env(
 /// (`ask_user` / `submit_plan` / `update_plan`) are injected so the agent can
 /// write the plan. Read-only turns (the "Ask about the plan" flow) pass `false`
 /// so no plan-writing tool is available and the saved plan cannot be mutated;
-/// the agent answers from the plan it reads with pi's built-in tools.
+/// the agent answers from the plan it reads with the backend's built-in tools.
 ///
-/// `resume` carries the seher session id forward when the selected backend
-/// supports resumption, so compatible plan/fix/ask turns can share one
-/// conversation. RPC `pi` / `omp` sessions are closed after each prompt and
-/// therefore start each turn fresh; command mode leaves `resume` untouched.
+/// `resume` carries the backend session id forward, so the plan/fix/ask turns
+/// share one conversation. Command mode leaves `resume` untouched.
 ///
 /// # Errors
 ///
@@ -259,7 +269,7 @@ pub async fn run_plan_prompt_template(
     );
     // Tool-based planning is gated on `interactive_planning`; when it is off the
     // plan is written to `{plan}` directly via the file-writing templates and no
-    // custom tools are registered, keeping tool-incapable providers eligible.
+    // custom tools are registered.
     let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
     let (tools, plan_persisted) = if plan_tools_enabled && register_plan_tools {
         let set = crate::sdk_tools::planning_tools(
@@ -296,19 +306,16 @@ pub async fn run_plan_prompt_template(
     drop(spinner);
 
     let outcome = outcome?;
-    // Lazily read the backend transcript only for the error path — a
-    // successful turn must not pay for loading the whole JSONL.
+    // The transcript is fetched lazily, on the failure path only. See
+    // `read_sdk_transcript` for what the current backends actually publish.
     ensure_plan_persisted(plan_persisted.as_deref(), || {
         outcome
             .session_id
             .as_deref()
             .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id))
     })?;
-    // Carry the seher session id forward only for SDK turns that return one.
-    // The RPC backends (`omp`, `pi`) close their sessions after each prompt
-    // because Cruise rebuilds its planning tool handlers between turns;
-    // assigning `None` also clears any stale session id from a prior
-    // provider/backend.
+    // Carry the backend session id forward only for SDK turns that return one.
+    // Assigning `None` also clears any stale session id from a prior backend.
     if plan_tools_enabled {
         *resume = outcome.session_id;
     }
@@ -345,8 +352,8 @@ fn ensure_plan_persisted(
         plan. This typically means the model stopped to wait for clarification it could not \
         receive, or it does not support the planning tools."
         .to_string();
-    if let Some(jsonl) = transcript()
-        && let Some(backend_error) = extract_terminal_error_from_transcript(&jsonl)
+    if let Some(text) = transcript()
+        && let Some(backend_error) = extract_terminal_error_from_transcript(&text)
     {
         use std::fmt::Write as _;
         let _ = write!(msg, " Backend transcript error: {backend_error}");
@@ -379,7 +386,8 @@ pub fn write_input_as_plan(plan_path: &Path, input: &str) -> Result<String> {
 /// and `.message.errorMessage` is non-empty. Returns the last such message
 /// found, or `None` if no terminal error exists.
 ///
-/// This is a pure function (no I/O) to facilitate unit testing.
+/// Pure (no I/O): the transcript text comes from the caller, which for cruise's
+/// own flows means [`read_sdk_transcript`].
 #[must_use]
 pub fn extract_terminal_error_from_transcript(jsonl: &str) -> Option<String> {
     let mut last_error = None;
@@ -435,8 +443,8 @@ pub fn resolve_generated_plan_content(
         Err(original_err) => {
             // Original error means plan/stdout/stderr were all empty.
             // Try to extract a more useful error from the transcript.
-            if let Some(jsonl) = transcript
-                && let Some(backend_error) = extract_terminal_error_from_transcript(jsonl)
+            if let Some(text) = transcript
+                && let Some(backend_error) = extract_terminal_error_from_transcript(text)
             {
                 return Err(crate::error::CruiseError::Other(format!(
                     "planning backend failed after producing no plan output: {backend_error}"
@@ -447,42 +455,25 @@ pub fn resolve_generated_plan_content(
     }
 }
 
-/// Maximum bytes read from an SDK transcript for error diagnosis.
+/// Backend transcript for `session_id`, when the backend publishes one that
+/// records terminal errors. Always `None` today.
 ///
-/// The transcript is only scanned for the *last* terminal error, so reading
-/// the tail is sufficient and bounds memory/parse cost for very long agent
-/// sessions.
-const MAX_TRANSCRIPT_DIAGNOSTIC_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Try to read an SDK transcript file for the given session ID.
+/// - `sdk: jcode` writes `$JCODE_HOME/sessions/<session_id>.json`, but that
+///   document holds only the session's messages. A turn killed by a provider
+///   error (429, `context_length_exceeded`, a transport failure) leaves no error
+///   field there — not even the partial assistant reply (verified against jcode
+///   0.81.2). jcode reports such failures on its NDJSON `error` event instead,
+///   which the `jcode` backend already turns into the run's own error, so
+///   reading the document would add nothing and cost a file read on every
+///   failed planning turn.
+/// - `sdk: claude` transcripts are not read by cruise.
 ///
-/// Reads at most the last [`MAX_TRANSCRIPT_DIAGNOSTIC_BYTES`] of the file;
-/// the diagnostics consumer only needs the most recent records. Returns
-/// `None` if the transcript cannot be found or read (non-fatal).
+/// The two consumers (`ensure_plan_persisted` and
+/// [`resolve_generated_plan_content`], the latter also called by the GUI) treat
+/// `None` as "no extra diagnosis available" and keep their generic message.
 #[must_use]
-pub fn read_sdk_transcript(working_dir: Option<&Path>, session_id: &str) -> Option<String> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-
-    let transcript_path = seher::sdk::pi_session_path(working_dir, session_id);
-    let mut file = std::fs::File::open(&transcript_path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let capped = len > MAX_TRANSCRIPT_DIAGNOSTIC_BYTES;
-    if capped {
-        file.seek(SeekFrom::End(
-            -MAX_TRANSCRIPT_DIAGNOSTIC_BYTES.cast_signed(),
-        ))
-        .ok()?;
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if capped {
-        // The seek can land mid-line, so drop the first partial record to
-        // keep JSONL lines whole for the terminal-error scan.
-        let start = text.find('\n').map_or(0, |i| i + 1);
-        text.drain(..start);
-    }
-    Some(text)
+pub fn read_sdk_transcript(_working_dir: Option<&Path>, _session_id: &str) -> Option<String> {
+    None
 }
 
 #[cfg(test)]
@@ -588,28 +579,45 @@ mod tests {
 
     #[test]
     fn templates_select_sdk_variants_with_sdk() {
-        let config = config_with(Some("seher"), None);
+        let config = config_with(Some("jcode"), None);
         assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
     }
 
     #[test]
-    fn templates_select_sdk_variants_with_pi() {
-        // sdk_plan_tools_enabled / template selection are driven off
-        // `config.sdk.is_some()`, not the SDK kind, so `sdk: pi` picks the same
-        // tool-based templates as `sdk: seher`.
-        let config = config_with(Some("pi"), None);
+    fn templates_select_sdk_variants_with_claude() {
+        // Template selection is driven off "an SDK backend is selected", not the
+        // SDK kind, so `sdk: claude` picks the same tool-based templates as
+        // `sdk: jcode`.
+        let config = config_with(Some("claude"), None);
         assert!(sdk_plan_tools_enabled(&config));
         assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
     }
 
+    /// A config naming neither `sdk:` nor `command:` runs on the default `jcode`
+    /// backend, so it must get the tool-based planning flow — the built-in
+    /// workflow names no backend, and it used to be an explicit SDK config.
+    #[test]
+    fn templates_select_sdk_variants_for_the_default_backend() {
+        let config = config_with(None, None);
+        assert!(sdk_plan_tools_enabled(&config));
+        assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
+        assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
+        assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
+        assert_eq!(
+            initial_plan_template(&config, true),
+            PLAN_GRILL_PROMPT_TEMPLATE_SDK,
+            "grill mode must stay available on the default backend"
+        );
+    }
+
     /// Build an SDK config with `interactive_planning: false`.
     fn sdk_config_no_interactive() -> WorkflowConfig {
         WorkflowConfig::from_yaml(
-            "sdk: seher\ninteractive_planning: false\nsteps:\n  s1:\n    prompt: hi\n",
+            "sdk: jcode\ninteractive_planning: false\nsteps:\n  s1:\n    prompt: hi\n",
         )
         .unwrap_or_else(|e| panic!("{e:?}"))
     }
@@ -617,7 +625,7 @@ mod tests {
     #[test]
     fn interactive_planning_defaults_to_true_for_sdk() {
         // Omitting the field keeps the tool-based interactive flow (SDK templates).
-        let config = config_with(Some("seher"), None);
+        let config = config_with(Some("jcode"), None);
         assert!(config.interactive_planning);
         assert!(sdk_plan_tools_enabled(&config));
     }
@@ -658,7 +666,7 @@ mod tests {
 
     #[test]
     fn initial_plan_template_uses_grill_variant_for_sdk_when_enabled() {
-        let config = config_with(Some("seher"), None);
+        let config = config_with(Some("jcode"), None);
         assert_eq!(
             initial_plan_template(&config, true),
             PLAN_GRILL_PROMPT_TEMPLATE_SDK
@@ -667,7 +675,7 @@ mod tests {
 
     #[test]
     fn initial_plan_template_uses_standard_sdk_variant_when_grill_off() {
-        let config = config_with(Some("seher"), None);
+        let config = config_with(Some("jcode"), None);
         assert_eq!(
             initial_plan_template(&config, false),
             PLAN_PROMPT_TEMPLATE_SDK
@@ -984,6 +992,30 @@ mod tests {
         );
     }
 
+    // -- read_sdk_transcript ---------------------------------------------------
+
+    /// Neither backend publishes a transcript that records terminal errors, so
+    /// the diagnostics consumers must always fall back to their own message —
+    /// including when a jcode session document for that id does exist.
+    #[test]
+    fn read_sdk_transcript_yields_no_diagnostics() {
+        let _guard = lock_process();
+        let tmp = make_temp_dir();
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let sessions = crate::backend::jcode::jcode_home()
+            .unwrap_or_else(|e| panic!("jcode home: {e}"))
+            .join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap_or_else(|e| panic!("create sessions dir: {e}"));
+        std::fs::write(
+            sessions.join("sess-1.json"),
+            r#"{"id":"sess-1","messages":[],"status":"Closed"}"#,
+        )
+        .unwrap_or_else(|e| panic!("write session: {e}"));
+
+        assert_eq!(read_sdk_transcript(Some(tmp.path()), "sess-1"), None);
+        assert_eq!(read_sdk_transcript(None, "no-such-session"), None);
+    }
+
     #[test]
     fn resolve_generated_plan_content_ignores_transcript_when_content_available() {
         let tmp = make_temp_dir();
@@ -1024,7 +1056,7 @@ mod tests {
 
     #[test]
     fn sdk_templates_resolve_clarification_var_in_both_modes() {
-        let config = config_with(Some("seher"), None);
+        let config = config_with(Some("jcode"), None);
         for interactive in [true, false] {
             let mut vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
             // The fix template also references {prev.input} (the change request).
@@ -1174,6 +1206,33 @@ mod tests {
             "command: [\"echo\"]\nenv:\n  {key}: \"{template}\"\nsteps:\n  s1:\n    prompt: hi\n"
         );
         WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    /// Given: an SDK backend and no ambient `PI_HTTP_REQUEST_TIMEOUT_SECS`
+    /// When: `resolve_planning_env` is called
+    /// Then: the variable is not injected — `jcode` / `claude` never read it, so
+    /// putting it in their environment (and in every process they spawn) is
+    /// pure pollution.
+    #[test]
+    fn resolve_planning_env_omits_pi_timeout_for_sdk_backends() {
+        let _guard = lock_process();
+        let _env_guard = EnvGuard::remove(PI_HTTP_REQUEST_TIMEOUT_SECS);
+        for yaml in [
+            "sdk: jcode\nsteps:\n  s1:\n    prompt: hi\n",
+            "sdk: claude\nsteps:\n  s1:\n    prompt: hi\n",
+            // Neither named: the default `jcode` backend.
+            "steps:\n  s1:\n    prompt: hi\n",
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+            let vars = VariableStore::new("test".to_string());
+
+            let env = resolve_planning_env(&config, &vars).unwrap_or_else(|e| panic!("{e:?}"));
+
+            assert!(
+                !env.contains_key(PI_HTTP_REQUEST_TIMEOUT_SECS),
+                "SDK backends must not be handed pi's timeout ({yaml})"
+            );
+        }
     }
 
     /// Given: empty workflow env and no ambient `PI_HTTP_REQUEST_TIMEOUT_SECS`

@@ -1,20 +1,24 @@
-# seher SDK backend example: no external command; prompts run in-process.
-sdk: seher
+# jcode SDK backend example: no external command; the jcode CLI runs the
+# prompts. This is also the default when neither `command` nor `sdk` is set.
+sdk: jcode
 
 description: SDK-backed TDD flow
 
-# In SDK mode these are seher mode_keys, not model names.
-model: build          # mode_key for ordinary prompt steps (this is also the default)
-plan_model: plan      # mode_key for the built-in plan step (this is also the default)
+# Plain model references: "provider/model[:effort]" (provider is a jcode
+# provider id; `jcode login --help` lists them all). Omit both to use the
+# jcode home's configured default. Sign in first with `cruise login`.
+model: anthropic-api/claude-sonnet-4-6   # for ordinary prompt steps
+plan_model: openai-api/gpt-5.5:high      # for the built-in plan step (falls back to `model`)
 
 steps:
   write-tests:
     prompt: |
-      Based on {plan}, write the test code first.
+      Write tests for {plan}. Do not implement yet.
 
   implement:
-    # Per-step model is also a mode_key in SDK mode.
-    model: build
+    # Per-step model is also a plain model reference. A bare model name (no
+    # "provider/" prefix) leaves the provider to jcode's own resolution.
+    model: claude-sonnet-4-6
     prompt: |
       Tests are written for {plan}. Implement to make them pass.
     timeout: 30m

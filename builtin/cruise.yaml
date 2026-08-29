@@ -1,6 +1,3 @@
-sdk: seher
-model: build
-plan_model: plan
 languages:
   pr: English
 cleanup_after_pr: true

@@ -7,17 +7,17 @@ command:                  # LLM invocation command (array). Mutually exclusive w
   - "{model}"
   - -p
 
-# sdk: seher              # Alternative backend: run prompts via seher's resolved
-                          # provider instead of an external command (see sdk.md).
-# sdk: pi                 # Alternative backend: run prompts via pi_agent_rust
-                          # directly, no seher config needed (see sdk.md).
+# sdk: jcode              # Alternative backend: drive the jcode CLI (this is the
+                          # default when neither `command` nor `sdk` is set; see sdk.md).
+# sdk: claude             # Alternative backend: drive the claude CLI in-process
+                          # via claude-agent-sdk (see sdk.md).
 
 description: My workflow  # Optional: shown alongside the file name in config selectors
 
 model: sonnet             # Optional: default model for prompt steps
-                          # (in SDK mode, reinterpreted as a seher mode_key)
+                          # (in SDK mode, a "provider/model[:effort]" reference)
 plan_model: opus          # Optional: model for the built-in plan step
-                          # (in SDK mode, reinterpreted as a seher mode_key)
+                          # (in SDK mode, a "provider/model[:effort]" reference)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
   plan: English           # Language for built-in planning prompts
@@ -51,15 +51,15 @@ cleanup_after_pr: false   # Optional: delete local worktree and branch after PR 
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
-`steps` and exactly one of `command` / `sdk` are required. Setting both `command` and `sdk`, or neither, is a validation error (an empty `command` array counts as "not set"). When `sdk` is set it must be `seher` or `pi` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
+`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); setting neither runs prompts on the default `jcode` backend. When `sdk` is set it must be `jcode` or `claude` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
 ## `command` vs `sdk`
 
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: seher` — resolve a provider/model through seher's own `~/.config/seher/config.yaml`; the seher dispatcher runs in-process, while the selected provider backend may be in-process or an external subprocess. `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys**. See [sdk.md](sdk.md) for details.
-- `sdk: pi` — run prompts in-process via `pi_agent_rust` **directly**, bypassing seher's provider resolution and config file entirely. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:thinking]"` or a bare `"model"`), not mode keys. See [sdk.md](sdk.md) for details.
+- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against cruise's own jcode home (sign in with `cruise login`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
+- `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
 
@@ -91,7 +91,7 @@ steps:
 
 ## `plan_model`
 
-Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. Under `sdk: seher` it is reinterpreted as the planning mode key; under `sdk: pi` it is a plain model reference (see [sdk.md](sdk.md)).
+Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is a plain model reference (see [sdk.md](sdk.md)).
 
 ## `description`
 
@@ -161,8 +161,27 @@ execution. Background `--plan` runs foreground because no plan worker is needed.
 
 ## Rate-limit retry
 
-When an HTTP 429 is detected, cruise retries with exponential backoff:
+When an HTTP 429 is detected, cruise retries the same model with exponential backoff:
 
 - Initial delay: 2 seconds
 - Max delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
+
+The SDK backends additionally accept an optional `retry:` block. Declaring it widens rate-limit handling into a fallback policy: 5xx and network failures become retryable too, the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and a model that has spent its retry budget is swapped for the next entry of its fallback chain. Setting `model_fallback: false` (or leaving the chains empty) only turns the *switching* off — the wider classification and the new backoff schedule still apply, so omit the block entirely to keep the historical behavior.
+
+```yaml
+retry:                    # Optional; SDK backends only. Omitted = same-model 429 retries only
+  base_delay_ms: 500      # Backoff base (default 500); delay is min(base * 2^(attempt-1), 8s) with jitter
+  max_delay_ms: 300000    # Waiting cap (default 300000). The computed backoff is already capped at 8s,
+                          # so this only binds a server Retry-After hint (itself clamped to 60s): a
+                          # hinted delay above it moves to the next fallback model, or fails the step
+                          # when there is no chain entry left
+  model_fallback: true    # Allow switching models via fallback_chains (default true)
+  fallback_chains:        # Keys: "provider/model", "provider/*", a bare "model", or "default"
+                          # (most specific wins)
+    default:
+      - anthropic-api/claude-opus-4-6
+      - openai-api/gpt-5.5
+```
+
+Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model that just failed is skipped for 5 minutes (in-memory, and cleared when the config is hot-reloaded). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the DAG loop-protection ceiling, not a retry budget for prompts.

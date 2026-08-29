@@ -143,8 +143,9 @@ fn list_skippable_step_map(
 #[derive(Debug, Clone)]
 pub struct CompiledWorkflow {
     pub command: Vec<String>,
-    /// SDK backend (`"seher"` or `"pi"`) when prompts run in-process instead
-    /// of via `command`. Mutually exclusive with a non-empty `command`.
+    /// SDK backend (`"jcode"` or `"claude"`) when prompts run in-process
+    /// instead of via `command`. Mutually exclusive with a non-empty `command`;
+    /// with both unset, prompts run on the default `jcode` backend.
     pub sdk: Option<String>,
     pub model: Option<String>,
     pub plan_model: Option<String>,

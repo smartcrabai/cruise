@@ -84,9 +84,14 @@ init_commit_coauthor() {
 init_commit_coauthor
 
 CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
-export XDG_DATA_HOME="$CRUISE_DIR/data"
-export XDG_CONFIG_HOME="$CRUISE_DIR/xdg-config"
-export XDG_STATE_HOME="$CRUISE_DIR/xdg-state"
+# XDG_* normally arrive from setup-env.sh via $GITHUB_ENV, set before the
+# install/provision steps so every step -- provision-jcode.sh writing the
+# credentials included -- resolves the same cruise data dir. These are only
+# the standalone fallback; overwriting them here would split the jcode home
+# between steps again.
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$CRUISE_DIR/data}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$CRUISE_DIR/xdg-config}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$CRUISE_DIR/xdg-state}"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 
 LOG_FILE="$CRUISE_DIR/run.log"

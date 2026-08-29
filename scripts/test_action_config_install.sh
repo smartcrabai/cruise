@@ -27,7 +27,7 @@ fi
 new_case
 reset_ws
 mkdir -p "$WS/subdir"
-printf 'sdk: pi\n' > "$WS/subdir/my-config.yaml"
+printf 'steps:\n  s:\n    prompt: "hi"\n' > "$WS/subdir/my-config.yaml"
 CONFIG_INPUT="subdir/my-config.yaml" GITHUB_WORKSPACE="$WS" bash action/scripts/resolve-config.sh >/dev/null
 assert_eq "resolve-config: a relative config input resolves to an absolute CRUISE_CONFIG path" \
   "$WS/subdir/my-config.yaml" "$(genv CRUISE_CONFIG)"
@@ -72,7 +72,7 @@ assert_own_config_detected() { # $1 = path (may include a subdir) relative to $W
   new_case
   reset_ws
   mkdir -p "$WS/$(dirname "$relpath")"
-  printf 'sdk: pi\n' > "$WS/$relpath"
+  printf 'steps:\n  s:\n    prompt: "hi"\n' > "$WS/$relpath"
   local stdout_out
   stdout_out="$(GITHUB_WORKSPACE="$WS" bash action/scripts/resolve-config.sh)"
   if grep -q '^CRUISE_CONFIG=' "$GITHUB_ENV"; then
@@ -98,9 +98,9 @@ assert_own_config_detected ".cruise/foo.yml"
 # --- config input takes priority over an existing repo config -------------
 new_case
 reset_ws
-printf 'sdk: pi\n' > "$WS/cruise.yaml"
+printf 'steps:\n  s:\n    prompt: "hi"\n' > "$WS/cruise.yaml"
 mkdir -p "$WS/custom"
-printf 'sdk: pi\n' > "$WS/custom/explicit.yaml"
+printf 'steps:\n  s:\n    prompt: "hi"\n' > "$WS/custom/explicit.yaml"
 CONFIG_INPUT="custom/explicit.yaml" GITHUB_WORKSPACE="$WS" bash action/scripts/resolve-config.sh >/dev/null
 assert_eq "resolve-config: an explicit config input takes priority over an existing repo-owned config" \
   "$WS/custom/explicit.yaml" "$(genv CRUISE_CONFIG)"
@@ -125,7 +125,7 @@ if [ "$PYYAML_OK" -eq 1 ]; then
     fail "resolve-config: the generated default config is valid YAML (PyYAML parse)" "$(cat "$default_cfg")"
   fi
 else
-  if grep -qx 'sdk: pi' "$default_cfg" && grep -qx 'steps:' "$default_cfg" \
+  if grep -qx 'steps:' "$default_cfg" \
      && grep -qx '  write-tests:' "$default_cfg" && grep -qx '  implement:' "$default_cfg"; then
     pass "resolve-config: the generated default config has the expected top-level structure (structural only)"
   else
@@ -154,6 +154,15 @@ if grep -Eq '^[[:space:]]*(model|plan_model):' "$default_cfg"; then
   fail "resolve-config: the generated default config sets neither model: nor plan_model:" "$(grep -En '^[[:space:]]*(model|plan_model):' "$default_cfg")"
 else
   pass "resolve-config: the generated default config sets neither model: nor plan_model:"
+fi
+
+# Omitting `sdk:` is what selects cruise's own default backend (`sdk: jcode`);
+# a generated config that declared one would override a repository's choice
+# and pin this action to a backend cruise no longer has to keep as default.
+if grep -Eq '^[[:space:]]*sdk:' "$default_cfg"; then
+  fail "resolve-config: the generated default config declares no sdk:" "$(grep -En '^[[:space:]]*sdk:' "$default_cfg")"
+else
+  pass "resolve-config: the generated default config declares no sdk:"
 fi
 
 # --- exec config: always generated, references {input} not {plan} ---------
@@ -188,6 +197,11 @@ if grep -Eq '^[[:space:]]*(model|plan_model):' "$exec_cfg"; then
   fail "resolve-config: the exec config sets neither model: nor plan_model:" "$(cat "$exec_cfg")"
 else
   pass "resolve-config: the exec config sets neither model: nor plan_model:"
+fi
+if grep -Eq '^[[:space:]]*sdk:' "$exec_cfg"; then
+  fail "resolve-config: the exec config declares no sdk:" "$(cat "$exec_cfg")"
+else
+  pass "resolve-config: the exec config declares no sdk:"
 fi
 
 # --- prompt embedding round-trips verbatim (blank lines, YAML specials) ---
@@ -282,17 +296,24 @@ SH
 # cases without depending on whatever is actually installed on this host.
 log_stub gh
 
+# The fake `cruise` reports a version at or above install.sh's
+# MIN_CRUISE_VERSION floor, so the happy-path cases exercise the install
+# itself; the dedicated case further down pins the rejection of an older one.
 write_ok_installer() {
-  cat > "$FAKE_INSTALLER" <<'EOF'
+  write_installer_with_version "0.2.0"
+}
+
+write_installer_with_version() { # $1=version string printed by `cruise --version`
+  cat > "$FAKE_INSTALLER" <<EOF
 #!/bin/sh
-printf 'installer CRUISE_UNMANAGED_INSTALL=%s CRUISE_NO_MODIFY_PATH=%s CRUISE_DISABLE_UPDATE=%s CRUISE_PRINT_QUIET=%s\n' \
-  "$CRUISE_UNMANAGED_INSTALL" "$CRUISE_NO_MODIFY_PATH" "$CRUISE_DISABLE_UPDATE" "$CRUISE_PRINT_QUIET" >> "$STUB_LOG"
-mkdir -p "$CRUISE_UNMANAGED_INSTALL"
-cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
+printf 'installer CRUISE_UNMANAGED_INSTALL=%s CRUISE_NO_MODIFY_PATH=%s CRUISE_DISABLE_UPDATE=%s CRUISE_PRINT_QUIET=%s\n' \\
+  "\$CRUISE_UNMANAGED_INSTALL" "\$CRUISE_NO_MODIFY_PATH" "\$CRUISE_DISABLE_UPDATE" "\$CRUISE_PRINT_QUIET" >> "\$STUB_LOG"
+mkdir -p "\$CRUISE_UNMANAGED_INSTALL"
+cat > "\$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
 #!/bin/sh
-echo "cruise 0.0.0-fake"
+echo "cruise $1"
 BIN
-chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
+chmod +x "\$CRUISE_UNMANAGED_INSTALL/cruise"
 EOF
 }
 
@@ -302,7 +323,7 @@ write_failing_installer() {
 mkdir -p "$CRUISE_UNMANAGED_INSTALL"
 cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
 #!/bin/sh
-echo "cruise 0.0.0-fake"
+echo "cruise 0.2.0"
 BIN
 chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
 printf 'installer-invoked-then-failed\n' >> "$STUB_LOG"
@@ -347,11 +368,11 @@ new_case
 write_ok_installer
 IDIR3="$TMP/install-pinned"
 mkdir -p "$IDIR3"
-status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR3" CRUISE_VERSION=v0.1.68 bash action/scripts/install.sh 2>&1)
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR3" CRUISE_VERSION=v0.2.0 bash action/scripts/install.sh 2>&1)
 status=$?
 assert_status "install: a pinned CRUISE_VERSION succeeds" 0 "$status" "$status_out"
-assert_contains "install: a pinned CRUISE_VERSION (v0.1.68) is embedded in the versioned download URL" \
-  "$(cat "$STUB_LOG")" "curl -fsSL https://github.com/smartcrabai/cruise/releases/download/v0.1.68/cruise-installer.sh"
+assert_contains "install: a pinned CRUISE_VERSION (v0.2.0) is embedded in the versioned download URL" \
+  "$(cat "$STUB_LOG")" "curl -fsSL https://github.com/smartcrabai/cruise/releases/download/v0.2.0/cruise-installer.sh"
 assert_eq "install: a pinned CRUISE_VERSION also appends the install dir to GITHUB_PATH" \
   "$IDIR3/cruise-bin" "$(cat "$GITHUB_PATH")"
 
@@ -384,6 +405,100 @@ else
 fi
 assert_contains "install: an already-installed cruise on PATH still reports its version" "$status_out" "cruise 9.9.9-preexisting"
 rm -f "$STUB_DIR/cruise"
+
+# `cruise --version` output that isn't exactly "cruise <semver>": a stderr
+# notice line and a dev build's trailing hash must not be misread as the
+# version (the notice would otherwise fail the numeric check, the hash would
+# be rejected as garbage).
+new_case
+: > "$GITHUB_PATH"
+stub cruise <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "cruise: an update is available (9.9.9)" >&2
+  echo "cruise 0.2.0 (abc1234)"
+  exit 0
+fi
+printf 'cruise %s\n' "$*" >> "$STUB_LOG"
+SH
+IDIR4B="$TMP/install-devbuild"
+mkdir -p "$IDIR4B"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR4B" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_status "install: a dev-build version string with stderr noise is parsed and accepted" \
+  0 "$status" "$status_out"
+rm -f "$STUB_DIR/cruise"
+
+# No "cruise <semver>" line at all: the step fails naming the output instead
+# of reporting an empty version as "too old".
+new_case
+: > "$GITHUB_PATH"
+stub cruise <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "garbage"
+  exit 0
+fi
+printf 'cruise %s\n' "$*" >> "$STUB_LOG"
+SH
+IDIR4C="$TMP/install-unparseable"
+mkdir -p "$IDIR4C"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR4C" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: unparseable --version output fails the step" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install: unparseable --version output names the cause" \
+  "$status_out" "::error::could not determine the cruise version"
+rm -f "$STUB_DIR/cruise"
+
+# --- minimum cruise version: an older binary is refused --------------------
+# This action generates `sdk:`-less configs and provisions credentials into
+# cruise's own jcode home, both of which only mean anything from v0.2.0 on.
+# Pairing an older binary with this action must fail loudly here rather than
+# somewhere inside the run, both when the installer produced it...
+new_case
+: > "$GITHUB_PATH"
+write_installer_with_version "0.1.86"
+IDIR_OLD="$TMP/install-too-old"
+mkdir -p "$IDIR_OLD"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR_OLD" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: a freshly-installed cruise below the minimum version fails the step" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install: the too-old error names the installed version and the floor" \
+  "$status_out" "::error::cruise 0.1.86 is too old for this version of the action (requires cruise v0.2.0 or later"
+
+# ...and when a self-hosted runner already had it on PATH.
+new_case
+: > "$GITHUB_PATH"
+stub cruise <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "cruise 0.1.86"
+  exit 0
+fi
+printf 'cruise %s\n' "$*" >> "$STUB_LOG"
+SH
+IDIR_OLD2="$TMP/install-preexisting-too-old"
+mkdir -p "$IDIR_OLD2"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR_OLD2" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: a pre-existing cruise below the minimum version fails the step too" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install: the pre-existing too-old error names the same floor" \
+  "$status_out" "requires cruise v0.2.0 or later"
+rm -f "$STUB_DIR/cruise"
+
+# A pre-release of the floor itself counts as meeting it: cargo-dist and RC
+# builds report e.g. "0.2.0-rc1", which must not be read as older than 0.2.0.
+new_case
+: > "$GITHUB_PATH"
+write_installer_with_version "0.2.0-rc1"
+IDIR_RC="$TMP/install-prerelease"
+mkdir -p "$IDIR_RC"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR_RC" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_status "install: a pre-release of the minimum version is accepted" 0 "$status" "$status_out"
 
 # --- installer failure: the step must not silently continue ---------------
 new_case
@@ -455,13 +570,157 @@ assert_contains "install: a missing gh CLI reports a clear ::error:: naming the 
   "$status_out" "::error::gh CLI not found on PATH"
 
 # Lines/branches not independently exercised here (documented, not testable
-# hermetically): install.sh's `cruise --version` output is only ever the
-# fake binary's own canned string above, never a real cargo-dist build; and
-# the case where BOTH the installer succeeds AND the freshly-installed
-# fake `cruise` binary still fails `command -v cruise` afterward (line 35-38's
-# "cruise installation failed" ::error::) is unreachable from a stub that
-# always drops a working binary in place -- reaching it would require an
+# hermetically): the case where BOTH the installer succeeds AND the freshly-
+# installed fake `cruise` binary still fails `command -v cruise` afterward
+# (the "cruise installation failed" ::error::) is unreachable from a stub
+# that always drops a working binary in place -- reaching it would require an
 # installer that reports success but writes no executable, which isn't a
 # realistic contract to fake without asserting invented behaviour.
+
+# ===========================================================================
+# install-jcode.sh
+# ===========================================================================
+# Same faked contract as install.sh above: the stub `curl` prints a
+# locally-authored installer that records the env it was handed and drops a
+# fake `jcode` into $JCODE_INSTALL_DIR.
+
+write_ok_jcode_installer() {
+  cat > "$FAKE_INSTALLER" <<'EOF'
+#!/bin/sh
+set -o pipefail
+printf 'jcode-installer JCODE_VERSION=[%s] JCODE_INSTALL_DIR=%s JCODE_NO_TELEMETRY=%s JCODE_SKIP_SERVER_RELOAD=%s HOME=%s JCODE_HOME=%s\n' \
+  "$JCODE_VERSION" "$JCODE_INSTALL_DIR" "$JCODE_NO_TELEMETRY" "$JCODE_SKIP_SERVER_RELOAD" "$HOME" "$JCODE_HOME" >> "$STUB_LOG"
+touch "$HOME/jcode-installer-home-marker"
+mkdir -p "$JCODE_INSTALL_DIR"
+cat > "$JCODE_INSTALL_DIR/jcode" <<'BIN'
+#!/bin/sh
+echo "jcode v0.81.1 (fake)"
+BIN
+chmod +x "$JCODE_INSTALL_DIR/jcode"
+EOF
+}
+
+# --- JCODE_VERSION=latest: the installer resolves the newest release ------
+# jcode ships one installer for every release and takes the pin through
+# JCODE_VERSION, so "latest" must reach it as an EMPTY pin (which is what
+# makes it resolve the newest release) rather than the literal "latest".
+new_case
+: > "$GITHUB_PATH"
+write_ok_jcode_installer
+JDIR="$TMP/jcode-latest"
+mkdir -p "$TMP/user-home"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" HOME="$TMP/user-home" RUNNER_TEMP="$JDIR" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: JCODE_VERSION=latest succeeds" 0 "$status" "$status_out"
+assert_contains "install-jcode: JCODE_VERSION=latest downloads jcode's own installer" \
+  "$(cat "$STUB_LOG")" "curl -fsSL https://jcode.sh/install"
+assert_contains "install-jcode: JCODE_VERSION=latest passes an empty pin plus the install dir, telemetry and server-reload opt-outs" \
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[] JCODE_INSTALL_DIR=$JDIR/jcode-bin JCODE_NO_TELEMETRY=1 JCODE_SKIP_SERVER_RELOAD=1"
+assert_contains "install-jcode: installer HOME is isolated under RUNNER_TEMP" \
+  "$(cat "$STUB_LOG")" "HOME=$JDIR/jcode-install-home"
+assert_contains "install-jcode: installer JCODE_HOME is isolated under RUNNER_TEMP" \
+  "$(cat "$STUB_LOG")" "JCODE_HOME=$JDIR/jcode-install-home/jcode-home"
+assert_file_absent "install-jcode: installer does not write the caller's HOME" \
+  "$TMP/user-home/jcode-installer-home-marker"
+assert_eq "install-jcode: JCODE_VERSION=latest appends the install dir to GITHUB_PATH" \
+  "$JDIR/jcode-bin" "$(cat "$GITHUB_PATH")"
+
+# --- JCODE_VERSION unset: same as "latest" --------------------------------
+new_case
+: > "$GITHUB_PATH"
+write_ok_jcode_installer
+JDIR2="$TMP/jcode-default"
+mkdir -p "$JDIR2"
+unset JCODE_VERSION
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR2" bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: an unset JCODE_VERSION defaults to resolving the newest release" \
+  0 "$status" "$status_out"
+assert_contains "install-jcode: an unset JCODE_VERSION also passes an empty pin" \
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[] JCODE_INSTALL_DIR=$JDIR2/jcode-bin"
+
+# --- a pinned tag is handed to the installer verbatim ---------------------
+new_case
+: > "$GITHUB_PATH"
+write_ok_jcode_installer
+JDIR3="$TMP/jcode-pinned"
+mkdir -p "$JDIR3"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3" JCODE_VERSION=v0.81.1 bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: a pinned JCODE_VERSION succeeds" 0 "$status" "$status_out"
+assert_contains "install-jcode: a pinned JCODE_VERSION reaches the installer as JCODE_VERSION" \
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.81.1] JCODE_INSTALL_DIR=$JDIR3/jcode-bin"
+
+# --- a bare semver pin is normalized to the release-tag form --------------
+# jcode's installer only accepts its release-tag form ("v0.81.1"); a bare
+# "0.81.1" would die on its tag check, so the script adds the prefix.
+new_case
+: > "$GITHUB_PATH"
+write_ok_jcode_installer
+JDIR3B="$TMP/jcode-pinned-bare"
+mkdir -p "$JDIR3B"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3B" JCODE_VERSION=0.81.1 bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: a bare semver JCODE_VERSION succeeds" 0 "$status" "$status_out"
+assert_contains "install-jcode: a bare semver pin reaches the installer with the v prefix it requires" \
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.81.1] JCODE_INSTALL_DIR=$JDIR3B/jcode-bin"
+
+# --- jcode already on PATH: installer is skipped entirely ------------------
+new_case
+: > "$GITHUB_PATH"
+log_stub jcode
+JDIR4="$TMP/jcode-preexisting"
+mkdir -p "$JDIR4"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR4" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: an already-installed jcode on PATH succeeds without reinstalling" \
+  0 "$status" "$status_out"
+if grep -q '^curl ' "$STUB_LOG"; then
+  fail "install-jcode: an already-installed jcode on PATH never invokes curl" "$(cat "$STUB_LOG")"
+else
+  pass "install-jcode: an already-installed jcode on PATH never invokes curl"
+fi
+if [ -s "$GITHUB_PATH" ]; then
+  fail "install-jcode: an already-installed jcode on PATH does not append to GITHUB_PATH" "$(cat "$GITHUB_PATH")"
+else
+  pass "install-jcode: an already-installed jcode on PATH does not append to GITHUB_PATH"
+fi
+rm -f "$STUB_DIR/jcode"
+
+# --- installer failure: the step must not silently continue ---------------
+new_case
+: > "$GITHUB_PATH"
+cat > "$FAKE_INSTALLER" <<'EOF'
+#!/bin/sh
+printf 'jcode-installer-invoked-then-failed\n' >> "$STUB_LOG"
+exit 1
+EOF
+JDIR5="$TMP/jcode-failing"
+mkdir -p "$JDIR5"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR5" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_nonzero_status "install-jcode: an installer that exits non-zero makes the step fail" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install-jcode: the failing installer was actually invoked before the step aborted" \
+  "$(cat "$STUB_LOG")" "jcode-installer-invoked-then-failed"
+assert_contains "install-jcode: a failing installer reports a clear ::error:: annotation" \
+  "$status_out" "::error::jcode installer failed for version 'latest'"
+
+# --- curl failure: the download itself produces the same clear error ------
+new_case
+: > "$GITHUB_PATH"
+stub curl <<'SH'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$STUB_LOG"
+exit 22
+SH
+JDIR6="$TMP/jcode-curl-failing"
+mkdir -p "$JDIR6"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR6" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_nonzero_status "install-jcode: a curl failure makes the step fail" \
+  "$status" "status=$status output=$status_out"
+assert_contains "install-jcode: a curl failure reports a clear ::error:: annotation" \
+  "$status_out" "::error::jcode installer failed for version 'latest'"
 
 finish

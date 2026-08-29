@@ -343,6 +343,7 @@ async fn run_single(
     let effective_max_retries =
         crate::config::resolve_effective_max_retries(args.max_retries, &config);
     crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
+    let retry_policy = crate::retry::policy_for_config(config.retry.clone());
 
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {session_id}")).dim());
@@ -506,20 +507,23 @@ async fn run_single(
         working_dir: Some(execution_workspace.path()),
         skipped_steps: &skipped_steps,
     };
-    let exec_result = tokio::select! {
-        result = execute_steps_with_dag(
-            &ctx,
-            &mut vars,
-            &mut tracker,
-            &mut dag,
-            &start_node,
-            &on_node_start,
-        ) => result,
-        _ = tokio::signal::ctrl_c() => {
-            cancel_token.cancel();
-            Err(CruiseError::Interrupted)
-        },
-    };
+    let exec_result = crate::retry::with_active_policy(retry_policy.clone(), async {
+        tokio::select! {
+            result = execute_steps_with_dag(
+                &ctx,
+                &mut vars,
+                &mut tracker,
+                &mut dag,
+                &start_node,
+                &on_node_start,
+            ) => result,
+            _ = tokio::signal::ctrl_c() => {
+                cancel_token.cancel();
+                Err(CruiseError::Interrupted)
+            },
+        }
+    })
+    .await;
 
     // Best-effort final flush so the persisted DAG reflects the last executed
     // node's `visited_at` timestamp even when it was the final step in the
@@ -554,17 +558,20 @@ async fn run_single(
                     ExecutionWorkspace::Worktree { ctx, .. } => {
                         observer.on_phase(&session_id, RunPhase::CreatingPr);
                         tokio::select! {
-                            result = crate::worktree_pr::handle_worktree_pr(
-                                ctx,
-                                &compiled,
-                                &mut vars,
-                                &mut tracker,
-                                session,
-                                args.rate_limit_retries,
-                                effective_max_retries,
-                                &skipped_steps,
-                                Some(&cancel_token),
-                                Some(&on_step_log),
+                            result = crate::retry::with_active_policy(
+                                retry_policy.clone(),
+                                crate::worktree_pr::handle_worktree_pr(
+                                    ctx,
+                                    &compiled,
+                                    &mut vars,
+                                    &mut tracker,
+                                    session,
+                                    args.rate_limit_retries,
+                                    effective_max_retries,
+                                    &skipped_steps,
+                                    Some(&cancel_token),
+                                    Some(&on_step_log),
+                                ),
                             ) => result,
                             _ = tokio::signal::ctrl_c() => {
                                 cancel_token.cancel();

@@ -1,75 +1,62 @@
 //! Prompt-execution backend abstraction.
 //!
 //! Cruise drives prompts through one of three backends: an external `command`
-//! (the classic `claude -p` path), the in-process **seher SDK**
-//! (`sdk: seher`), or **pi directly** (`sdk: pi`). [`Executor`] hides that
-//! choice behind a single [`Executor::run`] call so that `planning.rs`,
-//! `engine.rs`, and the GUI command layer don't need to branch on the backend.
+//! (the classic `claude -p` path), the **`jcode` CLI** (`sdk: jcode`, also the
+//! default when a workflow names neither `sdk` nor `command`), or the
+//! **`claude` CLI** (`sdk: claude`). [`Executor`] hides that choice behind a
+//! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
+//! GUI command layer don't need to branch on the backend.
 //!
-//! In `sdk: seher` mode the cruise `model` / `plan_model` / per-step `model`
-//! fields are reinterpreted as seher **mode keys** (see [`mode_key_for_step`] /
-//! [`mode_key_for_plan`]); seher resolves the actual provider/model from its
-//! own `~/.config/seher/config.yaml`.
+//! Every backend reads the cruise `model` / `plan_model` / per-step `model`
+//! fields as a plain model reference:
 //!
-//! In `sdk: pi` mode those same fields are instead a raw model reference
-//! (`"provider/model[:thinking]"` or a bare `"model"`) passed straight to
-//! `pi_agent_rust`, bypassing seher's provider-resolution layer entirely --
-//! see [`run_pi_direct`] / [`parse_pi_model_ref`].
+//! - `command` — the model name substituted into the command line.
+//! - `sdk: jcode` — a `provider/model[:effort]` reference in jcode's own
+//!   provider/model namespace, driven as a `jcode run --ndjson` subprocess
+//!   under cruise's private `JCODE_HOME` -- see [`run_jcode`] and
+//!   [`crate::backend::jcode`].
+//! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
+//!   suffix, driven in-process through `claude-agent-sdk` -- see
+//!   [`run_claude`] and [`crate::backend::claude`].
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
-use seher::sdk::{
-    CodexBarProbe, EffortLevel, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk,
-    poll_for_agent, split_thinking_suffix,
-};
-
+use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
+use crate::backend::effort::{effort_from_suffix, split_thinking_suffix};
+use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcode_agent};
+use crate::backend::stream::{ChunkOutcome, ChunkReducer, Folded, LineBuffer, StreamChunk};
+use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
+use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
-
-/// Default seher mode key for ordinary prompt steps when neither the step nor
-/// the workflow specifies one.
-pub const DEFAULT_STEP_MODE_KEY: &str = "build";
-
-/// Default seher mode key for the built-in planning step.
-pub const DEFAULT_PLAN_MODE_KEY: &str = "plan";
-
-/// Poll interval (ms) used while every seher provider is rate-limited.
-const SDK_POLL_INTERVAL_MS: u64 = 60_000;
+use crate::tool_bridge::ToolBridge;
 
 /// A single prompt execution request, backend-agnostic.
 ///
 /// Built by the caller and handed to [`Executor::run`]. `model_or_mode` carries
-/// a model name in command mode, a seher `mode_key` in `sdk: seher` mode, and a
-/// raw model reference in `sdk: pi` mode (compute it with
-/// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]). `tools`
-/// and `resume` are honored by SDK backends except the RPC backends `omp` and
-/// `pi`, whose sessions are intentionally closed after each prompt because
-/// Cruise may rebuild its tools.
+/// the model reference the selected backend takes (compute it with
+/// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]).
+/// `tools` and `resume` are honored by the SDK backends and ignored in command
+/// mode.
 pub struct PromptRun<'a> {
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
-    /// Model name (command mode), `mode_key` (`sdk: seher`), or model
-    /// reference (`sdk: pi`).
+    /// Model name (command mode) or model reference (`sdk: jcode`,
+    /// `sdk: claude`).
     pub model_or_mode: Option<&'a str>,
     /// Maximum rate-limit retries.
     pub max_retries: usize,
     /// Environment variables applied to the prompt run.
     ///
-    /// Command mode passes these to the spawned process. `sdk: seher` forwards
-    /// them to the selected seher backend; external RPC/Claude subprocesses
-    /// pass them to child processes, while `pi-rust` applies them through
-    /// process environment mutation inside seher. RPC backends inherit ambient
-    /// variables, but ignore workflow `PATH`/`PATHEXT` so helper resolution
-    /// cannot be redirected. `sdk: pi` applies them directly (see
-    /// [`PiRunnerOptions::env`]).
+    /// Command mode passes these to the spawned process; `sdk: jcode` and
+    /// `sdk: claude` pass them to the `jcode` / `claude` child process.
     pub env: &'a HashMap<String, String>,
-    /// Callback invoked with human-readable progress notices: seher provider
-    /// resolution (`sdk: seher`) and rate-limit retries.
+    /// Callback invoked with human-readable progress notices: rate-limit
+    /// retries and model fallbacks.
     pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token.
     pub cancel_token: Option<&'a CancellationToken>,
@@ -78,16 +65,14 @@ pub struct PromptRun<'a> {
     /// Streaming stdout/stderr callbacks.
     pub stream: Option<&'a StreamCallbacks<'a>>,
     /// Custom tools to inject (SDK mode only).
-    pub tools: Vec<SeherTool>,
-    /// Prior session id to resume (SDK mode only; the RPC backends `omp` and
-    /// `pi` always start a fresh session).
+    pub tools: Vec<CruiseTool>,
+    /// Prior session id to resume (SDK mode only).
     pub resume: Option<String>,
 }
 
-/// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the seher
-/// session id (for a follow-up `resume`). `session_id` is `None` in command mode
-/// and for the RPC backends `omp` / `pi`, whose sessions are closed after each
-/// Cruise prompt.
+/// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the
+/// backend session id (for a follow-up `resume`). `session_id` is `None` in
+/// command mode.
 #[derive(Debug, Clone)]
 pub struct PromptOutcome {
     pub result: PromptResult,
@@ -102,44 +87,61 @@ pub struct PromptOutcome {
 pub enum Executor {
     /// Spawn an external command (the classic `claude -p` path).
     Command { command: Vec<String> },
-    /// Drive prompts through one of the seher SDKs (`pi`, `omp`, `pi-rust`,
-    /// `claude`, `claude-terminal`, `claude-headless`); the concrete backend is
-    /// picked by [`spawn_agent_stream`] from the resolved provider's `sdk` field.
-    /// Selected by `sdk: seher` (or any `sdk:` value other than `"pi"`).
-    Sdk,
-    /// Drive prompts through `pi_agent_rust` directly (`sdk: pi`), bypassing
-    /// seher's provider-resolution layer and `~/.config/seher/config.yaml`
-    /// entirely. See [`run_pi_direct`].
-    Pi,
+    /// Drive the `jcode` CLI as an NDJSON subprocess (`sdk: jcode`) under
+    /// cruise's private `JCODE_HOME`, exposing cruise's tools over the
+    /// [`ToolBridge`]. See [`run_jcode`].
+    Jcode,
+    /// Drive the `claude` CLI in-process through `claude-agent-sdk`
+    /// (`sdk: claude`). See [`run_claude`].
+    Claude,
+    /// An `sdk:` value cruise does not implement. [`Executor::run`] reports it;
+    /// no prompt is executed.
+    ///
+    /// Unreachable through cruise itself — every config is validated by
+    /// [`crate::config::validate_sdk`] before it reaches here — but
+    /// [`Executor::new`] is public and infallible, and a removed value like
+    /// `sdk: seher` must never be quietly read as some other backend.
+    Unsupported { sdk: String },
 }
 
 impl Executor {
     /// Build an executor from the workflow's backend selection.
     ///
-    /// `sdk: pi` -> [`Executor::Pi`]; any other `sdk` value -> [`Executor::Sdk`];
-    /// no `sdk` -> [`Executor::Command`] wrapping `command`. (Mutual exclusivity
-    /// between `sdk` and `command`, and that `sdk` is one of the accepted
-    /// values, is enforced earlier by [`crate::config::validate_sdk`].)
+    /// `sdk: jcode` -> [`Executor::Jcode`]; `sdk: claude` -> [`Executor::Claude`];
+    /// a `command` with no `sdk` -> [`Executor::Command`]; neither named ->
+    /// [`Executor::Jcode`], the default backend. Any other `sdk` value ->
+    /// [`Executor::Unsupported`], which fails at run time.
+    ///
+    /// Mutual exclusivity between `sdk` and `command` is enforced earlier by
+    /// [`crate::config::validate_sdk`], which also rejects every `sdk` value
+    /// that would land in [`Executor::Unsupported`].
     #[must_use]
     pub fn new(sdk: Option<&str>, command: &[String]) -> Self {
         match sdk {
-            Some("pi") => Executor::Pi,
-            Some(_) => Executor::Sdk,
+            Some("jcode") => Executor::Jcode,
+            Some("claude") => Executor::Claude,
+            Some(other) => Executor::Unsupported {
+                sdk: other.to_string(),
+            },
+            None if command.is_empty() => Executor::Jcode,
             None => Executor::Command {
                 command: command.to_vec(),
             },
         }
     }
 
-    /// Whether this executor drives prompts through an in-process agent
-    /// backend (`Sdk` or `Pi`) rather than spawning an external `command`.
+    /// Whether this executor drives prompts through an agent backend (`Jcode`
+    /// or `Claude`) rather than spawning an external `command`.
     #[must_use]
     pub fn is_sdk(&self) -> bool {
-        matches!(self, Executor::Sdk | Executor::Pi)
+        matches!(self, Executor::Jcode | Executor::Claude)
     }
 
-    /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi`) for an ordinary prompt step.
+    /// Resolve the model reference for an ordinary prompt step: a per-step
+    /// value wins over the workflow default.
+    ///
+    /// Matched exhaustively even though every backend reads the same plain
+    /// reference, so adding a backend has to revisit this.
     #[must_use]
     pub fn step_model_or_mode(
         &self,
@@ -147,15 +149,15 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi => {
-                step_model.or(global_model).map(str::to_string)
-            }
-            Executor::Sdk => Some(mode_key_for_step(step_model, global_model)),
+            Executor::Command { .. }
+            | Executor::Jcode
+            | Executor::Claude
+            | Executor::Unsupported { .. } => step_model.or(global_model).map(str::to_string),
         }
     }
 
-    /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi`) for the built-in planning step.
+    /// Resolve the model reference for the built-in planning step: the
+    /// dedicated `plan_model` wins, falling back to the workflow `model`.
     #[must_use]
     pub fn plan_model_or_mode(
         &self,
@@ -163,10 +165,10 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi => {
-                plan_model.or(global_model).map(str::to_string)
-            }
-            Executor::Sdk => Some(mode_key_for_plan(plan_model, global_model)),
+            Executor::Command { .. }
+            | Executor::Jcode
+            | Executor::Claude
+            | Executor::Unsupported { .. } => plan_model.or(global_model).map(str::to_string),
         }
     }
 
@@ -174,83 +176,18 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the command fails to spawn / exits non-zero, or if
-    /// seher provider resolution, the seher SDK run, or the direct pi run
-    /// fails.
+    /// Returns an error if the command fails to spawn / exits non-zero, if the
+    /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
+    /// cruise does not implement.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         match self {
             Executor::Command { command } => run_command(command, req).await,
-            Executor::Sdk => run_sdk(req).await,
-            Executor::Pi => run_pi_direct(req).await,
+            Executor::Jcode => run_jcode(req).await,
+            Executor::Claude => run_claude(req).await,
+            Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
+                format!("unsupported `sdk` value '{sdk}'"),
+            )),
         }
-    }
-}
-
-/// Resolve a non-rate-limited seher provider for `mode_key`.
-///
-/// `require_tools` restricts candidates to SDKs that can execute custom tools
-/// (`pi`, `omp`, `pi-rust`, and `claude`); with `false`, the tool-incapable SDKs
-/// (`claude-terminal` and `claude-headless`) are also eligible and the caller
-/// must dispatch on `ResolvedAgent::sdk`.
-///
-/// `poll_for_agent` borrows a `&mut dyn LimitProbe` whose probe future is not
-/// `Send`, which would make the whole `run_sdk` future `!Send` and break the
-/// multi-threaded Tauri runtime. Confine that `!Send` work to a dedicated thread
-/// with its own current-thread runtime and return the `Send` `ResolvedAgent`.
-async fn resolve_provider(
-    mode_key: String,
-    require_tools: bool,
-    cancel: Arc<AtomicBool>,
-) -> Result<seher::sdk::ResolvedAgent> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| CruiseError::Other(format!("failed to build seher resolver runtime: {e}")))
-            .and_then(|rt| {
-                rt.block_on(async {
-                    let mut probe = CodexBarProbe;
-                    poll_for_agent(
-                        PollOptions {
-                            mode_key,
-                            require_tools,
-                            interval_ms: SDK_POLL_INTERVAL_MS,
-                            // Lets the caller abort the (otherwise unbounded)
-                            // all-providers-rate-limited wait.
-                            cancel: Some(cancel),
-                            ..Default::default()
-                        },
-                        &mut probe,
-                    )
-                    .await
-                    .map_err(|e| {
-                        CruiseError::CommandError(format!("seher provider resolution failed: {e}"))
-                    })
-                })
-            });
-        let _ = tx.send(result);
-    });
-    rx.await
-        .map_err(|_| CruiseError::Other("seher resolver thread terminated".to_string()))?
-}
-
-/// Sets an abort flag when dropped, so a detached resolver thread stops polling
-/// if the awaiting future is cancelled or dropped.
-struct AbortOnDrop(Arc<AtomicBool>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Cancels an OMP runner when the SDK execution future is dropped.
-struct CancelOnDrop(seher::sdk::CancelToken);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
     }
 }
 
@@ -296,302 +233,26 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
     })
 }
 
-/// Start `resolved` on the engine its `sdk` kind requires and return the chunk
-/// stream. Routes by `ResolvedAgent::sdk`:
-///
-/// - `pi` — the external pi CLI driven over RPC by seher (`pi`, falling back to
-///   `bunx`/`npx`). `resolved.model_id` is a full pi model ref
-///   (`"<pi-provider>/<model>[:thinking]"`).
-/// - `omp` — oh-my-pi RPC subprocess. `resolved.model_id` is a full pi model ref.
-/// - `pi-rust` — seher's in-process Rust pi engine (`pi_agent_rust`), whose
-///   model catalog is baked into the crate.
-/// - `claude` — `claude-agent-sdk` (supports custom tools). `resolved.model_id`
-///   is a plain `claude --model` name.
-/// - `claude-terminal` — local `claude` CLI via tmux. No tools.
-/// - `claude-headless` — `claude -p` subprocess. No tools.
-///
-/// `seher::sdk::is_supported_sdk` filters the candidate list to these kinds
-/// before resolution; an unknown kind here indicates the cruise<->seher
-/// dispatch mapping has drifted out of sync with the seher version in use.
-fn spawn_agent_stream(
-    resolved: &seher::sdk::ResolvedAgent,
-    req: &PromptRun<'_>,
-    omp_cancel: seher::sdk::CancelToken,
-) -> std::sync::mpsc::Receiver<StreamChunk> {
-    let cwd_string = req.working_dir.map(|p| p.to_string_lossy().into_owned());
-    match resolved.sdk.as_str() {
-        "claude" => {
-            // claude-agent-sdk supports custom tools natively, so `req.tools`
-            // flows straight through. `resolved.model_id` is a plain
-            // `claude --model` name, not a pi model ref.
-            let config = seher::claude_agent::ClaudeAgentRunnerConfig {
-                model: claude_family_model(&resolved.model_id),
-                effort: claude_family_effort(&resolved.model_id, resolved.effort),
-                cwd: cwd_string,
-                resume_session_id: req.resume.clone(),
-                tools: req.tools.clone(),
-                env: req.env.clone(),
-                ..Default::default()
-            };
-            seher::claude_agent::stream_agent(
-                config,
-                req.prompt.to_string(),
-                resolved.provider.clone(),
-            )
-        }
-        "claude-headless" => {
-            // `claude -p` subprocess. Cannot run custom tools; `require_tools`
-            // in [`run_sdk`] guarantees `req.tools` is empty here.
-            // ClaudeHeadlessRunnerConfig is #[non_exhaustive] in seher-sdk
-            // 0.0.45+, so we can't use struct-literal syntax across crates.
-            let mut headless_cfg = seher::claude_headless::ClaudeHeadlessRunnerConfig::default();
-            headless_cfg.model = claude_family_model(&resolved.model_id);
-            headless_cfg.effort = claude_family_effort(&resolved.model_id, resolved.effort);
-            headless_cfg.cwd = cwd_string;
-            headless_cfg.resume_session_id.clone_from(&req.resume);
-            headless_cfg.env = req
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            let runner = seher::claude_headless::ClaudeHeadlessRunner::new(headless_cfg);
-            seher::claude_headless::stream_headless(
-                runner,
-                req.prompt.to_string(),
-                resolved.provider.clone(),
-            )
-        }
-        "claude-terminal" => {
-            // claude-terminal cannot run custom tools; `require_tools` in
-            // [`run_sdk`] guarantees `req.tools` is empty here. `resolved.model_id`
-            // is a plain `claude --model` name, not a pi model ref.
-            let sdk = seher::claude_terminal::new_sdk_with_defaults(
-                None,
-                None,
-                claude_family_model(&resolved.model_id),
-                None,
-                claude_family_effort(&resolved.model_id, resolved.effort),
-                None,
-                cwd_string,
-                req.env.clone(),
-            );
-            seher::claude_terminal::stream_via_thread(
-                sdk,
-                req.prompt.to_string(),
-                resolved.provider.clone(),
-                req.resume.clone(),
-            )
-        }
-        "pi" | "omp" | "pi-rust" => {
-            let resume = match resolved.sdk.as_str() {
-                // The RPC backends keep one live child process per session and
-                // reject a resume whose tool set / options fingerprint changed,
-                // and [`finish_sdk_session`] closes their sessions after every
-                // prompt, so there is never a session left to resume.
-                "omp" | "pi" => None,
-                // PiRust can only open its own on-disk sessions. A provider
-                // fallback may hand us a Claude/OMP id; starting fresh is safer
-                // than passing a foreign id that PiRust cannot open.
-                "pi-rust" => req.resume.as_deref().and_then(|id| {
-                    seher::sdk::pi_session_path(req.working_dir, id)
-                        .is_file()
-                        .then(|| id.to_string())
-                }),
-                _ => unreachable!("shared RPC/PiRust dispatch branch"),
-            };
-            let mut resolved = resolved.clone();
-            if matches!(resolved.sdk.as_str(), "omp" | "pi") {
-                merge_helper_env(&mut resolved, req.env);
-            } else {
-                resolved
-                    .env
-                    .extend(req.env.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-            seher::sdk::stream_for_resolved(
-                &resolved,
-                req.prompt.to_string(),
-                seher::sdk::RunAgentOptions {
-                    working_dir: req.working_dir.map(Path::to_path_buf),
-                    resume,
-                    tools: req.tools.clone(),
-                    cancel: omp_cancel,
-                    ..Default::default()
-                },
-            )
-        }
-        other => unreachable!(
-            "seher resolver returned an unsupported sdk kind: {other:?} \
-             (cruise dispatch is out of sync with the seher version in use)"
-        ),
-    }
-}
-
-/// Merge ambient and request variables into an RPC backend's launch
-/// environment without allowing workflow `PATH` values to select the helper
-/// executable. Configured values in `ResolvedAgent::env` take precedence over
-/// ambient defaults; request values take precedence except for `PATH`/`PATHEXT`.
-/// `ResolvedAgent::env` is also the environment seher's OMP / pi candidate
-/// resolvers search for `omp`, `pi`, `bunx` and `npx`.
-fn merge_helper_env(
-    resolved: &mut seher::sdk::ResolvedAgent,
-    request_env: &HashMap<String, String>,
-) {
-    for (key, value) in std::env::vars() {
-        resolved.env.entry(key).or_insert(value);
-    }
-    for (key, value) in request_env {
-        if matches!(key.as_str(), "PATH" | "PATHEXT") {
-            continue;
-        }
-        resolved.env.insert(key.clone(), value.clone());
-    }
-}
-
-/// RPC-backend sessions are closed after each Cruise prompt because planning
-/// rebuilds its tool handlers between turns; seher fingerprints those handler
-/// identities and cannot resume a session with a different tool set. Closing
-/// also reaps the backend's child process, which seher keeps alive per session.
-fn finish_sdk_session(
-    sdk: &str,
-    working_dir: Option<&Path>,
-    session: Option<String>,
-) -> Option<String> {
-    match sdk {
-        "omp" => {
-            if let Some(session_id) = session.as_deref() {
-                let _ = seher::sdk::close_omp_session(session_id, working_dir);
-            }
-            None
-        }
-        "pi" => {
-            if let Some(session_id) = session.as_deref() {
-                let _ = seher::sdk::close_pi_session(session_id, working_dir);
-            }
-            None
-        }
-        _ => session,
-    }
-}
-
-/// SDK-backend execution: resolve a non-limited provider, run it via
-/// [`spawn_agent_stream`], and fold the streamed chunks into a [`PromptOutcome`].
-async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let mode_key = req
-        .model_or_mode
-        .unwrap_or(DEFAULT_STEP_MODE_KEY)
-        .to_string();
-    let on_delta = req.stream.and_then(|s| s.on_stdout);
-    // Custom tools only run on tool-capable SDKs (`pi`, `omp`, `pi-rust`,
-    // `claude`), and `resume` ids belong to whichever SDK started the session —
-    // every resumable turn in the planning flow starts with a tool-registering
-    // one — so both pin resolution to tool-capable providers. Tool-less fresh
-    // runs may also resolve tool-incapable SDKs (`claude-terminal`,
-    // `claude-headless`).
-    let require_tools = !req.tools.is_empty() || req.resume.is_some();
-
-    let mut attempts = 0;
-    loop {
-        if let Some(cb) = req.on_notice {
-            cb(&resolving_notice(&mode_key, require_tools));
-        }
-        // Signal the detached resolver thread to stop polling if this future is
-        // cancelled or dropped (e.g. timeout / Ctrl-C) before resolution finishes.
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let abort_guard = AbortOnDrop(Arc::clone(&cancel_flag));
-        let resolved = tokio::select! {
-            biased;
-            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
-            out = resolve_provider(mode_key.clone(), require_tools, cancel_flag) => out,
-        }?;
-        // Resolution finished; the resolver thread has already exited.
-        drop(abort_guard);
-        if let Some(cb) = req.on_notice {
-            cb(&resolution_notice(&resolved));
-        }
-        let omp_cancel = seher::sdk::CancelToken::new();
-        let _omp_cancel_guard = CancelOnDrop(omp_cancel.clone());
-        let session_slot =
-            matches!(resolved.sdk.as_str(), "omp" | "pi").then(|| Arc::new(Mutex::new(None)));
-        let rx_std = spawn_agent_stream(&resolved, &req, omp_cancel);
-        let outcome =
-            match stream_to_outcome(rx_std, on_delta, req.cancel_token, session_slot.clone()).await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    if matches!(&error, CruiseError::Interrupted) {
-                        let session = session_slot
-                            .as_ref()
-                            .and_then(|slot| slot.lock().ok().and_then(|session| session.clone()));
-                        let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
-                    }
-                    return Err(error);
-                }
-            };
-
-        match outcome {
-            ChunkOutcome::Done { output, session } => {
-                let session = finish_sdk_session(&resolved.sdk, req.working_dir, session);
-                return Ok(PromptOutcome {
-                    result: PromptResult {
-                        output,
-                        stderr: String::new(),
-                    },
-                    session_id: session,
-                });
-            }
-            ChunkOutcome::Failed { message, session } => {
-                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
-                return Err(CruiseError::CommandError(message));
-            }
-            ChunkOutcome::Limited { message, session } => {
-                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
-                if attempts < req.max_retries {
-                    attempts += 1;
-                    if let Some(cb) = req.on_notice {
-                        cb(&rate_limited_notice(&resolved, attempts, req.max_retries));
-                    }
-                    continue;
-                }
-                return Err(CruiseError::CommandError(message));
-            }
-            ChunkOutcome::Closed { session, .. } => {
-                let _ = finish_sdk_session(&resolved.sdk, req.working_dir, session);
-                return Err(CruiseError::Other(
-                    "seher stream closed before completion".to_string(),
-                ));
-            }
-        }
-    }
-}
-
-/// Bridge a blocking `std::sync::mpsc::Receiver<StreamChunk>` (as returned by
-/// seher's various `stream_*` functions and [`PiRunner::stream`]) into a
-/// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (pi and
-/// seher's backends emit token-level deltas; `StreamCallbacks::on_stdout` is
+/// Bridge a blocking `std::sync::mpsc::Receiver` of backend chunks (as returned
+/// by [`stream_claude_agent`] and [`stream_jcode_agent`]) into a
+/// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (the
+/// SDK backends emit token-level deltas; `StreamCallbacks::on_stdout` is
 /// line-oriented like the command backend) and returning `Err(Interrupted)` as
 /// soon as `cancel_token` fires.
 ///
-/// Shared by [`run_sdk`] and [`run_pi_direct`] so both backends fold a chunk
-/// stream into an outcome identically.
+/// Reached from [`run_with_fallback`] only, so every SDK backend folds its
+/// chunk stream into an outcome identically.
 async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     cancel_token: Option<&CancellationToken>,
-    session_slot: Option<Arc<Mutex<Option<String>>>>,
-) -> Result<ChunkOutcome> {
+) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
     // through the borrowed `on_delta` callback without moving it onto the
     // backend's worker thread.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
-    let bridge_session_slot = session_slot;
     std::thread::spawn(move || {
         while let Ok(chunk) = rx_std.recv() {
-            if let StreamChunk::Session(id) = &chunk
-                && let Some(slot) = &bridge_session_slot
-                && let Ok(mut session) = slot.lock()
-            {
-                *session = Some(id.clone());
-            }
             if tx.send(chunk).is_err() {
                 break;
             }
@@ -600,6 +261,10 @@ async fn stream_to_outcome(
 
     let mut line_buf = LineBuffer::new();
     let mut reducer = ChunkReducer::new();
+    // "Streamed" means text actually reached the caller's sink: a turn with no
+    // sink shows the user nothing, and a line buffer holds a fragment back
+    // until its newline arrives, so neither may block a retry.
+    let mut streamed = false;
     let outcome = loop {
         tokio::select! {
             biased;
@@ -608,7 +273,10 @@ async fn stream_to_outcome(
                 Some(chunk) => {
                     let mut sink = |d: &str| {
                         if let Some(cb) = on_delta {
-                            line_buf.push(d, cb);
+                            line_buf.push(d, |line| {
+                                streamed = true;
+                                cb(line);
+                            });
                         }
                     };
                     if let Some(out) = reducer.step(chunk, &mut sink) {
@@ -620,578 +288,252 @@ async fn stream_to_outcome(
         }
     };
     if let Some(cb) = on_delta {
-        line_buf.flush(cb);
+        line_buf.flush(|line| {
+            streamed = true;
+            cb(line);
+        });
     }
-    Ok(outcome)
+    Ok(Folded { outcome, streamed })
 }
 
-/// `Pi`-backend execution: build [`PiRunnerOptions`] straight from `req` (via
-/// [`build_pi_options`]) and drive [`PiRunner::stream`] in-process, bypassing
-/// seher's provider resolution ([`resolve_provider`]) entirely — there is no
-/// seher `~/.config/seher/config.yaml` involved and, unlike [`run_sdk`], no
-/// fallback provider to hop to on a rate limit.
+/// `Claude`-backend execution: drive the `claude` CLI in-process through
+/// `claude-agent-sdk` ([`crate::backend::claude`]).
 ///
-/// A [`ChunkOutcome::Limited`] therefore retries the *same* `PiRunnerOptions`
-/// and prompt with exponential backoff
-/// ([`crate::step::command::calculate_backoff`]: 2s doubling to a 60s cap),
-/// mirroring the command backend's rate-limit handling rather than `run_sdk`'s
-/// re-resolve-and-retry loop, up to `req.max_retries` attempts.
-// Cancellation caveat: dropping this future (step `timeout:` firing, Ctrl-C)
-// stops cruise from waiting, but the in-flight pi call keeps running on its
-// detached worker thread until it finishes on its own — `PiRunner::stream`
-// offers no cancellation hook. When `env:` overrides are set, that orphaned
-// run also keeps holding seher's process-wide env mutex, so a subsequent
-// `sdk: pi` step can block until the abandoned call completes. Same
-// limitation as the seher-resolved `pi-rust` engine; documented in
-// skills/cruise-config/references/sdk.md.
-//
-// Rate-limit retries deliberately start a *fresh* pi session (the original
-// `req.resume`, not the aborted attempt's session id): re-sending the same
-// prompt into a partially-answered session would duplicate context, and a
-// clean re-run of an idempotent step prompt is strictly safer.
-async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let opts = build_pi_options(&req, req.model_or_mode)?;
-    let runner = PiRunner::new(opts);
-    let on_delta = req.stream.and_then(|s| s.on_stdout);
-
-    let mut attempts = 0;
-    loop {
-        let rx_std = runner.stream(req.prompt.to_string(), req.resume.clone());
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
-
-        match outcome {
-            ChunkOutcome::Done { output, session } => {
-                return Ok(PromptOutcome {
-                    result: PromptResult {
-                        output,
-                        stderr: String::new(),
-                    },
-                    session_id: session,
-                });
-            }
-            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
-            ChunkOutcome::Limited { message, .. } => {
-                if attempts < req.max_retries {
-                    attempts += 1;
-                    let delay = crate::step::command::calculate_backoff(attempts);
-                    if let Some(cb) = req.on_notice {
-                        cb(&format!(
-                            "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
-                            delay.as_secs_f64(),
-                            req.max_retries
-                        ));
-                    }
-                    tokio::select! {
-                        biased;
-                        () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                    continue;
-                }
-                return Err(CruiseError::CommandError(message));
-            }
-            ChunkOutcome::Closed { .. } => {
-                return Err(CruiseError::Other(
-                    "pi stream closed before completion".to_string(),
-                ));
-            }
-        }
-    }
-}
-
-/// Build [`PiRunnerOptions`] straight from `req`, with no seher provider
-/// resolution involved. `model_ref` is `req.model_or_mode` — a raw model
-/// reference in `Pi` mode (see [`Executor::step_model_or_mode`] /
-/// [`Executor::plan_model_or_mode`]), parsed by [`parse_pi_model_ref`].
+/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
+/// off on the same model unless the workflow's `retry:` policy names a
+/// fallback model to switch to.
 ///
-/// `api_key` is always left `None`, deferring key resolution to pi's own
-/// precedence chain: an explicit key argument (not offered here) wins, then
-/// pi's `~/.pi/agent/auth.json` OAuth/Bearer credentials, *then* ambient
-/// environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — pi
-/// prefers stored credentials over env vars so a stale shell key never
-/// silently overrides a successful `pi login`. `req.env` is still forwarded
-/// via [`PiRunnerOptions::env`] and is visible to that env-var fallback.
-fn build_pi_options(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<PiRunnerOptions> {
-    let (provider, model, thinking) = parse_pi_model_ref(model_ref)?;
-    Ok(PiRunnerOptions {
-        provider,
-        model,
-        api_key: None,
-        thinking,
-        system_prompt: None,
-        working_directory: req.working_dir.map(Path::to_path_buf),
-        env: req
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-        tools: req.tools.clone(),
+/// Retries deliberately start from `req.resume` (the caller's session), not the
+/// aborted attempt's session id: re-sending the same prompt into a
+/// partially-answered session would duplicate context.
+///
+/// `req.cancel_token` is forwarded to the backend thread, which stops reading
+/// the CLI's output and closes the transport when it fires — that is what
+/// terminates the `claude` child, since the SDK offers no interrupt.
+async fn run_claude(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    run_with_fallback(&req, "claude", retry::active_policy(), |model| {
+        Ok(stream_claude_agent(
+            build_claude_config(&req, model),
+            req.prompt.to_string(),
+        ))
     })
+    .await
 }
 
-/// Split a `sdk: pi` model reference into the `(provider, model, thinking)`
-/// triple expected by [`PiRunnerOptions`].
+/// Build a [`ClaudeRunnerConfig`] straight from `req`. `model_ref` is the model
+/// this attempt runs on — the caller's plain `claude --model` name with an
+/// optional `:effort` suffix (see [`Executor::step_model_or_mode`] /
+/// [`Executor::plan_model_or_mode`]), or a fallback the retry policy switched
+/// to. Unset leaves `--model` off so the CLI picks its own default.
 ///
-/// Cruise's `model` / `plan_model` / per-step `model` are passed straight
-/// through in `Pi` mode instead of being reinterpreted as a seher mode key.
-/// Accepted forms:
-///
-/// - `None` / empty -> `(None, None, None)`. Both provider and model are left
-///   unset so pi's own auto-selection picks one: it tries
-///   `PROVIDER_DEFAULT_MODELS` in order (Codex, then `OpenAI`, ... down to
-///   Anthropic) against whichever credentials/env vars are actually
-///   configured, exactly like running the `pi` CLI with neither `--provider`
-///   nor `--model`.
-/// - `"model"` (no `/`) -> `(None, Some("model"), thinking)`. Provider is left
-///   unset; pi resolves it by searching its model registry for a model with
-///   this id, mirroring `pi --model X` with no `--provider`.
-/// - `"provider/model"` -> `(Some("provider"), Some("model"), thinking)`.
-/// - `":thinking"` alone -> `(None, None, Some(thinking))` — auto-selected
-///   model with an explicit thinking level.
-/// - A `/` with an empty provider or model (`"/model"`, `"provider/"`) is a
-///   configuration error: passing it through would surface as an opaque model
-///   registry miss inside pi instead of a clear cruise-side message.
-///
-/// A trailing `:thinking` suffix is recognized only when it parses as a pi
-/// thinking level (see [`split_thinking_suffix`]); any other `:` suffix (e.g.
-/// an `OpenRouter` `:free` variant) stays part of the model id.
-fn parse_pi_model_ref(
-    model_ref: Option<&str>,
-) -> Result<(Option<String>, Option<String>, Option<String>)> {
-    let Some(raw) = model_ref.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok((None, None, None));
-    };
-    let (without_thinking, thinking) = split_thinking_suffix(raw);
-    if without_thinking.is_empty() {
-        return Ok((None, None, thinking.map(str::to_string)));
-    }
-    match without_thinking.split_once('/') {
-        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => Ok((
-            Some(provider.to_string()),
-            Some(model.to_string()),
-            thinking.map(str::to_string),
-        )),
-        Some(_) => Err(CruiseError::Other(format!(
-            "invalid pi model reference '{raw}': provider and model must both be non-empty \
-             around '/' (expected \"provider/model[:thinking]\", \"model[:thinking]\", or \
-             empty for auto-selection)"
-        ))),
-        None => Ok((
-            None,
-            Some(without_thinking.to_string()),
-            thinking.map(str::to_string),
-        )),
+/// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
+/// consumes the config.
+fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRunnerConfig {
+    let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
+    ClaudeRunnerConfig {
+        model: (!model.is_empty()).then(|| model.to_string()),
+        effort: suffix.and_then(effort_from_suffix),
+        cwd: req.working_dir.map(Path::to_path_buf),
+        resume_session_id: req.resume.clone(),
+        tools: req.tools.clone(),
+        env: req.env.clone(),
+        cancel: req.cancel_token.cloned(),
+        cli_path: None,
     }
 }
 
-/// Buffers streamed token fragments and emits them as complete lines, so a
-/// line-oriented [`StreamCallbacks::on_stdout`] sees the same shape from the SDK
-/// backend as from the command backend.
-pub(crate) struct LineBuffer {
-    pending: String,
+/// How one attempt of [`run_with_fallback`] failed. Keeps the failure text
+/// owned, so the borrowed [`Failure`] handed to the engine can be taken after
+/// the attempt's outcome is destructured, and keeps the original error of a
+/// model reference the backend refused, to surface unchanged if no fallback
+/// remains.
+enum AttemptFailure {
+    Limited { message: String, streamed: bool },
+    Failed { message: String, streamed: bool },
+    Unusable { error: CruiseError, message: String },
 }
 
-impl LineBuffer {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending: String::new(),
+impl AttemptFailure {
+    /// The failure as the engine sees it, plus whether the turn's text reached
+    /// the user.
+    fn failure(&self) -> (Failure<'_>, bool) {
+        match self {
+            AttemptFailure::Limited { message, streamed } => (Failure::Limited(message), *streamed),
+            AttemptFailure::Failed { message, streamed } => (Failure::Failed(message), *streamed),
+            // Nothing was sent, so nothing was streamed.
+            AttemptFailure::Unusable { message, .. } => (Failure::Unusable(message), false),
         }
     }
 
-    /// Append `frag`, emitting each newly-completed line (without its trailing
-    /// `\n`/`\r\n`).
-    pub(crate) fn push<F: FnMut(&str)>(&mut self, frag: &str, mut emit: F) {
-        self.pending.push_str(frag);
-        while let Some(idx) = self.pending.find('\n') {
-            let rest = self.pending.split_off(idx + 1);
-            let mut line = std::mem::replace(&mut self.pending, rest);
-            line.pop(); // drop '\n'
-            if line.ends_with('\r') {
-                line.pop();
+    /// The error to surface once the engine gives up.
+    fn into_error(self) -> CruiseError {
+        match self {
+            AttemptFailure::Limited { message, .. } | AttemptFailure::Failed { message, .. } => {
+                CruiseError::CommandError(message)
             }
-            emit(&line);
-        }
-    }
-
-    /// Emit any buffered partial line (no trailing newline) and clear.
-    pub(crate) fn flush<F: FnMut(&str)>(&mut self, mut emit: F) {
-        if !self.pending.is_empty() {
-            emit(&self.pending);
-            self.pending.clear();
+            AttemptFailure::Unusable { error, .. } => error,
         }
     }
 }
 
-/// Terminal (or closed) outcome of folding a stream of [`StreamChunk`]s.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ChunkOutcome {
-    /// The run completed with the given full text.
-    Done {
-        output: String,
-        session: Option<String>,
-    },
-    /// The provider reported a rate/usage limit.
-    Limited {
-        message: String,
-        session: Option<String>,
-    },
-    /// The run failed with a non-limit error.
-    Failed {
-        message: String,
-        session: Option<String>,
-    },
-    /// The channel closed before any terminal chunk arrived.
-    Closed {
-        partial: String,
-        session: Option<String>,
-    },
-}
-
-/// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
-/// deltas through an `on_delta` sink as they arrive.
-pub(crate) struct ChunkReducer {
-    buf: String,
-    session: Option<String>,
-}
-
-impl ChunkReducer {
-    pub(crate) fn new() -> Self {
-        Self {
-            buf: String::new(),
-            session: None,
-        }
-    }
-
-    /// Feed one chunk. Returns `Some(outcome)` when a terminal chunk arrives,
-    /// `None` to keep consuming.
-    pub(crate) fn step<F: FnMut(&str)>(
-        &mut self,
-        chunk: StreamChunk,
-        on_delta: &mut F,
-    ) -> Option<ChunkOutcome> {
-        match chunk {
-            StreamChunk::Delta(d) => {
-                on_delta(&d);
-                self.buf.push_str(&d);
-                None
-            }
-            StreamChunk::Session(id) => {
-                self.session = Some(id);
-                None
-            }
-            StreamChunk::Done(text) => {
-                let output = if text.is_empty() {
-                    std::mem::take(&mut self.buf)
-                } else {
-                    text
-                };
-                Some(ChunkOutcome::Done {
-                    output,
-                    session: self.session.take(),
-                })
-            }
-            StreamChunk::Limit(e) => Some(ChunkOutcome::Limited {
-                message: e.to_string(),
-                session: self.session.take(),
-            }),
-            StreamChunk::Error(msg) => Some(ChunkOutcome::Failed {
-                message: msg,
-                session: self.session.take(),
-            }),
-        }
-    }
-
-    /// Produce a [`ChunkOutcome::Closed`] when the stream ends without a terminal
-    /// chunk.
-    pub(crate) fn finish(&mut self) -> ChunkOutcome {
-        ChunkOutcome::Closed {
-            partial: std::mem::take(&mut self.buf),
-            session: self.session.take(),
-        }
-    }
-}
-
-/// Resolve the seher `mode_key` for an ordinary prompt step.
+/// Run one prompt on an SDK backend, retrying through
+/// [`crate::retry::FallbackEngine`].
 ///
-/// Precedence mirrors the command-mode model resolution
-/// (`step.model.or(global.model)`): a per-step value wins over the workflow
-/// default. When neither is set the step runs under [`DEFAULT_STEP_MODE_KEY`].
-#[must_use]
-pub fn mode_key_for_step(step_model: Option<&str>, global_model: Option<&str>) -> String {
-    step_model
-        .or(global_model)
-        .unwrap_or(DEFAULT_STEP_MODE_KEY)
-        .to_string()
-}
-
-/// Resolve the seher `mode_key` for the built-in planning step.
+/// `start` opens a stream for the model reference the engine picked; it is
+/// called once per attempt, always against a *fresh* backend session (`start`
+/// builds from `req.resume`, never from the aborted attempt's session id), so a
+/// retry never re-sends the prompt into a partially-answered session. A `start`
+/// that rejects the reference itself (an unparseable `provider/model[:effort]`)
+/// is a notice and a move to the next chain entry, not a failed run.
 ///
-/// Precedence mirrors command-mode plan-model resolution
-/// (`plan_model.or(model)`): the dedicated `plan_model` wins, falling back to the
-/// workflow `model`, then to [`DEFAULT_PLAN_MODE_KEY`].
-#[must_use]
-pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -> String {
-    plan_model
-        .or(global_model)
-        .unwrap_or(DEFAULT_PLAN_MODE_KEY)
-        .to_string()
-}
+/// Without a workflow `retry:` policy this is exactly the historical loop: only
+/// a backend-reported rate limit retries, on the same model, on
+/// [`crate::step::command::calculate_backoff`]'s 2s-doubling schedule, up to
+/// `req.max_retries` times.
+async fn run_with_fallback(
+    req: &PromptRun<'_>,
+    label: &str,
+    policy: Option<Arc<RetryPolicy>>,
+    mut start: impl FnMut(Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
+) -> Result<PromptOutcome> {
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+    let mut engine = FallbackEngine::new(policy, req.model_or_mode, req.max_retries);
+    if let Some((from, to)) = engine.take_startup_switch()
+        && let Some(cb) = req.on_notice
+    {
+        cb(&format!(
+            "fallback: {from} -> {to} (still cooling down from an earlier failure)"
+        ));
+    }
 
-fn effort_from_suffix(suffix: &str) -> Option<EffortLevel> {
-    match suffix.trim().to_lowercase().as_str() {
-        "minimal" | "min" | "low" | "1" => Some(EffortLevel::Low),
-        "medium" | "med" | "2" => Some(EffortLevel::Medium),
-        "high" | "3" => Some(EffortLevel::High),
-        "xhigh" | "4" => Some(EffortLevel::XHigh),
-        "max" => Some(EffortLevel::Max),
-        _ => None,
+    loop {
+        let failed = match start(engine.model()) {
+            Err(error) => AttemptFailure::Unusable {
+                message: error.to_string(),
+                error,
+            },
+            Ok(rx_std) => {
+                let folded = stream_to_outcome(rx_std, on_delta, req.cancel_token).await?;
+                let streamed = folded.streamed;
+                match folded.outcome {
+                    ChunkOutcome::Done { output, session } => {
+                        return Ok(PromptOutcome {
+                            result: PromptResult {
+                                output,
+                                stderr: String::new(),
+                            },
+                            session_id: session,
+                        });
+                    }
+                    ChunkOutcome::Closed { .. } => {
+                        return Err(CruiseError::Other(format!(
+                            "{label} stream closed before completion"
+                        )));
+                    }
+                    ChunkOutcome::Limited { message, .. } => {
+                        AttemptFailure::Limited { message, streamed }
+                    }
+                    ChunkOutcome::Failed { message, .. } => {
+                        AttemptFailure::Failed { message, streamed }
+                    }
+                }
+            }
+        };
+
+        let (failure, streamed) = failed.failure();
+        let action = engine.next(failure, streamed);
+        let delay = match action {
+            RetryAction::GiveUp => return Err(failed.into_error()),
+            RetryAction::Switch {
+                from,
+                to,
+                detail,
+                attempt,
+                of,
+            } => {
+                if let Some(cb) = req.on_notice {
+                    cb(&format!(
+                        "fallback: {} -> {to} ({detail}, attempt {attempt}/{of})",
+                        from.as_deref().unwrap_or("default model")
+                    ));
+                }
+                // A switch runs immediately; the wait below is still the
+                // cancellation checkpoint every retry passes through.
+                Duration::ZERO
+            }
+            RetryAction::Backoff {
+                delay,
+                class,
+                attempt,
+                of,
+            } => {
+                if let Some(cb) = req.on_notice {
+                    cb(&format!(
+                        "{} detected. Retrying in {:.1}s... ({attempt}/{of})",
+                        class.label(),
+                        delay.as_secs_f64(),
+                    ));
+                }
+                delay
+            }
+        };
+        tokio::select! {
+            biased;
+            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+            () = tokio::time::sleep(delay) => {}
+        }
     }
 }
 
-fn claude_family_model(model_id: &str) -> Option<String> {
-    let (model, _) = split_thinking_suffix(model_id);
-    if model.is_empty() {
-        None
-    } else {
-        Some(model.to_string())
-    }
-}
+/// `Jcode`-backend execution: run the prompt as a `jcode run --ndjson`
+/// subprocess ([`crate::backend::jcode`]) under cruise's private `JCODE_HOME`.
+///
+/// jcode has no in-process tool registration, so cruise's tools are served to
+/// it over a per-run Unix socket by a [`ToolBridge`]: the `cruise mcp-bridge`
+/// server jcode spawns relays every call back here, which is what keeps the
+/// handlers' in-process state (the terminal `ask_user` prompt, the plan-persist
+/// flag, the title / PR-metadata stores) authoritative. The bridge is started
+/// once for the whole run, including its retries, and torn down on return.
+///
+/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
+/// off on the same model unless the workflow's `retry:` policy names a
+/// fallback model to switch to.
+///
+/// Retries deliberately start from `req.resume` (the caller's session), not the
+/// aborted attempt's session id: re-sending the same prompt into a
+/// partially-answered session would duplicate context.
+async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let home = jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
+    let bridge = ToolBridge::start(req.tools.clone())?;
 
-fn claude_family_effort(
-    model_id: &str,
-    resolved_effort: Option<EffortLevel>,
-) -> Option<EffortLevel> {
-    let (_, suffix_thinking) = split_thinking_suffix(model_id);
-    resolved_effort.or_else(|| suffix_thinking.and_then(effort_from_suffix))
-}
-
-/// The model id and reasoning effort the resolved provider will actually run
-/// with. Claude-family SDKs take a plain `--model` name plus a separate effort.
-/// Pi-family SDKs split the model reference and derive effort from its suffix.
-fn effective_model(resolved: &seher::sdk::ResolvedAgent) -> (Cow<'_, str>, Option<EffortLevel>) {
-    if matches!(
-        resolved.sdk.as_str(),
-        "claude" | "claude-headless" | "claude-terminal"
-    ) {
-        let model =
-            claude_family_model(&resolved.model_id).map_or(Cow::Borrowed("default"), Cow::Owned);
-        (
+    run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
+        let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
+        let config = JcodeRunnerConfig {
             model,
-            claude_family_effort(&resolved.model_id, resolved.effort),
-        )
-    } else {
-        let (_, model, suffix) =
-            seher::sdk::split_model_ref(&resolved.provider, &resolved.model_id);
-        (
-            Cow::Owned(model),
-            resolved
-                .effort
-                .or_else(|| suffix.as_deref().and_then(effort_from_suffix)),
-        )
-    }
-}
-
-fn resolving_notice(mode_key: &str, require_tools: bool) -> String {
-    let tools_note = if require_tools {
-        " (tool-capable providers only)"
-    } else {
-        ""
-    };
-    format!("seher: resolving provider for mode \"{mode_key}\"{tools_note}")
-}
-
-fn rate_limited_notice(
-    resolved: &seher::sdk::ResolvedAgent,
-    attempts: usize,
-    max_retries: usize,
-) -> String {
-    let (model, _) = effective_model(resolved);
-    format!(
-        "seher: provider={} model={model} rate-limited; re-resolving... ({attempts}/{max_retries})",
-        resolved.provider
-    )
-}
-
-/// Notice describing which seher provider/model a prompt is about to run on.
-/// seher logs nothing itself, so [`PromptRun::on_notice`] is the only place this
-/// can surface.
-fn resolution_notice(resolved: &seher::sdk::ResolvedAgent) -> String {
-    let (model, effort) = effective_model(resolved);
-    let mut msg = format!(
-        "seher: selected provider={} model={model} sdk={} mode={}",
-        resolved.provider, resolved.sdk, resolved.mode_key
-    );
-    if let Some(effort) = effort {
-        msg.push_str(" effort=");
-        msg.push_str(effort.as_str());
-    }
-    msg
-}
-
-#[test]
-fn resolution_notice_reports_provider_model_sdk_mode_and_effort() {
-    let resolved = seher::sdk::ResolvedAgent {
-        provider: "codex".to_string(),
-        model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
-        mode_key: "build".to_string(),
-        sdk: "pi".to_string(),
-        api: None,
-        skills: seher::sdk::ResolvedSkillsConfig::default(),
-        retry: seher::sdk::RetryConfig::default(),
-        env: indexmap::IndexMap::default(),
-        effort: Some(EffortLevel::High),
-    };
-    assert_eq!(
-        resolution_notice(&resolved),
-        "seher: selected provider=codex model=gpt-5.6-luna sdk=pi mode=build effort=high"
-    );
-}
-
-/// The claude-family SDKs get a plain `--model` plus a separate effort, so
-/// the notice must report what is really dispatched, not the raw config id.
-#[test]
-fn resolution_notice_splits_thinking_suffix_for_claude_family() {
-    let resolved = seher::sdk::ResolvedAgent {
-        provider: "claude".to_string(),
-        model_id: "claude-sonnet-4-6:xhigh".to_string(),
-        mode_key: "plan".to_string(),
-        sdk: "claude-terminal".to_string(),
-        api: None,
-        skills: seher::sdk::ResolvedSkillsConfig::default(),
-        retry: seher::sdk::RetryConfig::default(),
-        env: indexmap::IndexMap::default(),
-        effort: None,
-    };
-    assert_eq!(
-        resolution_notice(&resolved),
-        "seher: selected provider=claude model=claude-sonnet-4-6 sdk=claude-terminal mode=plan effort=xhigh"
-    );
-}
-
-#[test]
-fn resolution_notice_reports_claude_default_model() {
-    let resolved = seher::sdk::ResolvedAgent {
-        provider: "claude".to_string(),
-        model_id: ":high".to_string(),
-        mode_key: "build".to_string(),
-        sdk: "claude-terminal".to_string(),
-        api: None,
-        skills: seher::sdk::ResolvedSkillsConfig::default(),
-        retry: seher::sdk::RetryConfig::default(),
-        env: indexmap::IndexMap::default(),
-        effort: None,
-    };
-    assert_eq!(
-        resolution_notice(&resolved),
-        "seher: selected provider=claude model=default sdk=claude-terminal mode=build effort=high"
-    );
-}
-
-#[test]
-fn resolving_notice_reports_tool_requirement() {
-    assert_eq!(
-        resolving_notice("build", false),
-        "seher: resolving provider for mode \"build\""
-    );
-    assert_eq!(
-        resolving_notice("build", true),
-        "seher: resolving provider for mode \"build\" (tool-capable providers only)"
-    );
-}
-
-#[test]
-fn rate_limited_notice_reports_effective_model() {
-    let resolved = seher::sdk::ResolvedAgent {
-        provider: "codex".to_string(),
-        model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
-        mode_key: "build".to_string(),
-        sdk: "pi".to_string(),
-        api: None,
-        skills: seher::sdk::ResolvedSkillsConfig::default(),
-        retry: seher::sdk::RetryConfig::default(),
-        env: indexmap::IndexMap::default(),
-        effort: None,
-    };
-    assert_eq!(
-        rate_limited_notice(&resolved, 1, 2),
-        "seher: provider=codex model=gpt-5.6-luna rate-limited; re-resolving... (1/2)"
-    );
+            provider,
+            effort,
+            cwd: req.working_dir.map(Path::to_path_buf),
+            resume_session_id: req.resume.clone(),
+            home: home.clone(),
+            tool_socket: bridge.socket_path().to_path_buf(),
+            env: req.env.clone(),
+            cancel: req.cancel_token.cloned(),
+            binary: None,
+        };
+        Ok(stream_jcode_agent(config, req.prompt.to_string()))
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn step_mode_key_prefers_step_over_global() {
-        assert_eq!(mode_key_for_step(Some("fast"), Some("build")), "fast");
-    }
-
-    #[test]
-    fn step_mode_key_falls_back_to_global() {
-        assert_eq!(mode_key_for_step(None, Some("build")), "build");
-    }
-
-    #[test]
-    fn step_mode_key_defaults_to_build() {
-        assert_eq!(mode_key_for_step(None, None), DEFAULT_STEP_MODE_KEY);
-        assert_eq!(mode_key_for_step(None, None), "build");
-    }
-
-    #[test]
-    fn plan_mode_key_prefers_plan_model() {
-        assert_eq!(mode_key_for_plan(Some("plan"), Some("build")), "plan");
-    }
-
-    #[test]
-    fn plan_mode_key_falls_back_to_global_model() {
-        assert_eq!(mode_key_for_plan(None, Some("build")), "build");
-    }
-
-    #[test]
-    fn plan_mode_key_defaults_to_plan() {
-        assert_eq!(mode_key_for_plan(None, None), DEFAULT_PLAN_MODE_KEY);
-        assert_eq!(mode_key_for_plan(None, None), "plan");
-    }
-
-    #[test]
-    fn claude_family_model_strips_thinking_suffix() {
-        assert_eq!(
-            claude_family_model("claude-sonnet-4-5:high").as_deref(),
-            Some("claude-sonnet-4-5")
-        );
-    }
-
-    #[test]
-    fn claude_family_effort_uses_suffix_when_unresolved() {
-        assert_eq!(
-            claude_family_effort("claude-sonnet-4-5:med", None),
-            Some(EffortLevel::Medium)
-        );
-    }
-
-    #[test]
-    fn claude_family_effort_prefers_resolved_effort_over_suffix() {
-        assert_eq!(
-            claude_family_effort("claude-sonnet-4-5:low", Some(EffortLevel::High)),
-            Some(EffortLevel::High)
-        );
-    }
-
-    #[test]
-    fn claude_family_effort_omits_off_suffix() {
-        assert_eq!(
-            claude_family_model("claude-sonnet-4-5:off").as_deref(),
-            Some("claude-sonnet-4-5")
-        );
-        assert_eq!(claude_family_effort("claude-sonnet-4-5:off", None), None);
-    }
+    use crate::backend::effort::EffortLevel;
+    use crate::backend::stream::LimitError;
 
     // -- Executor dispatch ----------------------------------------------------
-
-    fn sdk_executor() -> Executor {
-        Executor::Sdk
-    }
 
     fn command_executor() -> Executor {
         Executor::Command {
@@ -1199,36 +541,68 @@ mod tests {
         }
     }
 
-    fn pi_executor() -> Executor {
-        Executor::Pi
+    fn claude_executor() -> Executor {
+        Executor::Claude
+    }
+
+    fn jcode_executor() -> Executor {
+        Executor::Jcode
     }
 
     #[test]
-    fn new_picks_sdk_when_sdk_set() {
-        let e = Executor::new(Some("seher"), &[]);
+    fn new_picks_claude_when_sdk_is_claude() {
+        let e = Executor::new(Some("claude"), &[]);
         assert!(e.is_sdk());
-        assert!(matches!(e, Executor::Sdk));
-    }
-
-    #[test]
-    fn new_picks_sdk_for_any_non_pi_sdk_value() {
-        // Any sdk value other than "pi" dispatches to Executor::Sdk; rejecting
-        // unknown values is validate_sdk's job, not Executor::new's.
-        let e = Executor::new(Some("claude-terminal"), &[]);
-        assert!(matches!(e, Executor::Sdk));
-    }
-
-    #[test]
-    fn new_picks_pi_when_sdk_is_pi() {
-        let e = Executor::new(Some("pi"), &[]);
-        assert!(e.is_sdk());
-        assert!(matches!(e, Executor::Pi));
+        assert!(matches!(e, Executor::Claude));
     }
 
     #[test]
     fn new_picks_command_when_sdk_unset() {
         let e = Executor::new(None, &["claude".to_string()]);
         assert!(!e.is_sdk());
+        assert!(matches!(e, Executor::Command { .. }));
+    }
+
+    /// Neither `sdk` nor `command` set: the workflow runs on the default
+    /// backend, which is what makes that combination valid at all (see
+    /// [`crate::config::validate_sdk`]).
+    #[test]
+    fn new_picks_jcode_when_neither_sdk_nor_command_is_set() {
+        let e = Executor::new(None, &[]);
+        assert!(e.is_sdk());
+        assert!(matches!(e, Executor::Jcode));
+    }
+
+    /// A removed `sdk:` value must never resolve to a working backend: cruise
+    /// rejects it in `validate_sdk`, and this layer refuses to run it too.
+    #[tokio::test]
+    async fn new_refuses_a_removed_sdk_value_instead_of_defaulting_to_jcode() {
+        let e = Executor::new(Some("seher"), &[]);
+        assert!(!e.is_sdk());
+        assert!(matches!(e, Executor::Unsupported { .. }));
+
+        let env = std::collections::HashMap::new();
+        let result = e
+            .run(PromptRun {
+                prompt: "hi",
+                model_or_mode: None,
+                max_retries: 0,
+                env: &env,
+                on_notice: None,
+                cancel_token: None,
+                working_dir: None,
+                stream: None,
+                tools: Vec::new(),
+                resume: None,
+            })
+            .await;
+        let Err(err) = result else {
+            panic!("an unsupported sdk must not execute a prompt");
+        };
+        assert!(
+            err.to_string().contains("seher"),
+            "error should name the rejected value: {err}"
+        );
     }
 
     #[test]
@@ -1242,245 +616,44 @@ mod tests {
     }
 
     #[test]
-    fn sdk_step_model_maps_to_mode_key_with_default() {
-        let e = sdk_executor();
+    fn claude_model_passes_through_model_reference() {
+        // Claude mode passes model_or_mode straight through as a
+        // `claude --model` name.
+        let e = claude_executor();
         assert_eq!(
-            e.step_model_or_mode(Some("fast"), None),
-            Some("fast".to_string())
-        );
-        assert_eq!(e.step_model_or_mode(None, None), Some("build".to_string()));
-    }
-
-    #[test]
-    fn sdk_plan_model_maps_to_plan_mode_key_with_default() {
-        let e = sdk_executor();
-        assert_eq!(e.plan_model_or_mode(None, None), Some("plan".to_string()));
-        assert_eq!(
-            e.plan_model_or_mode(None, Some("build")),
-            Some("build".to_string())
-        );
-    }
-
-    #[test]
-    fn pi_step_model_passes_through_model_reference() {
-        // Pi mode passes model/mode_or_mode straight through as a raw model
-        // reference (never reinterpreted as a mode key).
-        let e = pi_executor();
-        assert_eq!(
-            e.step_model_or_mode(Some("anthropic/claude-sonnet-4-6"), Some("opus")),
-            Some("anthropic/claude-sonnet-4-6".to_string())
-        );
-        assert_eq!(
-            e.step_model_or_mode(None, Some("opus")),
-            Some("opus".to_string())
+            e.step_model_or_mode(Some("claude-sonnet-4-6:high"), Some("opus")),
+            Some("claude-sonnet-4-6:high".to_string())
         );
         assert_eq!(e.step_model_or_mode(None, None), None);
-    }
-
-    #[test]
-    fn pi_plan_model_passes_through_model_reference() {
-        let e = pi_executor();
         assert_eq!(
-            e.plan_model_or_mode(Some("openai/gpt-5.5"), None),
-            Some("openai/gpt-5.5".to_string())
+            e.plan_model_or_mode(Some("claude-opus-4-6"), None),
+            Some("claude-opus-4-6".to_string())
         );
         assert_eq!(e.plan_model_or_mode(None, None), None);
     }
 
-    // -- parse_pi_model_ref / build_pi_options ---------------------------------
-
     #[test]
-    fn parse_pi_model_ref_none_when_unset() {
-        assert_eq!(
-            parse_pi_model_ref(None).unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (None, None, None)
-        );
-        assert_eq!(
-            parse_pi_model_ref(Some("")).unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (None, None, None)
-        );
-        assert_eq!(
-            parse_pi_model_ref(Some("   ")).unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (None, None, None)
-        );
+    fn new_picks_jcode_when_sdk_is_jcode() {
+        let e = Executor::new(Some("jcode"), &[]);
+        assert!(e.is_sdk());
+        assert!(matches!(e, Executor::Jcode));
     }
 
     #[test]
-    fn parse_pi_model_ref_bare_model_leaves_provider_unset() {
+    fn jcode_model_passes_through_model_reference() {
+        // Jcode mode passes model_or_mode straight through as a
+        // `provider/model[:effort]` reference in jcode's own namespace.
+        let e = jcode_executor();
         assert_eq!(
-            parse_pi_model_ref(Some("claude-sonnet-4-6"))
-                .unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (None, Some("claude-sonnet-4-6".to_string()), None)
+            e.step_model_or_mode(Some("claude/claude-opus-5:high"), Some("openai/gpt-5.6")),
+            Some("claude/claude-opus-5:high".to_string())
         );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_splits_provider_and_model() {
+        assert_eq!(e.step_model_or_mode(None, None), None);
         assert_eq!(
-            parse_pi_model_ref(Some("anthropic/claude-sonnet-4-6"))
-                .unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (
-                Some("anthropic".to_string()),
-                Some("claude-sonnet-4-6".to_string()),
-                None
-            )
+            e.plan_model_or_mode(Some("openai/gpt-5.6"), Some("claude/claude-opus-5")),
+            Some("openai/gpt-5.6".to_string())
         );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_extracts_thinking_suffix() {
-        assert_eq!(
-            parse_pi_model_ref(Some("openai-codex/gpt-5.5:xhigh"))
-                .unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (
-                Some("openai-codex".to_string()),
-                Some("gpt-5.5".to_string()),
-                Some("xhigh".to_string())
-            )
-        );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_keeps_non_thinking_colon_suffix_in_model() {
-        assert_eq!(
-            parse_pi_model_ref(Some("openrouter/meta-llama/llama-3-8b:free"))
-                .unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (
-                Some("openrouter".to_string()),
-                Some("meta-llama/llama-3-8b:free".to_string()),
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_bare_model_with_thinking_suffix() {
-        assert_eq!(
-            parse_pi_model_ref(Some("claude-sonnet-4-6:high"))
-                .unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (
-                None,
-                Some("claude-sonnet-4-6".to_string()),
-                Some("high".to_string())
-            )
-        );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_thinking_only_means_auto_model() {
-        assert_eq!(
-            parse_pi_model_ref(Some(":high")).unwrap_or_else(|e| panic!("unexpected error: {e}")),
-            (None, None, Some("high".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_pi_model_ref_rejects_empty_provider_or_model_around_slash() {
-        for bad in ["/claude-sonnet-4-6", "anthropic/", "/", "anthropic/:high"] {
-            match parse_pi_model_ref(Some(bad)) {
-                Err(err) => assert!(
-                    err.to_string().contains("invalid pi model reference"),
-                    "unexpected error message for {bad:?}: {err}"
-                ),
-                Ok(parsed) => panic!("expected parse error for {bad:?}, got {parsed:?}"),
-            }
-        }
-    }
-    /// `sdk: seher` must tell the CLI which provider/model seher picked; seher
-    /// itself logs nothing, so `on_notice` is the only carrier.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn sdk_run_reports_resolved_provider_through_on_notice() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _lock = crate::test_support::lock_process();
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let _home_guards = crate::test_support::set_fake_home(dir.path());
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
-        let script = bin_dir.join("omp");
-        let tool_marker = dir.path().join("tool-registered");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s\n' '{"type":"ready","protocolVersion":1}'
-while IFS= read -r line; do
-  case "$line" in
-    *get_state*) printf '%s\n' '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"omp-test-session"}}' ;;
-    *set_host_tools*) printf '%s\n' '{"id":"seher-host-tools","type":"response","command":"set_host_tools","success":true,"data":{"toolNames":["echo"]}}'; : > "$OMP_TOOL_MARKER" ;;
-    *prompt*) if [ ! -f "$OMP_TOOL_MARKER" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_end","isTerminal":true,"messages":[]}' ;;
-    *abort*) exit 0 ;;
-  esac
-done
-"#,
-        )
-        .unwrap_or_else(|e| panic!("write fake OMP: {e}"));
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| panic!("chmod fake OMP: {e}"));
-        for name in ["bunx", "npx"] {
-            let blocker = bin_dir.join(name);
-            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
-                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
-            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
-                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
-        }
-        let codexbar = dir.path().join("codexbar");
-        std::fs::write(&codexbar, "#!/bin/sh\nexit 1\n")
-            .unwrap_or_else(|e| panic!("write codexbar stub: {e}"));
-        std::fs::set_permissions(&codexbar, std::fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| panic!("chmod codexbar stub: {e}"));
-        let config_path = dir.path().join("seher.yaml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "providers:\n  test-provider:\n    sdk: omp\n    env:\n      PATH: {}\n      OMP_TOOL_MARKER: {}\n    models:\n      build: test-provider/test-model\n",
-                bin_dir.display(),
-                tool_marker.display()
-            ),
-        )
-        .unwrap_or_else(|e| panic!("write seher config: {e}"));
-        let _codexbar = crate::test_support::EnvGuard::set("SEHER_CODEXBAR_BIN", &codexbar);
-        let _seher_config = crate::test_support::EnvGuard::set("SEHER_CONFIG", &config_path);
-
-        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let notices_sink = std::sync::Arc::clone(&notices);
-        let on_notice = move |msg: &str| {
-            notices_sink
-                .lock()
-                .unwrap_or_else(|e| panic!("notices lock: {e}"))
-                .push(msg.to_string());
-        };
-        let env = HashMap::new();
-        let echo = SeherTool::new(
-            "echo",
-            "Echo",
-            serde_json::json!({"type": "object"}),
-            std::sync::Arc::new(|input| Ok(input.to_string())),
-        );
-        let outcome = Executor::Sdk
-            .run(PromptRun {
-                prompt: "hello",
-                model_or_mode: Some("build"),
-                max_retries: 0,
-                env: &env,
-                on_notice: Some(&on_notice),
-                cancel_token: None,
-                working_dir: Some(dir.path()),
-                stream: None,
-                tools: vec![echo],
-                resume: None,
-            })
-            .await
-            .unwrap_or_else(|e| panic!("SDK run: {e}"));
-
-        assert_eq!(outcome.result.output, "ok");
-        let notices = notices
-            .lock()
-            .unwrap_or_else(|e| panic!("notices lock: {e}"));
-        assert_eq!(
-            notices[1],
-            "seher: selected provider=test-provider model=test-model sdk=omp mode=build"
-        );
+        assert_eq!(e.plan_model_or_mode(None, None), None);
     }
 
     fn base_req(env: &HashMap<String, String>) -> PromptRun<'_> {
@@ -1498,32 +671,41 @@ done
         }
     }
 
+    // -- build_claude_config ---------------------------------------------------
+
     #[test]
-    fn build_pi_options_leaves_api_key_none_for_pi_to_resolve() {
+    fn build_claude_config_splits_effort_suffix_off_the_model() {
         let env = HashMap::new();
-        let req = base_req(&env);
-        let opts = build_pi_options(&req, Some("anthropic/claude-sonnet-4-6"))
-            .unwrap_or_else(|e| panic!("unexpected error: {e}"));
-        assert_eq!(opts.provider.as_deref(), Some("anthropic"));
-        assert_eq!(opts.model.as_deref(), Some("claude-sonnet-4-6"));
-        assert!(opts.api_key.is_none());
-        assert!(opts.thinking.is_none());
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("claude-sonnet-4-6:xhigh");
+        let config = build_claude_config(&req, req.model_or_mode);
+        assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
 
     #[test]
-    fn build_pi_options_forwards_tools_env_and_working_dir() {
+    fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+        let config = build_claude_config(&req, req.model_or_mode);
+        assert_eq!(config.model, None);
+        assert_eq!(config.effort, None);
+    }
+
+    #[test]
+    fn build_claude_config_forwards_tools_env_working_dir_and_resume() {
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let tool = SeherTool::new(
+        let tool = CruiseTool::new(
             "echo",
             "Echo",
             serde_json::json!({"type": "object"}),
             std::sync::Arc::new(|_| Ok(String::new())),
         );
-        let dir = std::path::PathBuf::from("/tmp/cruise-pi-test");
+        let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
         let req = PromptRun {
             prompt: "hi",
-            model_or_mode: Some("gpt-5.5"),
+            model_or_mode: Some("claude-opus-4-6"),
             max_retries: 0,
             env: &env,
             on_notice: None,
@@ -1533,432 +715,341 @@ done
             tools: vec![tool],
             resume: Some("sess-1".to_string()),
         };
-        let opts = build_pi_options(&req, req.model_or_mode)
-            .unwrap_or_else(|e| panic!("unexpected error: {e}"));
-        assert_eq!(opts.working_directory, Some(dir));
-        assert_eq!(opts.env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(opts.tools.len(), 1);
-        assert_eq!(opts.tools[0].name, "echo");
+        let config = build_claude_config(&req, req.model_or_mode);
+        assert_eq!(config.cwd, Some(dir));
+        assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(config.tools.len(), 1);
+        assert_eq!(config.tools[0].name, "echo");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn omp_dispatch_streams_through_cruise_dispatch() {
-        use std::os::unix::fs::PermissionsExt;
+    // -- run_with_fallback wiring ---------------------------------------------
 
-        let _lock = crate::test_support::lock_process();
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let _home_guards = crate::test_support::set_fake_home(dir.path());
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
-        let script = bin_dir.join("omp");
-        let tool_marker = dir.path().join("tool-registered");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s\n' '{"type":"ready","protocolVersion":1}'
-while IFS= read -r line; do
-  case "$line" in
-    *get_state*) printf '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"omp-test-session"}}\n' ;;
-    *set_host_tools*) printf '%s\n' '{"id":"seher-host-tools","type":"response","command":"set_host_tools","success":true,"data":{"toolNames":["echo"]}}'; : > "$OMP_TOOL_MARKER" ;;
-    *prompt*) if [ ! -f "$OMP_TOOL_MARKER" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_end","isTerminal":true,"messages":[]}' ;;
-    *abort*) exit 0 ;;
-  esac
-done
-"#,
-        )
-        .unwrap_or_else(|e| panic!("write fake OMP: {e}"));
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| panic!("chmod fake OMP: {e}"));
-        for name in ["bunx", "npx"] {
-            let blocker = bin_dir.join(name);
-            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
-                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
-            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
-                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
+    /// A retry policy whose backoff is short enough not to slow the tests.
+    fn fast_policy(chains: &[(&str, &[&str])]) -> Arc<RetryPolicy> {
+        Arc::new(RetryPolicy::new(crate::config::RetryConfig {
+            base_delay_ms: 1,
+            max_delay_ms: 300_000,
+            model_fallback: true,
+            fallback_chains: chains
+                .iter()
+                .map(|(key, entries)| {
+                    (
+                        (*key).to_string(),
+                        entries.iter().map(|e| (*e).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }))
+    }
+
+    /// A backend stub: hands the caller a receiver already holding `chunks`.
+    fn canned(chunks: Vec<StreamChunk>) -> std::sync::mpsc::Receiver<StreamChunk> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for chunk in chunks {
+            let _ = tx.send(chunk);
         }
+        rx
+    }
 
+    fn limit_chunk() -> StreamChunk {
+        StreamChunk::Limit(LimitError {
+            provider: "test".to_string(),
+            detail: "HTTP status 429 slow down".to_string(),
+        })
+    }
+
+    /// Collects strings a callback under test was handed.
+    type Recorder = Arc<Mutex<Vec<String>>>;
+
+    fn recorder() -> Recorder {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn recorded(items: &Recorder) -> Vec<String> {
+        items
+            .lock()
+            .unwrap_or_else(|e| panic!("recorder lock: {e}"))
+            .clone()
+    }
+
+    fn record(items: &Recorder, value: &str) {
+        items
+            .lock()
+            .unwrap_or_else(|e| panic!("recorder lock: {e}"))
+            .push(value.to_string());
+    }
+
+    #[tokio::test]
+    async fn fallback_spends_the_model_budget_then_switches_immediately() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
-        let echo = SeherTool::new(
-            "echo",
-            "Echo",
-            serde_json::json!({"type": "object"}),
-            std::sync::Arc::new(|input| Ok(input.to_string())),
-        );
-        let req = PromptRun {
-            prompt: "hello",
-            model_or_mode: None,
-            max_retries: 0,
-            env: &env,
-            on_notice: None,
-            cancel_token: None,
-            working_dir: Some(dir.path()),
-            stream: None,
-            tools: vec![echo],
-            resume: None,
-        };
-        let resolved = seher::sdk::ResolvedAgent {
-            provider: "test-provider".to_string(),
-            model_id: "test-provider/test-model:high".to_string(),
-            mode_key: "build".to_string(),
-            sdk: "omp".to_string(),
-            api: None,
-            skills: seher::sdk::ResolvedSkillsConfig::default(),
-            retry: seher::sdk::RetryConfig::default(),
-            env: [
-                (String::from("PATH"), bin_dir.display().to_string()),
-                (
-                    String::from("OMP_TOOL_MARKER"),
-                    tool_marker.display().to_string(),
-                ),
-            ]
-            .into(),
-            effort: None,
-        };
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+        req.on_notice = Some(&on_notice);
 
-        let rx = spawn_agent_stream(&resolved, &req, seher::sdk::CancelToken::new());
-        let mut output = String::new();
-        let mut session = None;
-        loop {
-            let chunk = rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap_or_else(|e| panic!("OMP stream did not finish: {e}"));
-            match chunk {
-                StreamChunk::Session(id) => session = Some(id),
-                StreamChunk::Delta(delta) => output.push_str(&delta),
-                StreamChunk::Done(done) => {
-                    if !done.is_empty() {
-                        output = done;
-                    }
-                    break;
-                }
-                StreamChunk::Error(message) => panic!("unexpected OMP error: {message}"),
-                StreamChunk::Limit(_) => panic!("unexpected OMP rate limit"),
-            }
-        }
-
-        assert_eq!(output, "ok");
-        assert_eq!(session.as_deref(), Some("omp-test-session"));
-        let session_id = session.unwrap_or_else(|| panic!("OMP session id missing"));
-        assert!(finish_sdk_session("omp", Some(dir.path()), Some(session_id.clone())).is_none());
-        assert!(!seher::sdk::close_omp_session(
-            &session_id,
-            Some(dir.path())
-        ));
-    }
-
-    #[test]
-    fn rpc_backend_env_does_not_override_helper_search_path() {
-        let _lock = crate::test_support::lock_process();
-        let _ambient = crate::test_support::EnvGuard::set("CRUISE_RPC_AMBIENT", "ambient");
-        let _pathext = crate::test_support::EnvGuard::remove("PATHEXT");
-        let mut resolved = seher::sdk::ResolvedAgent {
-            provider: "test-provider".to_string(),
-            model_id: "test-provider/test-model".to_string(),
-            mode_key: "build".to_string(),
-            sdk: "omp".to_string(),
-            api: None,
-            skills: seher::sdk::ResolvedSkillsConfig::default(),
-            retry: seher::sdk::RetryConfig::default(),
-            env: [("PATH".to_string(), "/trusted/bin".to_string())].into(),
-            effort: None,
-        };
-        let request_env = [
-            ("PATH".to_string(), "/repo/bin".to_string()),
-            ("PATHEXT".to_string(), ".COM".to_string()),
-            ("PROJECT".to_string(), "cruise".to_string()),
-        ]
-        .into_iter()
-        .collect();
-
-        merge_helper_env(&mut resolved, &request_env);
-
-        assert_eq!(
-            resolved.env.get("PATH").map(String::as_str),
-            Some("/trusted/bin")
-        );
-        assert!(!resolved.env.contains_key("PATHEXT"));
-        assert_eq!(
-            resolved.env.get("PROJECT").map(String::as_str),
-            Some("cruise")
-        );
-        assert_eq!(
-            resolved.env.get("CRUISE_RPC_AMBIENT").map(String::as_str),
-            Some("ambient")
-        );
-    }
-
-    /// Provider `sdk: pi` must reach seher's *external* pi CLI over RPC, not the
-    /// in-process `pi_agent_rust` engine (which is `sdk: pi-rust` and whose baked
-    /// model catalog rejects model ids newer than the crate). The fake `pi` on
-    /// `PATH` only answers the RPC protocol, so an in-process run cannot pass.
-    #[cfg(unix)]
-    #[test]
-    fn pi_dispatch_streams_through_external_pi_cli() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _lock = crate::test_support::lock_process();
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let _home_guards = crate::test_support::set_fake_home(dir.path());
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap_or_else(|e| panic!("create bin dir: {e}"));
-        let script = bin_dir.join("pi");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-sid=
-extension=
-previous=
-for arg in "$@"; do
-  if [ "$previous" = "--session-id" ]; then sid="$arg"; fi
-  if [ "$previous" = "--extension" ]; then extension="$arg"; fi
-  previous="$arg"
-done
-while IFS= read -r line; do
-  case "$line" in
-    *get_state*) printf '{"id":"seher-handshake","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s"}}\n' "$sid" ;;
-    *prompt*) if [ ! -f "$extension" ] || [ ! -s "$SEHER_PI_TOOL_SPEC" ] || [ -z "$SEHER_PI_BRIDGE_HOST" ] || [ -z "$SEHER_PI_BRIDGE_PORT" ] || [ -z "$SEHER_PI_BRIDGE_TOKEN" ]; then exit 42; fi; printf '%s\n' '{"id":"seher-prompt","type":"response","command":"prompt","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}' '{"type":"agent_settled"}' ;;
-    *abort*) exit 0 ;;
-  esac
-done
-"#,
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(if model == Some("p/spare") {
+                    canned(vec![StreamChunk::Done("ok".to_string())])
+                } else {
+                    canned(vec![limit_chunk()])
+                })
+            },
         )
-        .unwrap_or_else(|e| panic!("write fake pi: {e}"));
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| panic!("chmod fake pi: {e}"));
-        for name in ["bunx", "npx"] {
-            let blocker = bin_dir.join(name);
-            std::fs::write(&blocker, "#!/bin/sh\nexit 97\n")
-                .unwrap_or_else(|e| panic!("write {name} blocker: {e}"));
-            std::fs::set_permissions(&blocker, std::fs::Permissions::from_mode(0o700))
-                .unwrap_or_else(|e| panic!("chmod {name} blocker: {e}"));
-        }
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
 
-        // A workflow `PATH` must not steer which `pi` / `bunx` / `npx` seher
-        // launches: dispatch has to keep `resolved.env`'s PATH (`merge_helper_env`),
-        // or the fake pi below becomes unreachable. The non-empty tool list also
-        // requires the external Pi extension bridge to be configured.
-        let env: HashMap<String, String> =
-            [(String::from("PATH"), String::from("/nonexistent/bin"))].into();
-        let echo = SeherTool::new(
-            "echo",
-            "Echo",
-            serde_json::json!({"type": "object"}),
-            std::sync::Arc::new(|input| Ok(input.to_string())),
+        assert_eq!(outcome.result.output, "ok");
+        // The primary model spends its own budget before the chain is used.
+        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+        let notices = recorded(&notices);
+        assert!(
+            notices
+                .iter()
+                .any(|n| n == "fallback: p/primary -> p/spare (429, attempt 2/3)"),
+            "got: {notices:?}"
         );
-        let req = PromptRun {
-            prompt: "hello",
-            model_or_mode: None,
-            max_retries: 0,
-            env: &env,
-            on_notice: None,
-            cancel_token: None,
-            working_dir: Some(dir.path()),
-            stream: None,
-            tools: vec![echo],
-            // A foreign session id must not be forwarded to the RPC backend: its
-            // sessions are closed after every prompt, so there is none to resume.
-            resume: Some("foreign-session".to_string()),
-        };
-        let resolved = seher::sdk::ResolvedAgent {
-            provider: "codex".to_string(),
-            // Deliberately newer than `pi_agent_rust`'s baked catalog: the
-            // in-process engine rejects it with "Model ... not found".
-            model_id: "openai-codex/gpt-5.6-luna:high".to_string(),
-            mode_key: "build".to_string(),
-            sdk: "pi".to_string(),
-            api: None,
-            skills: seher::sdk::ResolvedSkillsConfig::default(),
-            retry: seher::sdk::RetryConfig::default(),
-            env: [(String::from("PATH"), bin_dir.display().to_string())].into(),
-            effort: None,
+    }
+
+    #[tokio::test]
+    async fn fallback_is_disabled_by_a_zero_retry_budget() {
+        // `--rate-limit-retries 0` means no retry: a fallback chain must not
+        // become a second retry count.
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(vec![limit_chunk()]))
+            },
+        )
+        .await
+        else {
+            panic!("a spent budget must surface the failure");
         };
 
-        let rx = spawn_agent_stream(&resolved, &req, seher::sdk::CancelToken::new());
-        let mut output = String::new();
-        let mut session = None;
-        loop {
-            let chunk = rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or_else(|e| panic!("pi stream did not finish: {e}"));
-            match chunk {
-                StreamChunk::Session(id) => session = Some(id),
-                StreamChunk::Delta(delta) => output.push_str(&delta),
-                StreamChunk::Done(done) => {
-                    if !done.is_empty() {
-                        output = done;
-                    }
-                    break;
+        assert!(error.to_string().contains("429"), "got: {error}");
+        assert_eq!(recorded(&models), ["p/primary"]);
+    }
+
+    #[tokio::test]
+    async fn text_the_user_saw_blocks_a_switch_but_not_a_same_model_retry() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let lines = recorder();
+        let lines_sink = Arc::clone(&lines);
+        let on_stdout = move |line: &str| record(&lines_sink, line);
+        let stream = StreamCallbacks {
+            on_stdout: Some(&on_stdout),
+            on_stderr: None,
+        };
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+        req.stream = Some(&stream);
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(vec![
+                    StreamChunk::Delta("partial answer\n".to_string()),
+                    limit_chunk(),
+                ]))
+            },
+        )
+        .await
+        else {
+            panic!("a streamed turn must not be replayed on another model");
+        };
+
+        assert!(error.to_string().contains("429"), "got: {error}");
+        // Retried on the same model (historical behavior), never on the spare.
+        assert_eq!(recorded(&models), ["p/primary", "p/primary"]);
+        assert_eq!(recorded(&lines), ["partial answer", "partial answer"]);
+    }
+
+    #[tokio::test]
+    async fn text_no_sink_received_does_not_block_a_switch() {
+        // `stream: None` (title generation, PR metadata) shows the user
+        // nothing, so a delta must not count as replayed output.
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+
+        let outcome = run_with_fallback(
+            &req,
+            "claude",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(if model == Some("p/spare") {
+                    canned(vec![StreamChunk::Done("ok".to_string())])
+                } else {
+                    canned(vec![
+                        StreamChunk::Delta("partial answer\n".to_string()),
+                        limit_chunk(),
+                    ])
+                })
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+    }
+
+    #[tokio::test]
+    async fn an_undispatchable_model_reference_moves_to_the_next_candidate() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.on_notice = Some(&on_notice);
+
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                if model == Some("p/spare") {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                } else {
+                    Err(CruiseError::Other("invalid model reference".to_string()))
                 }
-                StreamChunk::Error(message) => panic!("unexpected pi error: {message}"),
-                StreamChunk::Limit(_) => panic!("unexpected pi rate limit"),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(recorded(&models), ["p/primary", "p/spare"]);
+        let notices = recorded(&notices);
+        assert!(
+            notices
+                .iter()
+                .any(|n| n == "fallback: p/primary -> p/spare (unusable model, attempt 1/1)"),
+            "got: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undispatchable_model_reference_without_a_chain_surfaces_its_error() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+
+        let Err(error) = run_with_fallback(&req, "jcode", None, |_| {
+            Err(CruiseError::Other("invalid model reference".to_string()))
+        })
+        .await
+        else {
+            panic!("an undispatchable model reference must fail the run");
+        };
+
+        assert!(
+            error.to_string().contains("invalid model reference"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_switch_still_observes_cancellation_before_the_next_attempt() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let token = CancellationToken::new();
+        let cancel_on_switch = token.clone();
+        let on_notice = move |msg: &str| {
+            if msg.starts_with("fallback:") {
+                cancel_on_switch.cancel();
             }
-        }
+        };
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.on_notice = Some(&on_notice);
+        req.cancel_token = Some(&token);
 
-        assert_eq!(output, "ok");
-        let session_id = session.unwrap_or_else(|| panic!("pi session id missing"));
-        assert_ne!(session_id, "foreign-session");
-        // finish_sdk_session must reap the RPC child and drop the id.
-        assert!(finish_sdk_session("pi", Some(dir.path()), Some(session_id.clone())).is_none());
-        assert!(!seher::sdk::close_pi_session(&session_id, Some(dir.path())));
-    }
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Err(CruiseError::Other("invalid model reference".to_string()))
+            },
+        )
+        .await
+        else {
+            panic!("a cancelled run must not start another attempt");
+        };
 
-    #[test]
-    fn non_rpc_session_ids_remain_resumable() {
-        let session = Some("resumable-session".to_string());
-        assert_eq!(finish_sdk_session("claude", None, session.clone()), session);
-    }
-
-    #[test]
-    fn pi_backoff_matches_command_backoff_schedule() {
-        // run_pi_direct reuses step::command::calculate_backoff verbatim for its
-        // rate-limit retry delay (no seher provider to fall back to, unlike
-        // run_sdk); assert the schedule it inherits.
-        use crate::step::command::calculate_backoff;
-        assert_eq!(calculate_backoff(1), std::time::Duration::from_secs(2));
-        assert_eq!(calculate_backoff(2), std::time::Duration::from_secs(4));
-        assert_eq!(calculate_backoff(3), std::time::Duration::from_secs(8));
-        assert_eq!(calculate_backoff(10), std::time::Duration::from_mins(1));
-    }
-
-    // -- ChunkReducer ---------------------------------------------------------
-
-    fn no_sink() -> impl FnMut(&str) {
-        |_: &str| {}
-    }
-
-    #[test]
-    fn reducer_accumulates_deltas_and_captures_session() {
-        let mut r = ChunkReducer::new();
-        let mut collected = String::new();
-        let mut sink = |d: &str| collected.push_str(d);
-        assert_eq!(
-            r.step(StreamChunk::Session("sid-1".to_string()), &mut sink),
-            None
+        assert!(
+            matches!(error, CruiseError::Interrupted),
+            "expected Interrupted, got: {error}"
         );
-        assert_eq!(
-            r.step(StreamChunk::Delta("Hello ".to_string()), &mut sink),
-            None
+        // The spare was decided on but never spawned.
+        assert_eq!(recorded(&models), ["p/primary"]);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_closes_without_a_terminal_chunk_is_not_retried() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 3;
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "claude",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(Vec::new()))
+            },
+        )
+        .await
+        else {
+            panic!("a closed stream is not a retryable failure");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("claude stream closed before completion"),
+            "got: {error}"
         );
-        assert_eq!(
-            r.step(StreamChunk::Delta("world".to_string()), &mut sink),
-            None
-        );
-        let out = r
-            .step(StreamChunk::Done(String::new()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(collected, "Hello world");
-        assert_eq!(
-            out,
-            ChunkOutcome::Done {
-                output: "Hello world".to_string(),
-                session: Some("sid-1".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn reducer_done_text_overrides_buffered_deltas() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        r.step(StreamChunk::Delta("partial".to_string()), &mut sink);
-        let out = r
-            .step(StreamChunk::Done("FINAL".to_string()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(
-            out,
-            ChunkOutcome::Done {
-                output: "FINAL".to_string(),
-                session: None,
-            }
-        );
-    }
-
-    #[test]
-    fn reducer_surfaces_error_chunk() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        let out = r
-            .step(StreamChunk::Error("boom".to_string()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(
-            out,
-            ChunkOutcome::Failed {
-                message: "boom".to_string(),
-                session: None,
-            }
-        );
-    }
-
-    #[test]
-    fn reducer_surfaces_limit_chunk() {
-        use seher::sdk::errors::LimitError;
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        let out = r
-            .step(
-                StreamChunk::Limit(LimitError {
-                    provider: "anthropic".to_string(),
-                    reset_at: None,
-                }),
-                &mut sink,
-            )
-            .unwrap_or_else(|| panic!("expected terminal"));
-        match out {
-            ChunkOutcome::Limited { message, .. } => {
-                assert!(message.contains("anthropic"), "got: {message}");
-            }
-            other => panic!("expected Limited, got {other:?}"),
-        }
-    }
-
-    // -- LineBuffer -----------------------------------------------------------
-
-    fn collect_lines(frags: &[&str]) -> (Vec<String>, Vec<String>) {
-        let mut lb = LineBuffer::new();
-        let mut lines = Vec::new();
-        for f in frags {
-            lb.push(f, |l| lines.push(l.to_string()));
-        }
-        let mut flushed = Vec::new();
-        lb.flush(|l| flushed.push(l.to_string()));
-        (lines, flushed)
-    }
-
-    #[test]
-    fn line_buffer_emits_complete_lines_and_flushes_remainder() {
-        let (lines, flushed) = collect_lines(&["Hel", "lo\nwor", "ld"]);
-        assert_eq!(lines, vec!["Hello".to_string()]);
-        assert_eq!(flushed, vec!["world".to_string()]);
-    }
-
-    #[test]
-    fn line_buffer_handles_multiple_lines_in_one_fragment() {
-        let (lines, flushed) = collect_lines(&["a\nb\nc\n"]);
-        assert_eq!(
-            lines,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-        assert!(flushed.is_empty(), "no partial line should remain");
-    }
-
-    #[test]
-    fn line_buffer_strips_carriage_return() {
-        let (lines, _) = collect_lines(&["x\r\n"]);
-        assert_eq!(lines, vec!["x".to_string()]);
-    }
-
-    #[test]
-    fn reducer_finish_reports_closed_with_partial() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        r.step(StreamChunk::Delta("half".to_string()), &mut sink);
-        assert_eq!(
-            r.finish(),
-            ChunkOutcome::Closed {
-                partial: "half".to_string(),
-                session: None,
-            }
-        );
+        assert_eq!(recorded(&models), ["p/primary"]);
     }
 }

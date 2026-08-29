@@ -1,11 +1,14 @@
-//! Custom seher tools (function calling) for interactive planning.
+//! Custom cruise tools (function calling) for interactive planning.
 //!
-//! Three tools are exposed to the planning agent:
+//! Six tools are exposed, each registered only where it applies:
 //! - `ask_user(question)` — ask the user a clarifying question and return their
 //!   answer (delegates to an [`AskHandler`]).
 //! - `submit_plan(content)` — write the full plan markdown to the session
 //!   `plan.md`.
 //! - `update_plan(old, new)` — find/replace a section of the existing `plan.md`.
+//! - `generate_title(title)` — submit a session title.
+//! - `submit_pr_metadata(title, body)` — submit the PR title and description.
+//! - `skip_step(reason)` — record that making no file changes was deliberate.
 //!
 //! Tool handlers are synchronous `Arc` closures (`'static`), so the plan path is
 //! captured by value and the [`AskHandler`] is shared via `Arc`. A handler that
@@ -17,10 +20,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use seher::sdk::{SeherTool, ToolHandler};
 use serde_json::json;
 
 use crate::ask_handler::AskHandler;
+use crate::backend::tool::{CruiseTool, ToolHandler};
 
 /// Tool name for the clarifying-question tool.
 pub const ASK_USER_TOOL: &str = "ask_user";
@@ -46,7 +49,7 @@ pub type PlanPersistFlag = Arc<AtomicBool>;
 /// the agent actually persisted the plan instead of just talking about one.
 pub struct PlanningToolSet {
     /// Tools to register with the SDK backend.
-    pub tools: Vec<SeherTool>,
+    pub tools: Vec<CruiseTool>,
     /// Set once the plan has been persisted via `submit_plan` / `update_plan`.
     pub plan_persisted: PlanPersistFlag,
 }
@@ -83,12 +86,12 @@ pub fn planning_tools(
 
 /// `ask_user` — delegates the agent's question to the [`AskHandler`].
 #[must_use]
-pub fn ask_user_tool(ask: Arc<dyn AskHandler>) -> SeherTool {
+pub fn ask_user_tool(ask: Arc<dyn AskHandler>) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let question = require_str(&input, "question")?;
         ask.ask_user(question).map_err(|e| e.to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         ASK_USER_TOOL,
         "Ask the user a clarifying question and get their answer. Use this whenever a \
          requirement is ambiguous instead of guessing.",
@@ -108,14 +111,14 @@ pub fn ask_user_tool(ask: Arc<dyn AskHandler>) -> SeherTool {
 
 /// `submit_plan` — writes the full plan markdown to `plan_path`.
 #[must_use]
-pub fn submit_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> SeherTool {
+pub fn submit_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let content = require_str(&input, "content")?;
         write_plan(&plan_path, content)?;
         plan_persisted.store(true, Ordering::SeqCst);
         Ok("Plan saved.".to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         SUBMIT_PLAN_TOOL,
         "Submit the complete implementation plan as markdown. Call this once the plan is \
          ready; it overwrites the plan document.",
@@ -135,7 +138,7 @@ pub fn submit_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> 
 
 /// `update_plan` — find/replace a section of the existing plan document.
 #[must_use]
-pub fn update_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> SeherTool {
+pub fn update_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let old = require_str(&input, "old")?;
         let new = require_str(&input, "new")?;
@@ -146,7 +149,7 @@ pub fn update_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> 
         plan_persisted.store(true, Ordering::SeqCst);
         Ok("Plan updated.".to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         UPDATE_PLAN_TOOL,
         "Revise the existing plan by replacing an exact snippet. `old` must match a unique \
          span of the current plan verbatim; if it does not match, re-read the plan and retry.",
@@ -170,7 +173,7 @@ pub fn update_plan_tool(plan_path: PathBuf, plan_persisted: PlanPersistFlag) -> 
 
 /// `generate_title` — captures the session title submitted by the agent.
 #[must_use]
-pub fn generate_title_tool(title_store: Arc<std::sync::Mutex<Option<String>>>) -> SeherTool {
+pub fn generate_title_tool(title_store: Arc<std::sync::Mutex<Option<String>>>) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let title = require_str(&input, "title")?;
         let truncated: String = title.chars().take(80).collect();
@@ -180,7 +183,7 @@ pub fn generate_title_tool(title_store: Arc<std::sync::Mutex<Option<String>>>) -
             Some(truncated.trim().to_string());
         Ok("Title saved.".to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         GENERATE_TITLE_TOOL,
         "Submit a concise session title (maximum 80 characters). Call this exactly once.",
         json!({
@@ -206,7 +209,7 @@ pub struct PrMetadata {
 
 /// `submit_pr_metadata` — captures PR title and body submitted by the agent.
 #[must_use]
-pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>) -> SeherTool {
+pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let title = require_str(&input, "title")?;
         let body = require_str(&input, "body")?;
@@ -218,7 +221,7 @@ pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>)
         });
         Ok("PR metadata saved.".to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         SUBMIT_PR_METADATA_TOOL,
         "Submit the PR title and description. Call this exactly once after reviewing the changes.",
         json!({
@@ -251,7 +254,7 @@ pub fn submit_pr_metadata_tool(store: Arc<std::sync::Mutex<Option<PrMetadata>>>)
 /// support. Fire-and-forget like [`submit_pr_metadata_tool`]: the reason is
 /// captured into `store` and read back by the caller after the turn ends.
 #[must_use]
-pub fn skip_step_tool(store: Arc<std::sync::Mutex<Option<String>>>) -> SeherTool {
+pub fn skip_step_tool(store: Arc<std::sync::Mutex<Option<String>>>) -> CruiseTool {
     let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
         let reason = require_str(&input, "reason")?;
         *store
@@ -260,7 +263,7 @@ pub fn skip_step_tool(store: Arc<std::sync::Mutex<Option<String>>>) -> SeherTool
             Some(reason.to_string());
         Ok("Acknowledged: recorded as an intentional no-change step.".to_string())
     });
-    SeherTool::new(
+    CruiseTool::new(
         SKIP_STEP_TOOL,
         "Call this ONLY when making no file changes during this turn is the deliberate, \
          correct decision -- for example, the plan explicitly says not to add tests for this \
@@ -329,7 +332,7 @@ mod tests {
     use crate::ask_handler::ScriptedAskHandler;
     use tempfile::TempDir;
 
-    fn invoke(tool: &SeherTool, input: serde_json::Value) -> Result<String, String> {
+    fn invoke(tool: &CruiseTool, input: serde_json::Value) -> Result<String, String> {
         (tool.handler)(input)
     }
 

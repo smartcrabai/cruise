@@ -12,21 +12,20 @@
 # customize the prompts, add the `test` -> `fix-test-error` retry loop below,
 # or pin a specific model.
 #
-# `sdk: pi` matches what the cruise GitHub Action always forces via
-# CRUISE_SDK=pi (the env var wins regardless of what this field says), so
-# this file works there unmodified. It is equally usable outside the Action
-# -- `cruise plan`/`cruise run` on a workstation, with either `CRUISE_SDK=pi`
-# or nothing else needed since `sdk: pi` is already declared here.
-sdk: pi
+# No `sdk:` field: omitting both `sdk` and `command` selects cruise's
+# default `jcode` backend, which is what the cruise GitHub Action
+# provisions and drives. It is equally usable outside the Action --
+# `cruise plan`/`cruise run` on a workstation, against the credentials you
+# set up with `cruise login`.
 
-# Left unset so pi auto-selects a provider/model from whichever of
-# ANTHROPIC_API_KEY / OPENAI_API_KEY / ... is available -- the recommended
-# default when this config is used from the Action (see "Zero-config
-# default" in ../docs/github-actions.md). Uncomment to pin a specific model
-# instead (plain pi model references, not seher mode keys -- see
-# ../docs/github-actions.md#sdk-pi----how-execution-works):
-# model: anthropic/claude-sonnet-4-6
-# plan_model: anthropic/claude-sonnet-4-6
+# `model`/`plan_model` are left unset so the jcode home's configured default
+# provider/model is used -- the recommended default when this config is used
+# from the Action (see "Zero-config default" in ../docs/github-actions.md).
+# Uncomment to pin a specific model instead (jcode model references,
+# "provider/model[:effort]" -- see
+# ../docs/github-actions.md#sdk-jcode----how-execution-works):
+# model: anthropic-api/claude-sonnet-4-6
+# plan_model: anthropic-api/claude-sonnet-4-6
 
 steps:
   # Planning already produced {plan} (cruise run) before this step runs.

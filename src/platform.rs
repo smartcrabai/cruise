@@ -1,24 +1,24 @@
 /// Re-claims the controlling terminal's foreground process group when it was
 /// left pointing at a dead process group.
 ///
-/// Child processes spawned during SDK execution can steal the terminal: the
-/// codexbar usage probe runs `/bin/zsh -l -i -c 'printf ... "$PATH"'`, and an
-/// interactive zsh initialises job control by making itself the terminal's
-/// foreground process group. When it exits, the foreground group is dead and
-/// this process counts as "background" — the next terminal-mode change from
-/// reedline / inquire raises SIGTTOU and the user's shell reports
-/// `suspended (tty output)`.
+/// Cruise runs children on the user's terminal (a `command:` backend, an agent
+/// backend's own tool calls). A child that puts itself in the terminal's
+/// foreground process group and then exits leaves that group with no surviving
+/// members, which makes this process count as "background": the next
+/// terminal-mode change from reedline / inquire raises SIGTTOU and the user's
+/// shell reports `suspended (tty output)`.
 ///
-/// Only acts when stdin is a tty and the current foreground group has no
-/// surviving processes. A live owner (e.g. the user's shell after Ctrl+Z) is
-/// never preempted, preserving normal job-control semantics.
+/// The repair is driven by that observed state, not by knowing which child did
+/// it: this only acts when stdin is a tty *and* the current foreground group
+/// has no surviving processes. A live owner (e.g. the user's shell after
+/// Ctrl+Z) is never preempted, preserving normal job-control semantics.
 pub(crate) fn reclaim_terminal_foreground() {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
 
         // The SIGTTOU disposition below is process-global; serialise so two
-        // prompts (e.g. an `ask_user` on the pi worker thread and a CLI
+        // prompts (e.g. an `ask_user` on a backend worker thread and a CLI
         // select) can never interleave the save/restore.
         static RECLAIM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = RECLAIM_LOCK

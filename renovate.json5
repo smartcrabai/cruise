@@ -52,6 +52,17 @@
         "cruise.yaml",
       ],
       enabled: false,
+    },
+    {
+      // vendor/claude-agent-sdk holds the published .crate of exactly this
+      // version and is referenced through [patch.crates-io], so the pin can
+      // only move together with a full re-extraction of the vendored copy
+      // (scripts/verify_vendored_crate.sh fails on any mismatch). An automerged
+      // version-only bump would silently leave the patch unused.
+      matchDepNames: [
+        "seher-claude-agent-sdk",
+      ],
+      enabled: false,
     }
   ]
 }
