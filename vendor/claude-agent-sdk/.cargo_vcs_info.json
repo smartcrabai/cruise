@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "6adf4624ed27084a0d16f1574e609c4eff84d7cc"
+  },
+  "path_in_vcs": "crates/claude-agent-sdk"
+}

@@ -1309,6 +1309,7 @@ dependencies = [
  "libc",
  "reedline",
  "reqwest",
+ "seher-claude-agent-sdk",
  "seher-sdk",
  "serde",
  "serde_json",
@@ -6256,8 +6257,6 @@ dependencies = [
 [[package]]
 name = "seher-claude-agent-sdk"
 version = "0.0.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb71dbe2c93dc3e12135e34d8236e676550b3f6ec3f1bb8473d0e465face6d82"
 dependencies = [
  "async-trait",
  "futures",

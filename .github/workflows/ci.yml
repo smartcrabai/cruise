@@ -49,6 +49,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      - name: Verify vendored crate integrity
+        run: bash scripts/verify_vendored_crate.sh
+
       - name: Test GitHub Action step scripts
         run: |
           status=0
