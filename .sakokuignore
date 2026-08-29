@@ -3,3 +3,7 @@ src-tauri/icons/
 # Intentionally Japanese docs
 token-exchange/README.md
 skills/cruise-plan/SKILL.md
+# Intentionally Japanese migration specification and task prompts.
+JCODE.md
+PROHIBITED.md
+scripts/jcode-migration-workflow.ts

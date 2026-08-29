@@ -172,6 +172,7 @@ impl RetryPolicy {
 }
 
 /// Build a policy with fresh cooldown state for one resolved workflow config.
+#[must_use]
 pub fn policy_for_config(policy: Option<RetryConfig>) -> Option<Arc<RetryPolicy>> {
     policy.map(|config| Arc::new(RetryPolicy::new(config)))
 }
@@ -198,7 +199,7 @@ where
 /// `None`, so concurrent sessions cannot observe each other's policy.
 #[must_use]
 pub fn active_policy() -> Option<Arc<RetryPolicy>> {
-    if let Ok(policy) = TASK_POLICY.try_with(|policy| policy.clone()) {
+    if let Ok(policy) = TASK_POLICY.try_with(Clone::clone) {
         return policy;
     }
     ACTIVE_POLICY
