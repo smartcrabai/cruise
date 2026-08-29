@@ -2,8 +2,8 @@ name: "Cruise"
 description: >-
   Trigger the cruise coding agent from a GitHub Issue (@cruise plan / run /
   exec / fix). Runs cruise's plan -> implement -> PR workflow (or a direct
-  exec push) inside GitHub Actions, driving pi_agent_rust directly (sdk: pi),
-  and reports progress back as a comment.
+  exec push) inside GitHub Actions, driving the jcode CLI through cruise's
+  default backend, and reports progress back as a comment.
 author: "smartcrabai"
 
 branding:
@@ -13,17 +13,20 @@ branding:
 inputs:
   anthropic_api_key:
     description: >-
-      Anthropic API key used by pi (the sdk: pi backend cruise always drives
-      in this action). Provide an API key through `anthropic_api_key`,
-      `openai_api_key`, or `provider_api_keys`, or another pi-supported
-      provider's key (e.g. KIMI_API_KEY) via `env` -- the gate step fails
-      clearly when all four credential inputs are empty.
+      Anthropic API key. Stored as jcode's `anthropic-api` provider
+      credential inside cruise's own jcode home (via
+      `cruise login --api-key anthropic-api`), never in a config file this
+      action writes. Provide an API key through `anthropic_api_key`,
+      `openai_api_key`, or `providers`/`provider_api_keys`, or another
+      jcode-supported provider's key (e.g. KIMI_API_KEY) via `env` -- the
+      gate step fails clearly when none of these carries a credential.
     required: false
     default: ""
   openai_api_key:
     description: >-
-      OpenAI API key used by pi. See `anthropic_api_key` for how the
-      at-least-one-key requirement is checked.
+      OpenAI API key, stored the same way as `anthropic_api_key` but as
+      jcode's `openai-api` provider credential. See `anthropic_api_key` for
+      how the at-least-one-key requirement is checked.
     required: false
     default: ""
   github_token:
@@ -53,8 +56,19 @@ inputs:
   cruise_version:
     description: >-
       cruise release to install. "latest" (default) or a specific tag such as
-      "v0.1.68". Requires cruise v0.1.68 or later (the first release with
-      `sdk: pi` support, which this action always uses).
+      "v0.2.0". Requires cruise v0.2.0 or later (the first release whose
+      default backend is `sdk: jcode`, which is what this action's generated
+      configs and jcode credential setup assume); the install step rejects an
+      older binary with a clear error instead of running it.
+    required: false
+    default: "latest"
+  jcode_version:
+    description: >-
+      jcode release to install, using jcode's own installer. "latest"
+      (default) or a specific tag such as "v0.81.1". cruise drives this
+      binary for `sdk: jcode` and enforces its own verified minimum jcode
+      version at run time. Ignored when a `jcode` is already on PATH (e.g. on
+      a self-hosted runner that provides one).
     required: false
     default: "latest"
   config:
@@ -70,10 +84,13 @@ inputs:
   model:
     description: >-
       Overrides CRUISE_MODEL (the model used for implementation steps), in
-      pi's model-reference format: "provider/model[:thinking]" (e.g.
-      "openai-codex/gpt-5.5:xhigh"), a bare model id ("claude-sonnet-4-6"), or
-      empty to let pi auto-select a provider/model from its built-in
-      preference order.
+      cruise's jcode model-reference format: "provider/model[:effort]" (e.g.
+      "claude/claude-opus-4-6:xhigh"), a bare model id
+      ("claude-sonnet-4-6"), or empty to use whatever provider/model cruise's
+      jcode home has configured as its default. `provider` is a jcode
+      provider id (`jcode provider list`); `effort` is one of
+      low|medium|high|xhigh|max and is ignored by models without reasoning
+      effort.
     required: false
     default: ""
   plan_model:
@@ -82,26 +99,13 @@ inputs:
       commands' planning step), same format as `model`.
     required: false
     default: ""
-  pi_models_json:
-    description: >-
-      Raw contents of a pi `models.json` file (custom providers / OpenAI-
-      compatible endpoints / model registry overrides -- see pi's own model
-      docs for the schema). When `providers` is also set, this is deep-merged
-      on top of the document generated from it (this wins on any key both
-      define -- it's the raw escape hatch) rather than being mutually
-      exclusive with it. The merged (or standalone) result is written to
-      `$RUNNER_TEMP/pi-agent/models.json` and `PI_CODING_AGENT_DIR` is
-      pointed at that directory for the duration of the run. Empty (default)
-      leaves pi's model resolution untouched unless `providers` is set.
-    required: false
-    default: ""
   env:
     description: >-
       Extra environment variables to export into the cruise process, one
       `KEY=VALUE` per line (blank lines and lines starting with "#" are
       ignored). Each value is masked in the log before being exported.
-      Reserved names (GITHUB_TOKEN, GH_TOKEN, PI_CODING_AGENT_DIR, PATH,
-      HOME, SHELL, the git identity vars, the XDG_* vars, and anything
+      Reserved names (GITHUB_TOKEN, GH_TOKEN, PATH, HOME, SHELL, the git
+      identity vars, the XDG_* vars, and anything
       prefixed CRUISE_/GITHUB_/ACTIONS_/RUNNER_) are skipped with a
       warning instead of being overridden. ANTHROPIC_API_KEY and
       OPENAI_API_KEY are NOT reserved: passing them here, instead of or
@@ -111,26 +115,30 @@ inputs:
     default: ""
   providers:
     description: >-
-      JSON object keyed by pi provider id (letters/digits/`.`/`_`/`-`). Each
-      value requires `api` (one of `anthropic-messages`, `openai-completions`,
-      `openai-responses`, `google-generative-ai`, `azure-openai-responses`,
-      `bedrock-converse-stream`, `cohere-chat`), `base_url`, and a non-empty
-      `models` array (each entry a bare model id string, or an object with
-      `id` plus optional `name`/`api`/`reasoning`/`input`/`cost`/
-      `context_window`/`max_tokens`/`headers`/`compat`). Optional
-      provider-level keys: `headers`, `auth_header`, `compat`, and
-      `no_auth: true` for a key-less endpoint (rejected for
-      `bedrock-converse-stream`). See docs/github-actions.md for the full
-      schema, including `cost`/`compat` field details and the built-in
-      provider-id collision warning.
+      JSON object keyed by jcode provider-profile name (ASCII letters,
+      numbers, `-` and `_`, starting with a letter or number, at most 64
+      characters). Each entry becomes a `[providers.<name>]`
+      OpenAI-compatible profile in cruise's jcode `config.toml`, written by
+      `jcode provider add`. Required per entry: `base_url` and `model` (the
+      profile's default model id). Optional: `context_window` (a number),
+      `auth` (`bearer`, the default, or `api-key`), `auth_header` (the header
+      name, requires `auth: api-key`), `provider_routing: true` for
+      OpenRouter-style gateways, `no_auth: true` for a key-less endpoint, and
+      `default: true` to make the profile jcode's startup default
+      provider/model (at most one entry may set it -- a profile is only
+      reachable from `model`/`plan_model` when it is the default). See
+      docs/github-actions.md.
     required: false
     default: ""
   provider_api_keys:
     description: >-
-      One `provider-id=API key` per line for `providers`; blank lines and
+      One `profile-name=API key` per line for `providers`; blank lines and
       lines starting with "#" are ignored, and the first "=" separates the
-      id (keys may contain "="). Required for every `providers` entry that
-      isn't `no_auth: true`; may be left empty when every entry is
+      name (keys may contain "="). Each key is handed to `jcode provider add
+      --api-key-stdin`, which stores it in a private, owner-only env file
+      under cruise's jcode home and references it from `config.toml` by
+      environment-variable name only. Required for every `providers` entry
+      that isn't `no_auth: true`; may be left empty when every entry is
       `no_auth`. See docs/github-actions.md.
     required: false
     default: ""
@@ -202,7 +210,6 @@ runs:
         ENV_INPUT: ${{ inputs.env }}
         PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
         PROVIDERS_INPUT: ${{ inputs.providers }}
-        PI_MODELS_JSON: ${{ inputs.pi_models_json }}
       run: ${{ github.action_path }}/action/scripts/gate.sh
 
     - name: Resolve GitHub token (cruise-agent App or fallback)
@@ -215,19 +222,14 @@ runs:
         WORKFLOW_TOKEN: ${{ github.token }}
       run: ${{ github.action_path }}/action/scripts/app-token.sh
 
-    - name: Set up cruise/pi environment
+    - name: Set up cruise environment
       id: setup_env
       if: steps.gate.outputs.proceed == 'true'
       shell: bash
       env:
-        ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
-        OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
         MODEL_INPUT: ${{ inputs.model }}
         PLAN_MODEL_INPUT: ${{ inputs.plan_model }}
-        PI_MODELS_JSON: ${{ inputs.pi_models_json }}
         ENV_INPUT: ${{ inputs.env }}
-        PROVIDERS_INPUT: ${{ inputs.providers }}
-        PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
       run: ${{ github.action_path }}/action/scripts/setup-env.sh
 
     - name: Record start time
@@ -257,6 +259,28 @@ runs:
       env:
         CRUISE_VERSION: ${{ inputs.cruise_version }}
       run: ${{ github.action_path }}/action/scripts/install.sh
+
+    - name: Install jcode
+      id: install_jcode
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        JCODE_VERSION: ${{ inputs.jcode_version }}
+      run: ${{ github.action_path }}/action/scripts/install-jcode.sh
+
+    # Runs after both installs because it drives `cruise login` and
+    # `jcode provider add` to write the credentials into cruise's own jcode
+    # home rather than re-implementing their storage formats.
+    - name: Provision cruise's jcode home
+      id: provision_jcode
+      if: steps.gate.outputs.proceed == 'true'
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic_api_key }}
+        OPENAI_API_KEY_INPUT: ${{ inputs.openai_api_key }}
+        PROVIDERS_INPUT: ${{ inputs.providers }}
+        PROVIDER_API_KEYS_INPUT: ${{ inputs.provider_api_keys }}
+      run: ${{ github.action_path }}/action/scripts/provision-jcode.sh
 
     - name: Resolve cruise config
       id: config

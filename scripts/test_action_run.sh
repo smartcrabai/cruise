@@ -11,7 +11,7 @@
 REPO_COUNTER=0
 CRUISE_STATE="$TMP/cruise_state"
 EXEC_CONFIG="$TMP/exec-config.yaml"
-echo "sdk: pi" > "$EXEC_CONFIG"
+printf 'steps:\n  implement:\n    prompt: "{input}"\n' > "$EXEC_CONFIG"
 
 # --- fixture: a real git repo + bare "origin" so exec/hook commits and
 # pushes are real, local, and hermetic. Fresh per case (REPO_DIR/ORIGIN_DIR)
@@ -877,5 +877,18 @@ run_run
 check "COMMAND_REST_FILE: a missing file is tolerated (no error, no extra section)" $([ "$RUN_STATUS" -eq 0 ]; echo $?) "$RUN_OUT"
 check "COMMAND_REST_FILE: a missing file adds no 'Additional instructions' section" \
   $(grep -Fq 'Additional instructions' "$CRUISE_STATE/plan_stdin.txt"; [ $? -ne 0 ]; echo $?) "$(cat "$CRUISE_STATE/plan_stdin.txt")"
+
+# XDG_* arrive from setup-env.sh via $GITHUB_ENV in the real action; run.sh
+# must honor a pre-set XDG_DATA_HOME (its exports are fallbacks only) so the
+# run reads the same cruise data dir provision-jcode.sh wrote to.
+begin_case
+COMMAND=run
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+CRUISE_STUB_PR_URL="https://github.com/owner/repo/pull/1"
+export XDG_DATA_HOME="$TMP/preset-xdg-data"
+run_run
+check "XDG: a pre-set XDG_DATA_HOME is honored instead of the RUNNER_TEMP fallback" \
+  $([ "$RUN_STATUS" -eq 0 ] && [ -f "$TMP/preset-xdg-data/cruise/sessions/$CRUISE_STUB_SESSION_ID/plan.md" ]; echo $?) "$RUN_OUT"
+unset XDG_DATA_HOME
 
 finish

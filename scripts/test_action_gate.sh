@@ -8,7 +8,7 @@
 #
 # scripts/test_action_provider_config.sh already covers gate.sh's
 # credential-gate exit status (empty anthropic/openai/provider_api_keys/
-# providers/pi_models_json/env -> non-zero) without ever reading
+# providers/env -> non-zero) without ever reading
 # $GITHUB_OUTPUT; this suite deliberately does not repeat those credential
 # cases and instead asserts the actual output *values* on every path.
 
@@ -91,7 +91,6 @@ reset_gate_env() {
   export ENV_INPUT=
   export PROVIDER_API_KEYS_INPUT=
   export PROVIDERS_INPUT=
-  export PI_MODELS_JSON=
   export GH_PERMISSION_RESPONSE=write
   export GH_PERMISSION_EXIT=0
   unset GITHUB_EVENT_NAME GITHUB_EVENT_PATH
@@ -141,7 +140,7 @@ assert_eq "gate: command_rest_file contains the text after the mention" "please 
 # =============================================================================
 new_case
 reset_gate_env
-export ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT= ENV_INPUT= PROVIDER_API_KEYS_INPUT= PROVIDERS_INPUT= PI_MODELS_JSON=
+export ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT= ENV_INPUT= PROVIDER_API_KEYS_INPUT= PROVIDERS_INPUT=
 comment_event "@cruise please fix the bug"
 assert_nonzero_status "gate: hard_fail on empty credentials exits non-zero" "$status" "$output"
 assert_eq "gate: hard_fail sets proceed=false" "false" "$(out proceed)"
