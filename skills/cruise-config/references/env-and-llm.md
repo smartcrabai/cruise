@@ -1,4 +1,4 @@
-# Environment variables and LLM API config
+# Environment variables and session titles
 
 ## Env-var merge rules
 
@@ -42,35 +42,12 @@ then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or
 `LANGUAGE`, then the default is `English`. Unsupported or language-neutral
 locales use `English`.
 
-## Prompt language environment variables
+## Session title generation
 
-`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
-`languages.pr` and `languages.plan` settings. Blank values are ignored. When
-these variables are unset, nested language fields take precedence over the
-deprecated top-level fields, then locale inference, then the default is
-`English`.
+After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the GUI sidebar:
 
-## LLM API config (session-title generation)
+- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) invokes the agent with the `generate_title` tool, using `plan_model`, then `model`, then the backend default. Failure falls back to the first heading or first non-empty line of `plan.md`.
+- **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
+- Background `cruise --plan … --skip-planning` derives the title directly from `plan.md` and makes no model call.
 
-After plan approval, cruise can call an OpenAI-compatible API to generate a concise session title (up to 80 characters). The title is shown in `cruise list` and the GUI sidebar.
-
-```yaml
-llm:
-  api_key: sk-...
-  endpoint: https://api.openai.com/v1
-  model: gpt-4o-mini
-```
-
-### Precedence and environment variables
-
-| Setting | Config field | Environment variable | Default |
-|---------|--------------|----------------------|---------|
-| API key | `llm.api_key` | `CRUISE_LLM_API_KEY` | (required) |
-| Endpoint | `llm.endpoint` | `CRUISE_LLM_ENDPOINT` | `https://api.openai.com/v1` |
-| Model | `llm.model` | `CRUISE_LLM_MODEL` | `gpt-4o` |
-
-Environment variables take precedence over the YAML config. To avoid leaking secrets, prefer the `CRUISE_LLM_API_KEY` environment variable.
-
-### Fallback when unset
-
-When `api_key` is not set, the title is derived automatically from the first heading (or the first non-empty line) of the generated `plan.md`.
+No `llm:` workflow field or `CRUISE_LLM_*` override exists. Title generation uses the configured execution backend and model resolution above.

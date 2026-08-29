@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps `claude -p` and friends. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config), planning variants (--skip-planning / --grill interview planning / --repo GitHub-repo sessions), bounded `run --all --parallelism` execution and the live `run --all` dashboard, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped — even if they don't name the exact subcommand. For *authoring* the workflow YAML itself (step fields, variables, groups), use the cruise-config skill instead.
+description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution and the live dashboard, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -10,10 +10,11 @@ cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a decla
 Work flows through **sessions**, each with a phase. The normal path is:
 
 ```
-plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  Running  →  Completed  →  clean
+plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  Running  →  Completed  →  clean
 ```
 
 - A **session** is a unit of work (one task → one plan → one run → usually one PR).
+- **AwaitingInput** means SDK planning has persisted an unanswered `ask_user` question. Answering it resumes planning; `cruise list` can restart plan generation with **Generate Plan**.
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
 - `cruise exec` is the **odd one out**: it runs a workflow against the current directory with a **transient session**, no worktree, and no PR. Terminal exec sessions are removed automatically; paused or interrupted sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
 
@@ -25,6 +26,8 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Plan in the background, review later, return immediately | `cruise --plan "task"` |
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
+| Disable SDK planning tools and have the agent write `plan.md` directly | `cruise plan --no-interactive-planning "task"` |
+| Attach planning images | `cruise plan --image screenshot.png "task"` (repeat `--image` as needed) |
 | Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute the next approved (Planned) session | `cruise run` |
@@ -36,7 +39,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Dump session state for scripts | `cruise list --json` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Show / change app-level settings (e.g. GUI parallelism) | `cruise config` |
-| Sign the default `jcode` backend in to a provider / inspect what's configured | `cruise login [--api-key <provider>]` / `cruise login --status` |
+| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
 
 > **Legacy shortcut:** `cruise "task"` with no subcommand is treated as `cruise plan "task"`. Piping (`echo "task" | cruise`) feeds the task on stdin.
@@ -62,11 +65,19 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 
 ### `--skip-planning`
 
-No LLM is called: your input is written verbatim to `plan.md` and the session goes straight to `AwaitingApproval`. Empty/whitespace input is rejected. Use it when you've already written the plan and just want cruise to execute it. Requires either `--plan` or the positional input form.
+`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate `generate_title` call; background skip-planning and command mode derive the title from `plan.md`.
 
 ### `--grill` (interview planning)
 
 `cruise plan --grill "task"` turns the plan step into an interview: the SDK agent asks you questions **one at a time** (via its `ask_user` tool), recommending an answer for each, until scope, edge cases, and the approach are pinned down — then writes `plan.md`. Constraints: requires the **SDK backend** (the default `jcode` backend qualifies; a `command:` config does not) and an **interactive terminal**; cruise errors out and discards the session otherwise. Conflicts with `--skip-planning`, and only affects the *initial* plan — Fix/Ask, replan, drafts, and background `--plan` use the standard prompt. The GUI equivalent is the **"Grill me"** toggle on the New Session form.
+
+### `--no-interactive-planning`
+
+`cruise plan --no-interactive-planning "task"` disables the SDK planning tools (`submit_plan`, `update_plan`, `ask_user`) for this invocation and asks the agent to write `plan.md` directly. Use it with tool-incapable providers. It conflicts with `--grill`; the GUI equivalent is **Non-interactive planning**.
+
+### `--image`
+
+`cruise plan --image screenshot.png "task"` attaches a PNG, JPG/JPEG, WebP, or GIF; repeat the flag for multiple files. Interactive plan input also detects dragged/pasted image paths. Cruise copies attachments into the session so paths remain stable and appends those stored paths to the planning input. Image attachments disable `force_exec` for that invocation so planning can consume them.
 
 ### `--repo` (GitHub repo sessions)
 
@@ -96,13 +107,14 @@ The interactive menu changes with the session's phase:
 | Phase | Actions |
 |-------|---------|
 | **Draft** | Generate Plan, Delete, Back |
-| **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
+| **Awaiting Input** | Generate Plan, Delete, Back |
+| **Awaiting Approval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
 | **Running** | Resume, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Reset to Planned, Delete, Back |
-| **Planning** / **Plan Failed** | Delete, Back (Approve/Publish as Issue appear only once a non-empty `plan.md` exists) |
+| **Planning** / **Plan Failed** | Edit Settings, Delete, Back (Approve/Publish as Issue appear only once a non-empty `plan.md` exists and planning has no error) |
 
 \* Open PR shows only when the session has a PR URL.
 

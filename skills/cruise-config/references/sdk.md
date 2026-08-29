@@ -42,7 +42,7 @@ A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode`
 Credentials, sessions, `config.toml`, and MCP registration live in **cruise's own jcode home** (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), completely separate from your `~/.jcode` — cruise never reads or writes it, and runs jcode with telemetry and the auto-update check disabled. Sign in with:
 
 - `cruise login [provider]` — hands the terminal to `jcode login` (interactive picker / OAuth flow) against cruise's home.
-- `cruise login --api-key <provider>` — non-interactive API-key entry (key from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin — never a CLI argument).
+- `cruise login <provider> --api-key` — non-interactive API-key entry (key from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin — never a CLI argument).
 - `cruise login --status` — lists the providers configured in cruise's home and their models.
 
 Running `sdk: jcode` with no authenticated provider fails with an error pointing at `cruise login`. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) in that home's `config.toml` — cruise adds no provider notation of its own.

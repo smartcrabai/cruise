@@ -68,7 +68,7 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
-| [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge rules, the `llm:` section for session-title generation |
+| [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge/override rules and SDK/command session-title generation |
 | [examples/full-flow.yaml](examples/full-flow.yaml) | Complete example: plan → approve → implement → test → review → PR → after-pr |
 | [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: jcode` with model references |
 | [examples/claude-flow.yaml](examples/claude-flow.yaml) | SDK-backend example: `sdk: claude` with plain claude model names |

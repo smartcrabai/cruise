@@ -80,7 +80,7 @@ cruise plan --skip-planning -c path/to/cruise.yaml "$(cat plan.md)"   # explicit
 # Use -c __builtin__ to pin the embedded built-in default workflow.
 ```
 
-When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). Two caveats: auto-approval calls an LLM for title generation when the config has an `llm:` block (the plan itself is still used verbatim), and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag) — prefer the stdin form.
+When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). Two caveats: foreground auto-approval in SDK mode invokes the configured agent once more through `generate_title` (falling back to the plan heading on failure), while background `cruise --plan … --skip-planning` derives the title without a model call; and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag), so prefer stdin.
 
 ### Verify
 

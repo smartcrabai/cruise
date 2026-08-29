@@ -18,14 +18,11 @@ model: sonnet             # Optional: default model for prompt steps
                           # (in SDK mode, a "provider/model[:effort]" reference)
 plan_model: opus          # Optional: model for the built-in plan step
                           # (in SDK mode, a "provider/model[:effort]" reference)
+max_retries: 4           # Optional: global DAG edge traversal ceiling (default: 3)
+interactive_planning: true # Optional: enable SDK plan tools (default: true)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
   plan: English           # Language for built-in planning prompts
-
-llm:                      # Optional: OpenAI-compatible API for session-title generation
-  api_key: sk-...
-  endpoint: https://api.openai.com/v1
-  model: gpt-4o-mini
 
 env:                      # Optional: environment variables applied to every step
   API_KEY: sk-...
