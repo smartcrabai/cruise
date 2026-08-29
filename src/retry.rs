@@ -21,6 +21,7 @@
 //! therefore switching, entirely.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -105,14 +106,21 @@ const NETWORK_MARKERS: &[&str] = &[
     "timed out",
 ];
 
-/// The retry policy of the most recently resolved workflow config.
+/// The process-wide fallback policy for calls that are not inside a run task
+/// (for example, config inspection and focused unit tests).
 ///
-/// `PromptRun` has no policy field, so the hand-off is ambient:
-/// [`crate::workflow_call`] publishes the policy of a config it has validated,
-/// and the executor snapshots it (as one `Arc`, cooldown state included) when a
-/// prompt starts.
+/// Run tasks must use [`with_active_policy`] instead: `run --all` resolves
+/// several configs concurrently, so one process-wide slot cannot identify
+/// which policy belongs to a prompt.
 static ACTIVE_POLICY: LazyLock<RwLock<Option<Arc<RetryPolicy>>>> =
     LazyLock::new(|| RwLock::new(None));
+
+// Policy context for one asynchronous run. Tokio task-local storage follows
+// the run future without changing the public `crate::executor::PromptRun`
+// shape or sharing policies between concurrent sessions.
+tokio::task_local! {
+    static TASK_POLICY: Option<Arc<RetryPolicy>>;
+}
 
 /// A published `retry:` policy together with the model cooldowns it produced.
 ///
@@ -163,20 +171,36 @@ impl RetryPolicy {
     }
 }
 
-/// Publish `policy` as the retry policy for subsequent prompt runs.
+/// Build a policy with fresh cooldown state for one resolved workflow config.
+pub fn policy_for_config(policy: Option<RetryConfig>) -> Option<Arc<RetryPolicy>> {
+    policy.map(|config| Arc::new(RetryPolicy::new(config)))
+}
+
+/// Publish `policy` for calls that are not inside a run-task scope.
 pub(crate) fn set_active_policy(policy: Option<RetryConfig>) {
     let mut slot = ACTIVE_POLICY
         .write()
         .unwrap_or_else(PoisonError::into_inner);
-    *slot = policy.map(|config| Arc::new(RetryPolicy::new(config)));
+    *slot = policy_for_config(policy);
+}
+
+/// Run `future` with the policy belonging to one workflow session.
+pub async fn with_active_policy<F, T>(policy: Option<Arc<RetryPolicy>>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    TASK_POLICY.scope(policy, future).await
 }
 
 /// The retry policy in force, or `None` when no workflow declared one.
 ///
-/// Publishing is crate-internal (`set_active_policy`): only workflow-config
-/// resolution decides which policy is active.
+/// A run-task scope wins over the process-wide fallback, including an explicit
+/// `None`, so concurrent sessions cannot observe each other's policy.
 #[must_use]
 pub fn active_policy() -> Option<Arc<RetryPolicy>> {
+    if let Ok(policy) = TASK_POLICY.try_with(|policy| policy.clone()) {
+        return policy;
+    }
     ACTIVE_POLICY
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -684,6 +708,50 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn active_policy_isolated_between_concurrent_run_scopes() {
+        let first = policy_for_config(Some(policy(&[(
+            "test-scope/first",
+            &["test-scope/first-fallback"],
+        )])))
+        .unwrap_or_else(|| panic!("policy should exist"));
+        let second = policy_for_config(Some(policy(&[(
+            "test-scope/second",
+            &["test-scope/second-fallback"],
+        )])))
+        .unwrap_or_else(|| panic!("policy should exist"));
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+
+        let first_seen = {
+            let gate = Arc::clone(&gate);
+            let first = Arc::clone(&first);
+            with_active_policy(Some(first), async move {
+                gate.wait().await;
+                tokio::task::yield_now().await;
+                active_policy()
+            })
+        };
+        let second_seen = {
+            let gate = Arc::clone(&gate);
+            let second = Arc::clone(&second);
+            with_active_policy(Some(second), async move {
+                gate.wait().await;
+                tokio::task::yield_now().await;
+                active_policy()
+            })
+        };
+        let (first_seen, second_seen) = tokio::join!(first_seen, second_seen);
+
+        assert!(Arc::ptr_eq(
+            &first,
+            &first_seen.unwrap_or_else(|| panic!("first policy missing"))
+        ));
+        assert!(Arc::ptr_eq(
+            &second,
+            &second_seen.unwrap_or_else(|| panic!("second policy missing"))
+        ));
     }
 
     fn engine(config: RetryConfig, model: &str, max_retries: usize) -> FallbackEngine {

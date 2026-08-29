@@ -13,7 +13,7 @@ use cruise::session::{
     PLAN_VAR, SessionLogger, SessionManager, SessionPhase, SessionState, SessionStateFingerprint,
     WorkspaceMode, current_iso8601,
 };
-use cruise::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
+use cruise::session_edit::CurrentStepUpdate;
 use cruise::step::option::OptionResult;
 use cruise::workspace::{prepare_execution_workspace, update_session_workspace};
 use serde::{Deserialize, Serialize};
@@ -2268,6 +2268,7 @@ async fn execute_single_session(
     let effective_max_retries = cruise::config::resolve_effective_max_retries(None, &config);
     cruise::config::validate_group_retry_budget(&config, effective_max_retries)
         .map_err(|e| e.to_string())?;
+    let retry_policy = cruise::retry::policy_for_config(config.retry.clone());
     let compiled = cruise::workflow::compile(config).map_err(|e| e.to_string())?;
 
     let mut dag =
@@ -2405,13 +2406,16 @@ async fn execute_single_session(
             };
 
             let handle = tokio::runtime::Handle::current();
-            let result = handle.block_on(execute_steps_with_dag(
-                &ctx,
-                &mut vars,
-                &mut tracker,
-                &mut dag,
-                &start_node,
-                &on_node_start,
+            let result = handle.block_on(cruise::retry::with_active_policy(
+                retry_policy.clone(),
+                execute_steps_with_dag(
+                    &ctx,
+                    &mut vars,
+                    &mut tracker,
+                    &mut dag,
+                    &start_node,
+                    &on_node_start,
+                ),
             ));
 
             match &result {
@@ -2437,17 +2441,20 @@ async fn execute_single_session(
                     .load(&sid_for_pr)
                     .map_err(|e| cruise::error::CruiseError::Other(e.to_string()))?;
                 let skipped_steps_for_pr = session_for_pr.skipped_steps.clone();
-                let pr_result = handle.block_on(cruise::worktree_pr::handle_worktree_pr(
-                    ctx,
-                    &compiled,
-                    &mut vars,
-                    &mut tracker,
-                    &mut session_for_pr,
-                    DEFAULT_RATE_LIMIT_RETRIES,
-                    effective_max_retries,
-                    &skipped_steps_for_pr,
-                    None,
-                    None,
+                let pr_result = handle.block_on(cruise::retry::with_active_policy(
+                    retry_policy,
+                    cruise::worktree_pr::handle_worktree_pr(
+                        ctx,
+                        &compiled,
+                        &mut vars,
+                        &mut tracker,
+                        &mut session_for_pr,
+                        DEFAULT_RATE_LIMIT_RETRIES,
+                        effective_max_retries,
+                        &skipped_steps_for_pr,
+                        None,
+                        None,
+                    ),
                 ));
                 if pr_result.is_ok() {
                     let _ = manager_for_pr.save(&session_for_pr);
@@ -4253,19 +4260,11 @@ mod tests {
             saved.config_source,
             cruise::resolver::ConfigSource::Builtin.display_string()
         );
-        // The session snapshot is the resolved workflow re-serialized, so the
-        // expectation is the same resolution run through the same serializer.
-        let snapshot =
+        assert_eq!(
             fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-        let expected = cruise::resolver::resolve_workflow_config(
-            &fs::read_to_string(repo.join("cruise.yaml")).unwrap_or_else(|e| panic!("{e:?}")),
-            &cruise::resolver::ConfigSource::Local(repo.join("cruise.yaml")),
-            &repo,
-        )
-        .and_then(|config| cruise::repo_clone::serialize_resolved_config(&config))
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(snapshot, expected);
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            "command:\n- echo\nmodel: null\ninteractive_planning: true\ncleanup_after_pr: false\nforce_exec: false\nenv: {}\ngroups: {}\nsteps: {}\nafter-pr: {}\n"
+        );
     }
 
     #[test]

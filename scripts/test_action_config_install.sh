@@ -587,8 +587,10 @@ assert_contains "install: a missing gh CLI reports a clear ::error:: naming the 
 write_ok_jcode_installer() {
   cat > "$FAKE_INSTALLER" <<'EOF'
 #!/bin/sh
-printf 'jcode-installer JCODE_VERSION=[%s] JCODE_INSTALL_DIR=%s JCODE_NO_TELEMETRY=%s JCODE_SKIP_SERVER_RELOAD=%s\n' \
-  "$JCODE_VERSION" "$JCODE_INSTALL_DIR" "$JCODE_NO_TELEMETRY" "$JCODE_SKIP_SERVER_RELOAD" >> "$STUB_LOG"
+set -o pipefail
+printf 'jcode-installer JCODE_VERSION=[%s] JCODE_INSTALL_DIR=%s JCODE_NO_TELEMETRY=%s JCODE_SKIP_SERVER_RELOAD=%s HOME=%s JCODE_HOME=%s\n' \
+  "$JCODE_VERSION" "$JCODE_INSTALL_DIR" "$JCODE_NO_TELEMETRY" "$JCODE_SKIP_SERVER_RELOAD" "$HOME" "$JCODE_HOME" >> "$STUB_LOG"
+touch "$HOME/jcode-installer-home-marker"
 mkdir -p "$JCODE_INSTALL_DIR"
 cat > "$JCODE_INSTALL_DIR/jcode" <<'BIN'
 #!/bin/sh
@@ -606,14 +608,20 @@ new_case
 : > "$GITHUB_PATH"
 write_ok_jcode_installer
 JDIR="$TMP/jcode-latest"
-mkdir -p "$JDIR"
-status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+mkdir -p "$TMP/user-home"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" HOME="$TMP/user-home" RUNNER_TEMP="$JDIR" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
 status=$?
 assert_status "install-jcode: JCODE_VERSION=latest succeeds" 0 "$status" "$status_out"
 assert_contains "install-jcode: JCODE_VERSION=latest downloads jcode's own installer" \
   "$(cat "$STUB_LOG")" "curl -fsSL https://jcode.sh/install"
 assert_contains "install-jcode: JCODE_VERSION=latest passes an empty pin plus the install dir, telemetry and server-reload opt-outs" \
   "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[] JCODE_INSTALL_DIR=$JDIR/jcode-bin JCODE_NO_TELEMETRY=1 JCODE_SKIP_SERVER_RELOAD=1"
+assert_contains "install-jcode: installer HOME is isolated under RUNNER_TEMP" \
+  "$(cat "$STUB_LOG")" "HOME=$JDIR/jcode-install-home"
+assert_contains "install-jcode: installer JCODE_HOME is isolated under RUNNER_TEMP" \
+  "$(cat "$STUB_LOG")" "JCODE_HOME=$JDIR/jcode-install-home/jcode-home"
+assert_file_absent "install-jcode: installer does not write the caller's HOME" \
+  "$TMP/user-home/jcode-installer-home-marker"
 assert_eq "install-jcode: JCODE_VERSION=latest appends the install dir to GITHUB_PATH" \
   "$JDIR/jcode-bin" "$(cat "$GITHUB_PATH")"
 

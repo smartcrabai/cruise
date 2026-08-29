@@ -5,6 +5,11 @@
 # the published SHA256SUMS), the same shape as install.sh's cargo-dist
 # installer for cruise.
 #
+# The upstream installer is a Bash script and writes its launcher state below
+# `$HOME` (and shell startup files) even when `JCODE_INSTALL_DIR` is set. Keep
+# that state in the runner temp area: the action must not touch the runner
+# user's jcode installation or shell configuration.
+#
 # JCODE_NO_TELEMETRY=1 is a requirement, not a preference: an embedded jcode
 # must not report anything, for the install or for the runs cruise makes
 # afterwards (cruise sets it again for every jcode invocation of its own).
@@ -18,8 +23,10 @@
 set -euo pipefail
 
 JCODE_VERSION_INPUT="${JCODE_VERSION:-latest}"
-INSTALL_DIR="${RUNNER_TEMP:-/tmp}/jcode-bin"
-mkdir -p "$INSTALL_DIR"
+INSTALL_ROOT="${RUNNER_TEMP:-/tmp}"
+INSTALL_DIR="$INSTALL_ROOT/jcode-bin"
+INSTALL_HOME="$INSTALL_ROOT/jcode-install-home"
+mkdir -p "$INSTALL_DIR" "$INSTALL_HOME"
 
 if command -v jcode >/dev/null 2>&1; then
   echo "jcode: already installed at $(command -v jcode)"
@@ -41,11 +48,15 @@ else
   fi
   echo "jcode: installing ($JCODE_VERSION_INPUT) from $installer_url"
   if ! curl -fsSL "$installer_url" | \
+    HOME="$INSTALL_HOME" \
+    LOCALAPPDATA="$INSTALL_HOME/LocalAppData" \
+    XDG_CONFIG_HOME="$INSTALL_HOME/xdg-config" \
+    JCODE_HOME="$INSTALL_HOME/jcode-home" \
     JCODE_VERSION="$pinned_version" \
     JCODE_INSTALL_DIR="$INSTALL_DIR" \
     JCODE_NO_TELEMETRY=1 \
     JCODE_SKIP_SERVER_RELOAD=1 \
-    sh
+    bash
   then
     echo "::error::jcode installer failed for version '$JCODE_VERSION_INPUT' from $installer_url" >&2
     exit 1
