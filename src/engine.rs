@@ -1028,15 +1028,10 @@ pub fn resolve_command_with_model(
 /// `register_skip_tool` gates whether the `skip_step` tool (see
 /// [`crate::sdk_tools::skip_step_tool`]) is registered for this run: the
 /// caller passes `true` only for prompt steps that carry an
-/// `if.no-file-changes` condition. This restriction is deliberate, not
-/// incidental: a non-empty `tools` list makes `run_sdk`'s `require_tools`
-/// (`executor.rs`) `true`, which narrows SDK-mode provider resolution to
-/// tool-capable backends (`pi`, `omp`, `pi-rust`, `claude`) and drops the
-/// tool-incapable `claude-terminal` / `claude-headless` fallback candidates.
-/// Registering the tool unconditionally on every run step would silently
-/// narrow provider choice workflow-wide for a feature most steps never use, so
-/// it stays opt-in per step. Ordinary run steps still get no custom tools;
-/// pi's / claude's built-in tools do the file editing in SDK mode.
+/// `if.no-file-changes` condition. Keeping it opt-in per step keeps the tool
+/// set a step exposes to the model minimal, for a feature most steps never
+/// use. Ordinary run steps get no custom tools; the backend's own built-in
+/// tools do the file editing in SDK mode.
 #[expect(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,

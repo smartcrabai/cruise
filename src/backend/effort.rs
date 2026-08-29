@@ -183,44 +183,4 @@ mod tests {
     fn splits_a_suffix_only_reference_into_an_empty_model() {
         assert_eq!(split_thinking_suffix(":high"), ("", Some("high")));
     }
-
-    /// The port must accept exactly what seher's `split_thinking_suffix` did, or
-    /// existing `model:` values silently turn into unknown model ids. Deleted
-    /// together with the `seher-sdk` dependency.
-    #[test]
-    fn matches_seher_split_thinking_suffix() {
-        let inputs = [
-            "opus-4.7:off",
-            "opus-4.7:none",
-            "opus-4.7:0",
-            "opus-4.7:minimal",
-            "opus-4.7:min",
-            "opus-4.7:low",
-            "opus-4.7:1",
-            "opus-4.7:medium",
-            "opus-4.7:med",
-            "opus-4.7:2",
-            "opus-4.7:high",
-            "opus-4.7:3",
-            "opus-4.7:xhigh",
-            "opus-4.7:4",
-            "opus-4.7:max",
-            "opus-4.7:5",
-            "opus-4.7:HIGH",
-            "opus-4.7: high",
-            "opus-4.7:free",
-            "opus-4.7:",
-            "opus-4.7",
-            ":high",
-            "llama-3.1:free:low",
-            "meta-llama/llama-3.1-8b-instruct:free",
-        ];
-        for input in inputs {
-            assert_eq!(
-                split_thinking_suffix(input),
-                seher::sdk::split_thinking_suffix(input),
-                "input: {input:?}"
-            );
-        }
-    }
 }

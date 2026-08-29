@@ -20,8 +20,8 @@
     },
     "sdk": {
       "type": "string",
-      "enum": ["seher", "pi", "jcode", "claude"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`. \"seher\" resolves a provider/model through seher's config.yaml (model/plan_model become seher mode_keys); \"pi\" drives pi_agent_rust directly in-process, bypassing seher's provider resolution (model/plan_model become plain model references); \"jcode\" drives the jcode CLI as an NDJSON subprocess under cruise's own JCODE_HOME (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix; sign in with `cruise login`); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
+      "enum": ["jcode", "claude"],
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess under cruise's own JCODE_HOME (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix; sign in with `cruise login`); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
     },
     "model": {
       "type": "string",
@@ -33,7 +33,7 @@
     },
     "interactive_planning": {
       "type": "boolean",
-      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Has no effect in `command` mode."
+      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Applies to any SDK backend, including the default `jcode` one used when neither `sdk` nor `command` is set; it has no effect with a `command` backend, which is always file-based."
     },
     "pr_language": {
       "type": "string",

@@ -827,7 +827,7 @@ impl GuiPlanCtx {
     ///
     /// Note: GUI plan/fix/regenerate are independent one-shot commands with no
     /// in-process approve loop, so each passes `resume: &mut None` and starts a
-    /// fresh seher session. Multi-turn `resume` (sharing one conversation across
+    /// fresh backend session. Multi-turn `resume` (sharing one conversation across
     /// turns) is a CLI-only affordance; persisting the session id across GUI
     /// commands would require additional `AppState` plumbing.
     fn build<'a>(
@@ -1097,13 +1097,13 @@ pub async fn create_session(
 
     // Grill mode interviews the user via the SDK `ask_user` tool, which is only
     // registered in the interactive tool-based planning flow. Reject before
-    // creating the session when the SDK backend is absent or interactive
+    // creating the session when no SDK backend is selected or interactive
     // planning is disabled.
     if grill && !cruise::planning::sdk_plan_tools_enabled(&config) {
         remove_session_clone(&manager, &session_id);
         return Err(
-            "grill mode requires the SDK backend with interactive planning enabled \
-             (`sdk:` must be set and `interactive_planning` must not be disabled)"
+            "grill mode requires an SDK backend with interactive planning enabled \
+             (`command:` must not be set and `interactive_planning` must not be disabled)"
                 .to_string(),
         );
     }

@@ -7,9 +7,9 @@
 //!
 //! Uses [`std::sync::mpsc`] for the answer channel rather than
 //! `tokio::sync::oneshot`. The tool closure may run inside a tokio runtime —
-//! `seher::claude_agent::stream_agent` drives the CLI on a dedicated
-//! current-thread runtime, and the toolbox handler is awaited inline on that
-//! runtime — so `tokio::sync::oneshot::Receiver::blocking_recv()` would panic
+//! cruise's `sdk: claude` backend drives the CLI on a dedicated current-thread
+//! runtime, and the toolbox handler is awaited inline on that runtime — so
+//! `tokio::sync::oneshot::Receiver::blocking_recv()` would panic
 //! with "Cannot block the current thread from within a runtime". `std::sync::mpsc`
 //! has no tokio thread-local dependency and parks the OS thread directly,
 //! which is what we want here: the runtime has nothing else useful to do until
@@ -210,8 +210,8 @@ mod tests {
     }
 
     /// Regression: `ask_user` must not panic when invoked from inside a tokio
-    /// runtime. `seher::claude_agent::stream_agent` drives the CLI on a
-    /// dedicated current-thread runtime and awaits its toolbox handler inline
+    /// runtime. Cruise's `sdk: claude` backend drives the CLI on a dedicated
+    /// current-thread runtime and awaits its toolbox handler inline
     /// on that runtime; the previous implementation called
     /// `tokio::sync::oneshot::Receiver::blocking_recv()` from the tool closure,
     /// which panics with "Cannot block the current thread from within a

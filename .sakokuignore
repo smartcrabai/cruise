@@ -3,5 +3,3 @@ src-tauri/icons/
 # Intentionally Japanese docs
 token-exchange/README.md
 skills/cruise-plan/SKILL.md
-# Vendored dependency contains non-ASCII math symbols in docs/comments
-vendor/asupersync/

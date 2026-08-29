@@ -6,10 +6,10 @@
 //! - GUI: a Tauri-backed handler (see `src-tauri`) using events + a channel.
 //!
 //! The handler is invoked from inside a [`crate::sdk_tools`] tool closure, which
-//! runs on the seher backend's worker thread (the in-process `pi` engine, or
-//! the `claude-agent-sdk` MCP tool dispatcher). Implementations may therefore
-//! block (read stdin, wait on a channel) — they are never called on the async
-//! runtime thread.
+//! runs on a backend worker thread: the `claude-agent-sdk` MCP tool dispatcher,
+//! or the per-connection thread the [`crate::tool_bridge`] serves `jcode`'s
+//! calls on. Implementations may therefore block (read stdin, wait on a
+//! channel) — they are never called on the async runtime thread.
 
 use crate::error::Result;
 
