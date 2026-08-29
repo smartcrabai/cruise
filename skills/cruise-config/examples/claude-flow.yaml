@@ -1,0 +1,23 @@
+# claude SDK backend example: the claude CLI is driven in-process via
+# claude-agent-sdk. Authentication is the claude CLI's own (its stored
+# credentials or ANTHROPIC_API_KEY); `cruise login` does not apply here.
+sdk: claude
+
+description: claude-backed TDD flow
+
+# Plain `claude --model` names with an optional ":effort" suffix
+# (low|medium|high|xhigh|max), forwarded as `claude --effort` -- a CLI too old
+# for that flag fails the step permanently. Omit both for the CLI's default.
+model: claude-sonnet-4-6        # for ordinary prompt steps
+plan_model: claude-opus-4-6:high # for the built-in plan step (falls back to `model`)
+
+steps:
+  write-tests:
+    prompt: |
+      Write tests for {plan}. Do not implement yet.
+
+  implement:
+    # Per-step model overrides both, same as command mode.
+    model: claude-sonnet-4-6
+    prompt: |
+      Tests are written for {plan}. Implement to make them pass.

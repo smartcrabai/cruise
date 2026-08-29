@@ -10,7 +10,7 @@ selection). A step that only holds `group:` (a group call) is the exception — 
 ```yaml
 steps:
   planning:
-    model: claude-opus-4-5     # Optional: per-step model override (mode_key in SDK mode)
+    model: claude-opus-4-5     # Optional: per-step model override (a "provider/model[:effort]" reference in SDK mode)
     instruction: |             # Optional: message shown to the user before the step runs
       Describe the feature you want to build.
     prompt: |                  # Use either prompt or prompt_file
@@ -101,7 +101,7 @@ steps:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `model` | string | Model for prompt steps (overrides top-level; mode_key in SDK mode) |
+| `model` | string | Model for prompt steps (overrides top-level; a model reference in SDK mode) |
 | `prompt` | string | Inline prompt body (use with prompt steps) |
 | `prompt_file` | string \| null | File or supported GitHub blob/raw URL whose contents become the prompt; absolute, `~/`, or config-file-relative path (`~`/null means the local home directory) |
 | `instruction` | string | Message shown to the user before the step; input prompt when `{input}` is empty (prompt steps) |

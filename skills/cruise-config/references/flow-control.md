@@ -109,7 +109,7 @@ Sometimes a step legitimately makes no file changes — for example, the plan ex
          no-file-changes: retry
    ```
 
-2. **`skip_step` tool** (SDK mode only) — the agent calls `skip_step(reason)` instead of relying on text matching. Schema-validated, so it can't be missed by an accidental typo in the marker. Only registered on prompt steps that carry an `if.no-file-changes` condition — see `sdk.md` for why (registering custom tools narrows SDK-mode provider resolution to tool-capable backends, so it's kept opt-in per step). Not available in classic `command:` mode: `run_command` never sees the tool list, so a `command:` step can only use the output marker.
+2. **`skip_step` tool** (SDK mode only) — the agent calls `skip_step(reason)` instead of relying on text matching. Schema-validated, so it can't be missed by an accidental typo in the marker. Only registered on prompt steps that carry an `if.no-file-changes` condition — see `sdk.md` for why (keeping the exposed tool set minimal on steps that can never call it). Not available in classic `command:` mode: `run_command` never sees the tool list, so a `command:` step can only use the output marker.
 
 Either path logs the declared reason (`intentional no-changes declared: <reason>`) so the decision stays visible in the run output even though it silently changes what would otherwise be a failure/retry.
 

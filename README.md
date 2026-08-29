@@ -13,6 +13,8 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 ## Prerequisites
 
 - [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.81.1 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `cruise login` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
+- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, not `cruise login`.
 
 ## Installation
 
@@ -97,6 +99,7 @@ Commands:
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
   config       Show or update application-level configuration
+  login        Sign cruise's default SDK backend (jcode) in to a provider
 
 Options:
       --plan <INPUT>           Create a plan in the background and return immediately
@@ -126,9 +129,9 @@ Options:
 
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `Planned`, ready for `cruise run` with no approval step. Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
 
-With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires the SDK backend (`sdk:` in the workflow config) and an interactive terminal; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
+With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
 
-With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend. This is useful when using tool-incapable providers (e.g. `sdk: claude-terminal`). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
+With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend. The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
 With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone is removed once the plan is approved (the branch name is kept), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and the resolved workflow config (including the built-in default when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed (including inlined `prompt_file` contents). `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
@@ -224,6 +227,22 @@ Options:
 ```
 
 Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+
+#### `cruise login`
+
+```
+cruise login [OPTIONS] [PROVIDER]
+
+Arguments:
+  [PROVIDER]  Provider to sign in to (e.g. `claude`, `openai`, `anthropic-api`); omit for jcode's interactive picker
+
+Options:
+      --api-key  Store an API key for PROVIDER non-interactively instead of running the OAuth flow
+                 (key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin; requires PROVIDER)
+      --status   List the providers configured in cruise's jcode home and the models available to them
+```
+
+Manages credentials for the default `sdk: jcode` backend. Everything is stored in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), never in your `~/.jcode` and never in a cruise config file. `cruise login` hands the terminal to `jcode login` (interactive picker / OAuth flow); `--api-key` feeds a key to jcode's storage without exposing it on a command line and requires the `PROVIDER` argument (`cruise login --api-key anthropic-api`). See [SDK Mode](#sdk-mode).
 
 #### `cruise clean`
 
@@ -328,8 +347,9 @@ command:                   # LLM invocation command (mutually exclusive with `sd
   - "{model}"
   - -p
 
-# sdk: seher              # alternative to `command`: drive prompts via seher's resolved provider (see SDK Mode)
-# sdk: pi                 # alternative to `command`/`sdk: seher`: drive pi_agent_rust directly, no seher config needed
+# sdk: jcode              # alternative to `command`: drive the jcode CLI (this is the default
+                          # when neither `command` nor `sdk` is set -- see SDK Mode)
+# sdk: claude             # alternative: drive the claude CLI in-process via claude-agent-sdk
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -394,49 +414,41 @@ steps:
 
 ### SDK Mode
 
-Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK by setting the top-level `sdk` field. The seher dispatcher runs in-process, but its selected provider backend may be an external subprocess. `command` and `sdk` are mutually exclusive -- exactly one of them must be specified. Two values are accepted: `seher` and `pi`.
+Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; omitting both selects the default `jcode` backend. Two values are accepted: `jcode` and `claude`.
 
 ```yaml
-sdk: seher        # resolve a provider/model through seher's config.yaml
+sdk: jcode        # optional -- this is the default when neither `command` nor `sdk` is set
 
-model: build      # in seher mode, interpreted as a seher mode_key (default: build)
-plan_model: plan  # mode_key for the built-in plan step (falls back to `model`, then `plan`)
+model: anthropic-api/claude-opus-4-6   # "provider/model[:effort]" for ordinary prompt steps
+plan_model: openai-api/gpt-5.5:high    # model for the built-in plan step (falls back to `model`)
 ```
 
-In `sdk: seher` mode, `model` / `plan_model` / per-step `model` are reinterpreted as seher **mode keys** rather than LLM model names. When omitted, `model` defaults to `build`; `plan_model` falls back to `model`, or to `plan` when neither is set.
+In both SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). The optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
 
-When seher resolves a provider with `sdk: pi`, it drives the external TypeScript pi CLI over RPC and tries `pi`, then `bunx` / `npx` as fallbacks. Install one of those runtimes and the pi CLI package where needed. Use a seher provider with `sdk: pi-rust` to keep the in-process Rust engine; its model catalog is the version bundled with seher.
+- `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- under `sdk: jcode` this names the provider and the model separately; a `/` with an empty side (`"/model"`, `"provider/"`) fails the step with a clear error when the prompt runs, not at config-validation time. Under `sdk: claude` there is no provider part: everything except the `:effort` suffix goes to `claude --model` verbatim, so a `provider/model` value reaches the CLI as one model id and is rejected by it.
+- `"model"` (no `/`) -- the provider is left to the backend's own resolution.
+- Unset -- the backend's configured default provider/model is used.
 
-#### `sdk: pi` -- drive pi_agent_rust directly
+#### `sdk: jcode` -- the jcode CLI (default)
 
-`sdk: pi` drives `pi_agent_rust` directly in-process, **bypassing seher's provider resolution and `~/.config/seher/config.yaml` entirely** -- no seher configuration is required at all.
+`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.81.1 or newer is required; an older binary is rejected with a clear error. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows the ones cruise can already authenticate as. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
 
-```yaml
-sdk: pi
+Credentials, sessions, and configuration live in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), kept completely separate from your own `~/.jcode` -- cruise never reads or writes it. Sign in with [`cruise login`](#cruise-login); running `sdk: jcode` with no authenticated provider fails with an error pointing at `cruise login`.
 
-model: anthropic/claude-sonnet-4-6   # plain model reference, not a mode key
-plan_model: openai/gpt-5.5:high      # "provider/model[:thinking]"
-```
+Because jcode cannot register custom tools in-process, cruise's tools (`ask_user`, `submit_plan`, ...) reach the model through a stdio MCP server and appear as `mcp__cruise__<tool>`. One caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), which takes precedence over cruise's registration. A project-local MCP server named `cruise` is rejected with an error (it would shadow cruise's tools); other project-local servers are loaded but pointed out with a warning.
 
-In `sdk: pi` mode, `model` / `plan_model` / per-step `model` are plain **model references** instead of seher mode keys (same override precedence as command mode: step `model` > top-level `model` / `plan_model`):
+#### `sdk: claude` -- the claude CLI in-process
 
-- `"provider/model"` (optionally `:thinking`, e.g. `openai-codex/gpt-5.5:xhigh`) -- selects that provider and model explicitly.
-- `"model"` (no `/`) -- provider is left unset; pi resolves it by searching its own model registry for that model id (same as running the `pi` CLI with `--model` but no `--provider`).
-- Unset (both `model` and `plan_model` omitted) -- pi auto-selects a provider/model from its built-in preference order (Codex, then OpenAI, ... down to Anthropic and others), picking the first one with usable credentials.
-
-Authentication is resolved entirely by pi itself, in this order: an explicit key (not exposed by cruise) > pi's stored `~/.pi/agent/auth.json` OAuth/Bearer credentials > ambient environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and similar provider-specific vars) -- so a stored `pi login` credential always wins over a stale shell env var. `env:` values configured in the workflow are applied on top of the process environment before each pi call.
-
-Rate limits are retried against the **same** provider/model with exponential backoff (2s, doubling up to a 60s cap, same schedule as command mode) up to `--rate-limit-retries` attempts -- there is no other seher provider to fall back to, unlike `sdk: seher`.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unaffected by `cruise login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`). Under `sdk: seher`, custom tools require a tool-capable seher SDK (`pi`, `omp`, `pi-rust`, or `claude`), so this pins planning to those providers; `sdk: pi` always supports custom tools (there is no tool-incapable pi provider), so this setting matters less there.
+By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`); both SDK backends support them.
 
-Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode). Under `sdk: seher` this makes tool-incapable providers eligible, so SDK modes backed by `sdk: claude-terminal` or `sdk: claude-headless` (both of which shell out to the local `claude` CLI) can be used for planning.
+Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode).
 
 ```yaml
-sdk: seher
-interactive_planning: false   # tool-less, file-based planning; allows claude-terminal / claude-headless providers
+interactive_planning: false   # tool-less, file-based planning
 ```
 
 `--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
@@ -464,8 +476,8 @@ The effective values are available to built-in templates as `{pr.language}` and 
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the GUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` configured)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same model resolution as the plan step (`plan_model` -> `model` -> `plan`, reinterpreted as a seher mode key under `sdk: seher` or passed through as a model reference under `sdk: pi`). If the call fails, cruise falls back to extracting the title from `plan.md`.
-- **Command mode (`command:` configured)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
+- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- cruise invokes the agent with the `generate_title` SDK tool, using the same model resolution as the plan step (`plan_model` -> `model`, then the backend's own default). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **Command mode (`command:` set)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 No additional configuration is required.
 
@@ -714,7 +726,7 @@ steps:
 Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** actions (`failed` and `retry`) for that attempt:
 
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
-- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, because registering custom tools narrows SDK-mode provider resolution to tool-capable backends (`pi`, `omp`, `pi-rust`, `claude`); scoping it to the steps that need it keeps that narrowing from applying workflow-wide. Not available in classic `command:` mode -- use the output marker there.
+- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, to keep the exposed tool set minimal on steps that can never call it. Not available in classic `command:` mode -- use the output marker there.
 
 Either path logs the declared reason so the decision stays visible in the run output.
 
@@ -1048,11 +1060,34 @@ During `cruise run`, the config file is checked for changes between each step. I
 
 ## Rate Limit Retry
 
-When a rate-limit error (HTTP 429) is detected in a prompt or command step, cruise retries with exponential backoff:
+When a rate-limit error (HTTP 429) is detected in a prompt or command step, cruise retries the same model with exponential backoff:
 
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
+
+The SDK backends additionally accept an optional `retry:` block that widens this into a fallback policy:
+
+```yaml
+retry:
+  base_delay_ms: 500        # backoff base (default 500); delay is min(base * 2^(attempt-1), 8s) with jitter
+  max_delay_ms: 300000      # waiting cap (default 300000). The computed backoff is already capped at 8s,
+                            # so this only binds a server `Retry-After` hint (itself clamped to 60s): a
+                            # hinted delay above it moves to the next fallback model, or fails the step
+                            # when there is none
+  model_fallback: true      # allow switching to a fallback model (default true)
+  fallback_chains:          # tried in order: exact "provider/model" (or bare "model") key,
+                            # then "provider/*", then "default"
+    default:
+      - anthropic-api/claude-opus-4-6
+      - openai-api/gpt-5.5
+    "anthropic-api/*":
+      - openrouter/*
+```
+
+With `retry:` set, HTTP 5xx and network failures become retryable too, and a model that has spent its retry budget (`--rate-limit-retries`) is swapped for the next entry of its chain -- immediately, with a fresh budget, on a fresh session. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit or a 5xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A failed model is skipped for the next 5 minutes of the run (in-memory state owned by the active policy, so a config [hot-reload](#config-hot-reload) clears it). A turn that already streamed visible text is never retried on another model.
+
+Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: false` and empty chains included: those only switch model switching off, while 5xx/network classification and the `base_delay_ms`/8s-ceiling backoff schedule stay in force. Omit the block entirely to keep the historical behavior -- rate limits only, same model, 2s doubling to a 60s cap. The `command:` backend always uses the historical behavior and ignores `retry:`.
 
 ## Stale Session Detection
 
@@ -1084,7 +1119,7 @@ The desktop GUI persists two pieces of state across sessions:
 
 ## GitHub Actions
 
-Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions, always through the `sdk: pi` backend (no `claude` CLI install). There is no PR mode -- comments on pull requests are ignored.
+Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions. The action installs the `jcode` CLI and provisions its credentials, so cruise's default `sdk: jcode` backend works with no configuration; it no longer forces a backend, so a repository config that sets `command:` or `sdk: claude` still wins and has to bring its own CLI. There is no PR mode -- comments on pull requests are ignored.
 
 **Quickstart:**
 

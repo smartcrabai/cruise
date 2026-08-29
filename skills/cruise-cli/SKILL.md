@@ -24,7 +24,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Plan a task, then approve it interactively (foreground) | `cruise plan "task"` |
 | Plan in the background, review later, return immediately | `cruise --plan "task"` |
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
-| Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend + TTY) |
+| Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute the next approved (Planned) session | `cruise run` |
@@ -36,6 +36,7 @@ plan/draft  →  AwaitingApproval  →  (approve)  →  Planned  →  run  →  
 | Dump session state for scripts | `cruise list --json` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Show / change app-level settings (e.g. GUI parallelism) | `cruise config` |
+| Sign the default `jcode` backend in to a provider / inspect what's configured | `cruise login [--api-key <provider>]` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
 
 > **Legacy shortcut:** `cruise "task"` with no subcommand is treated as `cruise plan "task"`. Piping (`echo "task" | cruise`) feeds the task on stdin.
@@ -65,7 +66,7 @@ No LLM is called: your input is written verbatim to `plan.md` and the session go
 
 ### `--grill` (interview planning)
 
-`cruise plan --grill "task"` turns the plan step into an interview: the SDK agent asks you questions **one at a time** (via its `ask_user` tool), recommending an answer for each, until scope, edge cases, and the approach are pinned down — then writes `plan.md`. Constraints: requires the **SDK backend** (`sdk:` in the workflow config) and an **interactive terminal**; cruise errors out and discards the session otherwise. Conflicts with `--skip-planning`, and only affects the *initial* plan — Fix/Ask, replan, drafts, and background `--plan` use the standard prompt. The GUI equivalent is the **"Grill me"** toggle on the New Session form.
+`cruise plan --grill "task"` turns the plan step into an interview: the SDK agent asks you questions **one at a time** (via its `ask_user` tool), recommending an answer for each, until scope, edge cases, and the approach are pinned down — then writes `plan.md`. Constraints: requires the **SDK backend** (the default `jcode` backend qualifies; a `command:` config does not) and an **interactive terminal**; cruise errors out and discards the session otherwise. Conflicts with `--skip-planning`, and only affects the *initial* plan — Fix/Ask, replan, drafts, and background `--plan` use the standard prompt. The GUI equivalent is the **"Grill me"** toggle on the New Session form.
 
 ### `--repo` (GitHub repo sessions)
 

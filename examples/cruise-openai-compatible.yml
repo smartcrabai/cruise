@@ -40,22 +40,19 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          # Concise generated provider registry. OpenAI-compatible adapters
-          # normalize the base URL to the endpoint path pi expects. `compat`
-          # lets you match quirks of your specific gateway -- here,
-          # `max_tokens_field` covers a gateway that proxies newer
-          # reasoning-style models expecting `max_completion_tokens` instead
-          # of the usual `max_tokens` (see docs/github-actions.md#providers).
+          # A generated jcode provider profile: each `providers` entry becomes
+          # a `[providers.<name>]` table in cruise's jcode home via
+          # `jcode provider add` (see docs/github-actions.md#providers).
+          # `default: true` makes the profile jcode's startup default
+          # provider/model -- required here because a profile is only
+          # reachable as the default, so `model`/`plan_model` stay empty.
           providers: |
             {
               "my-gateway": {
-                "api": "openai-completions",
                 "base_url": "https://my-openai-compatible-endpoint.example.com/v1",
-                "models": ["my-custom-model"],
-                "compat": { "max_tokens_field": "max_completion_tokens" }
+                "model": "my-custom-model",
+                "default": true
               }
             }
           provider_api_keys: |
             my-gateway=${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}
-          model: my-gateway/my-custom-model
-          plan_model: my-gateway/my-custom-model

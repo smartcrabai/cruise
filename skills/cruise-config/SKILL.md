@@ -21,7 +21,7 @@ Config files are resolved in this priority order:
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: `sdk: seher` test-first steps + verify-review group + after-PR automation) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
+6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: test-first steps + verify-review group + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
 
@@ -29,7 +29,7 @@ In a non-interactive context (stdin/stdout is not a TTY), the highest-priority c
 
 ## Minimal config
 
-`steps` and exactly one of `command` / `sdk` are required.
+`steps` is required. `command` and `sdk` are mutually exclusive; omitting both runs prompts on the default `jcode` SDK backend.
 
 ```yaml
 command: [claude, -p]
@@ -38,18 +38,18 @@ steps:
     prompt: "{input}"
 ```
 
-Or with an SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)) — `sdk: seher` (routes through seher's provider resolution) or `sdk: pi` (drives pi_agent_rust directly, no seher config needed):
+Or with an SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)) — `sdk: jcode` (the default — drives the jcode CLI) or `sdk: claude` (drives the claude CLI in-process):
 
 ```yaml
-sdk: seher
+sdk: jcode
 steps:
   implement:
     prompt: "{input}"
 ```
 
 ```yaml
-sdk: pi
-model: anthropic/claude-sonnet-4-6   # plain model reference, not a mode key
+sdk: claude
+model: claude-sonnet-4-6   # plain model reference ("provider/model[:effort]" under sdk: jcode)
 steps:
   implement:
     prompt: "{input}"
@@ -62,7 +62,7 @@ The full spec is split into the files below. Load only the sections you need.
 | Doc | Contents |
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
-| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: seher` (mode keys, provider resolution) and `sdk: pi` (direct pi_agent_rust, model references, auth), differences from command mode |
+| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, command, option; `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
@@ -70,15 +70,15 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge rules, the `llm:` section for session-title generation |
 | [examples/full-flow.yaml](examples/full-flow.yaml) | Complete example: plan → approve → implement → test → review → PR → after-pr |
-| [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: seher` with mode keys |
-| [examples/pi-flow.yaml](examples/pi-flow.yaml) | SDK-backend example: `sdk: pi` with plain model references, no seher config |
+| [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: jcode` with model references |
+| [examples/claude-flow.yaml](examples/claude-flow.yaml) | SDK-backend example: `sdk: claude` with plain claude model names |
 | [examples/prompt-file.yaml](examples/prompt-file.yaml) | Prompt step example using an external `prompt_file` |
 
 ## Authoring checklist
 
 After writing or editing a config, verify each of the following:
 
-1. **Required fields**: is `steps` present, plus exactly one of `command` / `sdk`? (Both set or neither set is a validation error.) When `sdk` is set, is it `seher` or `pi`? (Any other value is a validation error.)
+1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither is set, the default `jcode` backend runs. When `sdk` is set, is it `jcode` or `claude`? (Any other value is a validation error.)
 2. **Step type uniqueness**: each step primarily holds one of `prompt` / `prompt_file` / `command` / `option` (group-call steps are the exception and hold none of these). Use `prompt_file` for long prompts; relative paths are resolved relative to the configuration file (or the called workflow's directory).
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?
