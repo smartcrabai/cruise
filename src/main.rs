@@ -36,6 +36,7 @@ mod planning;
 mod platform;
 mod repo_clone;
 mod resolver;
+mod retry;
 mod run_cmd;
 mod run_observer;
 mod sdk_tools;

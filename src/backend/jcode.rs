@@ -783,14 +783,14 @@ async fn run_async(config: JcodeRunnerConfig, prompt: String, tx: &Sender<Stream
         // (authentication, invalid request) into a retry, which PROHIBITED §7
         // forbids; the tail is still appended, for context only.
         Terminal::Failed(message) => {
-            let limited = is_jcode_rate_limit_message(&message);
+            let limited = crate::retry::is_limit_message(&message);
             send_failure(tx, &message, limited, &tail, provider.as_deref());
         }
         // No event message exists here -- the child died before emitting NDJSON
         // -- so stderr carries the only diagnosis there is, and is what gets
         // classified.
         Terminal::NoResult => {
-            let limited = tail.iter().any(|line| is_jcode_rate_limit_message(line));
+            let limited = tail.iter().any(|line| crate::retry::is_limit_message(line));
             send_failure(tx, NO_RESULT_MESSAGE, limited, &tail, provider.as_deref());
         }
     }
@@ -994,29 +994,17 @@ fn report_session(tx: &Sender<StreamChunk>, reported: &mut bool, id: &str) -> bo
     tx.send(StreamChunk::Session(id.to_string())).is_ok()
 }
 
-/// Rate/usage-limit detector for the free-form error text jcode reports.
-///
-/// Extends the command backend's [`crate::step::command::is_rate_limited`] --
-/// which covers `rate limit` / `429` / `too many requests` -- with the limit
-/// wording jcode's provider runtimes add. Deliberately narrow: only limit
-/// conditions are retryable, so permanent failures (authentication, invalid
-/// request, context overflow, exhausted balance) must not match.
-fn is_jcode_rate_limit_message(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    crate::step::command::is_rate_limited(&lower)
-        || lower.contains("usage limit")
-        || lower.contains("session limit")
-        || lower.contains("overloaded")
-}
-
 /// Report a failed turn: `msg` plus the collected stderr tail for context, as a
 /// retryable [`StreamChunk::Limit`] when `limited`, else a [`StreamChunk::Error`].
 ///
 /// The tail is appended because jcode's diagnosis for an invocation that never
 /// produced NDJSON (unknown flag, unknown `--resume` id, provider auth failure)
 /// lives on stderr only -- without it the failure reaches the user as an
-/// undiagnosable one-liner. Whether the tail also *classifies* the failure is
-/// the caller's call: see the match in [`run_async`].
+/// undiagnosable one-liner. A limit carries the same text as its
+/// [`LimitError::detail`], which is where the retry policy reads a server
+/// `Retry-After` hint from ([`crate::retry::parse_retry_after`]). Whether the
+/// tail also *classifies* the failure is the caller's call: see the match in
+/// [`run_async`].
 fn send_failure(
     tx: &Sender<StreamChunk>,
     msg: &str,
@@ -1024,18 +1012,20 @@ fn send_failure(
     stderr_tail: &[String],
     provider: Option<&str>,
 ) {
-    if limited {
-        let _ = tx.send(StreamChunk::Limit(LimitError {
-            provider: provider.unwrap_or(PROVIDER_LABEL).to_string(),
-        }));
-        return;
-    }
     let text = if stderr_tail.is_empty() {
         msg.to_string()
     } else {
         format!("{msg}\njcode stderr:\n{}", stderr_tail.join("\n"))
     };
-    let _ = tx.send(StreamChunk::Error(text));
+    let chunk = if limited {
+        StreamChunk::Limit(LimitError {
+            provider: provider.unwrap_or(PROVIDER_LABEL).to_string(),
+            detail: text,
+        })
+    } else {
+        StreamChunk::Error(text)
+    };
+    let _ = tx.send(chunk);
 }
 
 /// Build the `jcode run` invocation for `config`.
@@ -1192,6 +1182,8 @@ mod tests {
 
     #[test]
     fn rate_limit_classification_is_limited_to_limit_conditions() {
+        // The predicate lives in `crate::retry`, shared with `sdk: claude`, so
+        // the same provider text is classified identically on both backends.
         for message in [
             "HTTP 429 Too Many Requests",
             "Anthropic API error: rate limit exceeded",
@@ -1199,7 +1191,7 @@ mod tests {
             "session limit reached",
             "Provider returned: overloaded_error",
         ] {
-            assert!(is_jcode_rate_limit_message(message), "for {message}");
+            assert!(crate::retry::is_limit_message(message), "for {message}");
         }
         for message in [
             "Anthropic API error (401 Unauthorized): API key is invalid.",
@@ -1207,7 +1199,7 @@ mod tests {
             "prompt is too long: 250000 tokens > 200000 maximum",
             "payment required: balance exhausted",
         ] {
-            assert!(!is_jcode_rate_limit_message(message), "for {message}");
+            assert!(!crate::retry::is_limit_message(message), "for {message}");
         }
     }
 

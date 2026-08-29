@@ -87,6 +87,10 @@
     "force_exec": {
       "type": "boolean",
       "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
+    },
+    "retry": {
+      "$ref": "#/$defs/RetryConfig",
+      "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried, on the same model."
     }
   },
   "$defs": {
@@ -275,6 +279,36 @@
             "$ref": "#/$defs/StepConfig"
           },
           "description": "Named steps belonging to this group"
+        }
+      }
+    },
+    "RetryConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_delay_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "First backoff step in milliseconds; doubles per attempt up to an 8s ceiling, then jittered down by up to 25%. Default: 500."
+        },
+        "max_delay_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Longest delay cruise will wait before a retry. The computed backoff is already capped at 8s, so this only binds a server Retry-After hint: a hinted delay above it moves the run to its next fallback model, or fails the step when there is none. Default: 300000."
+        },
+        "model_fallback": {
+          "type": "boolean",
+          "description": "Whether a retryable failure may switch models via fallback_chains. Default: true."
+        },
+        "fallback_chains": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Fallback chains keyed by `provider/model`, `provider/*`, or `default`, each listing the model references to try next. A `provider/*` entry keeps the failing model id and swaps only the provider."
         }
       }
     }

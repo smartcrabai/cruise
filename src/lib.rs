@@ -23,6 +23,7 @@ pub mod paths;
 pub mod planning;
 pub mod repo_clone;
 pub mod resolver;
+pub mod retry;
 pub mod sdk_tools;
 pub mod session;
 pub mod session_edit;

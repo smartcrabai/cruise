@@ -6,11 +6,27 @@
 
 /// A provider rate/usage limit reported by a backend, distinguished from an
 /// ordinary error because it is retryable.
-#[derive(Debug, thiserror::Error)]
-#[error("Provider '{provider}' hit API rate/usage limit")]
+///
+/// `detail` carries the provider's own text, which is where a `Retry-After`
+/// hint lives (see [`crate::retry`]); it is empty when the backend has nothing
+/// to add.
+#[derive(Debug)]
 pub struct LimitError {
     pub provider: String,
+    pub detail: String,
 }
+
+impl std::fmt::Display for LimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Provider '{}' hit API rate/usage limit", self.provider)?;
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LimitError {}
 
 /// One event from a running prompt.
 #[derive(Debug)]
@@ -93,6 +109,14 @@ pub(crate) enum ChunkOutcome {
         partial: String,
         session: Option<String>,
     },
+}
+
+/// A folded stream: the terminal outcome plus whether the turn already emitted
+/// assistant text to the caller's output sink. A turn whose text the user has
+/// seen must not be replayed on another model (see [`crate::retry`]).
+pub(crate) struct Folded {
+    pub(crate) outcome: ChunkOutcome,
+    pub(crate) streamed: bool,
 }
 
 /// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
@@ -233,13 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn reducer_surfaces_limit_chunk() {
+    fn reducer_surfaces_limit_chunk_with_the_provider_detail() {
         let mut r = ChunkReducer::new();
         let mut sink = no_sink();
         let out = r
             .step(
                 StreamChunk::Limit(LimitError {
                     provider: "anthropic".to_string(),
+                    detail: "429; retry-after: 30".to_string(),
                 }),
                 &mut sink,
             )
@@ -247,6 +272,9 @@ mod tests {
         match out {
             ChunkOutcome::Limited { message, .. } => {
                 assert!(message.contains("anthropic"), "got: {message}");
+                // The provider's own text must survive: it carries the
+                // `Retry-After` hint the retry policy prefers.
+                assert!(message.contains("retry-after: 30"), "got: {message}");
             }
             other => panic!("expected Limited, got {other:?}"),
         }

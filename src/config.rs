@@ -139,6 +139,12 @@ pub struct WorkflowConfig {
     /// `config.yaml` snapshot (see `src/plan_cmd.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Retryable-failure policy for the SDK backends. Optional: with no
+    /// `retry:` block cruise keeps its historical behavior (same-model retries
+    /// of provider rate limits only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
 }
 
 /// A command value that can be either a single string or a list of strings.
@@ -315,6 +321,48 @@ pub struct GroupConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// Default `retry.base_delay_ms`.
+fn default_base_delay_ms() -> u64 {
+    500
+}
+
+/// Default `retry.max_delay_ms`.
+fn default_max_delay_ms() -> u64 {
+    300_000
+}
+
+/// How the SDK backends handle a retryable failure (rate limit, 5xx, network).
+///
+/// Opt-in: declaring `retry:` enables the fallback engine in
+/// [`crate::retry`]. The number of retries stays the existing
+/// `--rate-limit-retries` / [`WorkflowConfig::max_retries`] budget; this block
+/// only decides how long to wait and which model to move to.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetryConfig {
+    /// First backoff step in milliseconds; doubles per attempt up to an 8s
+    /// ceiling, then jittered down by up to 25%.
+    #[serde(default = "default_base_delay_ms")]
+    pub base_delay_ms: u64,
+
+    /// Longest delay cruise will wait before a retry. The computed backoff is
+    /// already capped at 8s, so this only binds a server `Retry-After` hint: a
+    /// hinted delay above it moves the run to its next fallback model, or fails
+    /// the step when there is none.
+    #[serde(default = "default_max_delay_ms")]
+    pub max_delay_ms: u64,
+
+    /// Whether a retryable failure may switch models via `fallback_chains`.
+    #[serde(default = "default_true")]
+    pub model_fallback: bool,
+
+    /// Fallback chains keyed by `provider/model`, `provider/*`, or `default`,
+    /// each listing the model references to try next. A `provider/*` entry
+    /// keeps the failing model id and swaps only the provider.
+    #[serde(default)]
+    pub fallback_chains: HashMap<String, Vec<String>>,
 }
 
 fn normalize_language(value: Option<&str>, default: &str) -> String {
@@ -619,7 +667,68 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
+    validate_retry(config)?;
     Ok(())
+}
+
+/// Validate the optional `retry:` block: usable delays, and fallback-chain keys
+/// and entries that name a model the SDK backends can actually dispatch.
+///
+/// # Errors
+///
+/// Returns an error if a delay bound is unusable or a chain key/entry is not
+/// `default`, `provider/model`, `provider/*`, or a bare model name.
+pub(crate) fn validate_retry(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    let Some(retry) = config.retry.as_ref() else {
+        return Ok(());
+    };
+    if retry.base_delay_ms == 0 {
+        return Err(CruiseError::InvalidStepConfig(
+            "`retry.base_delay_ms` must be at least 1".to_string(),
+        ));
+    }
+    if retry.max_delay_ms < retry.base_delay_ms {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "`retry.max_delay_ms` ({}) must be at least `retry.base_delay_ms` ({})",
+            retry.max_delay_ms, retry.base_delay_ms
+        )));
+    }
+    for (key, chain) in &retry.fallback_chains {
+        if key != crate::retry::DEFAULT_CHAIN_KEY && !is_model_pattern(key) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "invalid `retry.fallback_chains` key '{key}'; expected \
+                 '{}', 'provider/model', 'provider/*', or 'model'",
+                crate::retry::DEFAULT_CHAIN_KEY
+            )));
+        }
+        if chain.is_empty() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`retry.fallback_chains` entry '{key}' lists no fallback models"
+            )));
+        }
+        for model in chain {
+            if !is_model_pattern(model) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "invalid `retry.fallback_chains` model '{model}' under '{key}'; \
+                     expected 'provider/model', 'provider/*', or 'model'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is a model reference the fallback engine can use: a bare
+/// model name, `provider/model`, or the provider wildcard `provider/*`.
+fn is_model_pattern(value: &str) -> bool {
+    if value.trim() != value || value.is_empty() || value == crate::retry::WILDCARD_SUFFIX {
+        return false;
+    }
+    match value.split_once('/') {
+        None => value != "*",
+        Some((provider, model)) => !provider.is_empty() && !model.is_empty() && provider != "*",
+    }
 }
 
 /// SDK values accepted by [`validate_sdk`].
@@ -3974,6 +4083,109 @@ steps:
 
         // Then: the value survives the round trip
         assert_eq!(reparsed.max_retries, Some(7));
+    }
+
+    // --- top-level `retry` block ---
+
+    const RETRY_YAML: &str = r#"
+sdk: jcode
+retry:
+  base_delay_ms: 250
+  max_delay_ms: 60000
+  model_fallback: true
+  fallback_chains:
+    default:
+      - openai/gpt-5.5
+    "anthropic/*":
+      - openrouter/*
+steps:
+  s1:
+    prompt: hi
+"#;
+
+    #[test]
+    fn test_retry_block_parses_and_validates() {
+        let config = WorkflowConfig::from_yaml(RETRY_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        let retry = config
+            .retry
+            .clone()
+            .unwrap_or_else(|| panic!("retry block missing"));
+        assert_eq!(retry.base_delay_ms, 250);
+        assert_eq!(retry.max_delay_ms, 60_000);
+        assert!(retry.model_fallback);
+        assert_eq!(
+            retry.fallback_chains.get("anthropic/*").map(Vec::as_slice),
+            Some(["openrouter/*".to_string()].as_slice())
+        );
+        validate_config(&config).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn test_retry_block_defaults_apply_to_omitted_keys() {
+        let yaml = "sdk: jcode\nretry: {}\nsteps:\n  s1:\n    prompt: hi\n";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let retry = config
+            .retry
+            .unwrap_or_else(|| panic!("retry block missing"));
+        assert_eq!(retry.base_delay_ms, 500);
+        assert_eq!(retry.max_delay_ms, 300_000);
+        assert!(retry.model_fallback);
+        assert!(retry.fallback_chains.is_empty());
+    }
+
+    #[test]
+    fn test_retry_omitted_stays_none_and_is_not_serialized() {
+        let config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(config.retry, None);
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!serialized.contains("retry"), "{serialized}");
+    }
+
+    #[test]
+    fn test_retry_block_round_trips_through_serialize() {
+        let config = WorkflowConfig::from_yaml(RETRY_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        let reparsed = WorkflowConfig::from_yaml(&serialized).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(reparsed.retry, config.retry);
+    }
+
+    #[test]
+    fn test_retry_validation_rejects_unusable_delays_and_chains() {
+        for (yaml, expected) in [
+            (
+                "sdk: jcode\nretry:\n  base_delay_ms: 0\nsteps:\n  s1:\n    prompt: hi\n",
+                "`retry.base_delay_ms` must be at least 1",
+            ),
+            (
+                "sdk: jcode\nretry:\n  base_delay_ms: 5000\n  max_delay_ms: 100\nsteps:\n  s1:\n    prompt: hi\n",
+                "`retry.max_delay_ms` (100) must be at least `retry.base_delay_ms` (5000)",
+            ),
+            (
+                "sdk: jcode\nretry:\n  fallback_chains:\n    \"*\":\n      - openai/gpt-5.5\nsteps:\n  s1:\n    prompt: hi\n",
+                "invalid `retry.fallback_chains` key '*'",
+            ),
+            (
+                "sdk: jcode\nretry:\n  fallback_chains:\n    default: []\nsteps:\n  s1:\n    prompt: hi\n",
+                "`retry.fallback_chains` entry 'default' lists no fallback models",
+            ),
+            (
+                "sdk: jcode\nretry:\n  fallback_chains:\n    default:\n      - \"openai/\"\nsteps:\n  s1:\n    prompt: hi\n",
+                "invalid `retry.fallback_chains` model 'openai/' under 'default'",
+            ),
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+            let message = err_string(validate_config(&config));
+            assert!(message.contains(expected), "got: {message}");
+        }
+    }
+
+    #[test]
+    fn test_retry_block_rejects_unknown_keys() {
+        let yaml = "sdk: jcode\nretry:\n  max_attempts: 5\nsteps:\n  s1:\n    prompt: hi\n";
+        assert!(
+            WorkflowConfig::from_yaml(yaml).is_err(),
+            "unknown retry keys must not be silently ignored"
+        );
     }
 
     // --- resolve_effective_max_retries ---

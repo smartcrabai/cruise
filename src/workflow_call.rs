@@ -58,6 +58,11 @@ fn finish_resolved_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> 
         crate::status_eprintln!("warning: {warning}");
     }
     config.apply_env_overrides()?;
+    // `PromptRun` carries no policy field, so the retry policy reaches the
+    // executor ambiently. Validated first, so an unusable policy is rejected
+    // here instead of becoming the active one.
+    crate::config::validate_retry(&config)?;
+    crate::retry::set_active_policy(config.retry.clone());
     Ok(config)
 }
 

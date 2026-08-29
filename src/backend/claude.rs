@@ -323,41 +323,27 @@ fn snapshot_stderr_tail(buf: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
     }
 }
 
-/// Rate/usage-limit detector for the free-form error text the `claude` CLI
-/// family emits.
-///
-/// Extends the command backend's [`crate::step::command::is_rate_limited`] --
-/// which already covers the same CLI's `rate limit` / `429` / `too many
-/// requests` wording -- with the limit phrasings specific to claude's
-/// subscription windows, so `sdk: claude` retries exactly what `command:
-/// [claude, -p]` retries. Still deliberately narrow: only limit conditions are
-/// retryable, so permanent failures (auth, invalid request, context overflow)
-/// must not match.
-fn is_claude_rate_limit_message(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    crate::step::command::is_rate_limited(&lower)
-        || lower.contains("usage limit")
-        || lower.contains("session limit")
-}
-
 /// Report `msg` together with the collected stderr tail.
 ///
 /// The SDK error message alone is often insufficient: the CLI's real diagnosis
 /// (rate limit, unknown flag, MCP server failure) goes to stderr, while stdout
 /// carries at most a truncated frame that surfaces as a short JSON decode
-/// error. So the tail is both fed to [`is_claude_rate_limit_message`] to decide
-/// Limit vs. Error, and appended to the reported text -- otherwise the failure
+/// error. So the tail is both fed to [`crate::retry::is_limit_message`] to
+/// decide Limit vs. Error, and reported with the text -- otherwise the failure
 /// reaches the user as an undiagnosable one-liner, unlike the command backend
-/// which returns the CLI's stderr.
+/// which returns the CLI's stderr. A limit carries it as
+/// [`LimitError::detail`], which is where the retry policy reads a server
+/// `Retry-After` hint from ([`crate::retry::parse_retry_after`]).
 fn send_error_with_stderr(tx: &Sender<StreamChunk>, msg: &str, stderr_tail: &[String]) {
     let text = if stderr_tail.is_empty() {
         std::borrow::Cow::Borrowed(msg)
     } else {
         std::borrow::Cow::Owned(format!("{msg}\nclaude stderr:\n{}", stderr_tail.join("\n")))
     };
-    if is_claude_rate_limit_message(&text) {
+    if crate::retry::is_limit_message(&text) {
         let _ = tx.send(StreamChunk::Limit(LimitError {
             provider: PROVIDER_LABEL.to_string(),
+            detail: text.into_owned(),
         }));
     } else {
         let _ = tx.send(StreamChunk::Error(text.into_owned()));
@@ -493,6 +479,8 @@ mod tests {
 
     #[test]
     fn rate_limit_phrases_are_detected_case_insensitively() {
+        // The predicate lives in `crate::retry`, shared with `sdk: jcode`, so
+        // the same provider text is classified identically on both backends.
         for msg in [
             "API Error: 429 Rate Limit exceeded",
             "usage limit reached",
@@ -501,8 +489,10 @@ mod tests {
             // Retried by the command backend's `is_rate_limited`, so
             // `sdk: claude` must retry it too.
             r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#,
+            // Transient capacity refusal: retryable on both SDK backends.
+            "Provider returned: overloaded_error",
         ] {
-            assert!(is_claude_rate_limit_message(msg), "expected limit: {msg}");
+            assert!(crate::retry::is_limit_message(msg), "expected limit: {msg}");
         }
     }
 
@@ -514,7 +504,10 @@ mod tests {
             "prompt is too long: 250000 tokens > 200000 maximum",
             "error: unknown option '--effort'",
         ] {
-            assert!(!is_claude_rate_limit_message(msg), "expected error: {msg}");
+            assert!(
+                !crate::retry::is_limit_message(msg),
+                "expected error: {msg}"
+            );
         }
     }
 

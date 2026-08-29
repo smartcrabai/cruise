@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use seher::sdk::{
     CodexBarProbe, EffortLevel as SeherEffortLevel, PiRunner, PiRunnerOptions, PollOptions,
@@ -40,10 +41,13 @@ use seher::sdk::{
 use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
 use crate::backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix};
 use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcode_agent};
-use crate::backend::stream::{ChunkOutcome, ChunkReducer, LimitError, LineBuffer, StreamChunk};
+use crate::backend::stream::{
+    ChunkOutcome, ChunkReducer, Folded, LimitError, LineBuffer, StreamChunk,
+};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
+use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
 use crate::tool_bridge::ToolBridge;
 
@@ -57,6 +61,7 @@ impl From<SeherStreamChunk> for StreamChunk {
             SeherStreamChunk::Session(id) => StreamChunk::Session(id),
             SeherStreamChunk::Limit(e) => StreamChunk::Limit(LimitError {
                 provider: e.provider,
+                detail: String::new(),
             }),
             SeherStreamChunk::Error(message) => StreamChunk::Error(message),
         }
@@ -609,7 +614,7 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
         let outcome =
             match stream_to_outcome(rx_std, on_delta, req.cancel_token, session_slot.clone()).await
             {
-                Ok(outcome) => outcome,
+                Ok(folded) => folded.outcome,
                 Err(error) => {
                     if matches!(&error, CruiseError::Interrupted) {
                         let session = session_slot
@@ -674,7 +679,7 @@ async fn stream_to_outcome<C: Into<StreamChunk> + Send + 'static>(
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     cancel_token: Option<&CancellationToken>,
     session_slot: Option<Arc<Mutex<Option<String>>>>,
-) -> Result<ChunkOutcome> {
+) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
     // through the borrowed `on_delta` callback without moving it onto the
     // backend's worker thread.
@@ -697,6 +702,10 @@ async fn stream_to_outcome<C: Into<StreamChunk> + Send + 'static>(
 
     let mut line_buf = LineBuffer::new();
     let mut reducer = ChunkReducer::new();
+    // "Streamed" means text actually reached the caller's sink: a turn with no
+    // sink shows the user nothing, and a line buffer holds a fragment back
+    // until its newline arrives, so neither may block a retry.
+    let mut streamed = false;
     let outcome = loop {
         tokio::select! {
             biased;
@@ -705,7 +714,10 @@ async fn stream_to_outcome<C: Into<StreamChunk> + Send + 'static>(
                 Some(chunk) => {
                     let mut sink = |d: &str| {
                         if let Some(cb) = on_delta {
-                            line_buf.push(d, cb);
+                            line_buf.push(d, |line| {
+                                streamed = true;
+                                cb(line);
+                            });
                         }
                     };
                     if let Some(out) = reducer.step(chunk, &mut sink) {
@@ -717,9 +729,12 @@ async fn stream_to_outcome<C: Into<StreamChunk> + Send + 'static>(
         }
     };
     if let Some(cb) = on_delta {
-        line_buf.flush(cb);
+        line_buf.flush(|line| {
+            streamed = true;
+            cb(line);
+        });
     }
-    Ok(outcome)
+    Ok(Folded { outcome, streamed })
 }
 
 /// `Pi`-backend execution: build [`PiRunnerOptions`] straight from `req` (via
@@ -754,7 +769,9 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
     let mut attempts = 0;
     loop {
         let rx_std = runner.stream(req.prompt.to_string(), req.resume.clone());
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
+        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None)
+            .await?
+            .outcome;
 
         match outcome {
             ChunkOutcome::Done { output, session } => {
@@ -799,14 +816,11 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
 /// `Claude`-backend execution: drive the `claude` CLI in-process through
 /// `claude-agent-sdk` ([`crate::backend::claude`]), with no seher provider
 /// resolution ([`resolve_provider`]) involved — there is no
-/// `~/.config/seher/config.yaml` and, unlike [`run_sdk`], no fallback provider
-/// to hop to on a rate limit.
+/// `~/.config/seher/config.yaml`.
 ///
-/// A [`ChunkOutcome::Limited`] therefore retries the *same* model with
-/// exponential backoff ([`crate::step::command::calculate_backoff`]: 2s
-/// doubling to a 60s cap), mirroring the command backend's rate-limit handling
-/// rather than [`run_sdk`]'s re-resolve-and-retry loop, up to `req.max_retries`
-/// attempts.
+/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
+/// off on the same model unless the workflow's `retry:` policy names a
+/// fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
@@ -816,63 +830,26 @@ async fn run_pi_direct(req: PromptRun<'_>) -> Result<PromptOutcome> {
 /// the CLI's output and closes the transport when it fires — that is what
 /// terminates the `claude` child, since the SDK offers no interrupt.
 async fn run_claude(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let on_delta = req.stream.and_then(|s| s.on_stdout);
-
-    let mut attempts = 0;
-    loop {
-        let rx_std = stream_claude_agent(build_claude_config(&req), req.prompt.to_string());
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
-
-        match outcome {
-            ChunkOutcome::Done { output, session } => {
-                return Ok(PromptOutcome {
-                    result: PromptResult {
-                        output,
-                        stderr: String::new(),
-                    },
-                    session_id: session,
-                });
-            }
-            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
-            ChunkOutcome::Limited { message, .. } => {
-                if attempts < req.max_retries {
-                    attempts += 1;
-                    let delay = crate::step::command::calculate_backoff(attempts);
-                    if let Some(cb) = req.on_notice {
-                        cb(&format!(
-                            "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
-                            delay.as_secs_f64(),
-                            req.max_retries
-                        ));
-                    }
-                    tokio::select! {
-                        biased;
-                        () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                    continue;
-                }
-                return Err(CruiseError::CommandError(message));
-            }
-            ChunkOutcome::Closed { .. } => {
-                return Err(CruiseError::Other(
-                    "claude stream closed before completion".to_string(),
-                ));
-            }
-        }
-    }
+    run_with_fallback(&req, "claude", retry::active_policy(), |model| {
+        Ok(stream_claude_agent(
+            build_claude_config(&req, model),
+            req.prompt.to_string(),
+        ))
+    })
+    .await
 }
 
 /// Build a [`ClaudeRunnerConfig`] straight from `req`, with no seher provider
-/// resolution involved. `req.model_or_mode` is a plain `claude --model` name
-/// with an optional `:effort` suffix (see [`Executor::step_model_or_mode`] /
-/// [`Executor::plan_model_or_mode`]); unset leaves `--model` off so the CLI
+/// resolution involved. `model_ref` is the model this attempt runs on — the
+/// caller's plain `claude --model` name with an optional `:effort` suffix (see
+/// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]), or a
+/// fallback the retry policy switched to. Unset leaves `--model` off so the CLI
 /// picks its own default.
 ///
 /// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
 /// consumes the config.
-fn build_claude_config(req: &PromptRun<'_>) -> ClaudeRunnerConfig {
-    let (model, suffix) = split_thinking_suffix(req.model_or_mode.unwrap_or_default());
+fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRunnerConfig {
+    let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
     ClaudeRunnerConfig {
         model: (!model.is_empty()).then(|| model.to_string()),
         effort: suffix.and_then(effort_from_suffix),
@@ -885,10 +862,152 @@ fn build_claude_config(req: &PromptRun<'_>) -> ClaudeRunnerConfig {
     }
 }
 
+/// How one attempt of [`run_with_fallback`] failed. Keeps the failure text
+/// owned, so the borrowed [`Failure`] handed to the engine can be taken after
+/// the attempt's outcome is destructured, and keeps the original error of a
+/// model reference the backend refused, to surface unchanged if no fallback
+/// remains.
+enum AttemptFailure {
+    Limited { message: String, streamed: bool },
+    Failed { message: String, streamed: bool },
+    Unusable { error: CruiseError, message: String },
+}
+
+impl AttemptFailure {
+    /// The failure as the engine sees it, plus whether the turn's text reached
+    /// the user.
+    fn failure(&self) -> (Failure<'_>, bool) {
+        match self {
+            AttemptFailure::Limited { message, streamed } => (Failure::Limited(message), *streamed),
+            AttemptFailure::Failed { message, streamed } => (Failure::Failed(message), *streamed),
+            // Nothing was sent, so nothing was streamed.
+            AttemptFailure::Unusable { message, .. } => (Failure::Unusable(message), false),
+        }
+    }
+
+    /// The error to surface once the engine gives up.
+    fn into_error(self) -> CruiseError {
+        match self {
+            AttemptFailure::Limited { message, .. } | AttemptFailure::Failed { message, .. } => {
+                CruiseError::CommandError(message)
+            }
+            AttemptFailure::Unusable { error, .. } => error,
+        }
+    }
+}
+
+/// Run one prompt on an SDK backend, retrying through
+/// [`crate::retry::FallbackEngine`].
+///
+/// `start` opens a stream for the model reference the engine picked; it is
+/// called once per attempt, always against a *fresh* backend session (`start`
+/// builds from `req.resume`, never from the aborted attempt's session id), so a
+/// retry never re-sends the prompt into a partially-answered session. A `start`
+/// that rejects the reference itself (an unparseable `provider/model[:effort]`)
+/// is a notice and a move to the next chain entry, not a failed run.
+///
+/// Without a workflow `retry:` policy this is exactly the historical loop: only
+/// a backend-reported rate limit retries, on the same model, on
+/// [`crate::step::command::calculate_backoff`]'s 2s-doubling schedule, up to
+/// `req.max_retries` times.
+async fn run_with_fallback(
+    req: &PromptRun<'_>,
+    label: &str,
+    policy: Option<Arc<RetryPolicy>>,
+    mut start: impl FnMut(Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
+) -> Result<PromptOutcome> {
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+    let mut engine = FallbackEngine::new(policy, req.model_or_mode, req.max_retries);
+    if let Some((from, to)) = engine.take_startup_switch()
+        && let Some(cb) = req.on_notice
+    {
+        cb(&format!(
+            "fallback: {from} -> {to} (still cooling down from an earlier failure)"
+        ));
+    }
+
+    loop {
+        let failed = match start(engine.model()) {
+            Err(error) => AttemptFailure::Unusable {
+                message: error.to_string(),
+                error,
+            },
+            Ok(rx_std) => {
+                let folded = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
+                let streamed = folded.streamed;
+                match folded.outcome {
+                    ChunkOutcome::Done { output, session } => {
+                        return Ok(PromptOutcome {
+                            result: PromptResult {
+                                output,
+                                stderr: String::new(),
+                            },
+                            session_id: session,
+                        });
+                    }
+                    ChunkOutcome::Closed { .. } => {
+                        return Err(CruiseError::Other(format!(
+                            "{label} stream closed before completion"
+                        )));
+                    }
+                    ChunkOutcome::Limited { message, .. } => {
+                        AttemptFailure::Limited { message, streamed }
+                    }
+                    ChunkOutcome::Failed { message, .. } => {
+                        AttemptFailure::Failed { message, streamed }
+                    }
+                }
+            }
+        };
+
+        let (failure, streamed) = failed.failure();
+        let action = engine.next(failure, streamed);
+        let delay = match action {
+            RetryAction::GiveUp => return Err(failed.into_error()),
+            RetryAction::Switch {
+                from,
+                to,
+                detail,
+                attempt,
+                of,
+            } => {
+                if let Some(cb) = req.on_notice {
+                    cb(&format!(
+                        "fallback: {} -> {to} ({detail}, attempt {attempt}/{of})",
+                        from.as_deref().unwrap_or("default model")
+                    ));
+                }
+                // A switch runs immediately; the wait below is still the
+                // cancellation checkpoint every retry passes through.
+                Duration::ZERO
+            }
+            RetryAction::Backoff {
+                delay,
+                class,
+                attempt,
+                of,
+            } => {
+                if let Some(cb) = req.on_notice {
+                    cb(&format!(
+                        "{} detected. Retrying in {:.1}s... ({attempt}/{of})",
+                        class.label(),
+                        delay.as_secs_f64(),
+                    ));
+                }
+                delay
+            }
+        };
+        tokio::select! {
+            biased;
+            () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
 /// `Jcode`-backend execution: run the prompt as a `jcode run --ndjson`
 /// subprocess ([`crate::backend::jcode`]) under cruise's private `JCODE_HOME`,
-/// with no seher provider resolution involved and, unlike [`run_sdk`], no
-/// fallback provider to hop to on a rate limit.
+/// with no seher provider resolution involved.
 ///
 /// jcode has no in-process tool registration, so cruise's tools are served to
 /// it over a per-run Unix socket by a [`ToolBridge`]: the `cruise mcp-bridge`
@@ -897,25 +1016,22 @@ fn build_claude_config(req: &PromptRun<'_>) -> ClaudeRunnerConfig {
 /// flag, the title / PR-metadata stores) authoritative. The bridge is started
 /// once for the whole run, including its retries, and torn down on return.
 ///
-/// A [`ChunkOutcome::Limited`] retries the *same* model with exponential
-/// backoff ([`crate::step::command::calculate_backoff`]: 2s doubling to a 60s
-/// cap), mirroring the command backend's rate-limit handling, up to
-/// `req.max_retries` attempts.
+/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
+/// off on the same model unless the workflow's `retry:` policy names a
+/// fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let on_delta = req.stream.and_then(|s| s.on_stdout);
     let home = jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
     let bridge = ToolBridge::start(req.tools.clone())?;
-    let (provider, model, effort) = jcode::parse_model_ref(req.model_or_mode)?;
 
-    let mut attempts = 0;
-    loop {
+    run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
+        let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
         let config = JcodeRunnerConfig {
-            model: model.clone(),
-            provider: provider.clone(),
+            model,
+            provider,
             effort,
             cwd: req.working_dir.map(Path::to_path_buf),
             resume_session_id: req.resume.clone(),
@@ -925,47 +1041,9 @@ async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
             cancel: req.cancel_token.cloned(),
             binary: None,
         };
-        let rx_std = stream_jcode_agent(config, req.prompt.to_string());
-        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
-
-        match outcome {
-            ChunkOutcome::Done { output, session } => {
-                return Ok(PromptOutcome {
-                    result: PromptResult {
-                        output,
-                        stderr: String::new(),
-                    },
-                    session_id: session,
-                });
-            }
-            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
-            ChunkOutcome::Limited { message, .. } => {
-                if attempts < req.max_retries {
-                    attempts += 1;
-                    let delay = crate::step::command::calculate_backoff(attempts);
-                    if let Some(cb) = req.on_notice {
-                        cb(&format!(
-                            "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
-                            delay.as_secs_f64(),
-                            req.max_retries
-                        ));
-                    }
-                    tokio::select! {
-                        biased;
-                        () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                    continue;
-                }
-                return Err(CruiseError::CommandError(message));
-            }
-            ChunkOutcome::Closed { .. } => {
-                return Err(CruiseError::Other(
-                    "jcode stream closed before completion".to_string(),
-                ));
-            }
-        }
-    }
+        Ok(stream_jcode_agent(config, req.prompt.to_string()))
+    })
+    .await
 }
 
 /// Build [`PiRunnerOptions`] straight from `req`, with no seher provider
@@ -1743,7 +1821,7 @@ done
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model_or_mode = Some("claude-sonnet-4-6:xhigh");
-        let config = build_claude_config(&req);
+        let config = build_claude_config(&req, req.model_or_mode);
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
@@ -1751,7 +1829,8 @@ done
     #[test]
     fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
         let env = HashMap::new();
-        let config = build_claude_config(&base_req(&env));
+        let req = base_req(&env);
+        let config = build_claude_config(&req, req.model_or_mode);
         assert_eq!(config.model, None);
         assert_eq!(config.effort, None);
     }
@@ -1779,7 +1858,7 @@ done
             tools: vec![tool],
             resume: Some("sess-1".to_string()),
         };
-        let config = build_claude_config(&req);
+        let config = build_claude_config(&req, req.model_or_mode);
         assert_eq!(config.cwd, Some(dir));
         assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
@@ -2145,5 +2224,335 @@ done
             calls.load(Ordering::SeqCst),
             "handler was not the shared Arc"
         );
+    }
+
+    // -- run_with_fallback wiring ---------------------------------------------
+
+    /// A retry policy whose backoff is short enough not to slow the tests.
+    fn fast_policy(chains: &[(&str, &[&str])]) -> Arc<RetryPolicy> {
+        Arc::new(RetryPolicy::new(crate::config::RetryConfig {
+            base_delay_ms: 1,
+            max_delay_ms: 300_000,
+            model_fallback: true,
+            fallback_chains: chains
+                .iter()
+                .map(|(key, entries)| {
+                    (
+                        (*key).to_string(),
+                        entries.iter().map(|e| (*e).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }))
+    }
+
+    /// A backend stub: hands the caller a receiver already holding `chunks`.
+    fn canned(chunks: Vec<StreamChunk>) -> std::sync::mpsc::Receiver<StreamChunk> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for chunk in chunks {
+            let _ = tx.send(chunk);
+        }
+        rx
+    }
+
+    fn limit_chunk() -> StreamChunk {
+        StreamChunk::Limit(LimitError {
+            provider: "test".to_string(),
+            detail: "HTTP status 429 slow down".to_string(),
+        })
+    }
+
+    /// Collects strings a callback under test was handed.
+    type Recorder = Arc<Mutex<Vec<String>>>;
+
+    fn recorder() -> Recorder {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn recorded(items: &Recorder) -> Vec<String> {
+        items
+            .lock()
+            .unwrap_or_else(|e| panic!("recorder lock: {e}"))
+            .clone()
+    }
+
+    fn record(items: &Recorder, value: &str) {
+        items
+            .lock()
+            .unwrap_or_else(|e| panic!("recorder lock: {e}"))
+            .push(value.to_string());
+    }
+
+    #[tokio::test]
+    async fn fallback_spends_the_model_budget_then_switches_immediately() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+        req.on_notice = Some(&on_notice);
+
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(if model == Some("p/spare") {
+                    canned(vec![StreamChunk::Done("ok".to_string())])
+                } else {
+                    canned(vec![limit_chunk()])
+                })
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        // The primary model spends its own budget before the chain is used.
+        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+        let notices = recorded(&notices);
+        assert!(
+            notices
+                .iter()
+                .any(|n| n == "fallback: p/primary -> p/spare (429, attempt 2/3)"),
+            "got: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_is_disabled_by_a_zero_retry_budget() {
+        // `--rate-limit-retries 0` means no retry: a fallback chain must not
+        // become a second retry count.
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(vec![limit_chunk()]))
+            },
+        )
+        .await
+        else {
+            panic!("a spent budget must surface the failure");
+        };
+
+        assert!(error.to_string().contains("429"), "got: {error}");
+        assert_eq!(recorded(&models), ["p/primary"]);
+    }
+
+    #[tokio::test]
+    async fn text_the_user_saw_blocks_a_switch_but_not_a_same_model_retry() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let lines = recorder();
+        let lines_sink = Arc::clone(&lines);
+        let on_stdout = move |line: &str| record(&lines_sink, line);
+        let stream = StreamCallbacks {
+            on_stdout: Some(&on_stdout),
+            on_stderr: None,
+        };
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+        req.stream = Some(&stream);
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(vec![
+                    StreamChunk::Delta("partial answer\n".to_string()),
+                    limit_chunk(),
+                ]))
+            },
+        )
+        .await
+        else {
+            panic!("a streamed turn must not be replayed on another model");
+        };
+
+        assert!(error.to_string().contains("429"), "got: {error}");
+        // Retried on the same model (historical behavior), never on the spare.
+        assert_eq!(recorded(&models), ["p/primary", "p/primary"]);
+        assert_eq!(recorded(&lines), ["partial answer", "partial answer"]);
+    }
+
+    #[tokio::test]
+    async fn text_no_sink_received_does_not_block_a_switch() {
+        // `stream: None` (title generation, PR metadata) shows the user
+        // nothing, so a delta must not count as replayed output.
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 1;
+
+        let outcome = run_with_fallback(
+            &req,
+            "claude",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(if model == Some("p/spare") {
+                    canned(vec![StreamChunk::Done("ok".to_string())])
+                } else {
+                    canned(vec![
+                        StreamChunk::Delta("partial answer\n".to_string()),
+                        limit_chunk(),
+                    ])
+                })
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+    }
+
+    #[tokio::test]
+    async fn an_undispatchable_model_reference_moves_to_the_next_candidate() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.on_notice = Some(&on_notice);
+
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                if model == Some("p/spare") {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                } else {
+                    Err(CruiseError::Other("invalid model reference".to_string()))
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(recorded(&models), ["p/primary", "p/spare"]);
+        let notices = recorded(&notices);
+        assert!(
+            notices
+                .iter()
+                .any(|n| n == "fallback: p/primary -> p/spare (unusable model, attempt 1/1)"),
+            "got: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undispatchable_model_reference_without_a_chain_surfaces_its_error() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+
+        let Err(error) = run_with_fallback(&req, "jcode", None, |_| {
+            Err(CruiseError::Other("invalid model reference".to_string()))
+        })
+        .await
+        else {
+            panic!("an undispatchable model reference must fail the run");
+        };
+
+        assert!(
+            error.to_string().contains("invalid model reference"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_switch_still_observes_cancellation_before_the_next_attempt() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let token = CancellationToken::new();
+        let cancel_on_switch = token.clone();
+        let on_notice = move |msg: &str| {
+            if msg.starts_with("fallback:") {
+                cancel_on_switch.cancel();
+            }
+        };
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.on_notice = Some(&on_notice);
+        req.cancel_token = Some(&token);
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Err(CruiseError::Other("invalid model reference".to_string()))
+            },
+        )
+        .await
+        else {
+            panic!("a cancelled run must not start another attempt");
+        };
+
+        assert!(
+            matches!(error, CruiseError::Interrupted),
+            "expected Interrupted, got: {error}"
+        );
+        // The spare was decided on but never spawned.
+        assert_eq!(recorded(&models), ["p/primary"]);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_closes_without_a_terminal_chunk_is_not_retried() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("p/primary");
+        req.max_retries = 3;
+
+        let Err(error) = run_with_fallback(
+            &req,
+            "claude",
+            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(Vec::new()))
+            },
+        )
+        .await
+        else {
+            panic!("a closed stream is not a retryable failure");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("claude stream closed before completion"),
+            "got: {error}"
+        );
+        assert_eq!(recorded(&models), ["p/primary"]);
     }
 }
