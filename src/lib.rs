@@ -2,6 +2,7 @@
 pub mod app_config;
 pub mod ask_handler;
 pub mod attachments;
+pub mod backend;
 pub mod batch_run;
 pub mod cancellation;
 pub mod condition;

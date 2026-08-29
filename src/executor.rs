@@ -23,13 +23,71 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use seher::sdk::{
-    CodexBarProbe, EffortLevel, PiRunner, PiRunnerOptions, PollOptions, SeherTool, StreamChunk,
-    poll_for_agent, split_thinking_suffix,
+    CodexBarProbe, EffortLevel as SeherEffortLevel, PiRunner, PiRunnerOptions, PollOptions,
+    SeherTool, StreamChunk as SeherStreamChunk, poll_for_agent,
 };
 
+use crate::backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix};
+use crate::backend::stream::{ChunkOutcome, ChunkReducer, LimitError, LineBuffer, StreamChunk};
+use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
+
+/// Adapt a seher chunk to cruise's own [`StreamChunk`], which the fold in
+/// [`stream_to_outcome`] is written against.
+impl From<SeherStreamChunk> for StreamChunk {
+    fn from(chunk: SeherStreamChunk) -> Self {
+        match chunk {
+            SeherStreamChunk::Delta(text) => StreamChunk::Delta(text),
+            SeherStreamChunk::Done(text) => StreamChunk::Done(text),
+            SeherStreamChunk::Session(id) => StreamChunk::Session(id),
+            SeherStreamChunk::Limit(e) => StreamChunk::Limit(LimitError {
+                provider: e.provider,
+            }),
+            SeherStreamChunk::Error(message) => StreamChunk::Error(message),
+        }
+    }
+}
+
+/// Adapt a cruise tool to the seher tool type the seher SDKs register. Both
+/// carry the same `Arc`'d handler, so the shared interior state (plan-persist
+/// flag, title store) survives the conversion.
+impl From<CruiseTool> for SeherTool {
+    fn from(tool: CruiseTool) -> Self {
+        SeherTool::new(tool.name, tool.description, tool.parameters, tool.handler)
+    }
+}
+
+/// Adapt a cruise effort tier to the seher one the seher SDK configs take. The
+/// tiers are identical, so the mapping is total in both directions.
+impl From<EffortLevel> for SeherEffortLevel {
+    fn from(effort: EffortLevel) -> Self {
+        match effort {
+            EffortLevel::Low => SeherEffortLevel::Low,
+            EffortLevel::Medium => SeherEffortLevel::Medium,
+            EffortLevel::High => SeherEffortLevel::High,
+            EffortLevel::XHigh => SeherEffortLevel::XHigh,
+            EffortLevel::Max => SeherEffortLevel::Max,
+        }
+    }
+}
+
+impl From<SeherEffortLevel> for EffortLevel {
+    fn from(effort: SeherEffortLevel) -> Self {
+        match effort {
+            SeherEffortLevel::Low => EffortLevel::Low,
+            SeherEffortLevel::Medium => EffortLevel::Medium,
+            SeherEffortLevel::High => EffortLevel::High,
+            SeherEffortLevel::XHigh => EffortLevel::XHigh,
+            SeherEffortLevel::Max => EffortLevel::Max,
+        }
+    }
+}
+
+fn seher_tools(tools: &[CruiseTool]) -> Vec<SeherTool> {
+    tools.iter().cloned().map(Into::into).collect()
+}
 
 /// Default seher mode key for ordinary prompt steps when neither the step nor
 /// the workflow specifies one.
@@ -78,7 +136,7 @@ pub struct PromptRun<'a> {
     /// Streaming stdout/stderr callbacks.
     pub stream: Option<&'a StreamCallbacks<'a>>,
     /// Custom tools to inject (SDK mode only).
-    pub tools: Vec<SeherTool>,
+    pub tools: Vec<CruiseTool>,
     /// Prior session id to resume (SDK mode only; the RPC backends `omp` and
     /// `pi` always start a fresh session).
     pub resume: Option<String>,
@@ -317,19 +375,19 @@ fn spawn_agent_stream(
     resolved: &seher::sdk::ResolvedAgent,
     req: &PromptRun<'_>,
     omp_cancel: seher::sdk::CancelToken,
-) -> std::sync::mpsc::Receiver<StreamChunk> {
+) -> std::sync::mpsc::Receiver<SeherStreamChunk> {
     let cwd_string = req.working_dir.map(|p| p.to_string_lossy().into_owned());
     match resolved.sdk.as_str() {
         "claude" => {
             // claude-agent-sdk supports custom tools natively, so `req.tools`
-            // flows straight through. `resolved.model_id` is a plain
+            // flows through as seher tools. `resolved.model_id` is a plain
             // `claude --model` name, not a pi model ref.
             let config = seher::claude_agent::ClaudeAgentRunnerConfig {
                 model: claude_family_model(&resolved.model_id),
-                effort: claude_family_effort(&resolved.model_id, resolved.effort),
+                effort: claude_family_effort(&resolved.model_id, resolved.effort).map(Into::into),
                 cwd: cwd_string,
                 resume_session_id: req.resume.clone(),
-                tools: req.tools.clone(),
+                tools: seher_tools(&req.tools),
                 env: req.env.clone(),
                 ..Default::default()
             };
@@ -346,7 +404,8 @@ fn spawn_agent_stream(
             // 0.0.45+, so we can't use struct-literal syntax across crates.
             let mut headless_cfg = seher::claude_headless::ClaudeHeadlessRunnerConfig::default();
             headless_cfg.model = claude_family_model(&resolved.model_id);
-            headless_cfg.effort = claude_family_effort(&resolved.model_id, resolved.effort);
+            headless_cfg.effort =
+                claude_family_effort(&resolved.model_id, resolved.effort).map(Into::into);
             headless_cfg.cwd = cwd_string;
             headless_cfg.resume_session_id.clone_from(&req.resume);
             headless_cfg.env = req
@@ -370,7 +429,7 @@ fn spawn_agent_stream(
                 None,
                 claude_family_model(&resolved.model_id),
                 None,
-                claude_family_effort(&resolved.model_id, resolved.effort),
+                claude_family_effort(&resolved.model_id, resolved.effort).map(Into::into),
                 None,
                 cwd_string,
                 req.env.clone(),
@@ -413,7 +472,7 @@ fn spawn_agent_stream(
                 seher::sdk::RunAgentOptions {
                     working_dir: req.working_dir.map(Path::to_path_buf),
                     resume,
-                    tools: req.tools.clone(),
+                    tools: seher_tools(&req.tools),
                     cancel: omp_cancel,
                     ..Default::default()
                 },
@@ -564,8 +623,8 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
     }
 }
 
-/// Bridge a blocking `std::sync::mpsc::Receiver<StreamChunk>` (as returned by
-/// seher's various `stream_*` functions and [`PiRunner::stream`]) into a
+/// Bridge a blocking `std::sync::mpsc::Receiver<SeherStreamChunk>` (as returned
+/// by seher's various `stream_*` functions and [`PiRunner::stream`]) into a
 /// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (pi and
 /// seher's backends emit token-level deltas; `StreamCallbacks::on_stdout` is
 /// line-oriented like the command backend) and returning `Err(Interrupted)` as
@@ -574,7 +633,7 @@ async fn run_sdk(req: PromptRun<'_>) -> Result<PromptOutcome> {
 /// Shared by [`run_sdk`] and [`run_pi_direct`] so both backends fold a chunk
 /// stream into an outcome identically.
 async fn stream_to_outcome(
-    rx_std: std::sync::mpsc::Receiver<StreamChunk>,
+    rx_std: std::sync::mpsc::Receiver<SeherStreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     cancel_token: Option<&CancellationToken>,
     session_slot: Option<Arc<Mutex<Option<String>>>>,
@@ -586,6 +645,7 @@ async fn stream_to_outcome(
     let bridge_session_slot = session_slot;
     std::thread::spawn(move || {
         while let Ok(chunk) = rx_std.recv() {
+            let chunk = StreamChunk::from(chunk);
             if let StreamChunk::Session(id) = &chunk
                 && let Some(slot) = &bridge_session_slot
                 && let Ok(mut session) = slot.lock()
@@ -725,7 +785,7 @@ fn build_pi_options(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<PiRu
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
-        tools: req.tools.clone(),
+        tools: seher_tools(&req.tools),
     })
 }
 
@@ -784,133 +844,6 @@ fn parse_pi_model_ref(
     }
 }
 
-/// Buffers streamed token fragments and emits them as complete lines, so a
-/// line-oriented [`StreamCallbacks::on_stdout`] sees the same shape from the SDK
-/// backend as from the command backend.
-pub(crate) struct LineBuffer {
-    pending: String,
-}
-
-impl LineBuffer {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending: String::new(),
-        }
-    }
-
-    /// Append `frag`, emitting each newly-completed line (without its trailing
-    /// `\n`/`\r\n`).
-    pub(crate) fn push<F: FnMut(&str)>(&mut self, frag: &str, mut emit: F) {
-        self.pending.push_str(frag);
-        while let Some(idx) = self.pending.find('\n') {
-            let rest = self.pending.split_off(idx + 1);
-            let mut line = std::mem::replace(&mut self.pending, rest);
-            line.pop(); // drop '\n'
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            emit(&line);
-        }
-    }
-
-    /// Emit any buffered partial line (no trailing newline) and clear.
-    pub(crate) fn flush<F: FnMut(&str)>(&mut self, mut emit: F) {
-        if !self.pending.is_empty() {
-            emit(&self.pending);
-            self.pending.clear();
-        }
-    }
-}
-
-/// Terminal (or closed) outcome of folding a stream of [`StreamChunk`]s.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ChunkOutcome {
-    /// The run completed with the given full text.
-    Done {
-        output: String,
-        session: Option<String>,
-    },
-    /// The provider reported a rate/usage limit.
-    Limited {
-        message: String,
-        session: Option<String>,
-    },
-    /// The run failed with a non-limit error.
-    Failed {
-        message: String,
-        session: Option<String>,
-    },
-    /// The channel closed before any terminal chunk arrived.
-    Closed {
-        partial: String,
-        session: Option<String>,
-    },
-}
-
-/// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
-/// deltas through an `on_delta` sink as they arrive.
-pub(crate) struct ChunkReducer {
-    buf: String,
-    session: Option<String>,
-}
-
-impl ChunkReducer {
-    pub(crate) fn new() -> Self {
-        Self {
-            buf: String::new(),
-            session: None,
-        }
-    }
-
-    /// Feed one chunk. Returns `Some(outcome)` when a terminal chunk arrives,
-    /// `None` to keep consuming.
-    pub(crate) fn step<F: FnMut(&str)>(
-        &mut self,
-        chunk: StreamChunk,
-        on_delta: &mut F,
-    ) -> Option<ChunkOutcome> {
-        match chunk {
-            StreamChunk::Delta(d) => {
-                on_delta(&d);
-                self.buf.push_str(&d);
-                None
-            }
-            StreamChunk::Session(id) => {
-                self.session = Some(id);
-                None
-            }
-            StreamChunk::Done(text) => {
-                let output = if text.is_empty() {
-                    std::mem::take(&mut self.buf)
-                } else {
-                    text
-                };
-                Some(ChunkOutcome::Done {
-                    output,
-                    session: self.session.take(),
-                })
-            }
-            StreamChunk::Limit(e) => Some(ChunkOutcome::Limited {
-                message: e.to_string(),
-                session: self.session.take(),
-            }),
-            StreamChunk::Error(msg) => Some(ChunkOutcome::Failed {
-                message: msg,
-                session: self.session.take(),
-            }),
-        }
-    }
-
-    /// Produce a [`ChunkOutcome::Closed`] when the stream ends without a terminal
-    /// chunk.
-    pub(crate) fn finish(&mut self) -> ChunkOutcome {
-        ChunkOutcome::Closed {
-            partial: std::mem::take(&mut self.buf),
-            session: self.session.take(),
-        }
-    }
-}
-
 /// Resolve the seher `mode_key` for an ordinary prompt step.
 ///
 /// Precedence mirrors the command-mode model resolution
@@ -937,15 +870,17 @@ pub fn mode_key_for_plan(plan_model: Option<&str>, global_model: Option<&str>) -
         .to_string()
 }
 
-fn effort_from_suffix(suffix: &str) -> Option<EffortLevel> {
-    match suffix.trim().to_lowercase().as_str() {
-        "minimal" | "min" | "low" | "1" => Some(EffortLevel::Low),
-        "medium" | "med" | "2" => Some(EffortLevel::Medium),
-        "high" | "3" => Some(EffortLevel::High),
-        "xhigh" | "4" => Some(EffortLevel::XHigh),
-        "max" => Some(EffortLevel::Max),
-        _ => None,
-    }
+/// The cruise-side reasoning effort for a claude-family model id: the effort
+/// seher resolved from its own config if it set one, else the tier named by the
+/// model id's `:suffix`.
+fn claude_family_effort(
+    model_id: &str,
+    resolved_effort: Option<SeherEffortLevel>,
+) -> Option<EffortLevel> {
+    let (_, suffix_thinking) = split_thinking_suffix(model_id);
+    resolved_effort
+        .map(Into::into)
+        .or_else(|| suffix_thinking.and_then(effort_from_suffix))
 }
 
 fn claude_family_model(model_id: &str) -> Option<String> {
@@ -955,14 +890,6 @@ fn claude_family_model(model_id: &str) -> Option<String> {
     } else {
         Some(model.to_string())
     }
-}
-
-fn claude_family_effort(
-    model_id: &str,
-    resolved_effort: Option<EffortLevel>,
-) -> Option<EffortLevel> {
-    let (_, suffix_thinking) = split_thinking_suffix(model_id);
-    resolved_effort.or_else(|| suffix_thinking.and_then(effort_from_suffix))
 }
 
 /// The model id and reasoning effort the resolved provider will actually run
@@ -986,6 +913,7 @@ fn effective_model(resolved: &seher::sdk::ResolvedAgent) -> (Cow<'_, str>, Optio
             Cow::Owned(model),
             resolved
                 .effort
+                .map(Into::into)
                 .or_else(|| suffix.as_deref().and_then(effort_from_suffix)),
         )
     }
@@ -1039,7 +967,7 @@ fn resolution_notice_reports_provider_model_sdk_mode_and_effort() {
         skills: seher::sdk::ResolvedSkillsConfig::default(),
         retry: seher::sdk::RetryConfig::default(),
         env: indexmap::IndexMap::default(),
-        effort: Some(EffortLevel::High),
+        effort: Some(SeherEffortLevel::High),
     };
     assert_eq!(
         resolution_notice(&resolved),
@@ -1173,7 +1101,7 @@ mod tests {
     #[test]
     fn claude_family_effort_prefers_resolved_effort_over_suffix() {
         assert_eq!(
-            claude_family_effort("claude-sonnet-4-5:low", Some(EffortLevel::High)),
+            claude_family_effort("claude-sonnet-4-5:low", Some(SeherEffortLevel::High)),
             Some(EffortLevel::High)
         );
     }
@@ -1451,7 +1379,7 @@ done
                 .push(msg.to_string());
         };
         let env = HashMap::new();
-        let echo = SeherTool::new(
+        let echo = CruiseTool::new(
             "echo",
             "Echo",
             serde_json::json!({"type": "object"}),
@@ -1514,7 +1442,7 @@ done
     fn build_pi_options_forwards_tools_env_and_working_dir() {
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let tool = SeherTool::new(
+        let tool = CruiseTool::new(
             "echo",
             "Echo",
             serde_json::json!({"type": "object"}),
@@ -1579,7 +1507,7 @@ done
         }
 
         let env = HashMap::new();
-        let echo = SeherTool::new(
+        let echo = CruiseTool::new(
             "echo",
             "Echo",
             serde_json::json!({"type": "object"}),
@@ -1624,16 +1552,16 @@ done
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap_or_else(|e| panic!("OMP stream did not finish: {e}"));
             match chunk {
-                StreamChunk::Session(id) => session = Some(id),
-                StreamChunk::Delta(delta) => output.push_str(&delta),
-                StreamChunk::Done(done) => {
+                SeherStreamChunk::Session(id) => session = Some(id),
+                SeherStreamChunk::Delta(delta) => output.push_str(&delta),
+                SeherStreamChunk::Done(done) => {
                     if !done.is_empty() {
                         output = done;
                     }
                     break;
                 }
-                StreamChunk::Error(message) => panic!("unexpected OMP error: {message}"),
-                StreamChunk::Limit(_) => panic!("unexpected OMP rate limit"),
+                SeherStreamChunk::Error(message) => panic!("unexpected OMP error: {message}"),
+                SeherStreamChunk::Limit(_) => panic!("unexpected OMP rate limit"),
             }
         }
 
@@ -1740,7 +1668,7 @@ done
         // requires the external Pi extension bridge to be configured.
         let env: HashMap<String, String> =
             [(String::from("PATH"), String::from("/nonexistent/bin"))].into();
-        let echo = SeherTool::new(
+        let echo = CruiseTool::new(
             "echo",
             "Echo",
             serde_json::json!({"type": "object"}),
@@ -1782,16 +1710,16 @@ done
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|e| panic!("pi stream did not finish: {e}"));
             match chunk {
-                StreamChunk::Session(id) => session = Some(id),
-                StreamChunk::Delta(delta) => output.push_str(&delta),
-                StreamChunk::Done(done) => {
+                SeherStreamChunk::Session(id) => session = Some(id),
+                SeherStreamChunk::Delta(delta) => output.push_str(&delta),
+                SeherStreamChunk::Done(done) => {
                     if !done.is_empty() {
                         output = done;
                     }
                     break;
                 }
-                StreamChunk::Error(message) => panic!("unexpected pi error: {message}"),
-                StreamChunk::Limit(_) => panic!("unexpected pi rate limit"),
+                SeherStreamChunk::Error(message) => panic!("unexpected pi error: {message}"),
+                SeherStreamChunk::Limit(_) => panic!("unexpected pi rate limit"),
             }
         }
 
@@ -1821,144 +1749,83 @@ done
         assert_eq!(calculate_backoff(10), std::time::Duration::from_mins(1));
     }
 
-    // -- ChunkReducer ---------------------------------------------------------
-
-    fn no_sink() -> impl FnMut(&str) {
-        |_: &str| {}
-    }
+    // -- seher adapters -------------------------------------------------------
 
     #[test]
-    fn reducer_accumulates_deltas_and_captures_session() {
-        let mut r = ChunkReducer::new();
-        let mut collected = String::new();
-        let mut sink = |d: &str| collected.push_str(d);
-        assert_eq!(
-            r.step(StreamChunk::Session("sid-1".to_string()), &mut sink),
-            None
-        );
-        assert_eq!(
-            r.step(StreamChunk::Delta("Hello ".to_string()), &mut sink),
-            None
-        );
-        assert_eq!(
-            r.step(StreamChunk::Delta("world".to_string()), &mut sink),
-            None
-        );
-        let out = r
-            .step(StreamChunk::Done(String::new()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(collected, "Hello world");
-        assert_eq!(
-            out,
-            ChunkOutcome::Done {
-                output: "Hello world".to_string(),
-                session: Some("sid-1".to_string()),
-            }
-        );
-    }
+    fn seher_chunks_map_to_the_matching_cruise_variant() {
+        let cases = [
+            (
+                SeherStreamChunk::Delta("d".to_string()),
+                StreamChunk::Delta("d".to_string()),
+            ),
+            (
+                SeherStreamChunk::Done("done".to_string()),
+                StreamChunk::Done("done".to_string()),
+            ),
+            (
+                SeherStreamChunk::Session("sid".to_string()),
+                StreamChunk::Session("sid".to_string()),
+            ),
+            (
+                SeherStreamChunk::Error("boom".to_string()),
+                StreamChunk::Error("boom".to_string()),
+            ),
+        ];
+        for (seher_chunk, expected) in cases {
+            assert_eq!(
+                format!("{:?}", StreamChunk::from(seher_chunk)),
+                format!("{expected:?}")
+            );
+        }
 
-    #[test]
-    fn reducer_done_text_overrides_buffered_deltas() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        r.step(StreamChunk::Delta("partial".to_string()), &mut sink);
-        let out = r
-            .step(StreamChunk::Done("FINAL".to_string()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(
-            out,
-            ChunkOutcome::Done {
-                output: "FINAL".to_string(),
-                session: None,
+        // The limit variant carries the provider, and must keep the message the
+        // reducer reports verbatim.
+        let seher_limit = SeherStreamChunk::Limit(seher::sdk::errors::LimitError {
+            provider: "anthropic".to_string(),
+            reset_at: None,
+        });
+        match StreamChunk::from(seher_limit) {
+            StreamChunk::Limit(e) => {
+                assert_eq!(e.provider, "anthropic");
+                assert_eq!(
+                    e.to_string(),
+                    "Provider 'anthropic' hit API rate/usage limit"
+                );
             }
-        );
-    }
-
-    #[test]
-    fn reducer_surfaces_error_chunk() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        let out = r
-            .step(StreamChunk::Error("boom".to_string()), &mut sink)
-            .unwrap_or_else(|| panic!("expected terminal"));
-        assert_eq!(
-            out,
-            ChunkOutcome::Failed {
-                message: "boom".to_string(),
-                session: None,
-            }
-        );
-    }
-
-    #[test]
-    fn reducer_surfaces_limit_chunk() {
-        use seher::sdk::errors::LimitError;
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        let out = r
-            .step(
-                StreamChunk::Limit(LimitError {
-                    provider: "anthropic".to_string(),
-                    reset_at: None,
-                }),
-                &mut sink,
-            )
-            .unwrap_or_else(|| panic!("expected terminal"));
-        match out {
-            ChunkOutcome::Limited { message, .. } => {
-                assert!(message.contains("anthropic"), "got: {message}");
-            }
-            other => panic!("expected Limited, got {other:?}"),
+            other => panic!("expected Limit, got {other:?}"),
         }
     }
 
-    // -- LineBuffer -----------------------------------------------------------
-
-    fn collect_lines(frags: &[&str]) -> (Vec<String>, Vec<String>) {
-        let mut lb = LineBuffer::new();
-        let mut lines = Vec::new();
-        for f in frags {
-            lb.push(f, |l| lines.push(l.to_string()));
-        }
-        let mut flushed = Vec::new();
-        lb.flush(|l| flushed.push(l.to_string()));
-        (lines, flushed)
-    }
-
     #[test]
-    fn line_buffer_emits_complete_lines_and_flushes_remainder() {
-        let (lines, flushed) = collect_lines(&["Hel", "lo\nwor", "ld"]);
-        assert_eq!(lines, vec!["Hello".to_string()]);
-        assert_eq!(flushed, vec!["world".to_string()]);
-    }
-
-    #[test]
-    fn line_buffer_handles_multiple_lines_in_one_fragment() {
-        let (lines, flushed) = collect_lines(&["a\nb\nc\n"]);
-        assert_eq!(
-            lines,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    fn tool_conversion_preserves_name_description_schema_and_handler() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        });
+        let calls = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&calls);
+        let tool = CruiseTool::new(
+            "ask_user",
+            "Ask the user a clarifying question.",
+            schema.clone(),
+            Arc::new(move |input: serde_json::Value| {
+                flag.store(true, Ordering::SeqCst);
+                Ok(input["question"].as_str().unwrap_or_default().to_string())
+            }),
         );
-        assert!(flushed.is_empty(), "no partial line should remain");
-    }
 
-    #[test]
-    fn line_buffer_strips_carriage_return() {
-        let (lines, _) = collect_lines(&["x\r\n"]);
-        assert_eq!(lines, vec!["x".to_string()]);
-    }
-
-    #[test]
-    fn reducer_finish_reports_closed_with_partial() {
-        let mut r = ChunkReducer::new();
-        let mut sink = no_sink();
-        r.step(StreamChunk::Delta("half".to_string()), &mut sink);
+        let converted = SeherTool::from(tool);
+        assert_eq!(converted.name, "ask_user");
+        assert_eq!(converted.description, "Ask the user a clarifying question.");
+        assert_eq!(converted.parameters, schema);
         assert_eq!(
-            r.finish(),
-            ChunkOutcome::Closed {
-                partial: "half".to_string(),
-                session: None,
-            }
+            (converted.handler)(serde_json::json!({"question": "why?"})),
+            Ok("why?".to_string())
+        );
+        assert!(
+            calls.load(Ordering::SeqCst),
+            "handler was not the shared Arc"
         );
     }
 }
