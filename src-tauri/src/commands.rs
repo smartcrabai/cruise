@@ -4253,11 +4253,19 @@ mod tests {
             saved.config_source,
             cruise::resolver::ConfigSource::Builtin.display_string()
         );
-        assert_eq!(
+        // The session snapshot is the resolved workflow re-serialized, so the
+        // expectation is the same resolution run through the same serializer.
+        let snapshot =
             fs::read_to_string(manager.sessions_dir().join(session_id).join("config.yaml"))
-                .unwrap_or_else(|e| panic!("{e:?}")),
-            "command: [echo]\nsteps: {}\n"
-        );
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        let expected = cruise::resolver::resolve_workflow_config(
+            &fs::read_to_string(repo.join("cruise.yaml")).unwrap_or_else(|e| panic!("{e:?}")),
+            &cruise::resolver::ConfigSource::Local(repo.join("cruise.yaml")),
+            &repo,
+        )
+        .and_then(|config| cruise::repo_clone::serialize_resolved_config(&config))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(snapshot, expected);
     }
 
     #[test]
