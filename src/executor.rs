@@ -1,10 +1,10 @@
 //! Prompt-execution backend abstraction.
 //!
-//! Cruise drives prompts through one of four backends: an external `command`
+//! Cruise drives prompts through one of five backends: an external `command`
 //! (the classic `claude -p` path), the in-process **seher SDK**
-//! (`sdk: seher`), **pi directly** (`sdk: pi`), or the **`claude` CLI**
-//! (`sdk: claude`). [`Executor`] hides that
-//! choice behind a single [`Executor::run`] call so that `planning.rs`,
+//! (`sdk: seher`), **pi directly** (`sdk: pi`), the **`jcode` CLI**
+//! (`sdk: jcode`), or the **`claude` CLI** (`sdk: claude`). [`Executor`] hides
+//! that choice behind a single [`Executor::run`] call so that `planning.rs`,
 //! `engine.rs`, and the GUI command layer don't need to branch on the backend.
 //!
 //! In `sdk: seher` mode the cruise `model` / `plan_model` / per-step `model`
@@ -20,6 +20,11 @@
 //! In `sdk: claude` mode they are a plain `claude --model` name with an
 //! optional `:effort` suffix, driven in-process through `claude-agent-sdk` --
 //! see [`run_claude`] and [`crate::backend::claude`].
+//!
+//! In `sdk: jcode` mode they are a `provider/model[:effort]` reference in
+//! jcode's own provider/model namespace, driven as a `jcode run --ndjson`
+//! subprocess under cruise's private `JCODE_HOME` -- see [`run_jcode`] and
+//! [`crate::backend::jcode`].
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -34,11 +39,13 @@ use seher::sdk::{
 
 use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
 use crate::backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix};
+use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcode_agent};
 use crate::backend::stream::{ChunkOutcome, ChunkReducer, LimitError, LineBuffer, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
+use crate::tool_bridge::ToolBridge;
 
 /// Adapt a seher chunk to cruise's own [`StreamChunk`], which the fold in
 /// [`stream_to_outcome`] is written against.
@@ -177,6 +184,10 @@ pub enum Executor {
     /// seher's provider-resolution layer and `~/.config/seher/config.yaml`
     /// entirely. See [`run_pi_direct`].
     Pi,
+    /// Drive the `jcode` CLI as an NDJSON subprocess (`sdk: jcode`) under
+    /// cruise's private `JCODE_HOME`, exposing cruise's tools over the
+    /// [`ToolBridge`]. See [`run_jcode`].
+    Jcode,
     /// Drive the `claude` CLI in-process through `claude-agent-sdk`
     /// (`sdk: claude`), with no seher provider resolution involved. See
     /// [`run_claude`].
@@ -186,15 +197,17 @@ pub enum Executor {
 impl Executor {
     /// Build an executor from the workflow's backend selection.
     ///
-    /// `sdk: pi` -> [`Executor::Pi`]; `sdk: claude` -> [`Executor::Claude`]; any
-    /// other `sdk` value -> [`Executor::Sdk`]; no `sdk` -> [`Executor::Command`]
-    /// wrapping `command`. (Mutual exclusivity between `sdk` and `command`, and
-    /// that `sdk` is one of the accepted values, is enforced earlier by
+    /// `sdk: pi` -> [`Executor::Pi`]; `sdk: jcode` -> [`Executor::Jcode`];
+    /// `sdk: claude` -> [`Executor::Claude`]; any other `sdk` value ->
+    /// [`Executor::Sdk`]; no `sdk` -> [`Executor::Command`] wrapping `command`.
+    /// (Mutual exclusivity between `sdk` and `command`, and that `sdk` is one of
+    /// the accepted values, is enforced earlier by
     /// [`crate::config::validate_sdk`].)
     #[must_use]
     pub fn new(sdk: Option<&str>, command: &[String]) -> Self {
         match sdk {
             Some("pi") => Executor::Pi,
+            Some("jcode") => Executor::Jcode,
             Some("claude") => Executor::Claude,
             Some(_) => Executor::Sdk,
             None => Executor::Command {
@@ -203,16 +216,19 @@ impl Executor {
         }
     }
 
-    /// Whether this executor drives prompts through an in-process agent
-    /// backend (`Sdk`, `Pi`, or `Claude`) rather than spawning an external
-    /// `command`.
+    /// Whether this executor drives prompts through an agent backend (`Sdk`,
+    /// `Pi`, `Jcode`, or `Claude`) rather than spawning an external `command`.
     #[must_use]
     pub fn is_sdk(&self) -> bool {
-        matches!(self, Executor::Sdk | Executor::Pi | Executor::Claude)
+        matches!(
+            self,
+            Executor::Sdk | Executor::Pi | Executor::Jcode | Executor::Claude
+        )
     }
 
     /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi` / `sdk: claude`) for an ordinary prompt step.
+    /// model reference (`sdk: pi` / `sdk: jcode` / `sdk: claude`) for an
+    /// ordinary prompt step.
     #[must_use]
     pub fn step_model_or_mode(
         &self,
@@ -220,7 +236,7 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi | Executor::Claude => {
+            Executor::Command { .. } | Executor::Pi | Executor::Jcode | Executor::Claude => {
                 step_model.or(global_model).map(str::to_string)
             }
             Executor::Sdk => Some(mode_key_for_step(step_model, global_model)),
@@ -228,8 +244,8 @@ impl Executor {
     }
 
     /// Resolve the model name (command mode), `mode_key` (`sdk: seher`), or
-    /// model reference (`sdk: pi` / `sdk: claude`) for the built-in planning
-    /// step.
+    /// model reference (`sdk: pi` / `sdk: jcode` / `sdk: claude`) for the
+    /// built-in planning step.
     #[must_use]
     pub fn plan_model_or_mode(
         &self,
@@ -237,7 +253,7 @@ impl Executor {
         global_model: Option<&str>,
     ) -> Option<String> {
         match self {
-            Executor::Command { .. } | Executor::Pi | Executor::Claude => {
+            Executor::Command { .. } | Executor::Pi | Executor::Jcode | Executor::Claude => {
                 plan_model.or(global_model).map(str::to_string)
             }
             Executor::Sdk => Some(mode_key_for_plan(plan_model, global_model)),
@@ -249,13 +265,14 @@ impl Executor {
     /// # Errors
     ///
     /// Returns an error if the command fails to spawn / exits non-zero, or if
-    /// seher provider resolution, the seher SDK run, the direct pi run, or the
-    /// `claude` CLI run fails.
+    /// seher provider resolution, the seher SDK run, the direct pi run, the
+    /// `jcode` run, or the `claude` CLI run fails.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         match self {
             Executor::Command { command } => run_command(command, req).await,
             Executor::Sdk => run_sdk(req).await,
             Executor::Pi => run_pi_direct(req).await,
+            Executor::Jcode => run_jcode(req).await,
             Executor::Claude => run_claude(req).await,
         }
     }
@@ -868,6 +885,89 @@ fn build_claude_config(req: &PromptRun<'_>) -> ClaudeRunnerConfig {
     }
 }
 
+/// `Jcode`-backend execution: run the prompt as a `jcode run --ndjson`
+/// subprocess ([`crate::backend::jcode`]) under cruise's private `JCODE_HOME`,
+/// with no seher provider resolution involved and, unlike [`run_sdk`], no
+/// fallback provider to hop to on a rate limit.
+///
+/// jcode has no in-process tool registration, so cruise's tools are served to
+/// it over a per-run Unix socket by a [`ToolBridge`]: the `cruise mcp-bridge`
+/// server jcode spawns relays every call back here, which is what keeps the
+/// handlers' in-process state (the terminal `ask_user` prompt, the plan-persist
+/// flag, the title / PR-metadata stores) authoritative. The bridge is started
+/// once for the whole run, including its retries, and torn down on return.
+///
+/// A [`ChunkOutcome::Limited`] retries the *same* model with exponential
+/// backoff ([`crate::step::command::calculate_backoff`]: 2s doubling to a 60s
+/// cap), mirroring the command backend's rate-limit handling, up to
+/// `req.max_retries` attempts.
+///
+/// Retries deliberately start from `req.resume` (the caller's session), not the
+/// aborted attempt's session id: re-sending the same prompt into a
+/// partially-answered session would duplicate context.
+async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    let on_delta = req.stream.and_then(|s| s.on_stdout);
+    let home = jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
+    let bridge = ToolBridge::start(req.tools.clone())?;
+    let (provider, model, effort) = jcode::parse_model_ref(req.model_or_mode)?;
+
+    let mut attempts = 0;
+    loop {
+        let config = JcodeRunnerConfig {
+            model: model.clone(),
+            provider: provider.clone(),
+            effort,
+            cwd: req.working_dir.map(Path::to_path_buf),
+            resume_session_id: req.resume.clone(),
+            home: home.clone(),
+            tool_socket: bridge.socket_path().to_path_buf(),
+            env: req.env.clone(),
+            cancel: req.cancel_token.cloned(),
+            binary: None,
+        };
+        let rx_std = stream_jcode_agent(config, req.prompt.to_string());
+        let outcome = stream_to_outcome(rx_std, on_delta, req.cancel_token, None).await?;
+
+        match outcome {
+            ChunkOutcome::Done { output, session } => {
+                return Ok(PromptOutcome {
+                    result: PromptResult {
+                        output,
+                        stderr: String::new(),
+                    },
+                    session_id: session,
+                });
+            }
+            ChunkOutcome::Failed { message, .. } => return Err(CruiseError::CommandError(message)),
+            ChunkOutcome::Limited { message, .. } => {
+                if attempts < req.max_retries {
+                    attempts += 1;
+                    let delay = crate::step::command::calculate_backoff(attempts);
+                    if let Some(cb) = req.on_notice {
+                        cb(&format!(
+                            "Rate limit detected. Retrying in {:.1}s... ({attempts}/{})",
+                            delay.as_secs_f64(),
+                            req.max_retries
+                        ));
+                    }
+                    tokio::select! {
+                        biased;
+                        () = maybe_cancelled(req.cancel_token) => return Err(CruiseError::Interrupted),
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                    continue;
+                }
+                return Err(CruiseError::CommandError(message));
+            }
+            ChunkOutcome::Closed { .. } => {
+                return Err(CruiseError::Other(
+                    "jcode stream closed before completion".to_string(),
+                ));
+            }
+        }
+    }
+}
+
 /// Build [`PiRunnerOptions`] straight from `req`, with no seher provider
 /// resolution involved. `model_ref` is `req.model_or_mode` — a raw model
 /// reference in `Pi` mode (see [`Executor::step_model_or_mode`] /
@@ -1244,6 +1344,10 @@ mod tests {
         Executor::Claude
     }
 
+    fn jcode_executor() -> Executor {
+        Executor::Jcode
+    }
+
     #[test]
     fn new_picks_sdk_when_sdk_set() {
         let e = Executor::new(Some("seher"), &[]);
@@ -1253,7 +1357,7 @@ mod tests {
 
     #[test]
     fn new_picks_sdk_for_any_other_sdk_value() {
-        // Any sdk value other than "pi" / "claude" dispatches to
+        // Any sdk value other than "pi" / "jcode" / "claude" dispatches to
         // Executor::Sdk; rejecting unknown values is validate_sdk's job, not
         // Executor::new's.
         let e = Executor::new(Some("claude-terminal"), &[]);
@@ -1349,6 +1453,31 @@ mod tests {
         assert_eq!(
             e.plan_model_or_mode(Some("claude-opus-4-6"), None),
             Some("claude-opus-4-6".to_string())
+        );
+        assert_eq!(e.plan_model_or_mode(None, None), None);
+    }
+
+    #[test]
+    fn new_picks_jcode_when_sdk_is_jcode() {
+        let e = Executor::new(Some("jcode"), &[]);
+        assert!(e.is_sdk());
+        assert!(matches!(e, Executor::Jcode));
+    }
+
+    #[test]
+    fn jcode_model_passes_through_model_reference() {
+        // Jcode mode passes model_or_mode straight through as a
+        // `provider/model[:effort]` reference in jcode's own namespace (never
+        // reinterpreted as a mode key).
+        let e = jcode_executor();
+        assert_eq!(
+            e.step_model_or_mode(Some("claude/claude-opus-5:high"), Some("openai/gpt-5.6")),
+            Some("claude/claude-opus-5:high".to_string())
+        );
+        assert_eq!(e.step_model_or_mode(None, None), None);
+        assert_eq!(
+            e.plan_model_or_mode(Some("openai/gpt-5.6"), Some("claude/claude-opus-5")),
+            Some("openai/gpt-5.6".to_string())
         );
         assert_eq!(e.plan_model_or_mode(None, None), None);
     }

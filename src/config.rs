@@ -50,6 +50,13 @@ pub struct WorkflowConfig {
     ///   `plan_model` / per-step `model` are plain model references
     ///   (`"provider/model[:thinking]"` or a bare `"model"`; unset lets pi
     ///   auto-select), not mode keys.
+    /// - `"jcode"` — drives the `jcode` CLI as an NDJSON subprocess under
+    ///   cruise's own `JCODE_HOME`, so its credentials and sessions stay
+    ///   separate from the user's `~/.jcode` (sign in with `cruise login`).
+    ///   `model` / `plan_model` / per-step `model` are `provider/model`
+    ///   references in jcode's own provider/model namespace, with an optional
+    ///   `:effort` suffix (unset lets jcode pick its configured default), not
+    ///   mode keys.
     /// - `"claude"` — drives the `claude` CLI in-process through
     ///   `claude-agent-sdk`, with no seher provider resolution. `model` /
     ///   `plan_model` / per-step `model` are plain `claude --model` names with
@@ -616,14 +623,14 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
 }
 
 /// SDK values accepted by [`validate_sdk`].
-const SUPPORTED_SDKS: &[&str] = &["seher", "pi", "claude"];
+const SUPPORTED_SDKS: &[&str] = &["seher", "pi", "jcode", "claude"];
 
 /// Validate the top-level execution backend selection.
 ///
 /// Exactly one of `command` or `sdk` must be specified:
 /// - both set -> ambiguous, rejected.
 /// - neither set -> nothing to run prompts with, rejected.
-/// - `sdk` set to anything other than `"seher"` / `"pi"` / `"claude"` -> rejected.
+/// - `sdk` set to anything other than a [`SUPPORTED_SDKS`] value -> rejected.
 ///
 /// An empty `command` list counts as "not specified" so that `sdk`-only configs
 /// (where `command` defaults to `[]`) are accepted.
@@ -3392,6 +3399,18 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(validate_sdk(&config).is_ok(), "sdk: claude should be valid");
+    }
+
+    #[test]
+    fn test_validate_sdk_ok_jcode() {
+        let yaml = r"
+sdk: jcode
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(validate_sdk(&config).is_ok(), "sdk: jcode should be valid");
     }
 
     #[test]

@@ -142,6 +142,33 @@ pub enum Executor {
 | A. jcode-sdk vendor | `crates/jcode-sdk`（+path 依存 `jcode-harness-api`, `jcode-transport`）を vendor（MIT）。`launch(LaunchOptions{jcode_home: <cruise data dir>/jcode-home, inherit_logins: false, env: {JCODE_NO_TELEMETRY=1}, ..})` | **フォールバック**（B' スパイク不成立時のみ）。型付きイベント・`set_api_key`・`peek_session`・`attach_session` が使える。ただし publish=false crate の path 依存は crates.io publish を壊すため、採用する場合は 3 crate を自名義（`cruise-jcode-*`）で publish + `[patch.crates-io]` にする（ゴール 7）。 |
 | C. jcode フォークで in-process | `Registry` に独自 `Arc<dyn Tool>` 注入 | 不採用。82 crates の追随コスト + `Registry` に公開登録 API が無くフォーク改造必須。PROHIBITED（jcode フォーク禁止）。 |
 
+#### P3 冒頭スパイク結果（2026-08-29 実施 / `jcode v0.81.1 (cae6d2a57)` / macOS arm64）
+
+**判定: 案 B' 成立 → 採用（vendor なし、ゴール 7 維持）。** 検証項目 (1)–(8) すべて成立。
+検証は使い捨ての `JCODE_HOME`（`/tmp` 配下）+ ローカル mock OpenAI 互換サーバ（`[providers.spike]` プロファイル）で行い、
+ユーザの `~/.jcode` には読み書きとも触れていない。
+
+| # | 検証項目 | 結果 | 根拠 |
+|---|---|---|---|
+| (1) | `JCODE_HOME` が home を切り替える | **成立** | fresh dir で `jcode auth status` が全 provider `not_configured`。API キー投入先が `$JCODE_HOME/config/jcode/anthropic.env`（`0600`）。`config.toml` / `sessions/` / `mcp.json` / `logs/` すべて `$JCODE_HOME` 配下に生成 |
+| (2) | `run` の permission auto-approve | **成立（設定不要）** | `jcode run` は MCP ツール呼び出しを無承認で実行（`tool_start` → `tool_exec` → `tool_done` が連続、承認プロンプトなし）。`config.toml` に permission キーは存在しない |
+| (3) | `--api-key` 非対話投入 | **成立（CLI で完結）** | `printf '<key>\n' \| jcode login <provider> --no-validate` が stdin からキーを読み取り保存（`Stored at $JCODE_HOME/config/jcode/anthropic.env`）。`jcode login --api-key` は openai-compatible / カスタムプロファイル専用なので、API キー provider は stdin 投入を使う |
+| (4) | `--status` 相当 | **成立** | `jcode auth status --json` → `{"any_available": bool, "providers": [{id, display_name, status, method, ...}]}`。モデル一覧は `jcode model list [--json]`（未認証でも列挙可） |
+| (5) | `--resume` | **成立** | `--resume <id>` で同一 `session_id` を再利用し履歴を継続（3 ターン目のリクエストに 1・2 ターン目の messages が含まれることを mock 側で確認）。未知 id は `Error: No session found matching '<id>'` |
+| (6) | transcript 診断の代替 | **成立** | `$JCODE_HOME/sessions/<session_id>.json`（キー: `id`/`title`/`messages`/`model`/`working_dir`/`status` ...）。P5 の `read_sdk_transcript` 置換先 |
+| (7) | 固定 mcp.json + env 継承 | **成立** | `jcode run` の env に置いた `CRUISE_TOOL_SOCKET` が jcode の spawn する stdio MCP server プロセスにそのまま継承される（server 側で `env` をダンプして確認）。ハンドシェイクは `initialize`（`protocolVersion: 2024-11-05`）→ `notifications/initialized` → `tools/list`。`tools/call` の `params.name` は**プレフィックス除去後の素名**（`spike_probe`）。モデルに露出する名前は `mcp__cruise__<tool>` |
+| (8) | 並行安全性 | **成立** | 同一 `JCODE_HOME` で 6 並行 `jcode run`（2 リポジトリ）→ 全て別 `session_id` で成功、`sessions/` は 1 セッション 1 ファイル、`config.toml` も破損なし |
+
+付随して確定した事項:
+
+- **NDJSON イベント形**（`type` フィールドで判別）: `start{session_id, model, provider}` / `connection_type` / `connection_phase` / `text_delta{text}` / `reasoning_delta` / `tool_start{id,name}` / `tool_input{delta}` / `tool_exec` / `tool_done{id,name,output,error}` / `message_end{stop_reason}` / `done{text, session_id, usage, ...}` / `error{message, session_id, ...}`。`done.text` は**ターン全体の確定テキスト**なので `Done(text)` にそのまま使える。
+- **project-local MCP 設定の実測**: 対象 repo の `.mcp.json` に server 名 `cruise` があると `$JCODE_HOME/mcp.json` の `cruise` エントリを**完全に置換**し、cruise のツールがモデルから消える（露出が `mcp__cruise__<project の tool>` だけになる）。別名 server は共存する（両方露出）。探索は `-C` で指定した**そのディレクトリのみ**（親ディレクトリは辿らない）→ 検知は `working_dir` 直下の 3 パスで十分。PROHIBITED §6 のとおり、`cruise` 衝突は明確なエラー、別名 server は警告。
+- **effort 指定**: `jcode run` に `--effort` 相当のフラグは**無い**。jcode の reasoning effort は `[provider] {openai,anthropic}_reasoning_effort` config キーで、env override `JCODE_OPENAI_REASONING_EFFORT` / `JCODE_ANTHROPIC_REASONING_EFFORT` が存在する（バイナリのシンボルで確認）。受理値は `none|minimal|low|medium|high|xhigh|max`（cruise の 5 段は真部分集合）。→ **子プロセス env で渡す**（共有 `config.toml` を書き換えないので並行安全）。effort 非対応の provider/model では無視される（不正値でも run は失敗しないことを mock で確認）。
+- **モデル参照**: `--provider <p>` / `--model <m>` / `--provider-profile <name>`。`--model` に effort suffix は付けられないので `provider/model[:effort]` の `:effort` は必ず分離してから渡す。
+- **プロンプト受け渡し**: `<MESSAGE>` は argv。600KB のプロンプトが問題なく通ることを確認。
+- **バージョン**: `jcode version --json` の `semver` フィールドでバージョン floor を判定できる。floor は本スパイクで検証した **0.81.1**。
+- **対象リポジトリ汚染なし**: `jcode run -C <repo>` 後の `git status -uall` が空（`.jcode/` 等の作業ファイルを残さない）。
+
 実装（案 B' 前提。案 A 採用時も写像は同一）:
 - `jcode_home` は cruise の既存データディレクトリ慣行に従う固定パス（Linux 例: `~/.local/share/cruise/jcode-home`。macOS は既存コードの流儀に合わせる）でセッション永続化 → resume は `--resume <id>`（案 A: `attach_session(id)`）。セッション肥大は jcode の retention 機構があれば設定、なければ初回リリースでは対応しない。
 - イベント → StreamChunk 写像: `text_delta → Delta`、turn 完了 → `Done(text)`、セッション確定 → `Session(id)`、429/limit 系エラー → `Limit`、その他 → `Error`。未知イベントは無視してログのみ（jcode の minor bump 耐性）。

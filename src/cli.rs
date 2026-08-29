@@ -61,6 +61,15 @@ pub enum Commands {
     Config(ConfigArgs),
     /// Execute the workflow config directly in the current directory (no plan, no worktree, no PR).
     Exec(ExecArgs),
+    /// Sign in to a model provider for the `jcode` SDK backend.
+    ///
+    /// Cruise keeps its jcode credentials in its own `JCODE_HOME`, separate
+    /// from your `~/.jcode`, so signing in here never touches your own jcode
+    /// login.
+    Login(LoginArgs),
+    /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
+    #[command(name = "mcp-bridge", hide = true)]
+    McpBridge(McpBridgeArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -240,6 +249,35 @@ pub struct ExecArgs {
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct LoginArgs {
+    /// Provider to sign in to (e.g. `claude`, `openai`, `anthropic-api`).
+    /// Omit to let jcode's interactive picker choose.
+    pub provider: Option<String>,
+
+    /// Store an API key non-interactively instead of running the OAuth flow.
+    ///
+    /// The key is read from the `CRUISE_LOGIN_API_KEY` environment variable if
+    /// set, otherwise from piped stdin. Requires a provider argument. The key is
+    /// handed to jcode, which stores it under cruise's `JCODE_HOME`; cruise
+    /// never writes it to its own config.
+    #[arg(long, conflicts_with = "status")]
+    pub api_key: bool,
+
+    /// List the providers configured in cruise's jcode home and the models
+    /// available to them, then exit.
+    #[arg(long)]
+    pub status: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct McpBridgeArgs {
+    /// Unix socket of the parent cruise run's tool server. Defaults to the
+    /// `CRUISE_TOOL_SOCKET` environment variable, which jcode passes down.
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<std::path::PathBuf>,
 }
 
 pub fn parse_cli() -> Cli {
@@ -723,6 +761,89 @@ mod tests {
                 assert_eq!(args.rate_limit_retries, 2);
             }
             _ => panic!("expected Exec subcommand"),
+        }
+    }
+
+    // -- Login subcommand ------------------------------------------------------
+
+    #[test]
+    fn test_login_subcommand_without_arguments_is_the_interactive_flow() {
+        // Given: `cruise login` with nothing else
+        let cli = Cli::parse_from(["cruise", "login"]);
+        // When/Then: no provider, no flags -- jcode's own picker takes over
+        match cli.command {
+            Some(Commands::Login(args)) => {
+                assert_eq!(args.provider, None);
+                assert!(!args.api_key);
+                assert!(!args.status);
+            }
+            _ => panic!("expected Login subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_login_subcommand_passes_the_provider_through() {
+        let cli = Cli::parse_from(["cruise", "login", "anthropic-api"]);
+        match cli.command {
+            Some(Commands::Login(args)) => {
+                assert_eq!(args.provider.as_deref(), Some("anthropic-api"));
+            }
+            _ => panic!("expected Login subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_login_api_key_takes_a_provider_and_no_inline_value() {
+        // The key must never be a CLI argument (it would land in the process
+        // list), so --api-key is a bare flag next to the provider.
+        let cli = Cli::parse_from(["cruise", "login", "--api-key", "openai-api"]);
+        match cli.command {
+            Some(Commands::Login(args)) => {
+                assert!(args.api_key);
+                assert_eq!(args.provider.as_deref(), Some("openai-api"));
+            }
+            _ => panic!("expected Login subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_login_status_flag_parses() {
+        let cli = Cli::parse_from(["cruise", "login", "--status"]);
+        match cli.command {
+            Some(Commands::Login(args)) => assert!(args.status),
+            _ => panic!("expected Login subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_login_api_key_and_status_conflict() {
+        assert!(
+            Cli::try_parse_from(["cruise", "login", "--api-key", "--status"]).is_err(),
+            "--api-key and --status are mutually exclusive"
+        );
+    }
+
+    // -- mcp-bridge subcommand -------------------------------------------------
+
+    #[test]
+    fn test_mcp_bridge_subcommand_defaults_to_the_socket_environment_variable() {
+        // Given: `cruise mcp-bridge` exactly as registered in mcp.json
+        let cli = Cli::parse_from(["cruise", "mcp-bridge"]);
+        // When/Then: no --socket, so the env var supplies the path
+        match cli.command {
+            Some(Commands::McpBridge(args)) => assert_eq!(args.socket, None),
+            _ => panic!("expected McpBridge subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_bridge_socket_flag_overrides() {
+        let cli = Cli::parse_from(["cruise", "mcp-bridge", "--socket", "/tmp/x.sock"]);
+        match cli.command {
+            Some(Commands::McpBridge(args)) => {
+                assert_eq!(args.socket, Some(std::path::PathBuf::from("/tmp/x.sock")));
+            }
+            _ => panic!("expected McpBridge subcommand"),
         }
     }
 

@@ -1,5 +1,20 @@
 // Tauri GUI entry point - wired up in Phase 1 implementation.
 fn main() {
+    // `sdk: jcode` registers `<current_exe> mcp-bridge` as its MCP server in
+    // `$JCODE_HOME/mcp.json`, and the GUI runs prompts in-process (via
+    // `cruise::planning::run_plan_prompt_template`), so `current_exe` is *this*
+    // binary whenever a session starts from the GUI. Serving the subcommand here
+    // is what keeps cruise's tools reachable in that case; without it jcode
+    // would spawn a GUI window instead of a tool bridge and the model would lose
+    // `submit_plan` / `ask_user`.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == "mcp-bridge") {
+        if let Err(e) = cruise::mcp_bridge::run(None) {
+            eprintln!("cruise mcp-bridge: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     fix_path_for_gui();
     cruise_gui::run();
 }
