@@ -29,6 +29,17 @@ PR creation info becomes available inside `after-pr` steps.
 
 Regular variables (`{input}`, `{plan}`, etc.) remain usable.
 
+Prompt steps in `after-pr` are commit-guarded by default just like prompts in the main workflow. If an after-PR prompt must intentionally update the PR branch, set `allow_commit: true` on that prompt:
+
+```yaml
+after-pr:
+  resolve-conflict:
+    allow_commit: true
+    prompt: "Resolve the conflict, stage the files, and commit"
+```
+This opt-out is limited to that prompt step and bypasses all commit-guard behavior for it. Guarded prompt attempts to move `HEAD` fail with a commit-guard violation; cruise may restore the original branch reference without resetting the index or worktree, but the step still fails. Command and option steps are not guarded. `allow_commit: true` cannot be placed on a group or workflow-call invocation; put it on the expanded prompt step.
+
+
 ## Constraints
 
 - **Errors are downgraded to warnings**: if an `after-pr` step fails, the workflow continues (no fail-fast). The model fits side effects like pushing labels, posting notifications, etc.

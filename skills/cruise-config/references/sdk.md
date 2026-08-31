@@ -63,6 +63,12 @@ jcode cannot register custom tools in-process, so cruise's tools reach the model
 - **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing. The one exception is `skip_step` (see below), which is registered only on steps that need it.
 - **Session continuity**: planning's plan/fix/ask turns resume the same backend session, so the agent keeps its context between turns.
 
+## Commit guard
+
+SDK prompt steps are protected from advancing Git `HEAD` by default. Set `allow_commit: true` on a prompt that is intentionally expected to create commits or otherwise move `HEAD`; omitted and `false` values keep the guard enabled and false values are omitted when configs are serialized. The `true` value bypasses all commit-guard behavior for that prompt. A guarded movement is reported as a commit-guard violation and fails the step, even if cruise restores the original branch reference without touching the index or worktree.
+
+This guard covers both `sdk: jcode` and `sdk: claude` prompt execution. It does not apply to command or option steps, planning/title/PR-metadata calls, or cruise-owned PR worktree commits. `allow_commit: true` belongs on the actual prompt step, not a `group:` or `workflow_call:` invocation (those call sites reject the override).
+
 ### `skip_step` — declaring intentional no-changes (`if.no-file-changes` steps only)
 
 A prompt step with an `if.no-file-changes` condition (`failed` or `retry`) additionally gets a `skip_step(reason)` tool: the agent calls it to declare that leaving the workspace unchanged this turn is the deliberate, correct outcome (for example, the plan explicitly says not to add tests), which disables that step's `if.no-file-changes` action for the current attempt. A plain-text alternative that needs no tool support at all — a `NO_CHANGES_INTENTIONAL: <reason>` line anchored at the start of a line in the step's output — has the same effect and works in `command:` mode too; see `flow-control.md` for both.

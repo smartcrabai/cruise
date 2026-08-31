@@ -64,7 +64,7 @@ steps:
 - Steps inside a group definition cannot have nested `group:` references.
 - Steps inside a group definition cannot have an individual `if:` (the group's `if:` applies to the whole group).
 - Call-site steps cannot have an individual `if:`.
-- The legacy style of writing `prompt` / `prompt_file` / `command` alongside `group:` on a call-site step is rejected.
+- `allow_commit: true` is rejected on a group call site because the call site cannot override the expanded prompt steps; set it on the inner prompt instead.
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
 - A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.

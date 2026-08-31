@@ -249,6 +249,11 @@ fn expand_steps(
                      Please migrate to groups.<name>.steps block style."
                 )));
             }
+            if step.allow_commit {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses allow_commit on a group call; set it on the inner prompt step"
+                )));
+            }
 
             // Look up group definition
             let group_def = groups.get(group_name).ok_or_else(|| {
@@ -683,6 +688,24 @@ steps:
                 || msg.contains("move"),
             "expected migration hint in: {msg}"
         );
+    }
+
+    #[test]
+    fn test_compile_group_call_rejects_allow_commit_override() {
+        let yaml = r"
+groups:
+  review:
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  review-pass:
+    group: review
+    allow_commit: true
+";
+        let result = compile(parsed(yaml));
+        assert!(result.is_err());
+        assert!(err_string(result).contains("allow_commit"));
     }
 
     #[test]

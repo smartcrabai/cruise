@@ -76,6 +76,11 @@ impl TryFrom<StepConfig> for StepKind {
             }));
         }
 
+        if config.allow_commit {
+            return Err(CruiseError::InvalidStepConfig(
+                "allow_commit is only supported on prompt steps".to_string(),
+            ));
+        }
         // Command step: `command` field is present without `option`.
         if let Some(cmd) = config.command
             && config.option.is_none()
@@ -200,6 +205,14 @@ mod tests {
             }
             _ => panic!("Expected Command step"),
         }
+    }
+
+    #[test]
+    fn allow_commit_is_rejected_on_command_steps() {
+        let mut config = make_command_step();
+        config.allow_commit = true;
+        let result = StepKind::try_from(config);
+        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
     }
 
     #[test]

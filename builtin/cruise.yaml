@@ -573,6 +573,7 @@ after-pr:
       git merge "origin/$base" --no-edit
   resolve-conflict:
     skip: prev.success
+    allow_commit: true
     prompt: |
       A conflict with the base branch occurred during `git merge`.
       Check the unresolved files with `git status`, resolve all conflict
@@ -586,6 +587,7 @@ after-pr:
       gh pr checks {pr.number} --watch
   fix-ci-error:
     skip: prev.success
+    allow_commit: true
     prompt: |
       The GitHub Actions CI for PR #{pr.number} is failing.
       Identify the failing check with `gh pr checks {pr.number}`,

@@ -165,6 +165,10 @@ pub struct StepConfig {
 
     /// Inline prompt body (prompt steps only; use `prompt` or `prompt_file`).
     pub prompt: Option<String>,
+    /// Allow this prompt step to create commits or otherwise advance Git HEAD.
+    /// Defaults to `false`; false values are omitted when serialized.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_commit: bool,
 
     /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
@@ -312,6 +316,14 @@ pub struct GroupConfig {
 
 fn default_true() -> bool {
     true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if callbacks receive a field reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Default `retry.base_delay_ms`.
@@ -864,6 +876,11 @@ fn validate_step_groups(
                     "step '{step_name}' has both a group and an individual 'if' condition; use only the group's 'if'"
                 )));
             }
+            if step.allow_commit {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses allow_commit on a group call; set it on the inner prompt step"
+                )));
+            }
         }
     }
 
@@ -1378,6 +1395,26 @@ steps:
     }
 
     #[test]
+    fn test_allow_commit_defaults_false_and_is_omitted() {
+        let config = WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  s1:\n    prompt: hi\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!config.steps["s1"].allow_commit);
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!serialized.contains("allow_commit"));
+    }
+
+    #[test]
+    fn test_allow_commit_round_trips_true() {
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nsteps:\n  s1:\n    prompt: hi\n    allow_commit: true\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(config.steps["s1"].allow_commit);
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(serialized.contains("allow_commit: true"));
+    }
+
+    #[test]
     fn test_plan_model_field() {
         let yaml = r"
 command: [claude, -p]
@@ -1390,6 +1427,18 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.model, Some("sonnet".to_string()));
         assert_eq!(config.plan_model, Some("opus".to_string()));
+    }
+
+    #[test]
+    fn test_allow_commit_is_rejected_on_group_call() {
+        let config = WorkflowConfig::from_yaml(
+            "groups:\n  review:\n    steps:\n      one:\n        prompt: hi\nsteps:\n  review-pass:\n    group: review\n    allow_commit: true\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let Err(error) = validate_groups(&config) else {
+            panic!("group override should be rejected");
+        };
+        assert!(error.to_string().contains("allow_commit"));
     }
     #[test]
     fn test_pr_language_field() {
@@ -3116,6 +3165,7 @@ steps:
             &[
                 "model",
                 "prompt",
+                "allow_commit",
                 "instruction",
                 "plan",
                 "option",

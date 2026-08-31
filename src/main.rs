@@ -9,6 +9,7 @@ mod batch_run;
 mod cancellation;
 mod clean_cmd;
 mod cli;
+mod commit_guard;
 mod condition;
 mod config;
 mod config_cmd;

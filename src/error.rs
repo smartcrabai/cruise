@@ -76,6 +76,9 @@ pub enum CruiseError {
     #[error("interrupted by user (Ctrl+C)")]
     Interrupted,
 
+    #[error("commit guard violation: {0}")]
+    CommitGuardViolation(String),
+
     #[error("{0}")]
     Other(String),
 

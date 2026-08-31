@@ -584,9 +584,14 @@ steps:
       Create an implementation plan for:
       {input}
     timeout: 10m                  # per-step timeout (optional; see Step Timeout)
+    allow_commit: false          # default: guard this prompt from advancing Git HEAD
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
+
+Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
+
+Set `allow_commit: true` on the actual prompt, not a `group:` or `workflow_call:` invocation. The guard is a best-effort same-user policy, not a security boundary: nested or other repositories are not post-checked, and it is disabled outside a Git worktree or without a working directory.
 
 For longer prompts, load the prompt body from a file with `prompt_file`:
 
@@ -693,6 +698,8 @@ after-pr:
 ```
 
 `after-pr` steps run only after PR creation succeeds. They can use all normal template variables plus the PR-specific variables listed below.
+
+Prompt steps in `after-pr` are guarded by the same default. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD`; command and option steps are unaffected.
 
 ### Flow Control
 
@@ -882,6 +889,7 @@ steps:
 - Steps inside a group definition cannot have nested `group:` references or individual `if:` conditions -- the group-level `if:` applies to the entire group.
 - When the group's `if: file-changed` condition triggers, execution jumps back to the **first step of the group** and all group steps re-run.
 - A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
+- A group call site cannot set `allow_commit: true`; set it on the inner prompt step instead.
 
 ### Workflow Composition (`workflow_call`)
 
@@ -918,7 +926,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `nex
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `if`, `timeout`, `env`, etc.) are rejected at validation time.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `if`, `timeout`, `env`, etc.) and `allow_commit: true` are rejected at validation time. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 
