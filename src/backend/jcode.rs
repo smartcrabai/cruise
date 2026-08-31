@@ -25,6 +25,7 @@
 //! the home, so a repository can shadow cruise's registration.
 //! [`check_project_mcp_config`] is the gate for that.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1028,6 +1029,22 @@ fn send_failure(
     let _ = tx.send(chunk);
 }
 
+/// jcode treats a bare `--model` as a cross-provider selector even when
+/// `--provider` is also present. Prefix models handled by its multi-provider
+/// runtime so an ambiguous model id cannot silently override the requested
+/// provider. Concrete provider runtimes already own their bare model ids.
+fn routed_model_arg<'a>(provider: Option<&str>, model: &'a str) -> Cow<'a, str> {
+    let prefix = match provider {
+        Some("anthropic-api") => "claude-api",
+        Some("claude-subprocess") => "claude",
+        Some(
+            provider @ ("claude" | "openai" | "openai-api" | "copilot" | "openrouter" | "bedrock"),
+        ) => provider,
+        _ => return Cow::Borrowed(model),
+    };
+    Cow::Owned(format!("{prefix}:{model}"))
+}
+
 /// Build the `jcode run` invocation for `config`.
 fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Command {
     let binary = resolve_binary(config.binary.as_deref());
@@ -1036,7 +1053,8 @@ fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Co
     // `--quiet` drops jcode's own status chatter, leaving stdout as pure NDJSON.
     command.arg("--quiet");
     if let Some(model) = &config.model {
-        command.arg("--model").arg(model);
+        let model = routed_model_arg(config.provider.as_deref(), model);
+        command.arg("--model").arg(model.as_ref());
     }
     if let Some(provider) = &config.provider {
         command.arg("--provider").arg(provider);
@@ -1508,11 +1526,13 @@ mod tests {
         }
 
         #[test]
-        fn model_provider_resume_and_cwd_reach_the_command_line() {
+        fn provider_and_model_are_bound_in_the_model_route() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let mut cfg = config(tmp.path());
-            cfg.model = Some("claude-opus-5".to_string());
-            cfg.provider = Some("claude".to_string());
+            // A bare GPT model makes jcode switch away from Copilot despite
+            // `--provider copilot`; its routed model form binds both fields.
+            cfg.model = Some("gpt-5.6-sol".to_string());
+            cfg.provider = Some("copilot".to_string());
             cfg.resume_session_id = Some("session_herb_1".to_string());
             cfg.cwd = Some(tmp.path().to_path_buf());
             let args = args_of(&build_command(&cfg, "p"));
@@ -1521,8 +1541,8 @@ mod tests {
                     .position(|a| a == flag)
                     .and_then(|i| args.get(i + 1).cloned())
             };
-            assert_eq!(pair("--model").as_deref(), Some("claude-opus-5"));
-            assert_eq!(pair("--provider").as_deref(), Some("claude"));
+            assert_eq!(pair("--model").as_deref(), Some("copilot:gpt-5.6-sol"));
+            assert_eq!(pair("--provider").as_deref(), Some("copilot"));
             assert_eq!(pair("--resume").as_deref(), Some("session_herb_1"));
             assert_eq!(
                 pair("-C").as_deref(),

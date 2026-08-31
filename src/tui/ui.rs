@@ -773,10 +773,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             format!("{message}\n\nEnter confirm   Esc cancel"),
         ),
         Modal::Publish { trigger_cruise } => {
-            render_publish_modal(frame, app, area, *trigger_cruise)
+            render_publish_modal(frame, app, area, *trigger_cruise);
         }
         Modal::Palette { actions, selected } => {
-            render_palette_modal(frame, app, area, actions, *selected)
+            render_palette_modal(frame, app, area, actions, *selected);
         }
         Modal::Prompt => render_prompt_modal(frame, app, area),
         Modal::Input {
