@@ -167,6 +167,7 @@ Keys are fixed and cannot be configured:
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
 | `Enter` | Edit or commit a single-line field; in a multiline field, insert a newline |
+| `Space` (not editing) | Toggle the source or focused option, cycle available directory/config/repository choices, or toggle the selected skipped step |
 | `Esc` | Leave edit mode |
 | Focused submit button | Submit the current form |
 

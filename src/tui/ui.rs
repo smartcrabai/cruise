@@ -1,8 +1,10 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+};
 
 use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
@@ -12,22 +14,21 @@ use super::forms::{Editor, FormField, NewSessionForm, SourceKind};
 pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
     if area.width < 80 || area.height < 24 {
-        let block = Block::default().borders(Borders::ALL).title("Cruise TUI");
         frame.render_widget(
-            Paragraph::new("Terminal too small — resize to at least 80×24").block(block),
+            Paragraph::new("Terminal too small — resize to at least 80×24")
+                .style(warning(app))
+                .block(panel(app, " Cruise TUI ", true)),
             area,
         );
         return;
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(area);
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .split(area);
     render_header(frame, app, chunks[0]);
     match app.view {
         View::Sessions => render_sessions(frame, app, chunks[1]),
@@ -35,98 +36,118 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         View::RunAll => render_run_all(frame, app, chunks[1]),
     }
     render_footer(frame, app, chunks[2]);
-    if app.modal.is_some() {
-        render_modal(frame, app, area);
+    if let Some(modal) = app.modal.as_ref() {
+        render_modal(frame, app, area, modal);
     }
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let title = match app.view {
-        View::Sessions => "Cruise  /  Sessions",
-        View::NewSession => "Cruise  /  New Session",
-        View::RunAll => "Cruise  /  Run All",
-    };
-    let spinner = if app.is_busy() {
-        ["⠋", "⠙", "⠹", "⠸"][app.spinner_frame]
-    } else {
-        ""
-    };
-    let text = if spinner.is_empty() {
-        title.to_string()
-    } else {
-        format!("{spinner} {title}")
-    };
-    frame.render_widget(Paragraph::new(text).style(accent(app, true)), area);
+    let mut spans = vec![Span::styled(" CRUISE ", selection(app)), Span::raw("  ")];
+    for (view, label) in [
+        (View::Sessions, " 1 Sessions "),
+        (View::NewSession, " 2 New Session "),
+        (View::RunAll, " 3 Run All "),
+    ] {
+        spans.push(Span::styled(
+            label,
+            if app.view == view {
+                active_nav(app)
+            } else {
+                muted(app)
+            },
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if app.is_busy() {
+        let spinner = ["⠋", "⠙", "⠹", "⠸"][app.spinner_frame];
+        spans.push(Span::styled(format!(" {spinner} working"), warning(app)));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(border(app, false)),
+        ),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let status = app.status.as_deref().unwrap_or("Ready");
-    let prompt_badge = if app.prompts.is_empty() {
-        String::new()
-    } else {
-        format!("  prompts:{}", app.prompts.len())
-    };
-    let dropped = if app.dropped_logs == 0 {
-        String::new()
-    } else {
-        format!("  dropped logs:{}", app.dropped_logs)
-    };
-    let text = format!(
-        "{status}{prompt_badge}{dropped}    1 Sessions  2 New  3 Run All  a Actions  ? Help  q Quit"
+    let busy = app.is_busy();
+    let mut spans = vec![
+        Span::styled(
+            if busy { " ◉ " } else { " ● " },
+            if busy { warning(app) } else { success(app) },
+        ),
+        Span::raw(status),
+    ];
+    if !app.prompts.is_empty() {
+        spans.push(Span::styled(
+            format!("  {} prompt(s)", app.prompts.len()),
+            warning(app),
+        ));
+    }
+    if app.dropped_logs > 0 {
+        spans.push(Span::styled(
+            format!("  {} logs dropped", app.dropped_logs),
+            error_style(app),
+        ));
+    }
+    spans.extend([
+        Span::styled("    a", key(app)),
+        Span::styled(" actions", muted(app)),
+        Span::styled("   ?", key(app)),
+        Span::styled(" help", muted(app)),
+        Span::styled("   q", key(app)),
+        Span::styled(" quit", muted(app)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(border(app, false)),
+        ),
+        area,
     );
-    frame.render_widget(Paragraph::new(text).style(accent(app, false)), area);
 }
 
 fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     app.load_tab_data();
-    let sidebar_width = if area.width >= 120 {
-        34
+    let layout = if area.width >= 120 {
+        Layout::horizontal([Constraint::Length(34), Constraint::Min(1)])
     } else {
-        area.width.saturating_sub(2).min(40)
-    };
-    let sections = Layout::default()
-        .direction(if area.width >= 120 {
-            Direction::Horizontal
-        } else {
-            Direction::Vertical
-        })
-        .constraints(if area.width >= 120 {
-            vec![Constraint::Length(sidebar_width), Constraint::Min(1)]
-        } else {
-            vec![Constraint::Length(8), Constraint::Min(1)]
-        })
-        .split(area);
+        Layout::vertical([Constraint::Length(7), Constraint::Min(1)])
+    }
+    .spacing(1);
+    let sections = layout.split(area);
     render_sidebar(frame, app, sections[0]);
     render_detail(frame, app, sections[1]);
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let items = app
-        .sessions
-        .iter()
-        .map(|session| {
-            let title = truncate(
-                session.title_or_input(),
-                area.width.saturating_sub(5) as usize,
-            );
-            let phase = session.phase.label();
-            ListItem::new(Line::from(vec![
-                Span::raw(title),
-                Span::raw(" "),
-                Span::styled(format!("[{phase}]"), phase_style(app, &session.phase)),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    state.select((!app.sessions.is_empty()).then_some(app.selected));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!("Sessions ({})", items.len()));
+    let items = app.sessions.iter().map(|session| {
+        let phase = session.phase.label();
+        let title_width = usize::from(area.width)
+            .saturating_sub(phase.chars().count())
+            .saturating_sub(7) as usize;
+        ListItem::new(Line::from(vec![
+            Span::styled("● ", phase_style(app, &session.phase)),
+            Span::raw(truncate(session.title_or_input(), title_width)),
+            Span::styled(format!(" · {phase}"), phase_style(app, &session.phase)),
+        ]))
+    });
+    let mut state =
+        ListState::default().with_selected((!app.sessions.is_empty()).then_some(app.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(block)
-            .highlight_style(accent(app, true))
-            .highlight_symbol("▶ "),
+            .block(panel(
+                app,
+                format!(" Sessions  {} ", app.sessions.len()),
+                true,
+            ))
+            .highlight_style(selection(app))
+            .highlight_symbol("▸ "),
         area,
         &mut state,
     );
@@ -135,8 +156,9 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(session) = app.active_session() else {
         frame.render_widget(
-            Paragraph::new("No sessions yet. Press 2 to create one.")
-                .block(Block::default().borders(Borders::ALL).title("Detail")),
+            Paragraph::new("\n  No sessions yet\n\n  Press 2 to create one.")
+                .style(muted(app))
+                .block(panel(app, " Detail ", false)),
             area,
         );
         return;
@@ -149,8 +171,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             DetailTab::Log,
         ]
         .into_iter()
-        .map(|tab| Line::from(tab.label()))
-        .collect::<Vec<_>>(),
+        .map(|tab| Line::from(format!(" {} ", tab.label()))),
     )
     .select(match app.tab {
         DetailTab::Info => 0,
@@ -158,16 +179,11 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Plan => 2,
         DetailTab::Log => 3,
     })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(session.title_or_input()),
-    )
-    .highlight_style(accent(app, true));
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
+    .block(panel(app, format!(" {} ", session.title_or_input()), false))
+    .style(muted(app))
+    .highlight_style(active_nav(app))
+    .divider(Span::styled(" │ ", border(app, false)));
+    let vertical = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
     frame.render_widget(tabs, vertical[0]);
     match app.tab {
         DetailTab::Info => render_info(frame, app, session, vertical[1]),
@@ -184,52 +200,39 @@ fn render_info(
     area: Rect,
 ) {
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled("ID       ", accent(app, true)),
-            Span::raw(session.id.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled("Phase    ", accent(app, true)),
+        labeled_line(app, "ID       ", Span::raw(session.id.as_str())),
+        labeled_line(
+            app,
+            "Phase    ",
             Span::styled(session.phase.label(), phase_style(app, &session.phase)),
-        ]),
-        Line::from(vec![
-            Span::styled("Source   ", accent(app, true)),
-            Span::raw(session.config_source.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled("Directory", accent(app, true)),
+        ),
+        labeled_line(app, "Source   ", Span::raw(session.config_source.as_str())),
+        labeled_line(
+            app,
+            "Directory",
             Span::raw(format!(" {}", session.base_dir.display())),
-        ]),
-        Line::from(vec![
-            Span::styled("Workspace", accent(app, true)),
+        ),
+        labeled_line(
+            app,
+            "Workspace",
             Span::raw(workspace_label(session.workspace_mode)),
-        ]),
-        Line::from(vec![
-            Span::styled("Step     ", accent(app, true)),
-            Span::raw(
-                session
-                    .current_step
-                    .clone()
-                    .unwrap_or_else(|| "—".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("PR       ", accent(app, true)),
-            Span::raw(session.pr_url.clone().unwrap_or_else(|| "—".to_string())),
-        ]),
-        Line::from(vec![
-            Span::styled("Issue    ", accent(app, true)),
-            Span::raw(
-                session
-                    .published_issue_url
-                    .clone()
-                    .unwrap_or_else(|| "—".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Input    ", accent(app, true)),
-            Span::raw(session.input.clone()),
-        ]),
+        ),
+        labeled_line(
+            app,
+            "Step     ",
+            Span::raw(session.current_step.as_deref().unwrap_or("—")),
+        ),
+        labeled_line(
+            app,
+            "PR       ",
+            Span::raw(session.pr_url.as_deref().unwrap_or("—")),
+        ),
+        labeled_line(
+            app,
+            "Issue    ",
+            Span::raw(session.published_issue_url.as_deref().unwrap_or("—")),
+        ),
+        labeled_line(app, "Input    ", Span::raw(session.input.as_str())),
     ];
     if let SessionPhase::Failed(error) = &session.phase {
         lines.push(Line::from(vec![
@@ -250,79 +253,66 @@ fn render_info(
         .map(|action| action_label(*action))
         .collect::<Vec<_>>()
         .join(", ");
-    lines.push(Line::from(vec![
-        Span::styled("Actions  ", accent(app, true)),
-        Span::raw(actions),
-    ]));
+    lines.push(labeled_line(app, "Actions  ", Span::raw(actions)));
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Session information"),
-            )
+        Paragraph::new(lines)
+            .block(panel(app, " Session information ", false))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
+fn labeled_line<'a>(app: &TuiApp, name: &'a str, value: Span<'a>) -> Line<'a> {
+    Line::from(vec![Span::styled(name, label(app)), value])
+}
+
 fn error_style(app: &TuiApp) -> Style {
-    if app.display.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-    }
+    colored(app, Color::Rgb(248, 113, 113)).add_modifier(Modifier::BOLD)
 }
 
 fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(dag) = app.active_dag() else {
         frame.render_widget(
-            Paragraph::new("DAG is not available until the workflow is prepared.")
-                .block(Block::default().borders(Borders::ALL).title("DAG")),
+            Paragraph::new("\n  DAG unavailable. Check the session workflow configuration.")
+                .style(muted(app))
+                .block(panel(app, " DAG ", false)),
             area,
         );
         return;
     };
-    let split = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(1)])
+    let split = Layout::horizontal([Constraint::Length(32), Constraint::Min(1)])
+        .spacing(1)
         .split(area);
-    let items = dag
-        .nodes
-        .values()
-        .map(|node| {
-            ListItem::new(Line::from(vec![
-                Span::styled(node.id.clone(), accent(app, true)),
-                Span::raw(format!(" {}", node.step_name)),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    state
-        .select((!items.is_empty()).then_some(app.dag_selected.min(items.len().saturating_sub(1))));
+    let items = dag.nodes.values().map(|node| {
+        ListItem::new(Line::from(vec![
+            Span::styled(node.id.as_str(), accent(app, true)),
+            Span::styled("  ", muted(app)),
+            Span::raw(node.step_name.as_str()),
+        ]))
+    });
+    let mut state = ListState::default().with_selected(
+        (!dag.nodes.is_empty()).then_some(app.dag_selected.min(dag.nodes.len().saturating_sub(1))),
+    );
     frame.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Nodes ({})", dag.nodes.len())),
-            )
-            .highlight_style(accent(app, true))
-            .highlight_symbol("▶ "),
+            .block(panel(app, format!(" Nodes  {} ", dag.nodes.len()), true))
+            .highlight_style(selection(app))
+            .highlight_symbol("▸ "),
         split[0],
         &mut state,
     );
     let mut lines = Vec::new();
-    if let Some(node) = dag
-        .nodes
-        .values()
-        .nth(app.dag_selected.min(dag.nodes.len().saturating_sub(1)))
+    if let Some(node) = state
+        .selected()
+        .and_then(|index| dag.nodes.values().nth(index))
     {
         lines.push(Line::from(vec![
-            Span::styled("Node ", accent(app, true)),
-            Span::raw(format!("{}  {}", node.id, node.step_name)),
+            Span::styled("NODE  ", label(app)),
+            Span::styled(node.id.as_str(), accent(app, true)),
+            Span::raw(format!("  {}", node.step_name)),
         ]));
-        lines.push(Line::from("Incoming dependencies:"));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("INCOMING", label(app))));
         for predecessor in dag.nodes.values().filter(|candidate| {
             candidate
                 .successors
@@ -334,7 +324,7 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 predecessor.id, predecessor.step_name
             )));
         }
-        lines.push(Line::from("Transitions:"));
+        lines.push(Line::from(Span::styled("TRANSITIONS", label(app))));
         for successor in &node.successors {
             lines.push(Line::from(format!(
                 "  {:?}  →  {}",
@@ -343,16 +333,16 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             )));
         }
         if let Some(visited) = node.runtime.visited_at.as_deref() {
-            lines.push(Line::from(format!("Last visited: {visited}")));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("LAST VISITED  ", label(app)),
+                Span::raw(visited),
+            ]));
         }
     }
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Selected node"),
-            )
+        Paragraph::new(lines)
+            .block(panel(app, " Selected node ", false))
             .wrap(Wrap { trim: false }),
         split[1],
     );
@@ -370,30 +360,22 @@ fn render_plan(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(
         Paragraph::new(rendered)
             .scroll((u16::try_from(app.plan_scroll).unwrap_or(u16::MAX), 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Plan (Markdown)"),
-            )
+            .block(panel(app, " Plan  Markdown ", false))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn strip_text_styles(text: Text<'_>) -> Text<'_> {
-    Text::from(
-        text.lines
-            .into_iter()
-            .map(|line| {
-                Line::from(
-                    line.spans
-                        .into_iter()
-                        .map(|span| Span::raw(span.content))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
+    text.lines
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| Span::raw(span.content))
+                .collect::<Line<'_>>()
+        })
+        .collect()
 }
 
 fn render_log(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -405,32 +387,28 @@ fn render_log(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         "Log (paused)"
     };
     frame.render_widget(
-        Paragraph::new(Text::from(
-            visible.into_iter().map(Line::from).collect::<Vec<_>>(),
-        ))
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(visible.into_iter().map(Line::from).collect::<Vec<_>>())
+            .block(panel(app, format!(" {title} "), false))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(4),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ])
-        .split(area);
-    render_session_source(frame, app, rows[1]);
+    let rows = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(area);
     render_session_editors(frame, app, &rows);
+    render_session_source(frame, app, rows[1]);
     render_session_options(frame, app, rows[6]);
     render_session_skips(frame, app, rows[7]);
     render_session_actions(frame, app, rows[8]);
@@ -438,20 +416,28 @@ fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 
 fn render_session_source(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let form = &app.form;
-    let source = format!(
-        "{} Source: {}  (Space toggles)",
-        if form.field == FormField::Source {
-            "▶"
-        } else {
-            " "
-        },
-        match form.source {
-            SourceKind::Directory => "Directory",
-            SourceKind::GitHub => "GitHub",
-        }
-    );
     frame.render_widget(
-        Paragraph::new(source).block(Block::default().borders(Borders::ALL).title("Source")),
+        Paragraph::new(Line::from(vec![
+            field_marker(app, form.field == FormField::Source),
+            Span::styled("SOURCE  ", label(app)),
+            Span::styled(
+                " DIRECTORY ",
+                if form.source == SourceKind::Directory {
+                    active_nav(app)
+                } else {
+                    muted(app)
+                },
+            ),
+            Span::styled(
+                " GITHUB ",
+                if form.source == SourceKind::GitHub {
+                    active_nav(app)
+                } else {
+                    muted(app)
+                },
+            ),
+            Span::styled("   Space to switch", muted(app)),
+        ])),
         area,
     );
 }
@@ -460,11 +446,12 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
     let form = &app.form;
     render_editor(
         frame,
+        app,
         form,
         FormField::Input,
         rows[0],
         "Task description (Enter inserts a new line)",
-        &form.input.text(),
+        &form.input,
     );
     let recent_title = app
         .history_summary
@@ -487,11 +474,12 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
         );
     render_editor(
         frame,
+        app,
         form,
         FormField::WorkingDirectory,
         rows[2],
         &recent_title,
-        &form.working_dir.text(),
+        &form.working_dir,
     );
     let repository_title =
         if form.source == SourceKind::GitHub && !app.github_repositories.is_empty() {
@@ -504,115 +492,115 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
         };
     render_editor(
         frame,
+        app,
         form,
         FormField::Repository,
         rows[3],
         &repository_title,
-        &form.repository.text(),
+        &form.repository,
     );
     render_editor(
         frame,
+        app,
         form,
         FormField::Config,
         rows[4],
         "Workflow config (Space cycles discovered entries)",
-        &form.config.text(),
+        &form.config,
     );
     render_editor(
         frame,
+        app,
         form,
         FormField::Attachments,
         rows[5],
         "Image paths (one per line)",
-        &form.attachments.text(),
+        &form.attachments,
     );
 }
 
 fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let form = &app.form;
-    let options = vec![
-        (
-            FormField::Workspace,
-            format!("Workspace: {}", workspace_label(form.workspace_mode)),
-        ),
-        (
-            FormField::DirtyTree,
-            format!(
-                "Allow dirty current branch: {}",
-                yes_no(form.options.allow_dirty_working_tree)
-            ),
-        ),
-        (
-            FormField::Grill,
-            format!("Grill planning: {}", yes_no(form.options.planning.grill)),
-        ),
-        (
-            FormField::SkipPlanning,
-            format!(
-                "Use input as plan: {}",
-                yes_no(form.options.planning.skip_planning)
-            ),
-        ),
-        (
-            FormField::Noninteractive,
-            format!(
-                "No interactive planning: {}",
-                yes_no(form.options.planning.noninteractive)
-            ),
-        ),
-    ];
-    let option_lines = options
-        .into_iter()
-        .map(|(field, line)| {
-            Line::from(Span::styled(
-                format!("{}{}", if form.field == field { "▶ " } else { "  " }, line),
-                if form.field == field {
-                    accent(app, true)
-                } else {
-                    Style::default()
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
+    let option = |field, name, value, enabled| option_line(app, form, field, name, value, enabled);
+    let columns =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     frame.render_widget(
-        Paragraph::new(Text::from(option_lines)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Options — Space toggles, Tab moves"),
-        ),
-        area,
+        Paragraph::new(vec![
+            option(
+                FormField::Workspace,
+                "Workspace",
+                workspace_label(form.workspace_mode),
+                None,
+            ),
+            option(
+                FormField::DirtyTree,
+                "Allow dirty current branch",
+                yes_no(form.options.allow_dirty_working_tree),
+                Some(form.options.allow_dirty_working_tree),
+            ),
+            option(
+                FormField::Grill,
+                "Grill planning",
+                yes_no(form.options.planning.grill),
+                Some(form.options.planning.grill),
+            ),
+        ]),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            option(
+                FormField::SkipPlanning,
+                "Use input as plan",
+                yes_no(form.options.planning.skip_planning),
+                Some(form.options.planning.skip_planning),
+            ),
+            option(
+                FormField::Noninteractive,
+                "No interactive planning",
+                yes_no(form.options.planning.noninteractive),
+                Some(form.options.planning.noninteractive),
+            ),
+            Line::from(Span::styled("  Tab moves  ·  Space toggles", muted(app))),
+        ]),
+        columns[1],
     );
 }
 
 fn render_session_skips(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    fn collect_labels<'a>(
+        nodes: &'a [crate::workflow::SkippableStepNode],
+        labels: &mut Vec<&'a str>,
+    ) {
+        for node in nodes {
+            labels.push(&node.id);
+            collect_labels(&node.children, labels);
+        }
+    }
+
     let form = &app.form;
-    let available_steps = app
-        .config_defaults
-        .as_ref()
-        .map(|defaults| {
-            defaults
-                .steps
-                .iter()
-                .flat_map(|node| {
-                    std::iter::once(node.id.as_str())
-                        .chain(node.children.iter().map(|child| child.id.as_str()))
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-    let skip_title = if available_steps.is_empty() {
-        "Skipped steps (comma-separated; explicit blank means none)".to_string()
+    let mut labels = Vec::new();
+    if let Some(defaults) = app.config_defaults.as_ref() {
+        collect_labels(&defaults.steps, &mut labels);
+        collect_labels(&defaults.after_pr_steps, &mut labels);
+    }
+    let title = if labels.is_empty() {
+        "Skipped steps  ·  Enter edit".to_string()
     } else {
-        format!("Skipped steps (choices: {available_steps})")
+        let selected = app.skip_cursor % labels.len();
+        format!(
+            "Skipped steps  ·  choice: {}  ·  ↑↓ choose  ·  Space toggle  ·  Enter edit",
+            labels[selected]
+        )
     };
     render_editor(
         frame,
+        app,
         form,
         FormField::SkippedSteps,
         area,
-        &skip_title,
-        &form.skipped.text(),
+        &title,
+        &form.skipped,
     );
 }
 
@@ -625,103 +613,127 @@ fn render_session_actions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let actions = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-    let draft = format!(
-        "{} [ Save as draft ]",
-        if form.field == FormField::SaveDraft {
-            "▶"
-        } else {
-            " "
-        }
-    );
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+    let actions =
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[0]);
+    for (area, title, field) in [
+        (actions[0], "Save draft", FormField::SaveDraft),
+        (actions[1], "Create session and start", FormField::Submit),
+    ] {
+        frame.render_widget(
+            Paragraph::new(title)
+                .alignment(Alignment::Center)
+                .style(if form.field == field {
+                    selection(app)
+                } else {
+                    active_nav(app)
+                }),
+            area,
+        );
+    }
     frame.render_widget(
-        Paragraph::new(draft).block(Block::default().borders(Borders::ALL)),
-        actions[0],
-    );
-    let submit = format!(
-        "{} [ Create session and start ]  configs: {}",
-        if form.field == FormField::Submit {
-            "▶"
-        } else {
-            " "
-        },
-        if config_names.is_empty() {
-            "none"
-        } else {
-            &config_names
-        }
-    );
-    frame.render_widget(
-        Paragraph::new(submit).block(Block::default().borders(Borders::ALL)),
-        actions[1],
+        Paragraph::new(Line::from(vec![
+            Span::styled("  CONFIG SOURCES  ", label(app)),
+            Span::styled(
+                if config_names.is_empty() {
+                    "none"
+                } else {
+                    &config_names
+                },
+                muted(app),
+            ),
+        ])),
+        rows[1],
     );
 }
 
 fn render_editor(
     frame: &mut Frame<'_>,
+    app: &TuiApp,
     form: &NewSessionForm,
     field: FormField,
     area: Rect,
     title: &str,
-    value: &str,
+    editor: &Editor,
 ) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    let focused = form.field == field;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            field_marker(app, focused),
+            Span::styled(
+                title,
+                if focused {
+                    accent(app, true)
+                } else {
+                    muted(app)
+                },
+            ),
+        ])),
+        rows[0],
+    );
     let block = Block::default()
-        .borders(Borders::ALL)
-        .title(if form.field == field {
-            format!("▶ {title}")
-        } else {
-            title.to_string()
-        });
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    match field {
-        FormField::Input => frame.render_widget(form.input.widget(), inner),
-        FormField::WorkingDirectory => frame.render_widget(form.working_dir.widget(), inner),
-        FormField::Repository => frame.render_widget(form.repository.widget(), inner),
-        FormField::Config => frame.render_widget(form.config.widget(), inner),
-        FormField::Attachments => frame.render_widget(form.attachments.widget(), inner),
-        FormField::SkippedSteps => frame.render_widget(form.skipped.widget(), inner),
-        _ => frame.render_widget(Paragraph::new(value), inner),
-    }
+        .borders(Borders::LEFT)
+        .border_style(border(app, focused));
+    let inner = block.inner(rows[1]);
+    frame.render_widget(block, rows[1]);
+    frame.render_widget(editor.widget(), inner);
 }
 
 fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
-    let split = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+    let split = Layout::horizontal([Constraint::Percentage(48), Constraint::Min(1)])
+        .spacing(1)
         .split(area);
     let mut lines = vec![
-        Line::from(format!(
-            "Sessions: {}   Finished: {}/{}",
-            app.batch_rows.len(),
-            app.batch_finished,
-            app.batch_total
-        )),
-        Line::from(format!("Parallelism: {}", app.batch_parallelism)),
+        Line::from(vec![
+            Span::styled("SESSIONS  ", label(app)),
+            Span::styled(app.batch_rows.len().to_string(), accent(app, true)),
+            Span::styled("    FINISHED  ", label(app)),
+            Span::styled(
+                format!("{}/{}", app.batch_finished, app.batch_total),
+                success(app),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("PARALLELISM  ", label(app)),
+            Span::styled(app.batch_parallelism.to_string(), warning(app)),
+        ]),
         Line::from(""),
     ];
     if app.batch_rows.is_empty() {
-        lines.push(Line::from("No Planned or Suspended sessions are ready."));
+        let message = if app
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Run All"))
+        {
+            "No Planned or Suspended sessions were ready."
+        } else {
+            "Use Actions to start Run All."
+        };
+        lines.push(Line::from(Span::styled(message, muted(app))));
     }
     for row in &app.batch_rows {
-        lines.push(Line::from(format!(
-            "{}  {}  [{}]{}",
-            row.id,
-            truncate(&row.title, 36),
-            row.phase,
-            if row.finished { " done" } else { "" }
-        )));
+        let (marker, marker_style, phase_style) = if row.finished {
+            ("✓ ", success(app), success(app))
+        } else {
+            ("● ", warning(app), accent(app, false))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(row.id.as_str(), label(app)),
+            Span::raw(format!("  {}  ", truncate(&row.title, 36))),
+            Span::styled(row.phase.as_str(), phase_style),
+        ]));
     }
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(Block::default().borders(Borders::ALL).title(
+        Paragraph::new(lines).block(panel(
+            app,
             if app.operation_state.batch_cancelled {
-                "Run All (cancelled)"
+                " Run All  cancelled "
             } else {
-                "Run All"
+                " Run All "
             },
+            true,
         )),
         split[0],
     );
@@ -731,54 +743,54 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         .iter()
         .rev()
         .take(height)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
         .rev()
-        .map(Line::from)
+        .map(|line| Line::from(line.as_str()))
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(Text::from(logs))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Latest 2,000 batch log lines"),
-            )
+        Paragraph::new(logs)
+            .block(panel(app, " Batch log  latest 2,000 lines ", false))
             .wrap(Wrap { trim: false }),
         split[1],
     );
 }
 
-fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let Some(modal) = app.modal.as_ref() else {
-        return;
-    };
-    frame.render_widget(Clear, area);
+fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) {
     match modal {
         Modal::Help => render_help_modal(frame, app, area),
-        Modal::Error(error) => frame.render_widget(
-            Paragraph::new(error.as_str())
-                .block(modal_block(app, "Error — Enter/Esc to close"))
-                .wrap(Wrap { trim: false }),
-            centered(area, 70, 8),
+        Modal::Error(error) => {
+            let rect = centered(area, 70, 8);
+            frame.render_widget(Clear, rect);
+            frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .style(error_style(app))
+                    .block(modal_block(app, "Error  Enter/Esc to close"))
+                    .wrap(Wrap { trim: false }),
+                rect,
+            );
+        }
+        Modal::Resize => render_text_modal(
+            frame,
+            app,
+            area,
+            60,
+            5,
+            "Resize",
+            "Terminal too small — resize to at least 80×24",
         ),
-        Modal::Resize => frame.render_widget(
-            Paragraph::new("Terminal too small — resize to at least 80×24")
-                .block(modal_block(app, "Resize"))
-                .wrap(Wrap { trim: false }),
-            centered(area, 60, 5),
-        ),
-        Modal::Confirm { message, .. } => frame.render_widget(
-            Paragraph::new(format!("{message}\n\nEnter confirm   Esc cancel"))
-                .block(modal_block(app, "Confirm"))
-                .wrap(Wrap { trim: false }),
-            centered(area, 70, 7),
+        Modal::Confirm { message, .. } => render_text_modal(
+            frame,
+            app,
+            area,
+            70,
+            7,
+            "Confirm",
+            format!("{message}\n\nEnter confirm   Esc cancel"),
         ),
         Modal::Publish { trigger_cruise } => {
-            render_publish_modal(frame, app, area, *trigger_cruise);
+            render_publish_modal(frame, app, area, *trigger_cruise)
         }
         Modal::Palette { actions, selected } => {
-            render_palette_modal(frame, app, area, actions, *selected);
+            render_palette_modal(frame, app, area, actions, *selected)
         }
         Modal::Prompt => render_prompt_modal(frame, app, area),
         Modal::Input {
@@ -791,25 +803,15 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let body = "Keyboard-only controls\n\n1/2/3  Sessions / New Session / Run All\nTab/Shift-Tab  focus or detail tabs\n↑↓ or j/k  navigate (and move text cursors while editing)   PgUp/PgDn  page\n[/]  detail tabs   a  action palette\no  open next prompt or PR/Issue URL   f  follow log   r  refresh\nEnter  edit/commit/submit single-line fields   Enter  newline in multiline editors\nCtrl+Enter  submit multiline settings   Ctrl+R  toggle Save+Regenerate\nEsc  close edit/modal   ?  help   q/Ctrl-C  quit\n\nNo mouse, clipboard, daemon, or child-owned TTY is used.";
-    frame.render_widget(
-        Paragraph::new(body)
-            .block(modal_block(app, "Help"))
-            .wrap(Wrap { trim: false }),
-        centered(area, 64, 18),
-    );
+    let body = "Keyboard-only controls\n\n1/2/3  Sessions / New Session / Run All\nTab/Shift-Tab  focus or detail tabs\n↑↓ or j/k  navigate (and move text cursors while editing)   PgUp/PgDn  page\n[/]  detail tabs   a  action palette\no  open next prompt or PR/Issue URL   f  follow log   r  refresh\nEnter  edit/commit/submit single-line fields   Enter  newline in multiline editors\nSpace (not editing)  toggle options/source, cycle choices, or toggle a skipped step\nCtrl+Enter  submit multiline settings   Ctrl+R  toggle Save+Regenerate\nEsc  close edit/modal   ?  help   q/Ctrl-C  quit\n\nNo mouse, clipboard, daemon, or child-owned TTY is used.";
+    render_text_modal(frame, app, area, 68, 18, "Keyboard map", body);
 }
 fn render_publish_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, trigger_cruise: bool) {
     let text = format!(
         "Publish this plan as an Issue?\n\nFollow-up @cruise run comment: {}\n\nSpace/↑↓ toggle   Enter publish   Esc cancel",
         if trigger_cruise { "yes" } else { "no" }
     );
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(modal_block(app, "Publish"))
-            .wrap(Wrap { trim: false }),
-        centered(area, 72, 8),
-    );
+    render_text_modal(frame, app, area, 72, 8, "Publish", text);
 }
 
 fn render_palette_modal(
@@ -826,11 +828,11 @@ fn render_palette_modal(
             Line::from(Span::styled(
                 format!(
                     "{}{}",
-                    if idx == selected { "▶ " } else { "  " },
+                    if idx == selected { "▸ " } else { "  " },
                     action_label(*action)
                 ),
                 if idx == selected {
-                    accent(app, true)
+                    selection(app)
                 } else {
                     Style::default()
                 },
@@ -841,12 +843,7 @@ fn render_palette_modal(
         .unwrap_or(u16::MAX)
         .saturating_add(4)
         .min(area.height.saturating_sub(2));
-    frame.render_widget(
-        Paragraph::new(Text::from(items))
-            .block(modal_block(app, "Actions — ↑↓ Enter Esc"))
-            .wrap(Wrap { trim: false }),
-        centered(area, 52, height),
-    );
+    render_text_modal(frame, app, area, 52, height, "Actions  ↑↓ Enter Esc", items);
 }
 
 fn render_prompt_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -864,19 +861,19 @@ fn render_prompt_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 format!(
                     "{}{}{}",
                     if idx == app.prompts.choice {
-                        "▶ "
+                        "▸ "
                     } else {
                         "  "
                     },
                     choice.label,
-                    if matches!(&choice.kind, &OptionChoiceKind::TextInput) {
+                    if choice.kind == OptionChoiceKind::TextInput {
                         " (text)"
                     } else {
                         ""
                     }
                 ),
                 if idx == app.prompts.choice {
-                    accent(app, true)
+                    selection(app)
                 } else {
                     Style::default()
                 },
@@ -888,12 +885,7 @@ fn render_prompt_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     lines.push(Line::from(
         "Enter submit   Esc dismiss (request remains queued)",
     ));
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(modal_block(app, "Prompt"))
-            .wrap(Wrap { trim: false }),
-        centered(area, 78, 14),
-    );
+    render_text_modal(frame, app, area, 78, 14, "Prompt", lines);
 }
 
 fn render_input_modal(
@@ -905,13 +897,11 @@ fn render_input_modal(
     regenerate: bool,
 ) {
     let rect = centered(area, 78, 8);
+    frame.render_widget(Clear, rect);
     let block = modal_block(app, title);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
+    let split = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
     frame.render_widget(editor.widget(), split[0]);
     frame.render_widget(
         Paragraph::new(if regenerate {
@@ -923,52 +913,159 @@ fn render_input_modal(
     );
 }
 
+fn render_text_modal<'a>(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    width: u16,
+    height: u16,
+    title: &str,
+    text: impl Into<Text<'a>>,
+) {
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(modal_block(app, title))
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
 fn modal_block(app: &TuiApp, title: &str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title.to_string())
+    Block::bordered()
+        .border_type(BorderType::Double)
+        .title(format!(" {title} "))
+        .title_style(accent(app, true))
         .border_style(accent(app, true))
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width.saturating_sub(2));
-    let height = height.min(area.height.saturating_sub(2));
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
+    area.centered(
+        Constraint::Length(width.min(area.width.saturating_sub(2))),
+        Constraint::Length(height.min(area.height.saturating_sub(2))),
+    )
+}
+
+fn colored(app: &TuiApp, color: Color) -> Style {
+    if app.display.no_color {
+        Style::default()
+    } else {
+        Style::default().fg(color)
     }
 }
 
 fn accent(app: &TuiApp, bold: bool) -> Style {
-    if app.display.no_color {
-        Style::default().add_modifier(if bold {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        })
+    colored(app, Color::Rgb(94, 234, 212)).add_modifier(if bold {
+        Modifier::BOLD
     } else {
-        Style::default().fg(Color::Cyan).add_modifier(if bold {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        })
+        Modifier::empty()
+    })
+}
+
+fn active_nav(app: &TuiApp) -> Style {
+    accent(app, true).add_modifier(Modifier::UNDERLINED)
+}
+
+fn selection(app: &TuiApp) -> Style {
+    if app.display.no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Rgb(15, 23, 42))
+            .bg(Color::Rgb(94, 234, 212))
+            .add_modifier(Modifier::BOLD)
     }
 }
 
-fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
-    if app.display.no_color {
-        return Style::default();
+fn muted(app: &TuiApp) -> Style {
+    colored(app, Color::Rgb(148, 163, 184))
+}
+
+fn label(app: &TuiApp) -> Style {
+    muted(app).add_modifier(Modifier::BOLD)
+}
+
+fn border(app: &TuiApp, focused: bool) -> Style {
+    if focused {
+        accent(app, false)
+    } else {
+        colored(app, Color::Rgb(71, 85, 105))
     }
-    let color = match phase {
-        SessionPhase::Completed => Color::Green,
-        SessionPhase::Failed(_) => Color::Red,
-        SessionPhase::Running => Color::Yellow,
-        SessionPhase::Suspended => Color::Magenta,
-        _ => Color::White,
+}
+
+fn key(app: &TuiApp) -> Style {
+    warning(app).add_modifier(Modifier::BOLD)
+}
+
+fn success(app: &TuiApp) -> Style {
+    colored(app, Color::Rgb(74, 222, 128))
+}
+
+fn warning(app: &TuiApp) -> Style {
+    colored(app, Color::Rgb(251, 191, 36))
+}
+
+fn panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .title_style(if focused {
+            accent(app, true)
+        } else {
+            label(app)
+        })
+        .border_style(border(app, focused))
+}
+
+fn field_marker(app: &TuiApp, focused: bool) -> Span<'static> {
+    Span::styled(
+        if focused { "▸ " } else { "  " },
+        if focused {
+            accent(app, true)
+        } else {
+            muted(app)
+        },
+    )
+}
+
+fn option_line<'a>(
+    app: &TuiApp,
+    form: &NewSessionForm,
+    field: FormField,
+    name: &'a str,
+    value: &'a str,
+    enabled: Option<bool>,
+) -> Line<'a> {
+    let focused = form.field == field;
+    let value_style = match enabled {
+        Some(true) => success(app),
+        Some(false) => muted(app),
+        None => accent(app, false),
     };
-    Style::default().fg(color)
+    Line::from(vec![
+        field_marker(app, focused),
+        Span::styled(
+            name,
+            if focused {
+                accent(app, true)
+            } else {
+                Style::default()
+            },
+        ),
+        Span::raw("  "),
+        Span::styled(value, value_style),
+    ])
+}
+
+fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
+    match phase {
+        SessionPhase::Completed => success(app),
+        SessionPhase::Failed(_) => error_style(app),
+        SessionPhase::Running => warning(app),
+        SessionPhase::Suspended => colored(app, Color::Rgb(192, 132, 252)),
+        _ => muted(app),
+    }
 }
 
 fn workspace_label(mode: WorkspaceMode) -> &'static str {
@@ -998,7 +1095,13 @@ fn truncate(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn rendered(width: u16, height: u16, no_color: bool) -> String {
+    fn rendered_view_with(
+        width: u16,
+        height: u16,
+        no_color: bool,
+        view: View,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> String {
         let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = crate::application::CruiseApplication::new(
             crate::session::SessionManager::new(temp.path().to_path_buf()),
@@ -1007,6 +1110,8 @@ mod tests {
         let (log_tx, _) = tokio::sync::mpsc::channel(4);
         let mut app = TuiApp::new(application, event_tx, log_tx);
         app.display.no_color = no_color;
+        app.view = view;
+        configure(&mut app);
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal =
             ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
@@ -1022,17 +1127,75 @@ mod tests {
             .collect()
     }
 
+    fn rendered(width: u16, height: u16, no_color: bool) -> String {
+        rendered_view_with(width, height, no_color, View::Sessions, |_| {})
+    }
+
     #[test]
     fn minimum_and_wide_layouts_render_without_small_terminal_notice() {
         let minimum = rendered(80, 24, false);
-        assert!(minimum.contains("Cruise"));
+        assert!(minimum.contains("CRUISE"));
         assert!(minimum.contains("Sessions"));
         assert!(!minimum.contains("Terminal too small"));
 
         let wide = rendered(120, 24, false);
-        assert!(wide.contains("Cruise"));
+        assert!(wide.contains("CRUISE"));
         assert!(wide.contains("Sessions"));
         assert!(wide.contains("Detail"));
+    }
+
+    #[test]
+    fn minimum_new_session_layout_keeps_every_control_visible() {
+        let form = rendered_view_with(80, 24, false, View::NewSession, |_| {});
+        for expected in [
+            "Task description",
+            "SOURCE",
+            "Working directory",
+            "GitHub repository",
+            "Workflow config",
+            "Image paths",
+            "Workspace",
+            "Allow dirty current branch",
+            "Grill planning",
+            "Use input as plan",
+            "No interactive planning",
+            "Skipped steps",
+            "Save draft",
+            "Create session and start",
+        ] {
+            assert!(form.contains(expected), "missing control: {expected}");
+        }
+    }
+
+    #[test]
+    fn skipped_step_navigation_shows_the_current_choice() {
+        let form = rendered_view_with(80, 24, false, View::NewSession, |app| {
+            let step = |id: &str| crate::workflow::SkippableStepNode {
+                id: id.to_string(),
+                expanded_step_ids: vec![id.to_string()],
+                children: Vec::new(),
+            };
+            app.config_defaults = Some(crate::application::NewSessionConfigDefaults {
+                steps: vec![step("build"), step("review")],
+                after_pr_steps: Vec::new(),
+                default_skipped_steps: Vec::new(),
+                resolved_config_key: "test".to_string(),
+            });
+            app.form.field = FormField::SkippedSteps;
+            app.skip_cursor = 1;
+        });
+
+        assert!(form.contains("choice: review"));
+    }
+
+    #[test]
+    fn completed_empty_run_all_reports_no_eligible_sessions() {
+        let run_all = rendered_view_with(160, 24, false, View::RunAll, |app| {
+            app.status = Some("Run All: 0 sessions".to_string());
+        });
+
+        assert!(run_all.contains("No Planned or Suspended sessions were ready."));
+        assert!(!run_all.contains("Use Actions to start Run All."));
     }
 
     #[test]
