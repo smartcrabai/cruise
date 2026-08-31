@@ -77,7 +77,7 @@ cruise run
 cruise exec "do this"
 
 # Open the full interactive keyboard client
-cruise tui
+cruise
 
 # List and manage sessions with the CLI selector
 cruise list
@@ -85,20 +85,20 @@ cruise list
 # Remove closed/merged PR sessions and terminal no-PR sessions
 cruise clean
 
-# Legacy: no subcommand is treated as `cruise plan`
+# Legacy: positional input without a subcommand is treated as `cruise plan`
 cruise "implement the feature"
 ```
 
 ### TUI (Interactive Keyboard Client)
 
-`cruise tui` is cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
+Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
 
 ```sh
 # Open the interactive client
-cruise tui
+cruise
 ```
 
-Typical flow: run `cruise tui`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+Typical flow: run `cruise`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
 
 The TUI requires an interactive TTY on macOS or Linux. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh`.
 
@@ -158,7 +158,6 @@ Commands:
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
   exec         Execute the workflow config directly in the current directory
-  tui         Open the interactive keyboard client for session management
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
   config       Show or update application-level configuration
@@ -169,13 +168,13 @@ Options:
       --no-force-exec          Ignore force_exec: true and plan as usual
 ```
 
-#### `cruise tui`
+#### `cruise`
 
 ```
-cruise tui
+cruise
 ```
 
-Opens the keyboard-only TUI. It requires a macOS/Linux interactive TTY; see [TUI (Interactive Keyboard Client)](#tui-interactive-keyboard-client) for its screens, workflows, keymap, responsive layout, and log behavior. Use the existing CLI commands for automation, JSON, and CI.
+Running `cruise` with no arguments opens the keyboard-only TUI. It requires a macOS/Linux interactive TTY; see [TUI (Interactive Keyboard Client)](#tui-interactive-keyboard-client) for its screens, workflows, keymap, responsive layout, and log behavior. Use the CLI subcommands for automation, JSON, and CI.
 
 #### `cruise plan`
 
@@ -1162,9 +1161,9 @@ Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: fal
 
 ## Stale Session Detection
 
-When `cruise list`, `cruise tui`, or the desktop GUI loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
+When `cruise list`, the TUI (`cruise`), or the desktop GUI loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Suspended sessions can be resumed from `cruise list`, `cruise tui`, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+Suspended sessions can be resumed from `cruise list` or the TUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
 On resume, cruise restores more than just the current step: while running, each step's pre-execution runtime context -- the `{prev.*}` variables and file-change-tracking snapshots -- is best-effort persisted to `dag.json` in the session directory. `cruise run` loads this file when resuming an interrupted session and restores that context, so `{prev.*}` references and file-change detection behave exactly as they would have without the interruption. A save failure, or a missing/corrupt `dag.json`, falls back to the previous resume behavior (no restored context) with a warning; sessions created before this existed are unaffected.
 

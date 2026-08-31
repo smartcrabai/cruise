@@ -92,9 +92,6 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Login(args)) => login_cmd::run(&args),
-        Some(cli::Commands::Tui) => tui::run()
-            .await
-            .map_err(|error| error::CruiseError::Other(error.to_string())),
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             plan_cmd::launch_background_plan(
@@ -106,8 +103,16 @@ async fn run() -> error::Result<()> {
             )
             .await
         }
+        None if input.is_none()
+            && !skip_planning
+            && !no_force_exec
+            && repo.is_none()
+            && images.is_empty() =>
+        {
+            tui::run().await
+        }
         None => {
-            // Backward compat: no subcommand -> treat as `plan`.
+            // Backward compat: positional input and planning options use `plan`.
             let plan_args = cli::PlanArgs {
                 input,
                 config: None,

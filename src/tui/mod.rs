@@ -29,7 +29,7 @@ use registry::UiEvent;
 pub async fn run() -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(CruiseError::Other(
-            "cruise tui requires an interactive TTY".to_string(),
+            "cruise requires an interactive TTY".to_string(),
         ));
     }
     let data_dir = crate::paths::data_dir()?;
@@ -129,7 +129,7 @@ mod tests {
     fn non_tty_error_is_descriptive() {
         let error = io::Error::new(
             io::ErrorKind::NotConnected,
-            "cruise tui requires an interactive TTY",
+            "cruise requires an interactive TTY",
         );
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
         assert!(error.to_string().contains("interactive TTY"));

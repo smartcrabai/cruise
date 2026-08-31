@@ -38,7 +38,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Initial input (legacy: no subcommand is treated as `plan`).
+    /// Initial input (legacy: positional input without a subcommand uses `plan`).
     #[arg(conflicts_with = "plan")]
     pub input: Option<String>,
 }
@@ -70,8 +70,6 @@ pub enum Commands {
     /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
     #[command(name = "mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
-    /// Launch the keyboard-only Ratatui client.
-    Tui,
 }
 
 #[derive(Parser, Debug)]
@@ -311,6 +309,11 @@ mod tests {
     #[test]
     fn test_cli_verify() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn tui_is_not_a_subcommand() {
+        assert!(Cli::command().find_subcommand("tui").is_none());
     }
 
     #[test]

@@ -28,12 +28,11 @@ fn run_tui_in_pty(binary: &Path, home: &Path) -> Output {
     {
         command.args(["-q", "/dev/null"]);
         command.arg(binary);
-        command.arg("tui");
     }
 
     #[cfg(target_os = "linux")]
     {
-        let command_line = format!("{} tui", shell_quote(&binary.to_string_lossy()));
+        let command_line = shell_quote(&binary.to_string_lossy());
         command.args(["-q", "-e", "-c", &command_line, "/dev/null"]);
     }
 
@@ -81,7 +80,7 @@ fn run_tui_in_pty(binary: &Path, home: &Path) -> Output {
             Some(_) => break,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
-                panic!("cruise tui did not exit after q");
+                panic!("cruise did not exit after q");
             }
             None => thread::sleep(Duration::from_millis(25)),
         }
@@ -118,7 +117,7 @@ fn tui_quit_restores_terminal_for_following_command() {
     );
     assert!(
         output.status.success(),
-        "cruise tui failed in PTY: {transcript}"
+        "cruise failed in PTY: {transcript}"
     );
 
     let restored = Command::new("printf")
