@@ -130,7 +130,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         let phase = session.phase.label();
         let title_width = usize::from(area.width)
             .saturating_sub(phase.chars().count())
-            .saturating_sub(7) as usize;
+            .saturating_sub(7);
         ListItem::new(Line::from(vec![
             Span::styled("● ", phase_style(app, &session.phase)),
             Span::raw(truncate(session.title_or_input(), title_width)),
@@ -352,16 +352,15 @@ fn render_plan(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .active_plan()
         .unwrap_or("No plan has been generated for this session.");
     let parsed = tui_markdown::from_str(text);
-    let rendered = if app.display.no_color {
-        strip_text_styles(parsed)
-    } else {
-        parsed
-    };
     frame.render_widget(
-        Paragraph::new(rendered)
-            .scroll((u16::try_from(app.plan_scroll).unwrap_or(u16::MAX), 0))
-            .block(panel(app, " Plan  Markdown ", false))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(if app.display.no_color {
+            strip_text_styles(parsed)
+        } else {
+            parsed
+        })
+        .scroll((u16::try_from(app.plan_scroll).unwrap_or(u16::MAX), 0))
+        .block(panel(app, " Plan  Markdown ", false))
+        .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -757,17 +756,15 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
 fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) {
     match modal {
         Modal::Help => render_help_modal(frame, app, area),
-        Modal::Error(error) => {
-            let rect = centered(area, 70, 8);
-            frame.render_widget(Clear, rect);
-            frame.render_widget(
-                Paragraph::new(error.as_str())
-                    .style(error_style(app))
-                    .block(modal_block(app, "Error  Enter/Esc to close"))
-                    .wrap(Wrap { trim: false }),
-                rect,
-            );
-        }
+        Modal::Error(error) => render_text_modal(
+            frame,
+            app,
+            area,
+            70,
+            8,
+            "Error  Enter/Esc to close",
+            Text::styled(error.as_str(), error_style(app)),
+        ),
         Modal::Resize => render_text_modal(
             frame,
             app,
@@ -787,10 +784,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             format!("{message}\n\nEnter confirm   Esc cancel"),
         ),
         Modal::Publish { trigger_cruise } => {
-            render_publish_modal(frame, app, area, *trigger_cruise)
+            render_publish_modal(frame, app, area, *trigger_cruise);
         }
         Modal::Palette { actions, selected } => {
-            render_palette_modal(frame, app, area, actions, *selected)
+            render_palette_modal(frame, app, area, actions, *selected);
         }
         Modal::Prompt => render_prompt_modal(frame, app, area),
         Modal::Input {
@@ -933,10 +930,8 @@ fn render_text_modal<'a>(
 }
 
 fn modal_block(app: &TuiApp, title: &str) -> Block<'static> {
-    Block::bordered()
+    panel(app, format!(" {title} "), true)
         .border_type(BorderType::Double)
-        .title(format!(" {title} "))
-        .title_style(accent(app, true))
         .border_style(accent(app, true))
 }
 
@@ -1127,18 +1122,14 @@ mod tests {
             .collect()
     }
 
-    fn rendered(width: u16, height: u16, no_color: bool) -> String {
-        rendered_view_with(width, height, no_color, View::Sessions, |_| {})
-    }
-
     #[test]
     fn minimum_and_wide_layouts_render_without_small_terminal_notice() {
-        let minimum = rendered(80, 24, false);
+        let minimum = rendered_view_with(80, 24, false, View::Sessions, |_| {});
         assert!(minimum.contains("CRUISE"));
         assert!(minimum.contains("Sessions"));
         assert!(!minimum.contains("Terminal too small"));
 
-        let wide = rendered(120, 24, false);
+        let wide = rendered_view_with(120, 24, false, View::Sessions, |_| {});
         assert!(wide.contains("CRUISE"));
         assert!(wide.contains("Sessions"));
         assert!(wide.contains("Detail"));
@@ -1200,8 +1191,14 @@ mod tests {
 
     #[test]
     fn undersized_layout_reports_resize_notice() {
-        assert!(rendered(79, 24, false).contains("Terminal too small"));
-        assert!(rendered(80, 23, false).contains("Terminal too small"));
+        assert!(
+            rendered_view_with(79, 24, false, View::Sessions, |_| {})
+                .contains("Terminal too small")
+        );
+        assert!(
+            rendered_view_with(80, 23, false, View::Sessions, |_| {})
+                .contains("Terminal too small")
+        );
     }
 
     #[test]
