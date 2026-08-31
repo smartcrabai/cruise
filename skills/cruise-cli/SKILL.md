@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-1: description: Use when running, operating, or troubleshooting the `cruise` CLI or `cruise tui` interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck or skipped. For authoring workflow YAML itself, use the cruise-config skill instead.
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
 ---
@@ -19,7 +19,7 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 - **AwaitingInput** means SDK planning has persisted an unanswered `ask_user` question. Answering it resumes planning; `cruise list` can restart plan generation with **Generate Plan**.
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
 - `cruise exec` is the **odd one out**: it runs a workflow against the current directory with a **transient session**, no worktree, and no PR. Terminal exec sessions are removed automatically; paused or interrupted sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
-- `cruise tui` is the official interactive keyboard client for the full GUI-domain session workflows; use it for interactive management, while `cruise list` remains available as the CLI selector.
+- Bare `cruise` opens the official interactive keyboard client for the full GUI-domain session workflows; use it for interactive management, while `cruise list` remains available as the CLI selector.
 
 ## Which command do I want?
 
@@ -38,17 +38,17 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
 | Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
-| Manage sessions interactively in the full keyboard client | `cruise tui` |
+| Manage sessions interactively in the full keyboard client | `cruise` |
 | Browse / approve / resume / delete sessions with the CLI selector | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
 | Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
-1: description: Use when running, operating, or troubleshooting the `cruise` CLI or `cruise tui` interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck or skipped. For authoring workflow YAML itself, use the cruise-config skill instead.
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
 
-> **Legacy shortcut:** `cruise "task"` with no subcommand is treated as `cruise plan "task"`. Piping (`echo "task" | cruise`) feeds the task on stdin.
+> **Legacy shortcut:** `cruise "task"` with positional input and no subcommand is treated as `cruise plan "task"`. Piping (`echo "task" | cruise`) feeds the task on stdin.
 
 ## The session lifecycle, step by step
 
@@ -128,15 +128,15 @@ The interactive menu changes with the session's phase:
 - **Replan** regenerates the plan from feedback while staying `Planned`.
 - **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate.
 
-## `cruise tui` — interactive keyboard client
+## `cruise` — interactive keyboard client
 
 ```sh
-cruise tui
+cruise
 ```
 
-Typical flow: run `cruise tui`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+Typical flow: run `cruise`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
 
-`cruise tui` is the official keyboard-only client beside the CLI and desktop GUI. It preserves existing CLI behavior and exposes the GUI's session-management workflows in a terminal. It requires an interactive TTY on macOS or Linux; non-TTY use is not supported. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh`.
+Bare `cruise` opens the official keyboard-only client beside the CLI and desktop GUI. It exposes the GUI's session-management workflows in a terminal. It requires an interactive TTY on macOS or Linux; non-TTY use is not supported. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh`.
 
 ### TUI screens and workflows
 
@@ -223,7 +223,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 # Fire-and-forget: queue several plans in the background, approve later from `list`
 cruise --plan "add retry to the uploader"
 cruise --plan "migrate config to XDG paths"
-cruise tui                        # review/approve each when ready
+cruise                            # review/approve each when ready
 
 # I wrote the plan myself; just run it
 cruise plan --skip-planning "$(cat my-plan.md)"

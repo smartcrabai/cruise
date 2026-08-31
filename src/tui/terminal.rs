@@ -23,7 +23,7 @@ impl TerminalGuard {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "cruise tui requires an interactive TTY",
+                "cruise requires an interactive TTY",
             ));
         }
         enable_raw_mode()?;
@@ -44,7 +44,7 @@ impl TerminalGuard {
         // Worker panics are caught at their task boundary. Root/event-loop
         // panics still drop this guard and restore the terminal; a worker must
         // never tear down a terminal that the event loop is still drawing.
-        std::panic::set_hook(Box::new(|panic| eprintln!("cruise tui panic: {panic}")));
+        std::panic::set_hook(Box::new(|panic| eprintln!("cruise TUI panic: {panic}")));
         Ok(Self {
             terminal,
             restored: false,
