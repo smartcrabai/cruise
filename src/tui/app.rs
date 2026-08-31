@@ -816,12 +816,12 @@ impl TuiApp {
             .batch_finished
             .max(self.batch_rows.iter().filter(|row| row.finished).count());
         self.operation_state.bell_pending = true;
+        self.refresh();
         self.status = Some(if cancelled {
             "Run All cancelled".to_string()
         } else {
             "Run All finished".to_string()
         });
-        self.refresh();
     }
 
     fn sync_prompts(&mut self) {
