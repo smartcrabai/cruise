@@ -94,14 +94,25 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             error_style(app),
         ));
     }
-    spans.extend([
-        Span::styled("    a", key(app)),
-        Span::styled(" actions", muted(app)),
-        Span::styled("   ?", key(app)),
-        Span::styled(" help", muted(app)),
-        Span::styled("   q", key(app)),
-        Span::styled(" quit", muted(app)),
-    ]);
+    let hints: &[(&str, &str)] = match app.view {
+        View::Sessions if app.sessions.is_empty() => &[("2", "new"), ("?", "help"), ("q", "quit")],
+        View::Sessions => &[("a", "actions"), ("?", "help"), ("q", "quit")],
+        View::NewSession => &[
+            ("Tab", "focus"),
+            ("Enter", "select"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        View::RunAll => &[("a", "run/stop"), ("?", "help"), ("q", "quit")],
+    };
+    for &(shortcut, description) in hints {
+        spans.extend([
+            Span::raw("   "),
+            Span::styled(shortcut, key(app)),
+            Span::raw(" "),
+            Span::styled(description, muted(app)),
+        ]);
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(
             Block::default()
@@ -111,7 +122,6 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         area,
     );
 }
-
 fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     app.load_tab_data();
     let layout = if area.width >= 120 {
@@ -475,7 +485,11 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
         (
             FormField::Input,
             rows[0],
-            "Task description (Enter inserts a new line)",
+            if form.field == FormField::Input && form.editing {
+                "Task description (Enter newline · Esc done)"
+            } else {
+                "Task description (Enter to edit)"
+            },
             &form.input,
         ),
         (
@@ -669,9 +683,13 @@ fn render_editor(
 }
 
 fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
-    let split = Layout::horizontal([Constraint::Percentage(48), Constraint::Min(1)])
-        .spacing(1)
-        .split(area);
+    let split = if area.width >= 120 {
+        Layout::horizontal([Constraint::Percentage(48), Constraint::Min(1)])
+    } else {
+        Layout::vertical([Constraint::Percentage(55), Constraint::Min(1)])
+    }
+    .spacing(1)
+    .split(area);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("SESSIONS  ", label(app)),
@@ -696,7 +714,7 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         {
             "No Planned or Suspended sessions were ready."
         } else {
-            "Use Actions to start Run All."
+            "Press a to start Run All."
         };
         lines.push(Line::from(Span::styled(message, muted(app))));
     }
@@ -789,8 +807,19 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let body = "Keyboard-only controls\n\n1/2/3  Sessions / New Session / Run All\nTab/Shift-Tab  focus or detail tabs\n↑↓ or j/k  navigate (and move text cursors while editing)   PgUp/PgDn  page\n[/]  detail tabs   a  action palette\no  open next prompt or PR/Issue URL   f  follow log   r  refresh\nEnter  edit/commit/submit single-line fields   Enter  newline in multiline editors\nSpace (not editing)  toggle options/source, cycle choices, or toggle a skipped step\nCtrl+Enter  submit multiline settings   Ctrl+R  toggle Save+Regenerate\nEsc  close edit/modal   ?  help   q/Ctrl-C  quit\n\nNo mouse, clipboard, daemon, or child-owned TTY is used.";
-    render_text_modal(frame, app, area, 68, 18, "Keyboard map", body);
+    let body = "1/2/3  switch views
+Tab / Shift-Tab  move focus or detail tab
+↑↓ / j/k  navigate     PgUp/PgDn/Home/End  jump
+←→ / [ ]  detail tabs
+a  actions   o  prompt/link   f  follow log   r  refresh
+Enter  edit/commit/submit; newline in multiline fields
+Space  toggle/cycle the focused option when not editing
+Ctrl+Enter  save multiline input
+Ctrl+R  toggle save/regenerate
+Esc  close or finish editing   ?  help   q/Ctrl-C  quit
+
+Keyboard-only; no mouse or child-owned TTY.";
+    render_text_modal(frame, app, area, 68, 16, "Keyboard map", body);
 }
 fn render_publish_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, trigger_cruise: bool) {
     let text = format!(
@@ -1079,13 +1108,13 @@ fn truncate(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn rendered_view_with(
+    fn rendered_lines_with(
         width: u16,
         height: u16,
         no_color: bool,
         view: View,
         configure: impl FnOnce(&mut TuiApp),
-    ) -> String {
+    ) -> Vec<String> {
         let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = crate::application::CruiseApplication::new(
             crate::session::SessionManager::new(temp.path().to_path_buf()),
@@ -1106,9 +1135,19 @@ mod tests {
             .backend()
             .buffer()
             .content
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
             .collect()
+    }
+
+    fn rendered_view_with(
+        width: u16,
+        height: u16,
+        no_color: bool,
+        view: View,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> String {
+        rendered_lines_with(width, height, no_color, view, configure).join("\n")
     }
 
     #[test]
@@ -1148,6 +1187,47 @@ mod tests {
     }
 
     #[test]
+    fn new_session_footer_shows_form_controls_instead_of_session_actions() {
+        let form = rendered_view_with(80, 24, false, View::NewSession, |_| {});
+        assert!(form.contains("Tab focus"));
+        assert!(form.contains("Enter select"));
+        assert!(!form.contains("a actions"));
+    }
+
+    #[test]
+    fn help_modal_keeps_every_control_visible_at_minimum_size() {
+        let help = rendered_view_with(80, 24, false, View::Sessions, |app| {
+            app.modal = Some(Modal::Help);
+        });
+        for expected in [
+            "switch views",
+            "move focus or detail tab",
+            "save multiline input",
+            "toggle save/regenerate",
+            "Keyboard-only; no mouse or child-owned TTY.",
+        ] {
+            assert!(help.contains(expected), "missing help text: {expected}");
+        }
+    }
+
+    #[test]
+    fn narrow_run_all_stacks_summary_above_logs() {
+        let lines = rendered_lines_with(80, 24, false, View::RunAll, |_| {});
+        let summary_row = lines
+            .iter()
+            .position(|line| line.contains("SESSIONS"))
+            .unwrap_or_else(|| panic!("missing session summary: {lines:?}"));
+        let log_row = lines
+            .iter()
+            .position(|line| line.contains("Batch log"))
+            .unwrap_or_else(|| panic!("missing batch log: {lines:?}"));
+        assert!(
+            log_row > summary_row + 4,
+            "Run All did not stack: {lines:?}"
+        );
+    }
+
+    #[test]
     fn skipped_step_navigation_shows_the_current_choice() {
         let form = rendered_view_with(80, 24, false, View::NewSession, |app| {
             let step = |id: &str| crate::workflow::SkippableStepNode {
@@ -1175,7 +1255,7 @@ mod tests {
         });
 
         assert!(run_all.contains("No Planned or Suspended sessions were ready."));
-        assert!(!run_all.contains("Use Actions to start Run All."));
+        assert!(!run_all.contains("Press a to start Run All."));
     }
 
     #[test]
