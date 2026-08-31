@@ -515,11 +515,24 @@ fn explicit_or_sequential_next(
 ///
 /// Returns an error if the file cannot be created or serialization fails.
 pub fn save_dag(dag: &ExecutionDag, path: &Path) -> Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    serde_json::to_writer(&mut writer, dag)?;
-    std::io::Write::flush(&mut writer)?;
-    Ok(())
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path.file_name().map_or_else(
+        || "dag.json".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let tmp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, dag)?;
+        std::io::Write::flush(&mut writer)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(CruiseError::from)
 }
 
 /// Load a DAG previously saved with [`save_dag`].

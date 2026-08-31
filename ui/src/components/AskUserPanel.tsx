@@ -3,12 +3,12 @@ import { respondToAsk } from "../lib/commands";
 
 export interface AskUserPanelProps {
   sessionId: string;
+  requestId: string;
   question: string;
   onAnswered?: () => void;
 }
 
-/** Inline session-detail answer form for SDK ask_user questions raised during planning. */
-export function AskUserPanel({ sessionId, question, onAnswered }: AskUserPanelProps) {
+export function AskUserPanel({ sessionId, requestId, question, onAnswered }: AskUserPanelProps) {
   const [answer, setAnswer] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -19,7 +19,7 @@ export function AskUserPanel({ sessionId, question, onAnswered }: AskUserPanelPr
     setSubmitting(true);
     setError("");
     try {
-      await respondToAsk(sessionId, answer);
+      await respondToAsk(sessionId, requestId, answer);
       setAnswer("");
       onAnswered?.();
     } catch (e) {

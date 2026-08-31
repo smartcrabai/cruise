@@ -244,6 +244,20 @@ describe("getSessionActions", () => {
 
   // --- Publish as Issue button ------------------------------------------------
 
+  it("blocks terminal approval/publish/run actions but keeps planning retries after planError", () => {
+    const approval = getSessionActions(makeSession({ phase: "Awaiting Approval", planAvailable: true, planError: "provider unavailable" }), "idle");
+    expect(approval.showApprove).toBe(false);
+    expect(approval.showPublishIssue).toBe(false);
+    expect(approval.showAsk).toBe(false);
+    expect(approval.showFix).toBe(true);
+    expect(approval.showGeneratePlan).toBe(true);
+
+    const planned = getSessionActions(makeSession({ phase: "Planned", planAvailable: true, planError: "provider unavailable" }), "idle");
+    expect(planned.showPublishIssue).toBe(false);
+    expect(planned.showRun).toBe(false);
+    expect(planned.showReplan).toBe(true);
+  });
+
   describe("Publish as Issue button", () => {
     it("shows Publish as Issue for Awaiting Approval when planAvailable is true", () => {
       // Given: session awaiting approval with a valid plan (existing behavior, locked in)
@@ -330,7 +344,7 @@ describe("getSessionActions", () => {
   describe("Planned phase", () => {
     it("shows workspace selection buttons for a fresh run", () => {
       // Given: Planned session (fresh, ready to run)
-      const session = makeSession({ phase: "Planned" });
+      const session = makeSession({ phase: "Planned", planAvailable: true });
 
       // When
       const actions = getSessionActions(session, "idle");
@@ -411,7 +425,7 @@ describe("getSessionActions", () => {
   describe("Suspended phase", () => {
     it("shows Resume with label 'Resume'", () => {
       // Given: Suspended session (interrupted, can be resumed)
-      const session = makeSession({ phase: "Suspended" });
+      const session = makeSession({ phase: "Suspended", planAvailable: true });
 
       // When
       const actions = getSessionActions(session, "idle");
@@ -449,7 +463,7 @@ describe("getSessionActions", () => {
   describe("Failed phase", () => {
     it("shows Retry with label 'Retry'", () => {
       // Given: Failed session
-      const session = makeSession({ phase: "Failed", phaseError: "something went wrong" });
+      const session = makeSession({ phase: "Failed", phaseError: "something went wrong", planAvailable: true });
 
       // When
       const actions = getSessionActions(session, "idle");
@@ -916,7 +930,7 @@ describe("getSessionActions", () => {
     });
 
     it("shows Retry after refresh: status 'failed', phase 'Failed'", () => {
-      const session = makeSession({ phase: "Failed" });
+      const session = makeSession({ phase: "Failed", planAvailable: true });
       const actions = getSessionActions(session, "failed");
 
       expect(actions.showRun).toBe(true);
@@ -924,7 +938,7 @@ describe("getSessionActions", () => {
     });
 
     it("shows Resume after refresh: status 'cancelled', phase 'Suspended'", () => {
-      const session = makeSession({ phase: "Suspended" });
+      const session = makeSession({ phase: "Suspended", planAvailable: true });
       const actions = getSessionActions(session, "cancelled");
 
       expect(actions.showRun).toBe(true);

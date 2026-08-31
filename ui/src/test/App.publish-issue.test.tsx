@@ -37,6 +37,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -94,9 +95,8 @@ function setupBaseMocks() {
   vi.mocked(commands.listDirectory).mockResolvedValue([]);
   vi.mocked(commands.getUpdateReadiness).mockResolvedValue({ canAutoUpdate: true });
   vi.mocked(commands.cleanSessions).mockResolvedValue({ deleted: 0, skipped: 0 });
-  // handleDeleteConfirmed (shared by Delete and the post-publish cleanup) always
-  // calls deleteSession -- the session was already removed server-side by
-  // publish_plan_issue_and_delete, so this call is a no-op cleanup here.
+  // Publishing deletes the session in the backend; the UI removes it optimistically
+  // without issuing a second delete command.
   vi.mocked(commands.deleteSession).mockResolvedValue(undefined);
 }
 

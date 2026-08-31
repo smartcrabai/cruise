@@ -1,6 +1,8 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers which subcommand to reach for (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution and the live dashboard, the session lifecycle and phases, worktree vs current-branch modes, config-file resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage/clean sessions, pick a workspace mode, or debug why a session is stuck or skipped.
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or `cruise tui` interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck or skipped. For authoring workflow YAML itself, use the cruise-config skill instead.
+2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
+| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -17,6 +19,7 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 - **AwaitingInput** means SDK planning has persisted an unanswered `ask_user` question. Answering it resumes planning; `cruise list` can restart plan generation with **Generate Plan**.
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
 - `cruise exec` is the **odd one out**: it runs a workflow against the current directory with a **transient session**, no worktree, and no PR. Terminal exec sessions are removed automatically; paused or interrupted sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
+- `cruise tui` is the official interactive keyboard client for the full GUI-domain session workflows; use it for interactive management, while `cruise list` remains available as the CLI selector.
 
 ## Which command do I want?
 
@@ -35,10 +38,13 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`) |
 | Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
-| Browse / approve / resume / delete sessions | `cruise list` |
+| Manage sessions interactively in the full keyboard client | `cruise tui` |
+| Browse / approve / resume / delete sessions with the CLI selector | `cruise list` |
 | Dump session state for scripts | `cruise list --json` |
+| Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
-| Show / change app-level settings (e.g. GUI parallelism) | `cruise config` |
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or `cruise tui` interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck or skipped. For authoring workflow YAML itself, use the cruise-config skill instead.
+2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
 
@@ -122,6 +128,61 @@ The interactive menu changes with the session's phase:
 - **Replan** regenerates the plan from feedback while staying `Planned`.
 - **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate.
 
+## `cruise tui` — interactive keyboard client
+
+```sh
+cruise tui
+```
+
+Typical flow: run `cruise tui`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+
+`cruise tui` is the official keyboard-only client beside the CLI and desktop GUI. It preserves existing CLI behavior and exposes the GUI's session-management workflows in a terminal. It requires an interactive TTY on macOS or Linux; non-TTY use is not supported. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh`.
+
+### TUI screens and workflows
+
+The TUI has exactly three views:
+
+- **Sessions** — Browse the global session list. Each selected session has **Info**, **DAG**, **Plan**, and **Log** detail tabs. The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The view exposes the complete phase action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions), including Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **New Session** — Create a session or draft from a local Directory or GitHub source. The form supports workflow config, skipped steps, task text and image paths, input-as-plan, Grill me, non-interactive planning, draft persistence, and selection history. Paths are typed with completion.
+- **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. It uses the configured `run_all_parallelism`; the CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
+
+Ask and Option prompts are handled in the TUI. Required prompts are queued; a single-session prompt opens automatically, while Run All shows a queue badge. PR and Issue URLs are shown as text. Only a dedicated PR/Issue URL action opens a URL, using `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. The CLI-only `login`, `config`, and `exec` operations remain CLI commands rather than TUI screens.
+
+The New Session form autosaves 500 ms after changes. Other screen state is ephemeral. Destructive, external, and multi-stop actions require confirmation; quitting with active work confirms before cancelling it. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Empty text answers are rejected. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+
+### TUI keyboard map
+
+Keys are fixed and cannot be configured:
+
+| Key | Action |
+|-----|--------|
+| `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
+| `r` | Refresh |
+| `?` | Show help |
+| `q` / `Ctrl-C` | Quit; an active quit confirms and then cancels work |
+| `Tab` / `Shift-Tab` | Move focus forward / backward |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate |
+| `[` / `]` | Move between detail tabs |
+| `a` | Open the action palette |
+| `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
+| `f` | Follow the log |
+| `Enter` | Edit or commit a single-line field; in a multiline field, insert a newline |
+| `Esc` | Leave edit mode |
+| Focused submit button | Submit the current form |
+
+### TUI layout, logs, and concurrency
+
+- At **120 or more columns**, the layout has a fixed **34-column sidebar** and a detail pane.
+- At **80–119 columns**, it uses a single pane.
+- Below **80x24**, it shows a resize notice.
+- `NO_COLOR` is honored, and labels/statuses are never conveyed by color alone.
+- Idle updates are event-driven; external state is polled every 3 seconds; active work uses a 100 ms spinner.
+- In-memory logs are bounded: the session log keeps the latest 10,000 lines and Run All keeps the latest 2,000. Complete per-session output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (default `~/.local/share/cruise/sessions/<session-id>/run.log`).
+- A child process never shares TUI stdin. Interactive child commands therefore cannot prompt through the TUI.
+- Distinct sessions may run concurrently within one TUI process, but duplicate work for one session is rejected. Concurrent mutation of the same session by separate cruise processes is unsupported.
+
+Use the CLI as the canonical client for automation, JSON, and CI/non-interactive use. `cruise list` and all existing CLI commands remain documented below; `cruise list --json` is the machine-readable session-state interface.
+
 ## Config-file resolution
 
 `cruise run`/`plan`/`exec` resolve the **workflow YAML** in this order:
@@ -148,8 +209,8 @@ The interactive menu changes with the session's phase:
 
 - **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`; resumable sessions and ordinary planned sessions are retained.
-- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value only governs the **desktop GUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
-- **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value only governs the **desktop GUI**).
+- **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value governs the **desktop GUI and TUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
+- **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **desktop GUI and TUI**).
 - In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
 - **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
@@ -161,7 +222,7 @@ The interactive menu changes with the session's phase:
 # Fire-and-forget: queue several plans in the background, approve later from `list`
 cruise --plan "add retry to the uploader"
 cruise --plan "migrate config to XDG paths"
-cruise list                      # review/approve each when ready
+cruise tui                        # review/approve each when ready
 
 # I wrote the plan myself; just run it
 cruise plan --skip-planning "$(cat my-plan.md)"

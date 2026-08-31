@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import { BUILTIN_CONFIG_PATH, type ConfigEntry, type PlanEvent, type SkippableStepDto } from "../types";
+import { BUILTIN_CONFIG_PATH, type ApplicationEvent, type ConfigEntry, type SkippableStepDto } from "../types";
 import { getNewSessionConfigDefaults, listConfigs, updateSessionSettings, regenerateSessionPlan } from "../lib/commands";
 import { collectExpandedStepIds } from "../lib/stepUtils";
 import { ConfigSelect } from "./ConfigSelect";
@@ -9,19 +9,20 @@ import { Spinner } from "./Spinner";
 interface SessionConfigEditorProps {
   sessionId: string;
   baseDir: string;
-  configPath?: string;
+  configPath?: string | null;
   /** Repo slug ("owner/repo") when this session is repo-backed; forwarded to `listConfigs`. */
   repo?: string;
   skippedSteps: string[];
   /** Current session phase — controls which fields are editable. Defaults to "Planned". */
   phase?: import("../types").SessionPhase;
   /** Current step the session was on when it Failed/Suspended. */
-  currentStep?: string;
+  currentStep?: string | null;
   onSessionUpdated: (session: import("../types").Session) => void;
   onPlanRegenerated: (content: string) => void;
+  onPlanTerminal?: () => void;
   onBusyChange?: (isBusy: boolean) => void;
   onError: (error: string) => void;
-  onAskUserRequired?: () => void;
+  onAskUserRequired?: (requestId: string) => void;
   disabled?: boolean;
 }
 
@@ -35,6 +36,7 @@ export function SessionConfigEditor({
   currentStep,
   onSessionUpdated,
   onPlanRegenerated,
+  onPlanTerminal,
   onBusyChange,
   onError,
   onAskUserRequired,
@@ -229,18 +231,22 @@ export function SessionConfigEditor({
       const updated = await updateSessionSettings(sessionId, buildSettings());
       onSessionUpdated(updated);
 
-      const channel = new Channel<PlanEvent>();
+      const channel = new Channel<ApplicationEvent>();
       channel.onmessage = (event) => {
-        if (event.event === "planGenerated") {
-          onPlanRegenerated(event.data.content);
-        } else if (event.event === "planFailed") {
+        if (event.event === "planFinished" && event.data.sessionId === sessionId) {
+          onPlanTerminal?.();
+        } else if (event.event === "planFailed" && event.data.sessionId === sessionId) {
           setError(event.data.error);
           onError(event.data.error);
-        } else if (event.event === "askUserRequired") {
-          onAskUserRequired?.();
+          onPlanTerminal?.();
+        } else if (event.event === "planCancelled" && event.data.sessionId === sessionId) {
+          onPlanTerminal?.();
+        } else if (event.event === "askUserRequired" && event.data.sessionId === sessionId) {
+          onAskUserRequired?.(event.data.requestId);
         }
       };
-      await regenerateSessionPlan(sessionId, channel);
+      const content = await regenerateSessionPlan(sessionId, channel);
+      onPlanRegenerated(content);
     } catch (e) {
       const msg = String(e);
       setError(msg);

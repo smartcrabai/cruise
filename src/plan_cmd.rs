@@ -52,6 +52,7 @@ fn cli_plan_ctx<'a>(
         rate_limit_retries,
         working_dir,
         grill,
+        on_session_id: None,
         cancel_token,
     }
 }
@@ -526,6 +527,7 @@ async fn generate_title_via_sdk(
             working_dir: None,
             stream: None,
             tools: vec![tool],
+            on_session_id: None,
             resume: None,
         })
         .await?;

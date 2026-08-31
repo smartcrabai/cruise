@@ -92,6 +92,15 @@ pub(crate) struct StepExecOutcome {
     pub skip_step_reason: Option<String>,
 }
 
+pub(crate) struct CommandStepOptions<'a> {
+    rate_limit_retries: usize,
+    env: &'a HashMap<String, String>,
+    working_dir: Option<&'a std::path::Path>,
+    timeout: Option<Duration>,
+    on_step_log: Option<&'a crate::step::command::StepLogCallback<'a>>,
+    cancel_token: Option<&'a CancellationToken>,
+}
+
 /// Check whether the group containing `current_step` has exhausted its retry budget.
 ///
 /// Returns `Some(StepOutcome)` when the group should be skipped entirely.
@@ -332,15 +341,21 @@ pub async fn execute_steps_with_dag(
             &*dag,
         )?;
 
-        if let Some(token) = ctx.cancel_token
-            && token.is_cancelled()
+        if ctx
+            .cancel_token
+            .is_some_and(CancellationToken::is_cancelled)
         {
-            break;
+            return Err(CruiseError::Interrupted);
         }
 
         let outcome =
             step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?;
-
+        if ctx
+            .cancel_token
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(CruiseError::Interrupted);
+        }
         dag.nodes
             .get_mut(&current_node_id)
             .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
@@ -767,6 +782,7 @@ async fn execute_step_kind(
                         skip_step_reason: None,
                     })
                 }
+                Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
                 Err(e) if has_if_fail => {
                     crate::status_eprintln!(
                         "  {} prompt error: {e}",
@@ -786,11 +802,14 @@ async fn execute_step_kind(
             let result = run_command_step(
                 vars,
                 step,
-                ctx.rate_limit_retries,
-                merged_env,
-                ctx.working_dir,
-                timeout,
-                ctx.on_step_log,
+                CommandStepOptions {
+                    rate_limit_retries: ctx.rate_limit_retries,
+                    env: merged_env,
+                    working_dir: ctx.working_dir,
+                    timeout,
+                    on_step_log: ctx.on_step_log,
+                    cancel_token: ctx.cancel_token,
+                },
             )
             .await;
             let elapsed = step_start.elapsed();
@@ -822,7 +841,7 @@ async fn execute_step_kind(
             }
         }
         StepKind::Option(step) => {
-            let result = run_option_step(vars, step, ctx.option_handler)?;
+            let result = run_option_step(vars, step, ctx.option_handler, ctx.cancel_token).await?;
             let elapsed = step_start.elapsed();
             log_step_result(elapsed, true);
             Ok(StepExecOutcome {
@@ -1111,6 +1130,7 @@ pub(crate) async fn run_prompt_step(
             working_dir,
             stream: Some(&stream_callbacks),
             tools,
+            on_session_id: None,
             resume: None,
         });
 
@@ -1148,11 +1168,7 @@ pub(crate) async fn run_prompt_step(
 pub(crate) async fn run_command_step(
     vars: &mut VariableStore,
     step: &CommandStep,
-    rate_limit_retries: usize,
-    env: &HashMap<String, String>,
-    working_dir: Option<&std::path::Path>,
-    timeout: Option<Duration>,
-    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    options: CommandStepOptions<'_>,
 ) -> Result<bool> {
     let cmds: Vec<String> = step
         .command
@@ -1160,24 +1176,21 @@ pub(crate) async fn run_command_step(
         .map(|c| vars.resolve(c))
         .collect::<Result<Vec<_>>>()?;
 
-    for cmd in &cmds {
-        crate::status_eprintln!("  {} {}", style("$").dim(), style(cmd).dim());
-    }
-
-    let result = if crate::console_mode::is_quiet() {
-        crate::step::command::run_commands_with_log(
-            &cmds,
-            rate_limit_retries,
-            env,
-            working_dir,
-            timeout,
-            on_step_log,
-        )
-        .await?
+    let on_step_log = if crate::console_mode::is_quiet() {
+        options.on_step_log
     } else {
-        crate::step::command::run_commands(&cmds, rate_limit_retries, env, working_dir, timeout)
-            .await?
+        None
     };
+    let result = crate::step::command::run_commands(
+        &cmds,
+        options.rate_limit_retries,
+        options.env,
+        options.working_dir,
+        options.timeout,
+        on_step_log,
+        options.cancel_token,
+    )
+    .await?;
 
     let success = result.success;
     vars.set_prev_success(Some(success));
@@ -1189,28 +1202,36 @@ pub(crate) async fn run_command_step(
 }
 
 /// Execute an option step, updating variable state and returning the chosen next step.
-pub(crate) fn run_option_step(
+pub(crate) async fn run_option_step(
     vars: &mut VariableStore,
     step: &OptionStep,
     option_handler: &dyn OptionHandler,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<Option<String>> {
+    if step.choices.is_empty() {
+        return Ok(None);
+    }
     let desc = step
         .plan
-        .as_ref()
-        .map(|tmpl| -> Result<String> {
-            let path = vars.resolve(tmpl)?;
+        .as_deref()
+        .map(|path| {
+            let path = vars.resolve(path)?;
             std::fs::read_to_string(&path)
                 .map_err(|e| CruiseError::Other(format!("failed to read plan file {path}: {e}")))
         })
         .transpose()?;
-
-    let result = option_handler.select_option(&step.choices, desc.as_deref())?;
-
-    if let Some(ref text) = result.text_input {
-        vars.set_prev_input(Some(text.clone()));
+    let result = option_handler
+        .select_option_async(&step.choices, desc.as_deref(), cancel_token)
+        .await?;
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
     }
+    if let Some(text) = result.text_input {
+        vars.set_prev_input(Some(text));
+    }
+    // An option is a control-only step. Its preceding command/LLM output must
+    // not leak through `{prev.output}` after the user chooses a branch.
     vars.set_prev_output(None);
-
     Ok(result.next_step)
 }
 
@@ -1709,7 +1730,7 @@ steps:
             skipped_steps: &[],
             on_step_log: None,
         };
-        execute_steps_with_dag(
+        let phase1_result = execute_steps_with_dag(
             &ctx,
             &mut vars,
             &mut tracker,
@@ -1717,8 +1738,11 @@ steps:
             &start,
             &on_node_start,
         )
-        .await
-        .unwrap_or_else(|e| panic!("{e:?}"));
+        .await;
+        assert!(
+            matches!(&phase1_result, Err(CruiseError::Interrupted)),
+            "cancellation before second executes must interrupt the workflow: {phase1_result:?}"
+        );
 
         assert!(
             !tmp.path().join("second.txt").exists(),
@@ -3650,19 +3674,32 @@ steps:
 command: [echo]
 steps:
   step1:
-    command: "echo should not run"
+    command: "touch step1-ran"
   step2:
-    command: "echo also not run"
+    command: "touch step2-ran"
 "#;
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let token = CancellationToken::new();
         token.cancel();
-        let result = run_with_options(yaml, "step1", Some(&token), &NoOpOptionHandler).await;
-        assert!(result.is_ok(), "expected Ok but got: {result:?}");
-        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            result.run, 0,
-            "no steps should run when token is pre-cancelled"
+        let result = run_config_inner(
+            yaml,
+            "",
+            Some("step1"),
+            tmp.path().to_path_buf(),
+            10,
+            0,
+            None,
+            Some(&token),
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(CruiseError::Interrupted)),
+            "pre-cancelled execution must return Interrupted: {result:?}"
         );
+        assert!(!tmp.path().join("step1-ran").exists());
+        assert!(!tmp.path().join("step2-ran").exists());
     }
 
     #[tokio::test]
@@ -3720,12 +3757,30 @@ steps:
             },
         )
         .await;
-        // Then: step1 ran (run=1); step2's on_node_start was called but step2 did not execute
-        assert!(result.is_ok(), "expected Ok but got: {result:?}");
-        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            result.run, 1,
-            "only step1 should run; step2 cancelled before execution, step3 never reached"
+        assert!(
+            matches!(&result, Err(CruiseError::Interrupted)),
+            "cancellation at the step boundary must interrupt the workflow: {result:?}"
+        );
+        let step1_id = dag
+            .first_node_for_step("step1")
+            .unwrap_or_else(|| panic!("step1 not found in dag"));
+        let step2_id = dag
+            .first_node_for_step("step2")
+            .unwrap_or_else(|| panic!("step2 not found in dag"));
+        let step3_id = dag
+            .first_node_for_step("step3")
+            .unwrap_or_else(|| panic!("step3 not found in dag"));
+        assert!(
+            dag.nodes[step1_id].runtime.visited_at.is_some(),
+            "step1 should finish before cancellation"
+        );
+        assert!(
+            dag.nodes[step2_id].runtime.visited_at.is_none(),
+            "step2 must not execute after cancellation"
+        );
+        assert!(
+            dag.nodes[step3_id].runtime.visited_at.is_none(),
+            "step3 must not be reached after cancellation"
         );
     }
 

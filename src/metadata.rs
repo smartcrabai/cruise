@@ -77,7 +77,32 @@ pub fn resolve_plan_content(plan_path: &Path, stdout: &str, stderr: &str) -> Res
 
 #[must_use]
 pub fn plan_markdown_available(path: &Path) -> bool {
-    read_plan_markdown(path).is_ok()
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let mut reader = std::io::BufReader::new(file);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let Ok(read) = reader.read(&mut buffer) else {
+            return false;
+        };
+        if read == 0 {
+            return false;
+        }
+        if buffer[..read]
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace())
+        {
+            return true;
+        }
+    }
 }
 
 pub(crate) fn read_plan_markdown(path: &Path) -> Result<String> {

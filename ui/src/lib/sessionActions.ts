@@ -2,9 +2,9 @@ import type { Session } from "../types";
 
 export type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 
-/** True when the session is in "Awaiting Approval" phase with a plan ready for review. */
+/** True when the session is in review with a usable plan and no durable planning error. */
 export function isApprovalReady(session: Session): boolean {
-  return session.phase === "Awaiting Approval" && session.planAvailable === true && !session.fixInProgress;
+  return session.phase === "Awaiting Approval" && session.planAvailable === true && !session.planError && !session.fixInProgress;
 }
 
 /** Which action buttons are visible in the session detail pane. */
@@ -51,7 +51,7 @@ export interface SessionActions {
  * @param status   - Whether the local process is actively running this session.
  * @param isFixing - When true, suppresses Approve/Fix/Ask while a plan fix is in progress.
  */
-export function getSessionActions(session: Session, status: RunStatus, isFixing?: boolean): SessionActions {
+export function getSessionActions(session: Session, status: RunStatus, isFixing?: boolean, hasPendingPrompt?: boolean): SessionActions {
   const { phase } = session;
 
   const isLocallyRunning = status === "running";
@@ -61,29 +61,31 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
   const isAwaitingRefresh =
     !isLocallyRunning && status !== "idle" && isPhaseRunning;
 
-  // "Actively running" = local run in progress OR backend reports Running (excluding refresh-wait transient state).
-  const isActiveRun = isLocallyRunning || (isPhaseRunning && !isAwaitingRefresh);
+  // Hydrated or local planning claims remain cancellable after navigation.
+  const isActiveRun = isLocallyRunning || !!hasPendingPrompt || !!session.fixInProgress || !!isFixing || (isPhaseRunning && !isAwaitingRefresh);
 
   const showCancel = isActiveRun;
 
+  const hasPlanError = !!session.planError;
   const awaitingApprovalWithPlan =
-    !isLocallyRunning && !isFixing && isApprovalReady(session);
+    phase === "Awaiting Approval" &&
+    !isLocallyRunning &&
+    !isFixing &&
+    !session.fixInProgress &&
+    session.planAvailable === true;
+  const usablePlan = session.planAvailable === true && !hasPlanError;
 
-  const plannedWithPlan =
-    !isLocallyRunning && phase === "Planned" && session.planAvailable === true;
-
-  const showApprove = awaitingApprovalWithPlan;
-  const showPublishIssue = awaitingApprovalWithPlan || plannedWithPlan;
+  const showApprove = awaitingApprovalWithPlan && !hasPlanError;
+  const showPublishIssue = (phase === "Awaiting Approval" || phase === "Planned") && usablePlan && !isLocallyRunning && !isActiveRun;
   const showFix = awaitingApprovalWithPlan;
-  const showAsk = awaitingApprovalWithPlan;
+  const showAsk = awaitingApprovalWithPlan && !hasPlanError;
 
-  const showCreateWorktree = !isLocallyRunning && phase === "Planned";
-
+  const showCreateWorktree = !isActiveRun && phase === "Planned" && usablePlan;
   const showRun =
     !isActiveRun &&
     !isAwaitingRefresh &&
-    (phase === "Suspended" ||
-    phase === "Failed");
+    usablePlan &&
+    (phase === "Suspended" || phase === "Failed");
 
   const runLabel =
     phase === "Failed" ? "Retry" : "Resume";
@@ -95,7 +97,7 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
     phase === "Failed" ||
     phase === "Completed");
 
-  const showReplan = !isLocallyRunning && phase === "Planned";
+  const showReplan = !isActiveRun && phase === "Planned";
 
   const showDiscard = !isLocallyRunning && phase === "Awaiting Approval";
 
@@ -105,7 +107,7 @@ export function getSessionActions(session: Session, status: RunStatus, isFixing?
     !isLocallyRunning &&
     !isFixing &&
     !session.fixInProgress &&
-    (phase === "Draft" || phase === "Awaiting Input");
+    (phase === "Draft" || phase === "Awaiting Input" || (phase === "Awaiting Approval" && hasPlanError));
 
   return {
     showApprove,

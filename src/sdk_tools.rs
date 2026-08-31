@@ -16,11 +16,11 @@
 //! recover (e.g. re-read the plan and retry an `update_plan` whose `old` text no
 //! longer matches) rather than aborting the turn.
 
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use serde_json::json;
+use uuid::Uuid;
 
 use crate::ask_handler::AskHandler;
 use crate::backend::tool::{CruiseTool, ToolHandler};
@@ -301,8 +301,26 @@ fn write_plan(plan_path: &std::path::Path, content: &str) -> Result<(), String> 
     if content.trim().is_empty() {
         return Err("plan content must not be empty".to_string());
     }
-    std::fs::write(plan_path, content)
-        .map_err(|e| format!("failed to write plan at {}: {e}", plan_path.display()))
+    let parent = plan_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create plan directory {}: {e}", parent.display()))?;
+    let name = plan_path.file_name().map_or_else(
+        || "plan".to_string(),
+        |value| value.to_string_lossy().into_owned(),
+    );
+    let tmp = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4().simple()));
+    if let Err(error) =
+        std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, plan_path))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "failed to write plan at {}: {error}",
+            plan_path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Apply an exact-match find/replace to `current`.

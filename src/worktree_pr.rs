@@ -11,7 +11,7 @@ use crate::cancellation::CancellationToken;
 use crate::engine::{ExecutionContext, execute_steps_with_dag};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
-use crate::option_handler::CliOptionHandler;
+use crate::option_handler::OptionHandler;
 use crate::session::SessionState;
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
@@ -94,6 +94,7 @@ fn report_commit_outcome(commit_outcome: CommitOutcome) {
 pub fn ensure_gh_available() -> Result<()> {
     let ok = std::process::Command::new("gh")
         .arg("--version")
+        .stdin(std::process::Stdio::null())
         .output()
         .is_ok_and(|o| o.status.success());
 
@@ -108,17 +109,21 @@ pub fn ensure_gh_available() -> Result<()> {
 
 // --- PR post-processing ------------------------------------------------------
 
-/// Handle PR creation and after-PR steps for a worktree execution.
+/// Callback used to persist a session after a pull request is created.
+pub type PrCreatedCallback<'a> = dyn Fn(&SessionState) -> Result<()> + Send + Sync + 'a;
+
+/// Handle PR creation and after-PR steps, persisting the session immediately
+/// after a PR is created when `on_pr_created` is provided.
 ///
 /// # Errors
 ///
-/// Returns an error if the branch has no commits beyond its base, or if an
-/// underlying git or `gh` operation fails.
+/// Returns an error when description generation, pull-request creation, post-PR
+/// execution, persistence, or cancellation fails.
 #[expect(
     clippy::too_many_arguments,
     reason = "all params are needed for PR flow"
 )]
-pub async fn handle_worktree_pr(
+pub async fn handle_worktree_pr_with_persistence(
     ctx: &worktree::WorktreeContext,
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -128,13 +133,25 @@ pub async fn handle_worktree_pr(
     max_retries: usize,
     skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
+    option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    on_pr_created: Option<&PrCreatedCallback<'_>>,
 ) -> Result<()> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
     let (pr_title, pr_body) =
         generate_pr_description(&ctx.path, compiled, vars, rate_limit_retries, cancel_token)
             .await?;
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
 
-    let pr_attempt = attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body)?;
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
+    let pr_attempt =
+        attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body, cancel_token).await?;
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {
@@ -144,6 +161,12 @@ pub async fn handle_worktree_pr(
             }
             vars.set_named_value(PR_URL_VAR, url.clone());
             session.pr_url = Some(url);
+            if let Some(persist) = on_pr_created {
+                persist(session)?;
+            }
+            if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+                return Err(CruiseError::Interrupted);
+            }
             run_after_pr_steps(
                 compiled,
                 vars,
@@ -153,6 +176,7 @@ pub async fn handle_worktree_pr(
                 ctx.path.as_path(),
                 skipped_steps,
                 cancel_token,
+                option_handler,
                 on_step_log,
             )
             .await?;
@@ -163,10 +187,6 @@ pub async fn handle_worktree_pr(
             ctx.branch
         ))),
         PrAttemptOutcome::CreateFailed { error, .. } => {
-            // Repo-backed sessions exist solely to produce a PR, and their
-            // temporary clone is only reclaimed once one exists -- treat the
-            // failure as fatal so the session stays runnable (Failed) and the
-            // clone is retried instead of leaking under a Completed session.
             if session.repo.is_some() {
                 return Err(CruiseError::Other(format!("PR creation failed: {error}")));
             }
@@ -226,6 +246,7 @@ async fn generate_pr_description(
                 working_dir: Some(worktree_path),
                 stream: None,
                 tools: Vec::new(),
+                on_session_id: None,
                 resume: None,
             })
             .await
@@ -288,6 +309,7 @@ async fn generate_pr_via_sdk_tool(
             working_dir: Some(worktree_path),
             stream: None,
             tools: vec![tool],
+            on_session_id: None,
             resume: None,
         })
         .await
@@ -311,7 +333,6 @@ async fn generate_pr_via_sdk_tool(
 }
 
 /// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
-/// all other errors are logged as warnings and treated as non-fatal.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
@@ -322,6 +343,7 @@ async fn run_after_pr_steps(
     working_dir: &std::path::Path,
     skipped_steps: &[String],
     cancel_token: Option<&CancellationToken>,
+    option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<()> {
     let Some(_first_step) = compiled.after_pr.keys().next() else {
@@ -336,7 +358,7 @@ async fn run_after_pr_steps(
         rate_limit_retries,
         on_step_start: &|_| Ok(()),
         cancel_token,
-        option_handler: &CliOptionHandler,
+        option_handler,
         config_reloader: None,
         working_dir: Some(working_dir),
         skipped_steps,
@@ -360,11 +382,12 @@ pub(crate) fn build_pr_prompt(
     vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
 }
 
-pub(crate) fn attempt_pr_creation(
+pub(crate) async fn attempt_pr_creation(
     ctx: &worktree::WorktreeContext,
     message: &str,
     title: &str,
     body: &str,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
     let trimmed_title = title.trim();
     let commit_message = if trimmed_title.is_empty() {
@@ -373,18 +396,17 @@ pub(crate) fn attempt_pr_creation(
         trimmed_title
     };
     let commit_message = commit_message_with_coauthor(commit_message);
-    let commit_outcome = commit_changes(&ctx.path, &commit_message)?;
-    if branch_commit_count(ctx)? == 0 {
+    let commit_outcome = commit_changes(&ctx.path, &commit_message, cancel_token).await?;
+    if branch_commit_count(ctx, cancel_token).await? == 0 {
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
-
-    push_branch(&ctx.path, &ctx.branch)?;
-
-    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body) {
+    push_branch(&ctx.path, &ctx.branch, cancel_token).await?;
+    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body, cancel_token).await {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
         }),
+        Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e) => Ok(PrAttemptOutcome::CreateFailed {
             error: e.to_string(),
             commit_outcome,
@@ -435,22 +457,32 @@ fn is_valid_commit_coauthor_email(email: &str) -> bool {
         && !email.contains('>')
 }
 
-fn branch_commit_count(ctx: &worktree::WorktreeContext) -> Result<usize> {
+async fn branch_commit_count(
+    ctx: &worktree::WorktreeContext,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<usize> {
     let base_head = git_stdout(
         &ctx.original_dir,
         &["rev-parse", "HEAD"],
         "git rev-parse HEAD failed",
-    )?;
+        cancel_token,
+    )
+    .await?;
     let merge_base = git_stdout(
         &ctx.path,
         &["merge-base", "HEAD", &base_head],
         "git merge-base failed",
-    )?;
+        cancel_token,
+    )
+    .await?;
+    let range = format!("{merge_base}..HEAD");
     let count = git_stdout(
         &ctx.path,
-        &["rev-list", "--count", &format!("{merge_base}..HEAD")],
+        &["rev-list", "--count", &range],
         "git rev-list --count failed",
-    )?;
+        cancel_token,
+    )
+    .await?;
     count.parse::<usize>().map_err(|e| {
         CruiseError::Other(format!(
             "failed to parse branch commit count from `{count}`: {e}"
@@ -458,18 +490,29 @@ fn branch_commit_count(ctx: &worktree::WorktreeContext) -> Result<usize> {
     })
 }
 
-fn git_stdout(current_dir: &Path, args: &[&str], context: &str) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(current_dir)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git {}: {}", args.join(" "), e)))?;
-
+async fn git_stdout(
+    current_dir: &Path,
+    args: &[&str],
+    context: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<String> {
+    let output = crate::step::command::run_process_output_cancelled(
+        "git",
+        args,
+        Some(current_dir),
+        cancel_token,
+    )
+    .await
+    .map_err(|error| match error {
+        CruiseError::Interrupted => error,
+        _ => CruiseError::Other(format!("{context}: {error}")),
+    })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!("{context}: {}", stderr.trim())));
+        return Err(CruiseError::Other(format!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
-
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
         Err(CruiseError::Other(format!(
@@ -481,56 +524,66 @@ fn git_stdout(current_dir: &Path, args: &[&str], context: &str) -> Result<String
 }
 
 /// Stage all changes and commit them.
-fn commit_changes(worktree_path: &Path, message: &str) -> Result<CommitOutcome> {
-    let add = std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git add: {e}")))?;
+async fn commit_changes(
+    worktree_path: &Path,
+    message: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<CommitOutcome> {
+    let add = crate::step::command::run_process_output_cancelled(
+        "git",
+        &["add", "-A"],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if !add.status.success() {
-        let stderr = String::from_utf8_lossy(&add.stderr);
         return Err(CruiseError::Other(format!(
             "git add -A failed: {}",
-            stderr.trim()
+            String::from_utf8_lossy(&add.stderr).trim()
         )));
     }
-
-    let diff = std::process::Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git diff: {e}")))?;
+    let diff = crate::step::command::run_process_output_cancelled(
+        "git",
+        &["diff", "--cached", "--quiet"],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if diff.status.success() {
         return Ok(CommitOutcome::NoChanges);
     }
-
-    let commit = std::process::Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git commit: {e}")))?;
+    let commit = crate::step::command::run_process_output_cancelled(
+        "git",
+        &["commit", "-m", message],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if !commit.status.success() {
-        let stderr = String::from_utf8_lossy(&commit.stderr);
         return Err(CruiseError::Other(format!(
             "git commit failed: {}",
-            stderr.trim()
+            String::from_utf8_lossy(&commit.stderr).trim()
         )));
     }
-
     Ok(CommitOutcome::Created)
 }
 
-fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["push", "-u", "origin", branch])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git push: {e}")))?;
+async fn push_branch(
+    worktree_path: &Path,
+    branch: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<()> {
+    let output = crate::step::command::run_process_output_cancelled(
+        "git",
+        &["push", "-u", "origin", branch],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CruiseError::Other(format!(
             "git push failed: {}",
-            stderr.trim()
+            String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     Ok(())
@@ -538,38 +591,43 @@ fn push_branch(worktree_path: &Path, branch: &str) -> Result<()> {
 
 /// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise
 /// `--fill`. Falls back to `gh pr view` if a PR already exists.
-fn create_pr(worktree_path: &Path, branch: &str, title: &str, body: &str) -> Result<String> {
+async fn create_pr(
+    worktree_path: &Path,
+    branch: &str,
+    title: &str,
+    body: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<String> {
     let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
     } else {
         gh_args.extend(["--title", title, "--body", body]);
     }
-    let output = std::process::Command::new("gh")
-        .args(&gh_args)
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr create: {e}")))?;
-
+    let output = crate::step::command::run_process_output_cancelled(
+        "gh",
+        &gh_args,
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if output.status.success()
         && let Some(url) = gh_output_line(&output.stdout)
     {
         return Ok(url);
     }
-
-    // PR may already exist -- try to fetch the URL.
-    let fallback = std::process::Command::new("gh")
-        .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh pr view: {e}")))?;
-
+    let fallback = crate::step::command::run_process_output_cancelled(
+        "gh",
+        &["pr", "view", branch, "--json", "url", "--jq", ".url"],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
     if fallback.status.success()
         && let Some(url) = gh_output_line(&fallback.stdout)
     {
         return Ok(url);
     }
-
     let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
     Err(CruiseError::Other(format!(

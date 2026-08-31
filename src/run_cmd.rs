@@ -336,10 +336,21 @@ async fn run_single(
         )));
     }
 
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
     observer.on_phase(&session_id, RunPhase::Preparing);
 
     let config = manager.load_config(&session)?;
     validate_config(&config)?;
+    if !args.dry_run
+        && !session.exec
+        && (session.plan_error.is_some() || !session.has_usable_plan(&manager.sessions_dir()))
+    {
+        return Err(CruiseError::Other(format!(
+            "Session {session_id} has no usable plan; retry planning first."
+        )));
+    }
     let effective_max_retries =
         crate::config::resolve_effective_max_retries(args.max_retries, &config);
     crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
@@ -351,6 +362,9 @@ async fn run_single(
         return Ok(());
     }
 
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
     let compiled = crate::workflow::compile(config)?;
     let effective_workspace_mode = if session.repo.is_some() {
         // Repo-backed sessions always execute in a worktree on a fresh clone so
@@ -386,6 +400,9 @@ async fn run_single(
     if effective_workspace_mode == WorkspaceMode::Worktree {
         crate::worktree_pr::ensure_gh_available()?;
     }
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
     let mut dag = crate::dag::build_dag(&compiled, effective_max_retries)?;
     let start_node = session.current_step.clone().map_or_else(
         || Ok(dag.start.clone()),
@@ -410,6 +427,9 @@ async fn run_single(
         },
     )?;
     log_resume_message(&session);
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
     // Repo-backed sessions execute in a temporary clone; re-create it if the
     // post-approval cleanup (or a previous run) removed it.
     if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
@@ -418,6 +438,9 @@ async fn run_single(
             style("->").cyan(),
             session.base_dir.display()
         );
+    }
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
     }
     let execution_workspace =
         prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
@@ -557,10 +580,15 @@ async fn run_single(
                     ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
                     ExecutionWorkspace::Worktree { ctx, .. } => {
                         observer.on_phase(&session_id, RunPhase::CreatingPr);
+                        let persist_pr = |snapshot: &SessionState| {
+                            let fingerprint = manager.save_with_fingerprint(snapshot)?;
+                            *lock_unpoisoned(&session_fingerprint) = fingerprint;
+                            Ok(())
+                        };
                         tokio::select! {
                             result = crate::retry::with_active_policy(
                                 retry_policy.clone(),
-                                crate::worktree_pr::handle_worktree_pr(
+                                crate::worktree_pr::handle_worktree_pr_with_persistence(
                                     ctx,
                                     &compiled,
                                     &mut vars,
@@ -570,7 +598,9 @@ async fn run_single(
                                     effective_max_retries,
                                     &skipped_steps,
                                     Some(&cancel_token),
+                                    option_handler,
                                     Some(&on_step_log),
+                                    Some(&persist_pr),
                                 ),
                             ) => result,
                             _ = tokio::signal::ctrl_c() => {
@@ -595,6 +625,7 @@ async fn run_single(
             "\n{} Interrupted -- session saved as Suspended.",
             style("||").yellow().bold()
         );
+        session.clear_pending_input();
         session.clear_runner();
         session.phase = SessionPhase::Suspended;
         manager.save(session)?;
@@ -666,6 +697,7 @@ async fn run_single(
 /// - `Err(StepPaused)` -> keep `Running` (session can be resumed with `cruise run`)
 /// - `Err(other)` -> `Failed`
 fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
+    session.clear_pending_input();
     match result {
         Ok(()) => {
             session.clear_runner();
@@ -806,7 +838,8 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     let dashboard_for_workers = dashboard.clone();
     let manager_for_workers = manager.clone();
 
-    let batch_result = crate::batch_run::run_all_with_dynamic_parallelism(
+    let parent_cancel = cancel_token.clone();
+    let batch_future = crate::batch_run::run_all_with_dynamic_parallelism(
         &manager,
         move || parallelism,
         cancel_token,
@@ -856,8 +889,15 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
                 outcome
             })
         },
-    )
-    .await;
+    );
+    tokio::pin!(batch_future);
+    let batch_result = tokio::select! {
+        result = &mut batch_future => result,
+        _ = tokio::signal::ctrl_c() => {
+            parent_cancel.cancel();
+            batch_future.await
+        }
+    };
     drop(dashboard);
     crate::console_mode::set_quiet(false);
     let batch_results = batch_result?;
@@ -1286,6 +1326,10 @@ mod tests {
         let session_dir = manager.sessions_dir().join(session_id);
         fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(session_dir.join("config.yaml"), yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = session_dir.join("plan.md");
+        if !plan_path.exists() {
+            fs::write(plan_path, "# Test plan\n").unwrap_or_else(|e| panic!("{e:?}"));
+        }
     }
 
     fn single_command_config(step_name: &str, command: &str) -> String {
@@ -1691,8 +1735,8 @@ steps:
         );
     }
 
-    #[test]
-    fn test_attempt_pr_creation_skips_gh_when_branch_has_no_commits() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_skips_gh_when_branch_has_no_commits() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let (_repo, ctx) = create_worktree(&tmp, "20260307225900");
         let bin_dir = tmp.path().join("bin");
@@ -1706,8 +1750,9 @@ steps:
         );
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result =
-            attempt_pr_creation(&ctx, "test task", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&ctx, "test task", "", "", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(result, PrAttemptOutcome::SkippedNoCommits);
         assert!(
@@ -1721,8 +1766,8 @@ steps:
         worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    #[test]
-    fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_commits_changes_before_calling_gh() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1731,8 +1776,9 @@ steps:
         );
         let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let result =
-            attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1768,8 +1814,8 @@ steps:
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    #[test]
-    fn test_attempt_pr_creation_adds_commit_coauthor_from_env() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_adds_commit_coauthor_from_env() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1782,8 +1828,9 @@ steps:
             "12345+octocat@users.noreply.github.com",
         );
 
-        let result =
-            attempt_pr_creation(&f.ctx, "add feature", "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1801,8 +1848,8 @@ steps:
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    #[test]
-    fn test_attempt_pr_creation_reuses_existing_branch_commits() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_reuses_existing_branch_commits() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1816,7 +1863,8 @@ steps:
         let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "")
+        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "", None)
+            .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
@@ -1869,8 +1917,8 @@ steps:
         }
     }
 
-    #[test]
-    fn test_attempt_pr_creation_uses_pr_title_as_commit_message_when_title_is_present() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_uses_pr_title_as_commit_message_when_title_is_present() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1879,7 +1927,8 @@ steps:
         );
 
         let pr_title = "feat: add user icon registration";
-        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "")
+        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "", None)
+            .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
@@ -1902,8 +1951,8 @@ steps:
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    #[test]
-    fn test_attempt_pr_creation_falls_back_to_message_when_pr_title_is_empty() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_falls_back_to_message_when_pr_title_is_empty() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1912,8 +1961,9 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result =
-            attempt_pr_creation(&f.ctx, fallback, "", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, fallback, "", "", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1935,8 +1985,8 @@ steps:
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
-    #[test]
-    fn test_attempt_pr_creation_treats_whitespace_only_title_as_empty() {
+    #[tokio::test]
+    async fn test_attempt_pr_creation_treats_whitespace_only_title_as_empty() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
             &tmp,
@@ -1945,8 +1995,9 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result =
-            attempt_pr_creation(&f.ctx, fallback, "   ", "").unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,

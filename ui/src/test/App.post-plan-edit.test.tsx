@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
-import type { Session, PlanEvent } from "../types";
+import type { Session, ApplicationEvent } from "../types";
 import * as commands from "../lib/commands";
 
 vi.mock("@tauri-apps/api/app", () => ({
@@ -33,6 +33,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -434,8 +435,8 @@ describe("App: Post-plan session editing - config change with replan", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (_sessionId: any, channel: any) => {
         channel.onmessage?.({
-          event: "planGenerated",
-          data: { content: "# New plan content" },
+          event: "planFinished",
+          data: { sessionId: "session-1", phase: "Awaiting Approval" },
         });
         return "# New plan content";
       }
@@ -600,7 +601,7 @@ describe("App: Post-plan session editing - existing New Session behavior preserv
   });
 
   it("releases New Session form when sessionCreated event is received", async () => {
-    let capturedChannel: { onmessage: ((event: PlanEvent) => void) | null } | null = null;
+    let capturedChannel: { onmessage: ((event: ApplicationEvent) => void) | null } | null = null;
     vi.mocked(commands.createSession).mockImplementationOnce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (_params: any, channel: any) => {
@@ -626,7 +627,7 @@ describe("App: Post-plan session editing - existing New Session behavior preserv
     ]);
 
     await act(async () => {
-      capturedChannel?.onmessage?.({ event: "sessionCreated", data: { sessionId: "new-session-id" } });
+      capturedChannel?.onmessage?.({ event: "planStarted", data: { sessionId: "new-session-id", operation: "generate" } });
     });
 
     await waitFor(() => {

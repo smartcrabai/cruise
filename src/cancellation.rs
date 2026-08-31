@@ -7,9 +7,13 @@ use std::sync::{
 ///
 /// Clones share the same underlying state via `Arc`; cancelling any clone cancels all.
 /// Designed to be cheap to clone and thread-safe.
+/// A cancellation token. Clones share local state; child tokens additionally
+/// observe cancellation of their parent (and every ancestor) without being able
+/// to cancel siblings or the parent.
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
+    ancestors: Arc<Vec<Arc<AtomicBool>>>,
 }
 
 impl Default for CancellationToken {
@@ -24,6 +28,19 @@ impl CancellationToken {
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            ancestors: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Create an independently cancellable token linked to this token.
+    /// Cancelling the child does not affect this token or any sibling.
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        let mut ancestors = (*self.ancestors).clone();
+        ancestors.push(Arc::clone(&self.cancelled));
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ancestors: Arc::new(ancestors),
         }
     }
 
@@ -32,10 +49,13 @@ impl CancellationToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    /// Returns `true` if `cancel()` has been called on this token or any of its clones.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .ancestors
+                .iter()
+                .any(|parent| parent.load(Ordering::Acquire))
     }
 
     /// Returns a future that resolves once the token has been cancelled.
@@ -127,5 +147,25 @@ mod tests {
         let token = CancellationToken::default();
         // Then: it is not cancelled
         assert!(!token.is_cancelled());
+    }
+    #[test]
+    fn child_cancellation_is_isolated() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let sibling = parent.child_token();
+        child.cancel();
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert!(!sibling.is_cancelled());
+    }
+
+    #[test]
+    fn parent_cancellation_reaches_nested_children() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let grandchild = child.child_token();
+        parent.cancel();
+        assert!(child.is_cancelled());
+        assert!(grandchild.is_cancelled());
     }
 }

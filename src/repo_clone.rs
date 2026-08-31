@@ -56,6 +56,7 @@ pub fn clone_repo(repo: &str, clone_path: &Path) -> Result<()> {
     let output = Command::new("gh")
         .args(["repo", "clone", repo])
         .arg(clone_path)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run gh repo clone: {e}")))?;
 
@@ -149,6 +150,62 @@ pub fn ensure_repo_session_workspace(
     session.base_dir = clone_path;
     Ok(!reused)
 }
+/// Cancellation-aware variant used by interactive application runs. Unlike
+/// [`ensure_repo_session_workspace`], the `gh` child is reaped when the token
+/// is cancelled while cloning.
+///
+/// # Errors
+///
+/// Returns [`CruiseError::Interrupted`] when cancellation is requested, or an
+/// error if removing a partial clone, creating its parent, or cloning fails.
+pub async fn ensure_repo_session_workspace_cancelled(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    cancel_token: &crate::cancellation::CancellationToken,
+) -> Result<bool> {
+    let Some(repo) = session.repo.clone() else {
+        return Ok(false);
+    };
+    if cancel_token.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
+    let clone_path = manager.clones_dir().join(&session.id);
+    if clone_path.is_dir() {
+        if clone_path.join(".git").exists() {
+            session.base_dir = clone_path;
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(&clone_path)?;
+    }
+    if let Some(parent) = clone_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let clone_path_string = clone_path.to_string_lossy().into_owned();
+    let output = crate::step::command::run_process_output_cancelled(
+        "gh",
+        &["repo", "clone", &repo, &clone_path_string],
+        None,
+        Some(cancel_token),
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&clone_path);
+            return Err(error);
+        }
+    };
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&clone_path);
+        return Err(CruiseError::Other(format!(
+            "gh repo clone {} failed: {}",
+            repo,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    session.base_dir = clone_path;
+    Ok(true)
+}
 
 /// Remove the session's temporary clone and any worktree created on top of it.
 ///
@@ -180,15 +237,27 @@ pub fn cleanup_session_workspace(manager: &SessionManager, session: &SessionStat
 /// Post-approval cleanup for repo-backed sessions: the temporary clone (and
 /// any planning worktree on top of it) is removed; execution re-clones later.
 ///
-/// Clears `worktree_path` on the session (the branch name is kept so the
-/// execution worktree reuses it). No-op for sessions without a repository.
-/// The caller is responsible for persisting the session afterwards.
-pub fn cleanup_after_approval(manager: &SessionManager, session: &mut SessionState) {
+/// Clears `worktree_path` on the session only after cleanup succeeds. The
+/// caller is responsible for persisting the session afterwards.
+///
+/// # Errors
+///
+/// Returns an error if removing the temporary workspace fails.
+pub fn cleanup_after_approval_checked(
+    manager: &SessionManager,
+    session: &mut SessionState,
+) -> Result<()> {
     if session.repo.is_none() {
-        return;
+        return Ok(());
     }
-    let _ = cleanup_session_workspace(manager, session);
+    cleanup_session_workspace(manager, session)?;
     session.worktree_path = None;
+    Ok(())
+}
+
+/// Best-effort compatibility wrapper for CLI callers.
+pub fn cleanup_after_approval(manager: &SessionManager, session: &mut SessionState) {
+    let _ = cleanup_after_approval_checked(manager, session);
 }
 
 #[cfg(test)]

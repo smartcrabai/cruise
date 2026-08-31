@@ -6,18 +6,17 @@ import {
   type AppConfig,
   type ChoiceDto,
   type ConfigEntry,
-  type PlanEvent,
+  type ApplicationEvent,
   type Session,
   type SessionPhase,
   type SkippableStepDto,
-  type WorkflowEvent,
   type WorkspaceMode,
 } from "./types";
 import {
   approveSession,
   askSession,
+  cancelRunAll,
   cancelSession,
-  clearNewSessionDraft,
   createDraftSession,
   createSession,
   deleteSession,
@@ -28,16 +27,19 @@ import {
   getNewSessionConfigDefaults,
   getNewSessionDraft,
   getNewSessionHistorySummary,
+  getPendingPrompts,
   getSession,
   getSessionLog,
   getSessionPlan,
-  listConfigs,
   publishPlanIssue,
   resetSession,
   respondToOption,
   runAllSessions,
   runSession,
   saveNewSessionDraft,
+  clearNewSessionDraft,
+  listConfigs,
+  regenerateSessionPlan,
   updateAppConfig,
 } from "./lib/commands";
 import { notifyDesktop } from "./lib/desktopNotifications";
@@ -54,103 +56,14 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { PublishIssueDialog } from "./components/PublishIssueDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { WorkflowDagPanel } from "./components/WorkflowDagPanel";
+import { OptionDialog } from "./components/OptionDialog";
+import { WorkflowInfoPanel } from "./components/WorkflowInfoPanel";
 import { Spinner } from "./components/Spinner";
 import { getSessionActions, isApprovalReady, type RunStatus } from "./lib/sessionActions";
 import { collectExpandedStepIds } from "./lib/stepUtils";
 import { useSplitPane } from "./lib/useSplitPane";
-import {
-  formatLocalTime,
-  workflowEventLogLine,
-  runAllCompletedLogLine,
-  runAllSessionStartedLogLine,
-  runAllStartedLogLine,
-  runAllStepLogLine,
-  runAllWorkflowEventLogLine,
-  PHASE_ICON,
-} from "./lib/format";
+import { PHASE_ICON } from "./lib/format";
 
-// --- OptionDialog ----------------------------------------------------------------
-
-interface OptionDialogProps {
-  choices: ChoiceDto[];
-  plan?: string;
-  onRespond: (result: { nextStep?: string; textInput?: string }) => void;
-}
-
-function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
-  const [textValues, setTextValues] = useState<Record<string, string>>({});
-  const titleId = useId();
-
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="bg-gray-50 dark:bg-gray-900 rounded-lg shadow-xl border border-gray-300 dark:border-gray-700 p-6 max-w-lg w-full space-y-4"
-      >
-        <h2 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-gray-100">Choose an option</h2>
-        {plan && (
-          <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded overflow-auto max-h-48">
-            <MarkdownViewer content={plan} className="p-3" />
-          </div>
-        )}
-        <div className="space-y-2">
-          {choices.map((choice) =>
-            choice.kind === "selector" ? (
-              <button
-                key={choice.label}
-                type="button"
-                onClick={() => onRespond({ nextStep: choice.next })}
-                className="w-full text-left px-4 py-2 border border-gray-300 dark:border-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-sm text-gray-800 dark:text-gray-200 transition-colors"
-              >
-                {choice.label}
-              </button>
-            ) : (
-              <div key={choice.label} className="space-y-1">
-                <label htmlFor={`text-input-${choice.label}`} className="text-sm text-gray-500 dark:text-gray-400">{choice.label}</label>
-                <div className="flex gap-2">
-                  <input
-                    id={`text-input-${choice.label}`}
-                    type="text"
-                    value={textValues[choice.label] ?? ""}
-                    onChange={(e) =>
-                      setTextValues((prev) => ({
-                        ...prev,
-                        [choice.label]: e.target.value,
-                      }))
-                    }
-                    className="flex-1 border border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 rounded px-3 py-1.5 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 outline-none focus:border-blue-500"
-                    placeholder="Type here..."
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter")
-                        onRespond({
-                          nextStep: choice.next,
-                          textInput: textValues[choice.label] ?? "",
-                        });
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onRespond({
-                        nextStep: choice.next,
-                        textInput: textValues[choice.label] ?? "",
-                      })
-                    }
-                    className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
-                  >
-                    Submit
-                  </button>
-                </div>
-              </div>
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // --- WorkflowToastStack ------------------------------------------------------------
 
@@ -347,51 +260,6 @@ function AskEditor({ question, onQuestionChange, phase, error, onSubmit, onCance
 
 // --- Workflow panel sub-components (shared across layout variants) ----------------
 
-interface WorkflowInfoPanelProps {
-  session: Session;
-  panelInfoId: string;
-  tabInfoId: string;
-  className?: string;
-}
-
-function WorkflowInfoPanel({ session, panelInfoId, tabInfoId, className = "" }: WorkflowInfoPanelProps) {
-  return (
-    <div id={panelInfoId} role="tabpanel" aria-labelledby={tabInfoId} className={`p-6 space-y-3 text-sm text-gray-500 dark:text-gray-400 ${className}`}>
-      <div>
-        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Config</span>
-        <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.configSource}</p>
-      </div>
-      <div>
-        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">
-          {session.repo ? "Repository" : "Base dir"}
-        </span>
-        <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.repo ?? session.baseDir}</p>
-      </div>
-      {session.worktreeBranch && (
-        <div>
-          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Branch</span>
-          <p className="font-mono text-gray-700 dark:text-gray-300 mt-0.5">{session.worktreeBranch}</p>
-        </div>
-      )}
-      <div>
-        <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Created</span>
-        <p className="text-gray-700 dark:text-gray-300 mt-0.5">{formatLocalTime(session.createdAt)}</p>
-      </div>
-      {session.completedAt && (
-        <div>
-          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Completed</span>
-          <p className="text-gray-700 dark:text-gray-300 mt-0.5">{formatLocalTime(session.completedAt)}</p>
-        </div>
-      )}
-      {session.phaseError && (
-        <div>
-          <span className="text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Error</span>
-          <p className="text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{session.phaseError}</p>
-        </div>
-      )}
-    </div>
-  );
-}
 
 interface WorkflowPlanPanelProps {
   panelPlanId: string;
@@ -458,20 +326,22 @@ interface WorkflowRunnerProps {
   onActiveTabChange: (tab: ActiveTab) => void;
   onSessionUpdated: (session: Session) => void;
   onDeleteConfirmed: (sessionId: string) => void;
+  onSessionPublished?: (sessionId: string) => void;
   onDiscardConfirmed: (sessionId: string) => void;
   onToast: (toast: Omit<WorkflowToast, "id">) => void;
   onFixingChange: (sessionId: string, fixing: boolean) => void;
+  fixing?: boolean;
 }
 
 interface PendingOption {
+  sessionId: string;
   requestId: string;
   choices: ChoiceDto[];
   plan?: string;
 }
-
 type ActiveTab = "info" | "dag" | "plan" | "log";
 
-export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onDiscardConfirmed, onToast, onFixingChange }: WorkflowRunnerProps) {
+export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessionUpdated, onDeleteConfirmed, onSessionPublished, onDiscardConfirmed, onToast, onFixingChange, fixing = false }: WorkflowRunnerProps) {
   const uid = useId();
   const tabInfoId = `${uid}-tab-info`;
   const tabDagId = `${uid}-tab-dag`;
@@ -490,6 +360,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   const [planLoading, setPlanLoading] = useState(false);
   const [pendingOption, setPendingOption] = useState<PendingOption | null>(null);
   const [replanFeedback, setReplanFeedback] = useState("");
+  const [pendingAskRequestId, setPendingAskRequestId] = useState<string | null>(null);
   const [replanPhase, setReplanPhase] = useState<"idle" | "editing" | "generating">("idle");
   const [planProgress, setPlanProgress] = useState<string[]>([]);
   const [replanError, setReplanError] = useState("");
@@ -504,7 +375,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   const logEndRef = useRef<HTMLSpanElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
   const stickToBottomRef = useRef(true);
-
+  const cancelRequestedRef = useRef(false);
   const loadSavedLog = useCallback(async () => {
     try {
       const content = await getSessionLog(session.id);
@@ -543,6 +414,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     stickToBottomRef.current = true;
     setPlanContent("");
     setPendingOption(null);
+    setPendingAskRequestId(null);
     setReplanFeedback("");
     setReplanPhase("idle");
     setReplanError("");
@@ -554,16 +426,28 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     setShowDeleteConfirm(false);
     setShowDiscardConfirm(false);
     setIsConfigBusy(false);
+    cancelRequestedRef.current = false;
   }, [session.id]);
 
-  // Clear the ephemeral fixingSessionIds entry from App when this runner unmounts.
-  // The sidebar's "Fixing" badge now persists correctly via session.fixInProgress
-  // (DTO field), so this only keeps the parent's in-memory set tidy.
+  // Rehydrate prompt IDs when revisiting a session while its operation is still active.
+  // The persisted question alone is not enough to safely answer the runtime request.
   useEffect(() => {
-    return () => {
-      onFixingChange(session.id, false);
-    };
-  }, [session.id, onFixingChange]);
+    if (!session.awaitingInput) return;
+    let active = true;
+    void getPendingPrompts(session.id).then((prompts) => {
+      if (!active) return;
+      const ask = prompts.find((prompt) => prompt.kind === "ask");
+      if (ask) setPendingAskRequestId(ask.requestId);
+      const option = prompts.find((prompt) => prompt.kind === "option");
+      if (option) {
+        setPendingOption({ sessionId: option.sessionId, requestId: option.requestId, choices: option.choices });
+      }
+    }).catch(() => {
+      // The session may have completed between selection and this best-effort lookup.
+    });
+    return () => { active = false; };
+  }, [session.id, session.awaitingInput]);
+
 
   useEffect(() => {
     if (activeTab !== "log" || status === "running") return;
@@ -600,59 +484,61 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
       onToast({ kind: "failed", sessionInput: session.input, detail: `Approve error: ${e}` });
     }
   }
-
   async function startRun(workspaceMode: WorkspaceMode) {
+    cancelRequestedRef.current = false;
     setStatus("running");
     setCurrentStep(null);
     setLiveLog([]);
     onActiveTabChange("log");
 
-    const channel = new Channel<WorkflowEvent>();
-
+    const channel = new Channel<ApplicationEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "stepStarted") {
+      if (event.event === "runStarted" && event.data.sessionId === session.id) {
+        setStatus("running");
+      } else if (event.event === "runPhase" && event.data.sessionId === session.id) {
+        setLiveLog((prev) => appendSessionLog(prev, event.data.phase));
+      } else if (event.event === "stepStarted" && event.data.sessionId === session.id) {
         setCurrentStep(event.data.step);
-        setLiveLog((prev) => [...prev, event.data.step]);
-      } else if (event.event === "logChunk") {
-        setLiveLog((prev) => [...prev, event.data.line]);
-      } else if (event.event === "optionRequired") {
-        setPendingOption({
-          requestId: event.data.requestId,
-          choices: event.data.choices,
-          plan: event.data.plan,
-        });
+        setLiveLog((prev) => appendSessionLog(prev, event.data.step));
+      } else if (event.event === "optionRequired" && event.data.sessionId === session.id) {
+        setPendingOption({ sessionId: session.id, requestId: event.data.requestId, choices: event.data.choices });
         onToast({ kind: "input-required", sessionInput: session.input });
-      } else if (event.event === "workflowCompleted") {
-        setStatus("completed");
-        setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-      } else if (event.event === "workflowFailed") {
+      } else if (event.event === "prCreated" && event.data.sessionId === session.id) {
+        setLiveLog((prev) => appendSessionLog(prev, `PR created: ${event.data.url}`));
+        void refreshSession().catch((error) => setLiveLog((prev) => appendSessionLog(prev, `Session refresh error: ${error}`)));
+      } else if (event.event === "runFinished" && event.data.sessionId === session.id) {
+        setStatus(event.data.phase === "Completed" ? "completed" : event.data.phase === "Suspended" ? "cancelled" : "failed");
+      } else if (event.event === "runFailed" && event.data.sessionId === session.id) {
         setStatus("failed");
-        setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
-      } else if (event.event === "workflowCancelled") {
+        setLiveLog((prev) => appendSessionLog(prev, `Error: ${event.data.error}`));
+      } else if (event.event === "runCancelled" && event.data.sessionId === session.id) {
+        cancelRequestedRef.current = true;
         setStatus("cancelled");
-        setLiveLog((prev) => [...prev, workflowEventLogLine(event)]);
+      } else if (event.event === "logChunk" && event.data.sessionId === session.id) {
+        setLiveLog((prev) => appendSessionLog(prev, event.data.text));
       }
     };
 
     try {
-      await runSession(session.id, workspaceMode, channel);
+      const updated = await runSession(session.id, workspaceMode, channel);
+      onSessionUpdated(updated);
+      if (updated.phase === "Suspended" || cancelRequestedRef.current) setStatus("cancelled");
     } catch (e) {
-      setStatus("failed");
-      setLiveLog((prev) => [...prev, `Error: ${e}`]);
+      if (cancelRequestedRef.current || String(e).toLowerCase().includes("interrupt")) {
+        setStatus("cancelled");
+      } else {
+        setStatus("failed");
+        setLiveLog((prev) => appendSessionLog(prev, `Error: ${e}`));
+      }
     }
-
-    // Re-fetch session state after run resolves. The log tab effect reloads
-    // persisted log content once the run leaves the "running" state.
-    refreshSession().catch((e) => {
-      setLiveLog((prev) => [...prev, `Session refresh error: ${e}`]);
-    });
+    refreshSession().catch((e) => setLiveLog((prev) => appendSessionLog(prev, `Session refresh error: ${e}`)));
   }
-
   async function handleCancel() {
+    cancelRequestedRef.current = true;
     try {
-      await cancelSession();
+      await cancelSession(session.id);
     } catch (e) {
-      setLiveLog((prev) => [...prev, `Cancel error: ${e}`]);
+      setLiveLog((prev) => appendSessionLog(prev, `Cancel error: ${e}`));
     }
   }
 
@@ -662,9 +548,11 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
       onSessionUpdated(updated);
       setStatus("idle");
       setCurrentStep(null);
+      setPendingOption(null);
+      setPendingAskRequestId(null);
       setLiveLog([]);
     } catch (e) {
-      setLiveLog((prev) => [...prev, `Reset error: ${e}`]);
+      setLiveLog((prev) => appendSessionLog(prev, `Reset error: ${e}`));
     }
   }
 
@@ -681,137 +569,163 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   async function handlePublishIssue(triggerCruise: boolean) {
     const published = await publishPlanIssue(session.id, triggerCruise);
     setShowPublishIssueConfirm(false);
-    onDeleteConfirmed(session.id);
+    onSessionPublished?.(session.id);
     void openUrl(published.url);
   }
 
-  async function handleOptionRespond(result: {
-    nextStep?: string;
-    textInput?: string;
-  }) {
-    const sessionId = pendingOption?.requestId;
+  async function handleOptionRespond(result: { nextStep?: string; textInput?: string }) {
+    const requestId = pendingOption?.requestId;
     setPendingOption(null);
-    if (!sessionId) return;
+    if (!requestId) return;
     try {
-      await respondToOption(sessionId, result);
-      // Re-sync after awaiting_input = false is saved
+      await respondToOption(session.id, requestId, result);
       await refreshSession();
     } catch (e) {
-      setLiveLog((prev) => [...prev, `Option response error: ${e}`]);
+      setLiveLog((prev) => appendSessionLog(prev, `Option response error: ${e}`));
     }
   }
 
   async function handleReplan() {
     const trimmed = replanFeedback.trim();
     if (!trimmed) return;
+    cancelRequestedRef.current = false;
     setReplanPhase("generating");
     setPlanProgress([]);
     onFixingChange(session.id, true);
     setReplanError("");
-
-    const channel = new Channel<PlanEvent>();
+    const channel = new Channel<ApplicationEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "planGenerating") {
+      if (event.event === "planChunk" && event.data.sessionId === session.id) {
+        setPlanProgress((prev) => [...prev, event.data.text]);
+      } else if (event.event === "askUserRequired" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(event.data.requestId);
         void refreshSession();
-      } else if (event.event === "planChunk") {
-        setPlanProgress((prev) => [...prev, event.data.line]);
-      } else if (event.event === "askUserRequired") {
-        void refreshSession();
-      } else if (event.event === "planGenerated") {
-        setPlanContent(event.data.content);
+      } else if (event.event === "planFinished" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
+        setAskResponse("");
         setReplanPhase("idle");
         setPlanProgress([]);
         onFixingChange(session.id, false);
         setReplanFeedback("");
-        setAskResponse("");
         onActiveTabChange("plan");
         void refreshSession();
-      } else if (event.event === "planFailed") {
+      } else if (event.event === "planFailed" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
         setReplanError(event.data.error);
+        setReplanPhase("editing");
+        setPlanProgress([]);
+        onFixingChange(session.id, false);
+        void refreshSession();
+      } else if (event.event === "planCancelled" && event.data.sessionId === session.id) {
+        cancelRequestedRef.current = true;
+        setPendingAskRequestId(null);
         setReplanPhase("editing");
         setPlanProgress([]);
         onFixingChange(session.id, false);
       }
     };
-
     try {
-      await fixSession({ sessionId: session.id, feedback: trimmed }, channel);
+      const content = session.phase === "Planned"
+        ? await regenerateSessionPlan(session.id, channel, trimmed)
+        : await fixSession({ sessionId: session.id, feedback: trimmed }, channel);
+      if (content) {
+        setPlanContent(content);
+        setAskResponse("");
+      }
     } catch (e) {
-      setReplanError(String(e));
+      if (!cancelRequestedRef.current && !String(e).toLowerCase().includes("interrupt")) {
+        setReplanError(String(e));
+      }
       setReplanPhase("editing");
+      setPlanProgress([]);
       onFixingChange(session.id, false);
     }
   }
 
   async function handleGeneratePlan() {
+    cancelRequestedRef.current = false;
     setReplanPhase("generating");
     setPlanProgress([]);
     onFixingChange(session.id, true);
-
-    let handledFailure = false;
-    const channel = new Channel<PlanEvent>();
-    channel.onmessage = async (event) => {
-      if (event.event === "planGenerating") {
+    const channel = new Channel<ApplicationEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === "planChunk" && event.data.sessionId === session.id) {
+        setPlanProgress((prev) => [...prev, event.data.text]);
+      } else if (event.event === "askUserRequired" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(event.data.requestId);
         void refreshSession();
-      } else if (event.event === "planChunk") {
-        setPlanProgress((prev) => [...prev, event.data.line]);
-      } else if (event.event === "askUserRequired") {
-        void refreshSession();
-      } else if (event.event === "planGenerated") {
-        setPlanContent(event.data.content);
+      } else if (event.event === "planFinished" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
         setReplanPhase("idle");
         setPlanProgress([]);
         onFixingChange(session.id, false);
-        // Await the session refresh so that session.phase is AwaitingApproval
-        // before switching to the plan tab; otherwise the Approve button is
-        // momentarily absent because the phase is still Draft.
-        await refreshSession();
-        onActiveTabChange("plan");
-      } else if (event.event === "planFailed") {
-        handledFailure = true;
+        void refreshSession().then(() => onActiveTabChange("plan"));
+      } else if (event.event === "planFailed" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
         setReplanPhase("idle");
         setPlanProgress([]);
         onFixingChange(session.id, false);
         onToast({ kind: "failed", sessionInput: session.input, detail: event.data.error });
         void refreshSession();
+      } else if (event.event === "planCancelled" && event.data.sessionId === session.id) {
+        cancelRequestedRef.current = true;
+        setPendingAskRequestId(null);
+        setReplanPhase("idle");
+        setPlanProgress([]);
+        onFixingChange(session.id, false);
       }
     };
-
     try {
-      await generatePlanForDraft(session.id, channel);
+      const content = await generatePlanForDraft(session.id, channel);
+      if (content) setPlanContent(content);
     } catch (e) {
-      if (!handledFailure) {
-        setReplanPhase("idle");
-        onFixingChange(session.id, false);
+      if (!cancelRequestedRef.current && !String(e).toLowerCase().includes("interrupt")) {
         onToast({ kind: "failed", sessionInput: session.input, detail: `Plan generation error: ${String(e)}` });
       }
+      setReplanPhase("idle");
+      setPlanProgress([]);
+      onFixingChange(session.id, false);
     }
   }
 
   async function handleAsk() {
     const trimmed = askQuestion.trim();
     if (!trimmed) return;
+    cancelRequestedRef.current = false;
     setAskPhase("submitting");
     setAskError("");
-
+    const channel = new Channel<ApplicationEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === "planChunk" && event.data.sessionId === session.id) {
+        setAskResponse((prev) => prev + event.data.text);
+      } else if (event.event === "planFinished" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
+        setAskPhase("idle");
+        onActiveTabChange("plan");
+      } else if (event.event === "planFailed" && event.data.sessionId === session.id) {
+        setPendingAskRequestId(null);
+        setAskError(event.data.error);
+        setAskPhase("editing");
+      } else if (event.event === "planCancelled" && event.data.sessionId === session.id) {
+        cancelRequestedRef.current = true;
+        setPendingAskRequestId(null);
+        setAskPhase("editing");
+      }
+    };
     try {
-      const answer = await askSession(session.id, trimmed);
-      setAskResponse(answer);
-      setAskPhase("idle");
-      onActiveTabChange("plan");
+      setAskResponse("");
+      await askSession(session.id, trimmed, channel);
     } catch (e) {
-      setAskError(String(e));
+      if (!cancelRequestedRef.current && !String(e).toLowerCase().includes("interrupt")) setAskError(String(e));
       setAskPhase("editing");
     }
   }
 
-  // isFixing drives the PhaseBadge header; includes the DTO field so the badge
-  // stays correct after navigating away and back (replanPhase resets to "idle").
-  const isFixing = replanPhase === "generating" || !!session.fixInProgress;
-  // isApprovalReady() already checks !session.fixInProgress, so only the local
-  // ephemeral flag needs to be forwarded to suppress buttons while the request
-  // is in flight within this component instance.
-  const actions = getSessionActions(session, status, replanPhase === "generating" || isConfigBusy);
+
+  // isFixing drives the PhaseBadge header and survives a detail remount via App's
+  // per-session in-flight state or the persisted DTO field.
+  const isFixing = replanPhase === "generating" || fixing || !!session.fixInProgress;
+  const actions = getSessionActions(session, status, isFixing || isConfigBusy, pendingAskRequestId !== null);
   const notBusy = replanPhase === "idle" && askPhase === "idle" && !isConfigBusy;
   const canShowFix = actions.showFix && notBusy;
   const canShowAsk = actions.showAsk && notBusy;
@@ -831,10 +745,14 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     phase: session.phase,
     currentStep: session.currentStep,
     onSessionUpdated,
-    onPlanRegenerated: setPlanContent,
+    onPlanRegenerated: (content: string) => {
+      setPlanContent(content);
+      setPendingAskRequestId(null);
+    },
+    onPlanTerminal: () => setPendingAskRequestId(null),
     onBusyChange: setIsConfigBusy,
     onError: (error: string) => { onToast({ kind: "failed", sessionInput: session.input, detail: error }); },
-    onAskUserRequired: () => void refreshSession(),
+    onAskUserRequired: (requestId: string) => { setPendingAskRequestId(requestId); void refreshSession(); },
     disabled: replanPhase === "generating",
   };
 
@@ -859,17 +777,24 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
           </button>
         )}
 
-        <div className="text-sm text-gray-500 dark:text-gray-400 italic">{session.input}</div>
-
-        {session.phase === "Awaiting Input" && session.pendingAskQuestion && (
+        {session.phase === "Awaiting Input" && session.pendingAskQuestion && pendingAskRequestId && (
           <AskUserPanel
             sessionId={session.id}
+            requestId={pendingAskRequestId}
             question={session.pendingAskQuestion}
-            onAnswered={() => void refreshSession()}
+            onAnswered={() => {
+              setPendingAskRequestId(null);
+              void refreshSession();
+            }}
           />
         )}
 
         {/* Controls */}
+        {session.planError && (
+          <div role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            Planning failed: {session.planError}
+          </div>
+        )}
         <div className="flex gap-2">
           {actions.showGeneratePlan && (
             <button
@@ -1471,7 +1396,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   useEffect(() => {
     let active = true;
     const fetchConfigs = () => {
-      void listConfigs(isRepoMode ? {} : { baseDir: baseDir || "." })
+      void listConfigs(isRepoMode ? { repo: debouncedRepo.trim() || undefined } : { baseDir: baseDir || "." })
         .then((newConfigs) => {
           if (!active) return;
           setConfigs(newConfigs);
@@ -1500,7 +1425,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     }
     const timer = setTimeout(fetchConfigs, 200);
     return () => { active = false; clearTimeout(timer); };
-  }, [baseDir, isRepoMode, onDraftChange]);
+  }, [baseDir, debouncedRepo, isRepoMode, onDraftChange]);
 
   // Load history-backed defaults on mount.
   useEffect(() => {
@@ -1539,10 +1464,9 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     if (!canSubmit) return;
     onDraftChange((prev) => ({ ...prev, error: null, isGenerating: true }));
     let formReleased = false;
-
-    const channel = new Channel<PlanEvent>();
+    const channel = new Channel<ApplicationEvent>();
     channel.onmessage = (event) => {
-      if (event.event === "sessionCreated") {
+      if (event.event === "planStarted") {
         formReleased = true;
         onDraftChange((prev) => ({
           ...createInitialNewSessionDraft(),
@@ -1554,32 +1478,24 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         void clearNewSessionDraft();
         void refreshHistorySummary();
         onRefreshSidebar();
-      } else if (event.event === "askUserRequired") {
-        onRefreshSidebar();
-      } else if (event.event === "planGenerated" || event.event === "planFailed") {
+      } else if (event.event === "askUserRequired" || event.event === "planFinished" || event.event === "planFailed") {
         onRefreshSidebar();
       }
     };
-
     try {
-      await createSession(
-        {
-          input: input.trim(),
-          configPath: configPath || undefined,
-          baseDir: baseDir || ".",
-          repo: isRepoMode ? repo.trim() : undefined,
-          skippedSteps: Array.from(skippedSteps),
-          useInputAsPlan,
-          grill,
-          noInteractivePlanning,
-          imageAttachments,
-        },
-        channel,
-      );
+      await createSession({
+        input: input.trim(),
+        configPath: configPath || undefined,
+        baseDir: baseDir || ".",
+        repo: isRepoMode ? repo.trim() : undefined,
+        skippedSteps: Array.from(skippedSteps),
+        useInputAsPlan,
+        grill,
+        noInteractivePlanning,
+        imageAttachments,
+      }, channel);
     } catch (e) {
-      if (!formReleased) {
-        onDraftChange((prev) => ({ ...prev, error: String(e), isGenerating: false }));
-      }
+      if (!formReleased) onDraftChange((prev) => ({ ...prev, error: String(e), isGenerating: false }));
     }
   }
 
@@ -1853,16 +1769,14 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
     </div>
   );
 }
-
-// --- RunAllView ------------------------------------------------------------------
-
 type RunAllStatus = "running" | "completed" | "cancelled" | "error";
+type RunAllResultPhase = SessionPhase | "Busy";
 
 interface RunAllSessionResult {
   sessionId: string;
   input: string;
-  phase: SessionPhase;
-  error?: string;
+  phase: RunAllResultPhase;
+  error: string | null;
 }
 
 interface RunAllRunningSession {
@@ -2001,7 +1915,11 @@ function RunAllView({ state, onCancel, onOptionRespond, onDone }: RunAllViewProp
               <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{r.input}</p>
               {r.error && <p className="text-xs text-red-600 dark:text-red-400 mt-0.5 truncate">{r.error}</p>}
             </div>
-            <PhaseBadge phase={r.phase} />
+            {r.phase === "Busy" ? (
+              <span className="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-gray-100/50 dark:bg-gray-800/50 text-gray-600 dark:text-gray-400">Busy</span>
+            ) : (
+              <PhaseBadge phase={r.phase} />
+            )}
           </div>
         ))}
       </div>
@@ -2032,11 +1950,16 @@ function appendLog(log: string[], line: string): string[] {
   const next = [...log, line];
   return next.length > 2000 ? next.slice(-2000) : next;
 }
+function appendSessionLog(log: string[], line: string): string[] {
+  const next = [...log, line];
+  return next.length > 10_000 ? next.slice(-10_000) : next;
+}
 
 // --- App -------------------------------------------------------------------------
 
 export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+
   const [view, setView] = useState<"session" | "new" | "runAll">("session");
   const sidebarRefreshRef = useRef<(() => void) | null>(null);
   const sidebarRemoveSessionRef = useRef<((id: string) => void) | null>(null);
@@ -2046,7 +1969,7 @@ export default function App() {
   const [newSessionDraft, setNewSessionDraft] = useState<NewSessionDraft>(createInitialNewSessionDraft);
   const [sessionTabMap, setSessionTabMap] = useState<Record<string, ActiveTab>>({});
   const [runAllState, setRunAllState] = useState<RunAllUiState | null>(null);
-  const runAllChannelRef = useRef<Channel<WorkflowEvent> | null>(null);
+  const runAllChannelRef = useRef<Channel<ApplicationEvent> | null>(null);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const [fixingSessionIds, setFixingSessionIds] = useState<ReadonlySet<string>>(new Set());
@@ -2149,6 +2072,17 @@ export default function App() {
     });
   }, [addToast]);
 
+  const handleSessionPublished = useCallback((sessionId: string) => {
+    sidebarRemoveSessionRef.current?.(sessionId);
+    setSessionTabMap((prev) => {
+      if (!(sessionId in prev)) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setSelectedSession(null);
+  }, []);
+
   const handleDiscardConfirmed = useCallback((sessionId: string) => {
     const prevSession = selectedSessionRef.current;
     const prevTab = sessionTabMapRef.current[sessionId];
@@ -2184,6 +2118,16 @@ export default function App() {
   }, [addToast]);
 
   const handleSessionsChanged = useCallback((sessions: Session[]) => {
+    setFixingSessionIds((prev) => {
+      let next: Set<string> | undefined;
+      for (const session of sessions) {
+        if (session.fixInProgress === false && prev.has(session.id)) {
+          next ??= new Set(prev);
+          next.delete(session.id);
+        }
+      }
+      return next ?? prev;
+    });
     const newMap = new Map(sessions.map((s) => [s.id, s]));
     const prevMap = sessionSnapshotRef.current;
     sessionSnapshotRef.current = newMap;
@@ -2233,142 +2177,105 @@ export default function App() {
     setView("runAll");
     if (runAllState) return;
 
-    const channel = new Channel<WorkflowEvent>();
+    const channel = new Channel<ApplicationEvent>();
     runAllChannelRef.current = channel;
-    setRunAllState({
-      status: "running",
-      total: 0,
-      parallelism: null,
-      runningSessions: {},
-      results: [],
-      runError: null,
-      pendingOptions: [],
-      liveLog: [],
-    });
-
+    setRunAllState({ status: "running", total: 0, parallelism: null, runningSessions: {}, results: [], runError: null, pendingOptions: [], liveLog: [] });
     channel.onmessage = (event) => {
-      if (event.event === "runAllStarted") {
+      if (event.event === "batchStarted") {
+        setRunAllState((prev) => prev ? {
+          ...prev,
+          total: event.data.total,
+          parallelism: event.data.parallelism,
+          liveLog: appendLog(prev.liveLog, `--- Run All started (${event.data.total} sessions, parallelism: ${event.data.parallelism}) ---`),
+        } : prev);
+      } else if (event.event === "batchTotalChanged") {
+        setRunAllState((prev) => prev ? { ...prev, total: event.data.total } : prev);
+      } else if (event.event === "batchSessionStarted") {
+        const id = event.data.id;
+        const input = sessionSnapshotRef.current?.get(id)?.input ?? id;
+        setRunAllState((prev) => prev ? {
+          ...prev,
+          runningSessions: { ...prev.runningSessions, [id]: { input, currentStep: null } },
+          liveLog: appendLog(prev.liveLog, `--- Session: ${input} (${id}) ---`),
+        } : prev);
+      } else if (event.event === "runPhase") {
         setRunAllState((prev) => {
           if (!prev) return prev;
-          const { total, parallelism } = event.data;
+          const running = prev.runningSessions[event.data.sessionId];
           return {
             ...prev,
-            total,
-            parallelism,
-            liveLog: appendLog(prev.liveLog, runAllStartedLogLine(total, parallelism)),
+            runningSessions: running
+              ? { ...prev.runningSessions, [event.data.sessionId]: { ...running, currentStep: event.data.phase } }
+              : prev.runningSessions,
+            liveLog: appendLog(prev.liveLog, `[${event.data.sessionId}] ${event.data.phase}`),
           };
         });
-      } else if (event.event === "runAllSessionStarted") {
+      } else if (event.event === "prCreated") {
+        setRunAllState((prev) => prev ? {
+          ...prev,
+          liveLog: appendLog(prev.liveLog, `[${event.data.sessionId}] PR created: ${event.data.url}`),
+        } : prev);
+        sidebarRefreshRef.current?.();
+      } else if (event.event === "batchSessionFinished") {
+        const result = event.data;
         setRunAllState((prev) => {
           if (!prev) return prev;
+          const { [result.id]: _finished, ...remaining } = prev.runningSessions;
+          const detail = result.error ? `: ${result.error}` : "";
           return {
             ...prev,
-            runningSessions: {
-              ...prev.runningSessions,
-              [event.data.sessionId]: {
-                input: event.data.input,
-                currentStep: null,
-              },
-            },
-            liveLog: appendLog(prev.liveLog, runAllSessionStartedLogLine(event.data.sessionId, event.data.input)),
-          };
-        });
-      } else if (event.event === "runAllSessionFinished") {
-        setRunAllState((prev) => {
-          if (!prev) return prev;
-          const { sessionId, input, phase, error } = event.data;
-
-          const { [sessionId]: _finishedSession, ...remainingSessions } = prev.runningSessions;
-          return {
-            ...prev,
-            runningSessions: remainingSessions,
-            results: [...prev.results, { sessionId, input, phase, error }],
-            pendingOptions: prev.pendingOptions.filter((option) => option.requestId !== sessionId),
+            runningSessions: remaining,
+            results: [...prev.results, { sessionId: result.id, input: prev.runningSessions[result.id]?.input ?? result.id, phase: result.phase as RunAllResultPhase, error: result.error }],
+            pendingOptions: prev.pendingOptions.filter((option) => option.sessionId !== result.id),
+            liveLog: appendLog(prev.liveLog, `[${result.id}] ${result.phase}${detail}`),
           };
         });
         sidebarRefreshRef.current?.();
-      } else if (event.event === "runAllCompleted") {
-        setRunAllState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            status: event.data.cancelled > 0 ? "cancelled" : "completed",
-            liveLog: appendLog(prev.liveLog, runAllCompletedLogLine(event.data.cancelled)),
-          };
-        });
+      } else if (event.event === "batchFinished") {
+        setRunAllState((prev) => prev ? {
+          ...prev,
+          status: event.data.cancelled ? "cancelled" : "completed",
+          liveLog: appendLog(prev.liveLog, `--- Run All finished (cancelled: ${event.data.cancelled ? 1 : 0}) ---`),
+        } : prev);
       } else if (event.event === "stepStarted") {
         setRunAllState((prev) => {
           if (!prev) return prev;
-          const runningSession = prev.runningSessions[event.data.sessionId];
-          return {
+          const running = prev.runningSessions[event.data.sessionId];
+          return running ? {
             ...prev,
-            runningSessions: runningSession ? {
-              ...prev.runningSessions,
-              [event.data.sessionId]: {
-                ...runningSession,
-                currentStep: event.data.step,
-              },
-            } : prev.runningSessions,
-            liveLog: appendLog(prev.liveLog, runAllStepLogLine(event.data.sessionId, event.data.step)),
-          };
-        });
-      } else if (event.event === "logChunk") {
-        setRunAllState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            liveLog: appendLog(prev.liveLog, `[${event.data.sessionId}] ${event.data.line}`),
-          };
+            runningSessions: { ...prev.runningSessions, [event.data.sessionId]: { ...running, currentStep: event.data.step } },
+            liveLog: appendLog(prev.liveLog, `[${event.data.sessionId}] ${event.data.step}`),
+          } : prev;
         });
       } else if (event.event === "optionRequired") {
-        setRunAllState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            pendingOptions: [
-              ...prev.pendingOptions,
-              { requestId: event.data.requestId, choices: event.data.choices, plan: event.data.plan },
-            ],
-          };
-        });
-      } else if (
-        event.event === "workflowCompleted" ||
-        event.event === "workflowFailed" ||
-        event.event === "workflowCancelled"
-      ) {
-        setRunAllState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            liveLog: appendLog(prev.liveLog, runAllWorkflowEventLogLine(event)),
-          };
-        });
+        setRunAllState((prev) => prev ? { ...prev, pendingOptions: [...prev.pendingOptions, { sessionId: event.data.sessionId, requestId: event.data.requestId, choices: event.data.choices }] } : prev);
+      } else if (event.event === "logChunk") {
+        setRunAllState((prev) => prev ? { ...prev, liveLog: appendLog(prev.liveLog, event.data.sessionId ? `[${event.data.sessionId}] ${event.data.text}` : event.data.text) } : prev);
       }
     };
-
-    void runAllSessions(channel).catch((e) => {
-      patchRunAll({ status: "error", runError: String(e) });
-    });
+    void runAllSessions(channel).catch((e) => patchRunAll({ status: "error", runError: String(e) }));
   }
 
   async function handleRunAllCancel() {
     try {
-      await cancelSession();
+      await cancelRunAll();
     } catch (e) {
       patchRunAll({ runError: String(e) });
     }
   }
 
   async function handleRunAllOptionRespond(result: { nextStep?: string; textInput?: string }) {
-    const sessionId = runAllState?.pendingOptions[0]?.requestId;
-    setRunAllState((prev) => prev ? { ...prev, pendingOptions: prev.pendingOptions.filter((o) => o.requestId !== sessionId) } : prev);
-    if (!sessionId) return;
+    const prompt = runAllState?.pendingOptions[0];
+    setRunAllState((prev) => prev ? { ...prev, pendingOptions: prompt ? prev.pendingOptions.filter((option) => option.requestId !== prompt.requestId) : prev.pendingOptions } : prev);
+    if (!prompt) return;
     try {
-      await respondToOption(sessionId, result);
+      await respondToOption(prompt.sessionId, prompt.requestId, result);
     } catch (e) {
       patchRunAll({ runError: String(e) });
     }
   }
+
+
 
   function handleRunAllDone() {
     if (runAllChannelRef.current) {
@@ -2441,6 +2348,7 @@ export default function App() {
             key={selectedSession.id}
             session={selectedSession}
             activeTab={sessionTabMap[selectedSession.id] ?? "plan"}
+            fixing={fixingSessionIds.has(selectedSession.id)}
             onActiveTabChange={(tab) =>
               setSessionTabMap((prev) => ({ ...prev, [selectedSession.id]: tab }))
             }
@@ -2449,6 +2357,7 @@ export default function App() {
               sidebarRefreshRef.current?.();
             }}
             onDeleteConfirmed={handleDeleteConfirmed}
+            onSessionPublished={handleSessionPublished}
             onDiscardConfirmed={handleDiscardConfirmed}
             onToast={(toast) => emitNotification(toast.kind, toast.sessionInput, toast.detail)}
             onFixingChange={handleFixingChange}

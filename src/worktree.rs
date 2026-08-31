@@ -68,6 +68,7 @@ pub fn setup_session_worktree(
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .current_dir(base_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
@@ -102,6 +103,7 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
         .args(["worktree", "remove", "--force"])
         .arg(&ctx.path)
         .current_dir(&ctx.original_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
@@ -116,9 +118,9 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
     let output = Command::new("git")
         .args(["branch", "-D", &ctx.branch])
         .current_dir(&ctx.original_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CruiseError::WorktreeError(format!(
@@ -134,6 +136,7 @@ fn ensure_git_repo(dir: &Path) -> Result<()> {
     let output = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
 
@@ -247,6 +250,7 @@ mod tests {
             Command::new("git")
                 .args(args)
                 .current_dir(dir)
+                .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap_or_else(|e| panic!("git command failed: {e:?}"));
         };

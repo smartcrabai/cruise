@@ -6,9 +6,9 @@ import { OptionDialog } from "./OptionDialog";
 
 afterEach(() => cleanup());
 
-const selectorChoice: ChoiceDto = { label: "Continue", kind: "selector", next: "step-2" };
-const anotherSelectorChoice: ChoiceDto = { label: "Abort", kind: "selector", next: "step-abort" };
-const textInputChoice: ChoiceDto = { label: "Enter value", kind: "textInput", next: "step-input" };
+const selectorChoice: ChoiceDto = { label: "Continue", kind: "selector", nextStep: "step-2" };
+const anotherSelectorChoice: ChoiceDto = { label: "Abort", kind: "selector", nextStep: "step-abort" };
+const textInputChoice: ChoiceDto = { label: "Enter value", kind: "textInput", nextStep: "step-input" };
 
 describe("OptionDialog", () => {
   describe("Dialog accessibility", () => {

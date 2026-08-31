@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
-import type { Session, WorkflowEvent } from "../types";
+import type { Session, ApplicationEvent } from "../types";
 import * as commands from "../lib/commands";
 import { openSettingsModal } from "./helpers";
 
@@ -34,6 +34,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getConfigSteps: vi.fn().mockResolvedValue([]),
   listDirectory: vi.fn(),
   getUpdateReadiness: vi.fn(),
@@ -85,7 +86,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 
 async function navigateToRunAll(
   sessions: Session[],
-): Promise<{ onmessage: ((event: WorkflowEvent) => void) | null }> {
+): Promise<{ onmessage: ((event: ApplicationEvent) => void) | null }> {
   vi.mocked(commands.listSessions).mockResolvedValue(sessions);
 
   render(<App />);
@@ -98,7 +99,7 @@ async function navigateToRunAll(
   });
 
   return vi.mocked(commands.runAllSessions).mock.calls[0][0] as {
-    onmessage: ((event: WorkflowEvent) => void) | null;
+    onmessage: ((event: ApplicationEvent) => void) | null;
   };
 }
 
@@ -131,15 +132,9 @@ describe("App: Run All parallel state", () => {
 
     // When: two sessions start before either finishes
     await act(async () => {
-      channel.onmessage?.({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s1", input: "task one" },
-      });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s2", input: "task two" },
-      });
+      channel.onmessage?.({ event: "batchStarted", data: { total: 3, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s1" } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s2" } });
     });
 
     // Then: progress counts both running sessions
@@ -157,23 +152,14 @@ describe("App: Run All parallel state", () => {
     ]);
 
     await act(async () => {
-      channel.onmessage?.({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s1", input: "task one" },
-      });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s2", input: "task two" },
-      });
+      channel.onmessage?.({ event: "batchStarted", data: { total: 3, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s1" } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s2" } });
     });
 
     // When: one session finishes but the other is still running
     await act(async () => {
-      channel.onmessage?.({
-        event: "runAllSessionFinished",
-        data: { sessionId: "s1", input: "task one", phase: "Completed" },
-      });
+      channel.onmessage?.({ event: "batchSessionFinished", data: { id: "s1", phase: "Completed", error: null } });
     });
 
     // Then: progress still counts one completed + one running
@@ -192,27 +178,16 @@ describe("App: Run All parallel state", () => {
 
     // When: batch starts with total=3, then all 3 initially-known sessions start
     await act(async () => {
-      channel.onmessage?.({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s1", input: "task one" },
-      });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s2", input: "task two" },
-      });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s3", input: "task three" },
-      });
+      channel.onmessage?.({ event: "batchStarted", data: { total: 3, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s1" } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s2" } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s3" } });
     });
 
-    // And: a 4th session is picked up late (beyond the initial total of 3)
+    // And: a late session changes the total before it starts
     await act(async () => {
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s4", input: "task four" },
-      });
+      channel.onmessage?.({ event: "batchTotalChanged", data: { total: 4 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s4" } });
     });
 
     // Then: progress shows 4 / 4 sessions, not the broken 4 / 3 sessions
@@ -223,82 +198,62 @@ describe("App: Run All parallel state", () => {
   });
 
   it("preserves overlapping option prompts so both requests can be answered", async () => {
-    // Given: Run All is active and two sessions ask for input before either response is sent
     const channel = await navigateToRunAll([
       makeSession({ id: "s1", input: "interactive one" }),
       makeSession({ id: "s2", input: "interactive two" }),
     ]);
 
     await act(async () => {
-      channel.onmessage?.({ event: "runAllStarted", data: { total: 2, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchStarted", data: { total: 2, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s1" } });
       channel.onmessage?.({
         event: "optionRequired",
         data: {
+          sessionId: "s1",
           requestId: "req-1",
-          choices: [{ label: "First choice", kind: "selector", next: "first-step" }],
-          plan: "# Plan 1",
+          prompt: "Choose the first step",
+          choices: [{ label: "First choice", kind: "selector", nextStep: "first-step" }],
         },
       });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s2" } });
       channel.onmessage?.({
         event: "optionRequired",
         data: {
+          sessionId: "s2",
           requestId: "req-2",
-          choices: [{ label: "Second choice", kind: "selector", next: "second-step" }],
-          plan: "# Plan 2",
+          prompt: "Choose the second step",
+          choices: [{ label: "Second choice", kind: "selector", nextStep: "second-step" }],
         },
       });
     });
 
-    // When: the first surfaced prompt (req-1 -- oldest pending) is answered
     await userEvent.click(screen.getByRole("button", { name: "First choice" }));
-
-    // Then: the other pending request is still surfaced and answerable afterwards
-    await waitFor(() => {
-      expect(commands.respondToOption).toHaveBeenCalledTimes(1);
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Second choice" })).toBeInTheDocument();
-    });
+    await waitFor(() => expect(commands.respondToOption).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Second choice" })).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: "Second choice" }));
-
-    await waitFor(() => {
-      expect(commands.respondToOption).toHaveBeenCalledTimes(2);
-    });
-    expect(vi.mocked(commands.respondToOption).mock.calls[0][0]).toBe("req-1");
-    expect(vi.mocked(commands.respondToOption).mock.calls[1][0]).toBe("req-2");
+    await waitFor(() => expect(commands.respondToOption).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(commands.respondToOption).mock.calls[0][0]).toBe("s1");
+    expect(vi.mocked(commands.respondToOption).mock.calls[1][0]).toBe("s2");
   });
 
   it("updates parallelism denominator to new value after settings are saved while running", async () => {
-    // Given: Run All is active with parallelism=2 and one session is in flight
     const channel = await navigateToRunAll([
       makeSession({ id: "s1", input: "task one" }),
       makeSession({ id: "s2", input: "task two" }),
     ]);
 
     await act(async () => {
-      channel.onmessage?.({ event: "runAllStarted", data: { total: 2, parallelism: 2 } });
-      channel.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId: "s1", input: "task one" },
-      });
+      channel.onmessage?.({ event: "batchStarted", data: { total: 2, parallelism: 2 } });
+      channel.onmessage?.({ event: "batchSessionStarted", data: { id: "s1" } });
     });
 
-    // Confirm the initial denominator is 2
-    await waitFor(() => {
-      expect(screen.getByText(/Running 1\s*\/\s*2/)).toBeInTheDocument();
-    });
-
-    // When: open settings and save parallelism=4
+    await waitFor(() => expect(screen.getByText(/Running 1\s*\/\s*2/)).toBeInTheDocument());
     await openSettingsModal();
     const input = screen.getByRole("spinbutton");
     await userEvent.clear(input);
     await userEvent.type(input, "4");
     vi.mocked(commands.getAppConfig).mockResolvedValue({ runAllParallelism: 4 });
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    // Then: the denominator in "Running n / parallelism" switches to 4
-    await waitFor(() => {
-      expect(screen.getByText(/Running 1\s*\/\s*4/)).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByText(/Running 1\s*\/\s*4/)).toBeInTheDocument());
   });
 });

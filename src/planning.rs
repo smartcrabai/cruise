@@ -1,7 +1,10 @@
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use uuid::Uuid;
 
 use console::style;
 
@@ -175,10 +178,9 @@ pub struct PlanPromptCtx<'a> {
     /// ([`PLAN_GRILL_PROMPT_TEMPLATE_SDK`]). SDK + interactive only; validated by
     /// the caller. Affects only the initial plan turn (not fix/ask).
     pub grill: bool,
+    /// Called when an SDK backend reports its session identity.
+    pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     /// Cooperative cancellation token forwarded to the executor.
-    ///
-    /// CLI plan flows set this and race the LLM call against Ctrl+C. The GUI
-    /// passes `None` to avoid terminal-signal cancellation in a non-TTY context.
     pub cancel_token: Option<&'a CancellationToken>,
 }
 
@@ -283,12 +285,12 @@ pub async fn run_plan_prompt_template(
     };
 
     let env = resolve_planning_env(ctx.config, vars)?;
-    eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
+    crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
     // The SDK backend surfaces progress through streamed deltas and `ask_user`
     // prompts, so a spinner would clobber interactive input; only spin for the
     // command backend.
     let spinner = (!executor.is_sdk()).then(|| crate::spinner::Spinner::start("Cruising..."));
-    let on_notice = move |msg: &str| eprintln!("{}", style(msg).dim());
+    let on_notice = move |msg: &str| crate::status_eprintln!("{}", style(msg).dim());
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
@@ -300,6 +302,7 @@ pub async fn run_plan_prompt_template(
             working_dir: ctx.working_dir,
             stream: stream_callbacks,
             tools,
+            on_session_id: ctx.on_session_id,
             resume: resume.clone(),
         })
         .await;
@@ -355,7 +358,6 @@ fn ensure_plan_persisted(
     if let Some(text) = transcript()
         && let Some(backend_error) = extract_terminal_error_from_transcript(&text)
     {
-        use std::fmt::Write as _;
         let _ = write!(msg, " Backend transcript error: {backend_error}");
     }
     Err(crate::error::CruiseError::Other(msg))
@@ -375,9 +377,79 @@ pub fn write_input_as_plan(plan_path: &Path, input: &str) -> Result<String> {
             "cannot use empty input as plan".to_string(),
         ));
     }
-    std::fs::write(plan_path, &content)
+    write_plan_atomically(plan_path, content.as_bytes())
         .map_err(|e| crate::error::CruiseError::Other(format!("failed to write plan: {e}")))?;
     Ok(content)
+}
+
+/// Build the stable identity used to decide whether a planning conversation
+/// can be resumed. Both configuration identity and effective serialized
+/// content are included, so changing settings naturally invalidates resume.
+#[must_use]
+pub fn plan_conversation_key(config: &WorkflowConfig, config_identity: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(config_identity.as_bytes());
+    hasher.update([0]);
+    let backend = if Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
+        "sdk"
+    } else {
+        "command"
+    };
+    hasher.update(backend.as_bytes());
+    hasher.update([0]);
+    hasher.update(config.model.as_deref().unwrap_or_default().as_bytes());
+    hasher.update([0]);
+    hasher.update(config.plan_model.as_deref().unwrap_or_default().as_bytes());
+    hasher.update([0]);
+    for command in &config.command {
+        hasher.update(command.as_bytes());
+        hasher.update([0]);
+    }
+    if let Ok(value) = serde_json::to_value(config) {
+        hasher.update(serde_json::to_vec(&value).unwrap_or_default());
+    }
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
+}
+
+/// Resolve a config identity from a path and compute its conversation key.
+/// The path is part of the key even if two files happen to have identical
+/// bytes, preventing accidental cross-config conversation reuse.
+#[must_use]
+pub fn plan_conversation_key_for_path(config: &WorkflowConfig, path: Option<&Path>) -> String {
+    let identity = path.map_or_else(
+        || "__builtin__".to_string(),
+        |path| path.to_string_lossy().into_owned(),
+    );
+    plan_conversation_key(config, &identity)
+}
+
+/// Write bytes to a path by replacing it atomically.
+///
+/// The parent directory is created when necessary, and a temporary file is
+/// removed if writing or renaming fails.
+///
+/// # Errors
+///
+/// Returns an error if the parent directory cannot be created, the temporary
+/// file cannot be written, or the replacement cannot be renamed into place.
+pub fn write_plan_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path.file_name().map_or_else(
+        || "plan".to_string(),
+        |value| value.to_string_lossy().into_owned(),
+    );
+    let tmp = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4().simple()));
+    if let Err(error) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Extract the last terminal error message from a JSONL transcript.
@@ -712,6 +784,7 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
+            on_session_id: None,
             cancel_token: None,
         }
     }
@@ -748,6 +821,7 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
+            on_session_id: None,
             cancel_token: Some(&token),
         };
 
@@ -807,6 +881,7 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
+            on_session_id: None,
             cancel_token: Some(&token),
         };
         let mut vars = VariableStore::new("test input".to_string());
@@ -1185,7 +1260,6 @@ mod tests {
     // -- resolve_planning_env --------------------------------------------------
 
     use crate::test_support::{EnvGuard, lock_process};
-    use std::fmt::Write as _;
 
     /// Helper: build a `WorkflowConfig` with top-level `env` entries.
     fn config_with_env(env_entries: &[(&str, &str)]) -> WorkflowConfig {

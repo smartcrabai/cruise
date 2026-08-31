@@ -1,21 +1,51 @@
+use crate::cancellation::CancellationToken;
 use crate::error::Result;
 use crate::step::OptionChoice;
 use crate::step::option::OptionResult;
+use std::future::Future;
+use std::pin::Pin;
 
-/// Abstraction over the UI mechanism used to present option choices to the user.
-///
-/// Implementations:
-/// - CLI: [`CliOptionHandler`] using `inquire` interactive prompts.
-/// - GUI: [`GuiOptionHandler`] using Tauri events + `oneshot::channel`.
+/// Abstraction over the UI mechanism used to present option choices to users.
+/// Clients may implement the basic method; shared runners call the
+/// cancellation-aware default when no broker is required.
 pub trait OptionHandler: Send + Sync {
-    /// Present `choices` to the user and return their selection.
-    ///
-    /// `plan` is optional context text shown before the selection menu (e.g. plan.md contents).
+    /// Present `choices` and return the selection.
     ///
     /// # Errors
     ///
-    /// Returns an error if the user interaction fails or is cancelled.
+    /// Returns an error when the handler cannot present the choices or obtain
+    /// a selection.
     fn select_option(&self, choices: &[OptionChoice], plan: Option<&str>) -> Result<OptionResult>;
+
+    /// Present choices while observing operation cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::CruiseError::Interrupted`] if cancellation has
+    /// already been requested, or the underlying [`Self::select_option`] error.
+    fn select_option_with_cancellation(
+        &self,
+        choices: &[OptionChoice],
+        plan: Option<&str>,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<OptionResult> {
+        if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+            return Err(crate::error::CruiseError::Interrupted);
+        }
+        self.select_option(choices, plan)
+    }
+
+    /// Async bridge for handlers whose prompt wait must not block an async
+    /// runtime worker. Existing synchronous handlers retain their behavior;
+    /// broker-backed handlers override this and offload their wait.
+    fn select_option_async<'a>(
+        &'a self,
+        choices: &'a [OptionChoice],
+        plan: Option<&'a str>,
+        cancel_token: Option<&'a CancellationToken>,
+    ) -> Pin<Box<dyn Future<Output = Result<OptionResult>> + Send + 'a>> {
+        Box::pin(async move { self.select_option_with_cancellation(choices, plan, cancel_token) })
+    }
 }
 
 /// The CLI implementation of [`OptionHandler`] that uses `inquire` interactive prompts.

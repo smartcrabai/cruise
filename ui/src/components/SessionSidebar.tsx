@@ -8,7 +8,6 @@ import type { Session, UpdateReadiness } from "../types";
 import { PhaseBadge } from "./PhaseBadge";
 import { Spinner } from "./Spinner";
 import { formatLocalTime } from "../lib/format";
-import { isApprovalReady } from "../lib/sessionActions";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 type UpdateState = "available" | "downloading" | "error";
@@ -80,7 +79,7 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
         const bTime = b.updatedAt ?? b.createdAt;
         return bTime.localeCompare(aTime);
       });
-      const fingerprint = JSON.stringify(sorted.map(s => [s.id, s.phase, s.updatedAt ?? s.createdAt, !!s.awaitingInput, !!s.planAvailable, !!s.fixInProgress, s.pendingAskQuestion ?? null]));
+      const fingerprint = JSON.stringify(sorted.map(s => [s.id, s.phase, s.updatedAt ?? s.createdAt, !!s.awaitingInput, !!s.planAvailable, !!s.fixInProgress, s.pendingAskQuestion ?? null, s.planError ?? null]));
       if (fingerprint !== lastFingerprintRef.current) {
         lastFingerprintRef.current = fingerprint;
         setSessions(sorted);
@@ -204,7 +203,8 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
     setCleanMessage(null);
     try {
       const result = await cleanSessions();
-      setCleanMessage(`${result.deleted} deleted (skipped: ${result.skipped})`);
+      const noPr = result.noPrDeleted ?? 0;
+      setCleanMessage(`${result.deleted} deleted (no-PR: ${noPr}, skipped: ${result.skipped})`);
       void load(true);
     } catch (e) {
       setCleanMessage(`Error: ${e}`);
@@ -213,10 +213,12 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
     }
   }
 
-  const showAutoUpdate = update && updateState === "available" && updateReadiness?.canAutoUpdate;
-  const updateGuidance = updateReadiness && !updateReadiness.canAutoUpdate ? updateReadiness.guidance : null;
+  const autoUpdate = update && updateState === "available" && updateReadiness?.canAutoUpdate ? update : null;
+  const updateGuidance = update && updateState === "available" && updateReadiness && !updateReadiness.canAutoUpdate
+    ? updateReadiness.guidance
+    : null;
   const runnableCount = sessions.filter(
-    (s) => !s.exec && (s.phase === "Planned" || s.phase === "Suspended" || isApprovalReady(s)),
+    (s) => !s.exec && (s.phase === "Planned" || s.phase === "Suspended"),
   ).length;
 
   return (
@@ -326,9 +328,9 @@ export function SessionSidebar({ selectedId, onSelect, onNewSession, onRunAll, r
       {/* Sidebar footer: version & update */}
       <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-800 px-3 py-2">
         <div className="text-xs text-gray-500 dark:text-gray-400">{version ? `v${version}` : "..."}</div>
-        {showAutoUpdate && (
+        {autoUpdate && (
           <div className="mt-1 space-y-1">
-            <div className="text-xs text-green-600 dark:text-green-400">v{update.version} available</div>
+            <div className="text-xs text-green-600 dark:text-green-400">v{autoUpdate.version} available</div>
             <button
               type="button"
               onClick={() => void handleInstall()}

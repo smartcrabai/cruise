@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
-import type { Session, WorkflowEvent } from "../types";
+import type { Session, ApplicationEvent } from "../types";
 import * as commands from "../lib/commands";
 
 // --- Module mocks --------------------------------------------------------------
@@ -35,6 +35,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -92,7 +93,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 async function navigateToRunAll(
   sessions: Session[] = [makeSession()],
 ): Promise<{
-  channel: { onmessage: ((event: WorkflowEvent) => void) | null };
+  channel: { onmessage: ((event: ApplicationEvent) => void) | null };
   container: HTMLElement;
 }> {
   vi.mocked(commands.listSessions).mockResolvedValue(sessions);
@@ -106,7 +107,7 @@ async function navigateToRunAll(
     expect(commands.runAllSessions).toHaveBeenCalledTimes(1);
   });
   const channel = vi.mocked(commands.runAllSessions).mock.calls[0][0] as {
-    onmessage: ((event: WorkflowEvent) => void) | null;
+    onmessage: ((event: ApplicationEvent) => void) | null;
   };
   return { channel, container: result.container };
 }
@@ -140,27 +141,23 @@ describe("Run All: live log display", () => {
 
   // --- Single session happy path ----------------------------------------------
 
-  it("displays log lines from stepStarted and workflowCompleted events", async () => {
+  it("displays log lines from stepStarted and batchSessionFinished events", async () => {
     // Given: Run All is running
     const { channel, container } = await navigateToRunAll();
 
     // When: a full single-session event sequence flows
-    // runAllStarted requires both `total` and `parallelism` (new field for concurrent batch display)
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
+    // The batch event includes the configured parallelism for concurrent display.
+    channel.onmessage!({ event: "batchStarted", data: { total: 1, parallelism: 1 } });
     channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "build feature" },
+      event: "batchSessionStarted",
+      data: { id: "s1" },
     });
-    // stepStarted now carries `sessionId` to attribute concurrent progress to the correct session
+    // stepStarted carries `sessionId` to attribute concurrent progress.
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Write code" } });
-    // workflowCompleted now carries `sessionId` to identify which session completed
+    // The batch completion event carries the terminal session phase.
     channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "build feature", phase: "Completed" },
+      event: "batchSessionFinished",
+      data: { id: "s1", phase: "Completed", error: null },
     });
 
     // Then: the log area contains the step and completion entries
@@ -168,8 +165,7 @@ describe("Run All: live log display", () => {
     await waitFor(() => {
       expect(logPre.textContent).toContain("Write code");
     });
-    expect(logPre.textContent).toMatch(/Completed.*run: 1/);
-    expect(logPre.textContent).toMatch(/skipped: 0/);
+    expect(logPre.textContent).toContain("[s1] Completed");
   });
 
   // --- Session boundary lines -------------------------------------------------
@@ -182,10 +178,10 @@ describe("Run All: live log display", () => {
     ]);
 
     // When: first session starts
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
+    channel.onmessage!({ event: "batchStarted", data: { total: 2, parallelism: 1 } });
     channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "first task" },
+      event: "batchSessionStarted",
+      data: { id: "s1" },
     });
 
     // Then: log contains the first session boundary
@@ -205,36 +201,16 @@ describe("Run All: live log display", () => {
     ]);
 
     // When: first session runs to completion
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "task alpha" },
-    });
+    channel.onmessage!({ event: "batchStarted", data: { total: 2, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Step A" } });
-    channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "task alpha", phase: "Completed" },
-    });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s1", phase: "Completed", error: null } });
 
     // And: second session starts and runs
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s2", input: "task beta" },
-    });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s2" } });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s2", step: "Step B" } });
-    channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s2", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s2", input: "task beta", phase: "Completed" },
-    });
-    channel.onmessage!({ event: "runAllCompleted", data: { cancelled: 0 } });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s2", phase: "Completed", error: null } });
+    channel.onmessage!({ event: "batchFinished", data: { cancelled: false } });
 
     // Then: both sessions' log lines are present
     const logPre = getLogPre(container);
@@ -247,29 +223,18 @@ describe("Run All: live log display", () => {
     expect(logPre.textContent).toContain("task beta");
   });
 
-  // --- workflowFailed ---------------------------------------------------------
+  // --- batch session failure ---------------------------------------------------
 
-  it("shows a failure log line on workflowFailed", async () => {
-    // Given: Run All is running
+  it("shows a failure log line on batchSessionFinished", async () => {
     const { channel, container } = await navigateToRunAll();
 
-    // When: session starts and then fails
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
+    channel.onmessage!({ event: "batchStarted", data: { total: 1, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
     channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing" },
-    });
-    // workflowFailed now carries `sessionId` to route the failure to the correct session
-    channel.onmessage!({
-      event: "workflowFailed",
-      data: { sessionId: "s1", error: "build error: missing dependency" },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "do thing", phase: "Failed", error: "build error: missing dependency" },
+      event: "batchSessionFinished",
+      data: { id: "s1", phase: "Failed", error: "build error: missing dependency" },
     });
 
-    // Then: the failure message appears in the log
     const logPre = getLogPre(container);
     await waitFor(() => {
       expect(logPre.textContent).toContain("Failed");
@@ -277,152 +242,86 @@ describe("Run All: live log display", () => {
     });
   });
 
-  // --- workflowCancelled ------------------------------------------------------
+  // --- batch cancellation -----------------------------------------------------
 
-  it("shows a cancellation log line on workflowCancelled", async () => {
-    // Given: Run All is running
+  it("shows a cancellation summary on batchFinished", async () => {
     const { channel, container } = await navigateToRunAll();
 
-    // When: session starts and is cancelled
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing" },
-    });
-    // workflowCancelled now carries `data.sessionId` (no longer a unit variant)
-    channel.onmessage!({ event: "workflowCancelled", data: { sessionId: "s1" } });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "do thing", phase: "Suspended" },
-    });
-    channel.onmessage!({ event: "runAllCompleted", data: { cancelled: 1 } });
+    channel.onmessage!({ event: "batchStarted", data: { total: 1, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s1", phase: "Suspended", error: null } });
+    channel.onmessage!({ event: "batchFinished", data: { cancelled: true } });
 
-    // Then: the cancellation indicator appears in the log
     const logPre = getLogPre(container);
     await waitFor(() => {
-      expect(logPre.textContent).toMatch(/Cancelled/);
+      expect(logPre.textContent).toContain("cancelled: 1");
     });
   });
 
   // --- No duplicate completion lines ------------------------------------------
 
-  it("does not duplicate the completion line from workflowCompleted and runAllSessionFinished", async () => {
-    // Given: Run All is running
+  it("shows one completion line for batchSessionFinished", async () => {
     const { channel, container } = await navigateToRunAll();
 
-    // When: both workflowCompleted and runAllSessionFinished fire
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "do thing" },
-    });
-    channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "do thing", phase: "Completed" },
-    });
+    channel.onmessage!({ event: "batchStarted", data: { total: 1, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s1", phase: "Completed", error: null } });
 
-    // Then: "v Completed" appears exactly once in the log
     const logPre = getLogPre(container);
-    await waitFor(() => {
-      expect(logPre.textContent).toMatch(/Completed/);
-    });
-    const completedCount = (logPre.textContent!.match(/Completed -- run:/g) ?? []).length;
+    await waitFor(() => expect(logPre.textContent).toContain("[s1] Completed"));
+    const completedCount = (logPre.textContent!.match(/\[s1\] Completed/g) ?? []).length;
     expect(completedCount).toBe(1);
   });
 
   // --- optionRequired preserves log -------------------------------------------
 
   it("preserves accumulated log lines when optionRequired fires", async () => {
-    // Given: Run All is running
     const { channel, container } = await navigateToRunAll();
 
-    // When: some steps run, then optionRequired fires
-    channel.onmessage!({ event: "runAllStarted", data: { total: 1, parallelism: 1 } });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "interactive task" },
-    });
+    channel.onmessage!({ event: "batchStarted", data: { total: 1, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
     channel.onmessage!({ event: "stepStarted", data: { sessionId: "s1", step: "Analyze code" } });
     channel.onmessage!({
       event: "optionRequired",
       data: {
+        sessionId: "s1",
         requestId: "req-1",
-        choices: [{ label: "Yes", kind: "selector", next: "step2" }],
-        plan: "# Plan",
+        prompt: "Choose the next step",
+        choices: [{ label: "Yes", kind: "selector", nextStep: "step2" }],
       },
     });
 
-    // Then: the log still shows previous entries
     const logPre = getLogPre(container);
-    await waitFor(() => {
-      expect(logPre.textContent).toContain("Analyze code");
-    });
-    // And: the option dialog is visible
+    await waitFor(() => expect(logPre.textContent).toContain("Analyze code"));
     expect(screen.getByText("Yes")).toBeInTheDocument();
   });
 
   // --- Batch start and end messages -------------------------------------------
 
-  it("shows batch start message when runAllStarted fires", async () => {
-    // Given: Run All is running
+  it("shows batch start message when batchStarted fires", async () => {
     const { channel, container } = await navigateToRunAll();
 
-    // When: runAllStarted fires — now includes `parallelism` for display/debugging
-    channel.onmessage!({ event: "runAllStarted", data: { total: 3, parallelism: 2 } });
+    channel.onmessage!({ event: "batchStarted", data: { total: 3, parallelism: 2 } });
 
-    // Then: the log area is visible and contains a start indicator (includes total count)
     const logPre = getLogPre(container);
-    await waitFor(() => {
-      expect(logPre.textContent).toMatch(/3/);
-    });
+    await waitFor(() => expect(logPre.textContent).toMatch(/3/));
   });
 
-  it("shows batch completion summary when runAllCompleted fires", async () => {
-    // Given: Run All with 2 sessions
+  it("shows batch completion summary when batchFinished fires", async () => {
     const { channel, container } = await navigateToRunAll([
       makeSession({ id: "s1", input: "task 1" }),
       makeSession({ id: "s2", input: "task 2" }),
     ]);
 
-    // When: both sessions complete and batch finishes
-    channel.onmessage!({ event: "runAllStarted", data: { total: 2, parallelism: 1 } });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s1", input: "task 1" },
-    });
-    channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s1", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s1", input: "task 1", phase: "Completed" },
-    });
-    channel.onmessage!({
-      event: "runAllSessionStarted",
-      data: { sessionId: "s2", input: "task 2" },
-    });
-    channel.onmessage!({
-      event: "workflowCompleted",
-      data: { sessionId: "s2", run: 1, skipped: 0, failed: 0 },
-    });
-    channel.onmessage!({
-      event: "runAllSessionFinished",
-      data: { sessionId: "s2", input: "task 2", phase: "Completed" },
-    });
-    channel.onmessage!({ event: "runAllCompleted", data: { cancelled: 0 } });
+    channel.onmessage!({ event: "batchStarted", data: { total: 2, parallelism: 1 } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s1" } });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s1", phase: "Completed", error: null } });
+    channel.onmessage!({ event: "batchSessionStarted", data: { id: "s2" } });
+    channel.onmessage!({ event: "batchSessionFinished", data: { id: "s2", phase: "Completed", error: null } });
+    channel.onmessage!({ event: "batchFinished", data: { cancelled: false } });
 
-    // Then: the log shows a batch summary
     const logPre = getLogPre(container);
-    await waitFor(() => {
-      // The "Done" button appears indicating batch completed
-      expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
-    });
-    // Log contains entries from both sessions
+    await waitFor(() => expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument());
     expect(logPre.textContent).toContain("task 1");
     expect(logPre.textContent).toContain("task 2");
   });

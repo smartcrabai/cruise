@@ -35,6 +35,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -82,6 +83,13 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     skippedSteps: [],
     ...overrides,
   };
+}
+
+function mockAskAnswer(answer: string): void {
+  vi.mocked(commands.askSession).mockImplementationOnce(async (sessionId, _question, channel) => {
+    channel.onmessage?.({ event: "planChunk", data: { sessionId, stream: "stdout", text: answer } });
+    channel.onmessage?.({ event: "planFinished", data: { sessionId, phase: "Awaiting Approval" } });
+  });
 }
 
 // --- Awaiting Approval: Fix and Ask button visibility ------------------------
@@ -178,7 +186,7 @@ describe("App: Awaiting Approval -- Ask flow", () => {
 
   it("calls askSession with session ID and question, then displays the answer", async () => {
     // Given: askSession is ready to return an answer
-    vi.mocked(commands.askSession).mockResolvedValue("The plan uses approach X because of Y.");
+    mockAskAnswer("The plan uses approach X because of Y.");
     await selectAwaitingApprovalSession();
 
     // When: ask, type question, and submit
@@ -191,7 +199,7 @@ describe("App: Awaiting Approval -- Ask flow", () => {
 
     // Then: askSession is called with correct args
     await waitFor(() => {
-      expect(commands.askSession).toHaveBeenCalledWith("session-1", "Why approach X?");
+      expect(commands.askSession).toHaveBeenCalledWith("session-1", "Why approach X?", expect.anything());
     });
 
     // And: the answer is displayed on the Plan tab
@@ -204,7 +212,7 @@ describe("App: Awaiting Approval -- Ask flow", () => {
 
   it("shows action buttons again after receiving an Ask answer", async () => {
     // Given: an Ask has been answered
-    vi.mocked(commands.askSession).mockResolvedValue("Some answer.");
+    mockAskAnswer("Some answer.");
     await selectAwaitingApprovalSession();
 
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
@@ -231,7 +239,7 @@ describe("App: Awaiting Approval -- Ask flow", () => {
       planAvailable: false,
     });
     vi.mocked(commands.listSessions).mockResolvedValue([sessA, sessB]);
-    vi.mocked(commands.askSession).mockResolvedValue("The answer.");
+    mockAskAnswer("The answer.");
 
     render(<App />);
     await waitFor(() => screen.getByText("task A"));
@@ -374,7 +382,7 @@ describe("App: Awaiting Approval -- Fixing display state", () => {
     vi.mocked(commands.fixSession).mockImplementationOnce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (_params: any, channel: any) => {
-        channel.onmessage?.({ event: "planGenerated", data: { content: "# Revised plan" } });
+        channel.onmessage?.({ event: "planFinished", data: { sessionId: "session-1", phase: "Awaiting Approval" } });
         return "# Revised plan";
       }
     );
@@ -416,7 +424,7 @@ describe("App: Awaiting Approval -- Fixing display state", () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.mocked(commands.fixSession).mockImplementationOnce((_params: any, channel: any) => {
-      channel.onmessage?.({ event: "planGenerating", data: {} });
+      channel.onmessage?.({ event: "planStarted", data: { sessionId: "sess-a", operation: "fix" } });
       return new Promise<string>(() => { /* never resolves */ });
     });
     vi.mocked(commands.getSession).mockResolvedValue(sessAFixing);
@@ -523,13 +531,13 @@ describe("App: Awaiting Approval -- Fix flow", () => {
   });
 
   it("calls fixSession with feedback and updates plan content on success", async () => {
-    // Given: fixSession streams planGenerated and returns updated content
+    // Given: fixSession streams planFinished and returns updated content
     vi.mocked(commands.fixSession).mockImplementationOnce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (_params: any, channel: any) => {
         channel.onmessage?.({
-          event: "planGenerated",
-          data: { content: "# Revised plan" },
+          event: "planFinished",
+          data: { sessionId: "session-1", phase: "Awaiting Approval" },
         });
         return "# Revised plan";
       }
@@ -558,13 +566,13 @@ describe("App: Awaiting Approval -- Fix flow", () => {
 
   it("clears stale Ask answer when Fix succeeds", async () => {
     // Given: an Ask answer is displayed, then Fix is triggered
-    vi.mocked(commands.askSession).mockResolvedValue("Old ask answer.");
+    mockAskAnswer("Old ask answer.");
     vi.mocked(commands.fixSession).mockImplementationOnce(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (_params: any, channel: any) => {
         channel.onmessage?.({
-          event: "planGenerated",
-          data: { content: "# Revised plan" },
+          event: "planFinished",
+          data: { sessionId: "session-1", phase: "Awaiting Approval" },
         });
         return "# Revised plan";
       }
@@ -632,8 +640,8 @@ describe("App: Awaiting Approval -- Fix flow", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (_params: any, channel: any) => {
         channel.onmessage?.({
-          event: "planGenerated",
-          data: { content: "# Updated plan" },
+          event: "planFinished",
+          data: { sessionId: "session-1", phase: "Awaiting Approval" },
         });
         return "# Updated plan";
       }
