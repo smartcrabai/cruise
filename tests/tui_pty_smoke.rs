@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-#[cfg(target_os = "linux")]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -24,23 +23,23 @@ fn script_is_available() -> bool {
 fn run_tui_in_pty(binary: &Path, home: &Path) -> Output {
     let mut command = Command::new("script");
 
+    let command_line = format!(
+        "stty cols 120 rows 30; exec {}",
+        shell_quote(&binary.to_string_lossy())
+    );
+
     #[cfg(target_os = "macos")]
-    {
-        command.args(["-q", "/dev/null"]);
-        command.arg(binary);
-    }
+    command.args(["-q", "/dev/null", "/bin/sh", "-c", &command_line]);
 
     #[cfg(target_os = "linux")]
-    {
-        let command_line = shell_quote(&binary.to_string_lossy());
-        command.args(["-q", "-e", "-c", &command_line, "/dev/null"]);
-    }
+    command.args(["-q", "-e", "-c", &command_line, "/dev/null"]);
 
     let mut child = command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
+        .env("NO_COLOR", "1")
         .env_remove("CRUISE_CONFIG")
         .env_remove("CRUISE_MODEL")
         .env_remove("CRUISE_PLAN_MODEL")
@@ -64,11 +63,8 @@ fn run_tui_in_pty(binary: &Path, home: &Path) -> Output {
         .take()
         .unwrap_or_else(|| panic!("script stdin should be piped"));
     input
-        .write_all(b"q\r")
-        .unwrap_or_else(|error| panic!("failed to send quit key: {error}"));
-    input
-        .flush()
-        .unwrap_or_else(|error| panic!("failed to flush quit key: {error}"));
+        .write_all(b"23??q\r")
+        .unwrap_or_else(|error| panic!("failed to send TUI input: {error}"));
     drop(input);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -92,9 +88,9 @@ fn run_tui_in_pty(binary: &Path, home: &Path) -> Output {
 }
 
 #[test]
-fn tui_quit_restores_terminal_for_following_command() {
+fn tui_navigation_and_terminal_lifecycle_work_in_pty() {
     if !script_is_available() {
-        eprintln!("skipping TUI PTY smoke: script is unavailable");
+        eprintln!("skipping TUI PTY E2E: script is unavailable");
         return;
     }
 
@@ -120,13 +116,17 @@ fn tui_quit_restores_terminal_for_following_command() {
         "cruise failed in PTY: {transcript}"
     );
 
-    let restored = Command::new("printf")
-        .arg("terminal-restored\n")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run post-TUI command: {error}"));
-    assert!(restored.status.success(), "post-TUI command failed");
-    assert_eq!(
-        String::from_utf8_lossy(&restored.stdout),
-        "terminal-restored\n"
-    );
+    for expected in [
+        "Detail",
+        "SOURCE",
+        "PARALLELISM",
+        "Keyboard-only",
+        "\u{1b}[?1049l",
+        "\u{1b}[?25h",
+    ] {
+        assert!(
+            transcript.contains(expected),
+            "PTY transcript missing {expected:?}: {transcript}"
+        );
+    }
 }
