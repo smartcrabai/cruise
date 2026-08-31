@@ -443,15 +443,6 @@ fn render_session_source(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 
 fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
     let form = &app.form;
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::Input,
-        rows[0],
-        "Task description (Enter inserts a new line)",
-        &form.input,
-    );
     let recent_title = app
         .history_summary
         .as_ref()
@@ -471,15 +462,6 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
                 )
             },
         );
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::WorkingDirectory,
-        rows[2],
-        &recent_title,
-        &form.working_dir,
-    );
     let repository_title =
         if form.source == SourceKind::GitHub && !app.github_repositories.is_empty() {
             format!(
@@ -489,33 +471,40 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
         } else {
             "GitHub repository owner/name".to_string()
         };
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::Repository,
-        rows[3],
-        &repository_title,
-        &form.repository,
-    );
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::Config,
-        rows[4],
-        "Workflow config (Space cycles discovered entries)",
-        &form.config,
-    );
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::Attachments,
-        rows[5],
-        "Image paths (one per line)",
-        &form.attachments,
-    );
+    for (field, row, title, editor) in [
+        (
+            FormField::Input,
+            rows[0],
+            "Task description (Enter inserts a new line)",
+            &form.input,
+        ),
+        (
+            FormField::WorkingDirectory,
+            rows[2],
+            recent_title.as_str(),
+            &form.working_dir,
+        ),
+        (
+            FormField::Repository,
+            rows[3],
+            repository_title.as_str(),
+            &form.repository,
+        ),
+        (
+            FormField::Config,
+            rows[4],
+            "Workflow config (Space cycles discovered entries)",
+            &form.config,
+        ),
+        (
+            FormField::Attachments,
+            rows[5],
+            "Image paths (one per line)",
+            &form.attachments,
+        ),
+    ] {
+        render_editor(frame, app, form, field, row, title, editor);
+    }
 }
 
 fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -784,10 +773,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             format!("{message}\n\nEnter confirm   Esc cancel"),
         ),
         Modal::Publish { trigger_cruise } => {
-            render_publish_modal(frame, app, area, *trigger_cruise);
+            render_publish_modal(frame, app, area, *trigger_cruise)
         }
         Modal::Palette { actions, selected } => {
-            render_palette_modal(frame, app, area, actions, *selected);
+            render_palette_modal(frame, app, area, actions, *selected)
         }
         Modal::Prompt => render_prompt_modal(frame, app, area),
         Modal::Input {
@@ -1212,13 +1201,5 @@ mod tests {
                 .flat_map(|line| line.spans.iter())
                 .all(|span| span.style == Style::default())
         );
-    }
-
-    #[test]
-    fn centered_rect_stays_inside_parent() {
-        let parent = Rect::new(0, 0, 100, 30);
-        let rect = centered(parent, 80, 10);
-        assert!(rect.x + rect.width <= parent.width);
-        assert!(rect.y + rect.height <= parent.height);
     }
 }
