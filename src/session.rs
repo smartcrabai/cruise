@@ -113,6 +113,12 @@ pub struct SessionState {
     /// Persisted planning `ask_user` question while waiting for an answer.
     #[serde(default)]
     pub pending_ask_question: Option<String>,
+    /// Backend conversation identifier used to resume plan/fix/ask turns.
+    #[serde(default)]
+    pub plan_conversation_id: Option<String>,
+    /// Configuration/backend identity that produced `plan_conversation_id`.
+    #[serde(default)]
+    pub plan_conversation_key: Option<String>,
     /// Durable background-planning failure detail, if plan generation failed before approval.
     #[serde(default)]
     pub plan_error: Option<String>,
@@ -219,6 +225,8 @@ impl SessionState {
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
+            plan_conversation_id: None,
+            plan_conversation_key: None,
             plan_error: None,
             skipped_steps: vec![],
             runner_pid: None,
@@ -268,20 +276,71 @@ impl SessionState {
             self.phase.label()
         );
         self.plan_error = None;
+        self.awaiting_input = false;
+        self.pending_ask_question = None;
         self.phase = SessionPhase::Planned;
     }
 
-    /// Resets this session back to `Planned` state so it can be re-executed from scratch.
+    /// Construct a new session that is still being edited by the user.
+    #[must_use]
+    pub fn new_draft(id: String, base_dir: PathBuf, config_source: String, input: String) -> Self {
+        let mut state = Self::new(id, base_dir, config_source, input);
+        state.phase = SessionPhase::Draft;
+        state
+    }
+
+    /// Guarded transition for using current input (or image attachments) as a
+    /// plan. This deliberately does not call `approve`, which is only valid
+    /// for an existing plan.
     ///
-    /// Clears: `phase`, `current_step`, `completed_at`, `pr_url`, `runner_pid`, `runner_started_at`,
-    /// `has_dag`, `current_step_is_node_id`.
-    /// Preserves: `worktree_path`, `worktree_branch` (reused on next run).
+    /// # Errors
+    ///
+    /// Returns an error if the session is not in an editable phase, or if it
+    /// has neither non-empty input nor image attachments.
+    pub fn use_input_as_plan(&mut self) -> Result<()> {
+        if !matches!(
+            self.phase,
+            SessionPhase::Draft | SessionPhase::AwaitingInput
+        ) {
+            return Err(CruiseError::Other(format!(
+                "input-as-plan is unavailable in '{}' phase",
+                self.phase.label()
+            )));
+        }
+        if self.input.trim().is_empty() && self.attachments.is_empty() {
+            return Err(CruiseError::Other(
+                "input-as-plan requires non-empty input or an image attachment".to_string(),
+            ));
+        }
+        self.phase = SessionPhase::Planned;
+        self.awaiting_input = false;
+        self.pending_ask_question = None;
+        self.plan_conversation_id = None;
+        self.plan_conversation_key = None;
+        self.plan_error = None;
+        Ok(())
+    }
+
+    /// Clear persisted prompt state after a valid response or reset.
+    pub fn clear_pending_input(&mut self) {
+        self.awaiting_input = false;
+        self.pending_ask_question = None;
+    }
+
+    #[must_use]
+    pub fn has_usable_plan(&self, sessions_dir: &Path) -> bool {
+        crate::metadata::plan_markdown_available(&self.plan_path(sessions_dir))
+    }
+
+    /// Resets this session back to `Planned` state so it can be re-executed.
     pub fn reset_to_planned(&mut self) {
         self.phase = SessionPhase::Planned;
         self.current_step = None;
         self.completed_at = None;
         self.pr_url = None;
         self.plan_error = None;
+        self.awaiting_input = false;
+        self.pending_ask_question = None;
         self.runner_pid = None;
         self.runner_started_at = None;
         self.has_dag = false;
@@ -432,7 +491,9 @@ impl SessionManager {
         Ok(())
     }
 
-    pub(crate) fn state_path(&self, id: &str) -> PathBuf {
+    /// Return the path to a session's persisted state file.
+    #[must_use]
+    pub fn state_path(&self, id: &str) -> PathBuf {
         self.sessions_dir().join(id).join("state.json")
     }
 
@@ -495,7 +556,19 @@ impl SessionManager {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| CruiseError::SessionError(format!("serialize error: {e}")))?;
         let fingerprint = SessionStateFingerprint::from_bytes(&json);
-        std::fs::write(&path, json)?;
+        let parent = path.parent().ok_or_else(|| {
+            CruiseError::SessionError(format!("state path has no parent: {}", path.display()))
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let tmp = parent.join(format!(".state.{}.tmp", Uuid::new_v4().simple()));
+        let write_result = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CruiseError::SessionError(format!(
+                "failed to atomically save {}: {error}",
+                path.display()
+            )));
+        }
         Ok(fingerprint)
     }
 
@@ -594,10 +667,20 @@ impl SessionManager {
     ///
     /// Returns an error if the config file cannot be read or parsed.
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
-        let config_path = state.config_path.clone().unwrap_or_else(|| {
-            // Backward-compatible fallback: session-local copy
-            self.sessions_dir().join(&state.id).join("config.yaml")
-        });
+        let config_path = state
+            .config_path
+            .clone()
+            .unwrap_or_else(|| self.sessions_dir().join(&state.id).join("config.yaml"));
+        if config_path.is_file() {
+            return crate::workflow_call::resolve_workflow_calls_from_path(config_path);
+        }
+        if crate::resolver::ConfigSource::is_builtin_source(&state.config_source) {
+            let (yaml, source) = crate::resolver::resolve_config_in_dir(
+                Some(crate::new_session_history::BUILTIN_CONFIG_KEY),
+                &state.base_dir,
+            )?;
+            return crate::resolver::resolve_workflow_config(&yaml, &source, &state.base_dir);
+        }
         crate::workflow_call::resolve_workflow_calls_from_path(config_path)
     }
 
@@ -697,10 +780,29 @@ impl SessionManager {
     ///
     /// Returns an error if the session list cannot be read or a session cannot be deleted.
     pub fn cleanup_by_pr_status(&self) -> Result<CleanupReport> {
+        self.cleanup_by_pr_status_skipping(&std::collections::HashSet::new())
+    }
+
+    /// Remove reclaimable sessions while preserving IDs owned by an active
+    /// application operation. The skip set is evaluated in the same scan as
+    /// deletion, so callers can hold matching runtime claims throughout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session list cannot be read or a session cannot
+    /// be deleted.
+    pub fn cleanup_by_pr_status_skipping(
+        &self,
+        skipped: &std::collections::HashSet<String>,
+    ) -> Result<CleanupReport> {
         let sessions = self.list()?;
         let mut report = CleanupReport::default();
 
         for session in sessions {
+            if skipped.contains(&session.id) {
+                report.skipped += 1;
+                continue;
+            }
             let plan_available = session.workspace_mode == WorkspaceMode::CurrentBranch
                 && session.phase == SessionPhase::Planned
                 && crate::metadata::plan_markdown_available(
@@ -708,38 +810,42 @@ impl SessionManager {
                 );
             if is_unreclaimable_no_pr_session(&session, plan_available) {
                 if let Err(e) = self.cleanup_session_workspace(&session) {
-                    eprintln!("warning: failed to clean up session {}: {}", session.id, e);
+                    crate::status_eprintln!(
+                        "warning: failed to clean up session {}: {}",
+                        session.id,
+                        e
+                    );
                     continue;
                 }
                 if let Err(e) = self.delete(&session.id) {
-                    eprintln!("warning: failed to remove session {}: {}", session.id, e);
+                    crate::status_eprintln!(
+                        "warning: failed to remove session {}: {}",
+                        session.id,
+                        e
+                    );
                     continue;
                 }
-                eprintln!("Removed no-PR session {}.", session.id);
+                crate::status_eprintln!("Removed no-PR session {}.", session.id);
                 report.deleted += 1;
                 report.no_pr_deleted += 1;
                 continue;
             }
-
             if !matches!(session.phase, SessionPhase::Completed) {
                 continue;
             }
             let Some(ref pr_url) = session.pr_url else {
                 continue;
             };
-
-            // Check PR state via gh CLI.
             let output = std::process::Command::new("gh")
                 .args(["pr", "view", pr_url, "--json", "state", "--jq", ".state"])
+                .stdin(std::process::Stdio::null())
                 .output();
-
             let state = match output {
                 Ok(out) if out.status.success() => {
-                    let raw = String::from_utf8_lossy(&out.stdout);
-                    raw.trim().to_uppercase()
+                    String::from_utf8_lossy(&out.stdout).trim().to_uppercase()
                 }
                 Ok(out) => {
-                    eprintln!(
+                    crate::status_eprintln!(
                         "warning: gh pr view failed for {}: {}",
                         session.id,
                         String::from_utf8_lossy(&out.stderr).trim()
@@ -748,30 +854,27 @@ impl SessionManager {
                     continue;
                 }
                 Err(e) => {
-                    eprintln!("warning: failed to run gh for {}: {}", session.id, e);
+                    crate::status_eprintln!("warning: failed to run gh for {}: {}", session.id, e);
                     report.skipped += 1;
                     continue;
                 }
             };
-
             if state != "CLOSED" && state != "MERGED" {
                 report.skipped += 1;
                 continue;
             }
-
-            // Remove the git worktree (and, for repo-backed sessions, the
-            // temporary clone) if they still exist. Keep the metadata when
-            // cleanup fails so ownership can be recovered and retried.
             if let Err(e) = self.cleanup_session_workspace(&session) {
-                eprintln!("warning: failed to clean up session {}: {}", session.id, e);
+                crate::status_eprintln!(
+                    "warning: failed to clean up session {}: {}",
+                    session.id,
+                    e
+                );
                 report.skipped += 1;
                 continue;
             }
-
             self.delete(&session.id)?;
             report.deleted += 1;
         }
-
         Ok(report)
     }
 
@@ -833,13 +936,13 @@ fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) 
         && !plan_available
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CleanupReport {
     pub deleted: usize,
     pub skipped: usize,
     pub no_pr_deleted: usize,
 }
-
 /// Generate a unique session ID from current UTC time plus a UUID suffix.
 ///
 /// Format: `YYYYMMDDHHmmssNNN_<uuid>` where `YYYYMMDDHHmmssNNN` is the current
@@ -870,10 +973,10 @@ pub fn current_iso8601() -> String {
 }
 
 /// Appends timestamped log lines to `<sessions_dir>/<session_id>/run.log`.
+#[derive(Clone)]
 pub struct SessionLogger {
     path: std::path::PathBuf,
 }
-
 impl SessionLogger {
     #[must_use]
     pub fn new(path: std::path::PathBuf) -> Self {
@@ -3682,5 +3785,20 @@ mod tests {
             .output()
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+    #[test]
+    fn test_input_as_plan_accepts_image_only_session() {
+        let mut state = SessionState::new_draft(
+            "20260830000001".to_string(),
+            PathBuf::from("/tmp/repo"),
+            "config: (builtin default)".to_string(),
+            String::new(),
+        );
+        state.attachments.push(PathBuf::from("image.png"));
+
+        state.use_input_as_plan().unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(state.phase, SessionPhase::Planned);
+        assert!(!state.awaiting_input);
     }
 }

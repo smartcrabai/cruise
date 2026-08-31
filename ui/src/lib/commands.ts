@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  ApplicationEvent,
   AppConfig,
   CleanupResult,
   ConfigEntry,
@@ -8,181 +9,158 @@ import type {
   NewSessionConfigDefaults,
   NewSessionDraftPersisted,
   NewSessionHistorySummary,
-  PlanEvent,
+  PendingPrompt,
   PublishedIssue,
   Session,
   UpdateReadiness,
   WorkspaceMode,
-  WorkflowEvent,
 } from "../types";
 
-/** List all sessions, sorted oldest-first. */
+export type EventChannel = Channel<ApplicationEvent>;
+
 export function listSessions(): Promise<Session[]> {
   return invoke<Session[]>("list_sessions");
 }
 
-/** Get a single session by ID. */
 export function getSession(sessionId: string): Promise<Session> {
   return invoke<Session>("get_session", { sessionId });
 }
 
-/** Return the plan markdown for a session. */
 export function getSessionPlan(sessionId: string): Promise<string> {
   return invoke<string>("get_session_plan", { sessionId });
 }
-
-/** Return the step-level DAG for a session's workflow. */
-export function getSessionDag(sessionId: string): Promise<DagDto> {
-  return invoke<DagDto>("get_session_dag", { sessionId });
-}
-
-/**
- * Run a session's workflow, streaming events via the returned Channel.
- *
- * @example
- * const channel = new Channel<WorkflowEvent>();
- * channel.onmessage = (event) => { ... };
- * await runSession(sessionId, "Worktree", channel);
- */
-export function runSession(
-  sessionId: string,
-  workspaceMode: WorkspaceMode,
-  channel: Channel<WorkflowEvent>
-): Promise<void> {
-  return invoke<void>("run_session", { sessionId, workspaceMode, channel });
-}
-
-/** Cancel the currently running workflow. */
-export function cancelSession(): Promise<void> {
-  return invoke<void>("cancel_session");
-}
-
-/**
- * Run all Planned / Suspended sessions in series, streaming events via `channel`.
- */
-export function runAllSessions(
-  channel: Channel<WorkflowEvent>
-): Promise<void> {
-  return invoke<void>("run_all_sessions", { channel });
-}
-
-/**
- * Respond to a pending option-step request.
- *
- * @param result.nextStep  The next step to jump to (selector choice).
- * @param result.textInput Free-text input (text-input choice).
- */
-export function respondToOption(
-  sessionId: string,
-  result: { nextStep?: string; textInput?: string },
-): Promise<void> {
-  return invoke<void>("respond_to_option", { sessionId, result });
-}
-
-/**
- * Deliver the user's answer to an SDK `ask_user` question raised during plan
- * generation, routed to the waiting session by `sessionId`.
- */
-export function respondToAsk(sessionId: string, answer: string): Promise<void> {
-  return invoke<void>("respond_to_ask", { sessionId, answer });
-}
-
-// ─── App config ───────────────────────────────────────────────────────────────
-
-/**
- * Retrieve the current application configuration from `~/.config/cruise/config.json`.
- *
- * If the file does not exist the server returns the default config (`runAllParallelism: 1`).
- */
-export function getAppConfig(): Promise<AppConfig> {
-  return invoke<AppConfig>("get_app_config");
-}
-
-/**
- * Persist an updated application configuration.
- *
- * The server validates the config before writing (e.g. `runAllParallelism` must be ≥ 1).
- * Throws if validation fails or the file cannot be written.
- */
-export function updateAppConfig(config: AppConfig): Promise<void> {
-  return invoke<void>("update_app_config", { config });
-}
-
-/** Remove Completed sessions whose PR is closed or merged. */
-export function cleanSessions(): Promise<CleanupResult> {
-  return invoke<CleanupResult>("clean_sessions");
-}
-
-/** Reset a session to "Planned" phase regardless of its current phase. */
-export function resetSession(sessionId: string): Promise<Session> {
-  return invoke<Session>("reset_session", { sessionId });
-}
-
-/**
- * Update session settings (config and/or skipped steps) for a session in
- * `Awaiting Approval` or `Planned` phase.
- */
-export function updateSessionSettings(
-  sessionId: string,
-  params: { configPath?: string; skippedSteps: string[]; currentStep?: string | null }
-): Promise<Session> {
-  const setCurrentStep = params.currentStep !== undefined;
-  return invoke<Session>("update_session", {
-    sessionId,
-    configPath: params.configPath ?? null,
-    skippedSteps: params.skippedSteps,
-    currentStep: params.currentStep ?? null,
-    setCurrentStep,
-  });
-}
-
-/**
- * Regenerate the plan for a session, streaming PlanEvents via `channel`.
- *
- * @returns The updated plan markdown.
- */
-export function regenerateSessionPlan(
-  sessionId: string,
-  channel: Channel<PlanEvent>
-): Promise<string> {
-  return invoke<string>("regenerate_session_plan", {
-    sessionId,
-    channel,
-  });
-}
-
-/** Return the run log for a session as plain text. Empty string if not yet run. */
 export function getSessionLog(sessionId: string): Promise<string> {
   return invoke<string>("get_session_log", { sessionId });
 }
 
-// ─── Filesystem ───────────────────────────────────────────────────────────────
 
-/** Return whether the current launch context supports automatic in-place update. */
+export function getSessionDag(sessionId: string): Promise<DagDto> {
+  return invoke<DagDto | null>("get_session_dag", { sessionId }).then(
+    (dag) => dag ?? { startStep: "", steps: [], edges: [], currentStep: null },
+  );
+}
+
+function runRequest(workspaceMode?: WorkspaceMode) {
+  return { workspaceMode: workspaceMode ?? null, maxRetries: null, rateLimitRetries: 5 };
+}
+
+export function runSession(
+  sessionId: string,
+  workspaceMode: WorkspaceMode,
+  channel: EventChannel,
+): Promise<Session> {
+  return invoke<Session>("run_session", {
+    sessionId,
+    request: runRequest(workspaceMode),
+    channel,
+  });
+}
+
+export function cancelSession(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_session", { sessionId });
+}
+
+export function cancelRunAll(): Promise<boolean> {
+  return invoke<boolean>("cancel_run_all");
+}
+
+export function runAllSessions(
+  channel: EventChannel,
+  parallelism?: number,
+): Promise<void> {
+  return invoke<void>("run_all_sessions", {
+    parallelism: parallelism ?? null,
+    channel,
+  });
+}
+
+export function respondToOption(
+  sessionId: string,
+  requestId: string,
+  result: { nextStep?: string; textInput?: string },
+): Promise<void> {
+  return invoke<void>("respond_to_option", { sessionId, requestId, result });
+}
+
+export function respondToAsk(
+  sessionId: string,
+  requestId: string,
+  answer: string,
+): Promise<void> {
+  return invoke<void>("respond_to_ask", { sessionId, requestId, answer });
+}
+export function getPendingPrompts(sessionId: string): Promise<PendingPrompt[]> {
+  return invoke<PendingPrompt[]>("pending_prompts", { sessionId });
+}
+
+export function getAppConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_app_config");
+}
+
+export function updateAppConfig(config: AppConfig): Promise<void> {
+  return invoke<void>("update_app_config", { config });
+}
+
+export function cleanSessions(): Promise<CleanupResult> {
+  return invoke<CleanupResult>("clean_sessions");
+}
+
+export function resetSession(sessionId: string): Promise<Session> {
+  return invoke<Session>("reset_session", { sessionId });
+}
+
+function currentStepUpdate(currentStep: string | null | undefined) {
+  if (currentStep === undefined) return "unchanged";
+  return currentStep === null ? "clear" : { set: currentStep };
+}
+
+export function updateSessionSettings(
+  sessionId: string,
+  params: { configPath?: string; skippedSteps: string[]; currentStep?: string | null },
+): Promise<Session> {
+  const configPath = params.configPath === undefined ? {} : { configPath: params.configPath };
+  return invoke<Session>("update_session", {
+    sessionId,
+    request: {
+      ...configPath,
+      skippedSteps: params.skippedSteps,
+      currentStepUpdate: currentStepUpdate(params.currentStep),
+    },
+  });
+}
+
+
+export function regenerateSessionPlan(
+  sessionId: string,
+  channel: EventChannel,
+  feedback?: string,
+): Promise<string> {
+  return invoke<Session>("regenerate_session_plan", {
+    sessionId,
+    request: {
+      grill: false,
+      skipPlanning: false,
+      noInteractivePlanning: false,
+      interactive: true,
+      rateLimitRetries: 5,
+      feedback: feedback ?? null,
+      question: null,
+    },
+    channel,
+  }).then(() => getSessionPlan(sessionId));
+}
 export function getUpdateReadiness(): Promise<UpdateReadiness> {
   return invoke<UpdateReadiness>("get_update_readiness");
 }
 
-/** List subdirectories of `path`. `~` is expanded server-side. Returns up to 50 entries. */
 export function listDirectory(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_directory", { path });
 }
 
-/**
- * List GitHub repositories (`owner/repo`) for the authenticated `gh` user,
- * for the New Session repository picker.
- */
 export function listGithubRepos(): Promise<string[]> {
   return invoke<string[]>("list_github_repos");
 }
 
-// ─── Session creation ─────────────────────────────────────────────────────────
-
-/** List workflow config files.
- *
- * When `baseDir` is provided and `repo` is absent, local configs from the working directory
- * are included first. When `repo` is provided (repo mode), only user workflow configs are returned.
- */
 export function listConfigs(params?: { baseDir?: string; repo?: string }): Promise<ConfigEntry[]> {
   return invoke<ConfigEntry[]>("list_configs", {
     baseDir: params?.baseDir ?? null,
@@ -190,15 +168,12 @@ export function listConfigs(params?: { baseDir?: string; repo?: string }): Promi
   });
 }
 
-/** Return persisted defaults for the New Session form. */
 export function getNewSessionHistorySummary(): Promise<NewSessionHistorySummary> {
   return invoke<NewSessionHistorySummary>("get_new_session_history_summary");
 }
 
-/** Resolve the effective config for the New Session form and return the skippable-step
- *  tree together with history-backed default skip selections. */
 export function getNewSessionConfigDefaults(
-  params: { baseDir: string; configPath?: string; repo?: string }
+  params: { baseDir: string; configPath?: string; repo?: string },
 ): Promise<NewSessionConfigDefaults> {
   return invoke<NewSessionConfigDefaults>("get_new_session_config_defaults", {
     baseDir: params.baseDir,
@@ -207,148 +182,141 @@ export function getNewSessionConfigDefaults(
   });
 }
 
-// ─── New Session Draft persistence ─────────────────────────────────────────────
-
-/** Get the latest New Session form draft, or null if no draft exists. */
 export function getNewSessionDraft(): Promise<NewSessionDraftPersisted | null> {
   return invoke<NewSessionDraftPersisted | null>("get_new_session_draft");
 }
 
-/** Persist the current New Session form state. */
 export function saveNewSessionDraft(draft: NewSessionDraftPersisted): Promise<void> {
   return invoke<void>("save_new_session_draft", { draft });
 }
 
-/** Delete the New Session form draft. */
 export function clearNewSessionDraft(): Promise<void> {
   return invoke<void>("clear_new_session_draft");
 }
 
-/**
- * Create a new session and generate a plan, streaming PlanEvents via `channel`.
- *
- * @returns The new session ID.
- */
-export function createSession(
-  params: {
-    input: string;
-    configPath?: string;
-    baseDir: string;
-    /** GitHub repository (owner/repo) to clone instead of using baseDir. */
-    repo?: string;
-    skippedSteps?: string[];
-    useInputAsPlan?: boolean;
-    /** "Grill me" planning: interview the user via `ask_user` before writing the plan. Requires the SDK backend. */
-    grill?: boolean;
-    /** Disable interactive planning tools for this session, making the agent write plan.md directly. */
-    noInteractivePlanning?: boolean;
-    /** Absolute paths of image files to attach to the planning input. */
-    imageAttachments?: string[];
-  },
-  channel: Channel<PlanEvent>
-): Promise<string> {
-  return invoke<string>("create_session", {
-    input: params.input,
-    configPath: params.configPath ?? null,
-    baseDir: params.baseDir,
-    repo: params.repo ?? null,
-    skippedSteps: params.skippedSteps ?? [],
-    useInputAsPlan: params.useInputAsPlan ?? false,
-    grill: params.grill ?? false,
-    noInteractivePlanning: params.noInteractivePlanning ?? false,
-    imageAttachments: params.imageAttachments ?? [],
-    channel,
-  });
-}
-
-/**
- * Create a new session in `Draft` phase without generating a plan.
- *
- * The session is left in `Draft` phase; generate a plan later via
- * {@link generatePlanForDraft}.
- *
- * @returns The new session ID.
- */
-export function createDraftSession(params: {
+type NewSessionParams = {
   input: string;
   configPath?: string;
   baseDir: string;
-  /** GitHub repository (owner/repo) to clone instead of using baseDir. */
   repo?: string;
   skippedSteps?: string[];
-  /** Absolute paths of image files to attach to the planning input. */
+  useInputAsPlan?: boolean;
+  grill?: boolean;
+  noInteractivePlanning?: boolean;
   imageAttachments?: string[];
-}): Promise<string> {
-  return invoke<string>("create_draft_session", {
+  workspaceMode?: WorkspaceMode;
+  allowDirtyWorkingTree?: boolean;
+};
+
+function newSessionRequest(params: NewSessionParams) {
+  const configPath = params.configPath === undefined ? {} : { configPath: params.configPath };
+  return {
     input: params.input,
-    configPath: params.configPath ?? null,
     baseDir: params.baseDir,
+    ...configPath,
+    configSource: null,
+    configYaml: null,
     repo: params.repo ?? null,
+    workspaceMode: params.workspaceMode ?? "Worktree",
+    allowDirtyWorkingTree: params.allowDirtyWorkingTree ?? false,
+    attachments: params.imageAttachments ?? [],
     skippedSteps: params.skippedSteps ?? [],
-    imageAttachments: params.imageAttachments ?? [],
-  });
+  };
 }
 
-/** Approve a session (Awaiting Approval → Planned). */
+const planRequest = (params: NewSessionParams) => ({
+  grill: params.grill ?? false,
+  // skipPlanning is reserved for the explicit "use input as plan" flow.
+  // Non-interactive planning still invokes the LLM, only without planning tools.
+  skipPlanning: false,
+  noInteractivePlanning: params.noInteractivePlanning ?? false,
+  // `interactive` controls clarification prompts, independently of planning tools.
+  interactive: true,
+  rateLimitRetries: 5,
+  feedback: null,
+  question: null,
+});
+
+export async function createSession(
+  params: NewSessionParams,
+  channel: EventChannel,
+): Promise<string> {
+  const session = await invoke<Session>("create_session", { request: newSessionRequest(params) });
+  if (params.useInputAsPlan) {
+    await invoke<Session>("use_input_as_plan", { sessionId: session.id, channel });
+  } else {
+    await invoke<Session>("generate_plan_for_draft", {
+      sessionId: session.id,
+      request: planRequest(params),
+      channel,
+    });
+  }
+  return session.id;
+}
+
+export function createDraftSession(params: NewSessionParams): Promise<string> {
+  return invoke<Session>("create_session", { request: newSessionRequest(params) }).then((session) => session.id);
+}
+
 export function approveSession(sessionId: string): Promise<void> {
-  return invoke<void>("approve_session", { sessionId });
+  return invoke<Session>("approve_session", { sessionId }).then(() => undefined);
 }
 
-/**
- * Publish a session's generated plan as a GitHub issue and delete the local
- * session. The target repo is inferred from the session (or its `origin` git
- * remote); the issue body is always the plan, unchanged. When `triggerCruise`
- * is true, a separate `@cruise run` comment is posted on the created issue.
- */
 export function publishPlanIssue(sessionId: string, triggerCruise: boolean): Promise<PublishedIssue> {
   return invoke<PublishedIssue>("publish_plan_issue", { sessionId, triggerCruise });
 }
 
-/**
- * Generate the initial plan for a Draft session, streaming PlanEvents via `channel`.
- * Transitions the session to `AwaitingApproval` on success.
- *
- * @returns The generated plan markdown.
- */
 export function generatePlanForDraft(
   sessionId: string,
-  channel: Channel<PlanEvent>
+  channel: EventChannel,
+  request: Partial<{
+    grill: boolean;
+    noInteractivePlanning: boolean;
+    interactive: boolean;
+    rateLimitRetries: number;
+    feedback: string;
+    question: string;
+  }> = {},
 ): Promise<string> {
-  return invoke<string>("generate_plan_for_draft", { sessionId, channel });
+  return invoke<Session>("generate_plan_for_draft", {
+    sessionId,
+    request: {
+      grill: request.grill ?? false,
+      skipPlanning: false,
+      noInteractivePlanning: request.noInteractivePlanning ?? false,
+      interactive: request.interactive ?? true,
+      rateLimitRetries: request.rateLimitRetries ?? 5,
+      feedback: request.feedback ?? null,
+      question: request.question ?? null,
+    },
+    channel,
+  }).then(() => getSessionPlan(sessionId));
 }
 
-/**
- * Ask a question about a session's plan without modifying it.
- *
- * @returns The LLM answer text (transient; not persisted to plan.md).
- */
-export function askSession(sessionId: string, question: string): Promise<string> {
-  return invoke<string>("ask_session", { sessionId, question });
+export function askSession(
+  sessionId: string,
+  question: string,
+  channel: EventChannel,
+): Promise<void> {
+  return invoke<Session>("ask_session", { sessionId, question, channel }).then(() => undefined);
 }
 
-/** Delete a session that is still awaiting approval. */
 export function discardSession(sessionId: string): Promise<void> {
   return invoke<void>("discard_session", { sessionId });
 }
 
-/** Delete a session and clean up its worktree. Cannot delete Running sessions. */
 export function deleteSession(sessionId: string): Promise<void> {
   return invoke<void>("delete_session", { sessionId });
 }
 
-/**
- * Re-generate the plan for an existing session with the given feedback,
- * streaming PlanEvents via `channel`.
- *
- * @returns The updated plan markdown.
- */
 export function fixSession(
   params: { sessionId: string; feedback: string },
-  channel: Channel<PlanEvent>
+  channel: EventChannel,
 ): Promise<string> {
-  return invoke<string>("fix_session", {
+  return invoke<Session>("fix_session", {
     sessionId: params.sessionId,
     feedback: params.feedback,
     channel,
-  });
+  }).then(() => getSessionPlan(params.sessionId));
 }
+

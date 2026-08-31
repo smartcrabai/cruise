@@ -70,6 +70,8 @@ pub enum Commands {
     /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
     #[command(name = "mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
+    /// Launch the keyboard-only Ratatui client.
+    Tui,
 }
 
 #[derive(Parser, Debug)]

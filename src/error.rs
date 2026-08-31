@@ -55,6 +55,9 @@ pub enum CruiseError {
     #[error("git worktree error: {0}")]
     WorktreeError(String),
 
+    #[error("session busy: {0}")]
+    Busy(String),
+
     #[error("session error: {0}")]
     SessionError(String),
 

@@ -123,15 +123,25 @@ describe("WorkflowDagPanel", () => {
     });
 
     it("passes a Mermaid source with an edge label derived from the edge reason/selector", async () => {
-      // Given
-      mockGetSessionDag.mockResolvedValue(makeDag());
+      mockGetSessionDag.mockResolvedValue({
+        startStep: "build",
+        currentStep: "test",
+        steps: [
+          { name: "build", kind: "command", isTerminal: false },
+          { name: "test", kind: "command", isTerminal: true },
+        ],
+        edges: [
+          { from: "build", to: "test", reason: "IfFileChanged", selector: "src/**" },
+          { from: "test", to: null, reason: "Sequential", selector: null },
+        ],
+      });
       mockMermaidRender.mockResolvedValue({ svg: "<svg></svg>" });
       // When
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
       await waitFor(() => expect(mockMermaidRender).toHaveBeenCalled());
       // Then
       const [, source] = mockMermaidRender.mock.calls[0];
-      expect(source).toContain('s0_build -->|"if-file-changed: src/**"| s1_test');
+      expect(source).toContain('s0_build -->|"IfFileChanged: src/**"| s1_test');
       expect(source).toContain("s1_test --> end_terminal");
     });
 

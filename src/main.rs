@@ -1,4 +1,5 @@
 mod app_config;
+pub mod application;
 mod ask_handler;
 mod attachments;
 mod backend;
@@ -11,7 +12,6 @@ mod cli;
 mod condition;
 mod config;
 mod config_cmd;
-#[cfg_attr(not(test), expect(dead_code))]
 mod configs;
 mod console_mode;
 mod dag;
@@ -28,6 +28,7 @@ mod login_cmd;
 mod mcp_bridge;
 mod metadata;
 mod multiline_input;
+pub mod new_session_draft;
 mod new_session_history;
 mod option_handler;
 mod paths;
@@ -50,6 +51,7 @@ mod test_binary_support;
 mod test_support;
 mod timeout;
 mod tool_bridge;
+mod tui;
 mod variable;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
@@ -57,7 +59,6 @@ mod workflow_call;
 mod workspace;
 mod worktree;
 mod worktree_pr;
-#[cfg_attr(not(test), expect(dead_code))]
 mod yaml_metadata;
 
 // Multi-threaded runtime: parallel `run --all` workers execute blocking
@@ -91,6 +92,9 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Login(args)) => login_cmd::run(&args),
+        Some(cli::Commands::Tui) => tui::run()
+            .await
+            .map_err(|error| error::CruiseError::Other(error.to_string())),
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             plan_cmd::launch_background_plan(

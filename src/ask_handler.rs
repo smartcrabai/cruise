@@ -11,19 +11,35 @@
 //! calls on. Implementations may therefore block (read stdin, wait on a
 //! channel) — they are never called on the async runtime thread.
 
+use crate::cancellation::CancellationToken;
 use crate::error::Result;
 
 /// Presents an agent's free-form question to the user and returns their answer.
-///
-/// Implementations block until the user responds (or cancels). The returned
-/// string is fed back to the agent as the `ask_user` tool result.
 pub trait AskHandler: Send + Sync {
     /// Ask `question` and return the user's answer.
     ///
     /// # Errors
     ///
-    /// Returns an error if the interaction fails or the user cancels.
+    /// Returns an error when the handler cannot obtain an answer.
     fn ask_user(&self, question: &str) -> Result<String>;
+
+    /// Cancellation-aware variant for shared runners. Existing clients only
+    /// implement `ask_user`; broker-backed clients override this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::CruiseError::Interrupted`] if cancellation has
+    /// already been requested, or the underlying [`Self::ask_user`] error.
+    fn ask_user_with_cancellation(
+        &self,
+        question: &str,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<String> {
+        if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+            return Err(crate::error::CruiseError::Interrupted);
+        }
+        self.ask_user(question)
+    }
 }
 
 /// Handler for non-interactive contexts where the user cannot be reached.

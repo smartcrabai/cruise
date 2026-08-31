@@ -37,6 +37,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -116,11 +117,11 @@ function setupTwoPhaseCreateSession(sessionId: string) {
   );
 
   return {
-    emitSessionCreated(): void {
-      capturedChannel!.onmessage?.({ event: "sessionCreated", data: { sessionId } });
+    emitPlanStarted(): void {
+      capturedChannel!.onmessage?.({ event: "planStarted", data: { sessionId, operation: "generate" } });
     },
-    emitPlanGenerated(content = "# Plan"): void {
-      capturedChannel!.onmessage?.({ event: "planGenerated", data: { sessionId, content } });
+    emitPlanFinished(_content = "# Plan"): void {
+      capturedChannel!.onmessage?.({ event: "planFinished", data: { sessionId, phase: "Awaiting Input" } });
       resolveCreate(sessionId);
     },
     emitPlanFailed(error = "failed"): void {
@@ -156,22 +157,22 @@ describe("App: input-required notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // sessionCreated: session is AwaitingInput but no pendingAskQuestion yet
+    // planStarted: session is Awaiting Input but no pendingAskQuestion yet
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-ask", phase: "Awaiting Input", pendingAskQuestion: undefined }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => {
       expect(
         screen.getByPlaceholderText("Describe what you want to implement...")
       ).toHaveValue("");
     });
 
-    // When: planGenerated fires -> sidebar poll returns the question
+    // When: planFinished fires -> sidebar poll returns the question
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-ask", phase: "Awaiting Input", pendingAskQuestion: "Which auth strategy?" }),
     ]);
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
 
     // Then: input-required toast appears
     await waitFor(() => expect(screen.getByText("Action required")).toBeInTheDocument());
@@ -194,22 +195,22 @@ describe("App: input-required notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // sessionCreated: session has Q1
+    // planStarted: session has Q1
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-ask2", phase: "Awaiting Input", pendingAskQuestion: "Q1?" }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => {
       expect(
         screen.getByPlaceholderText("Describe what you want to implement...")
       ).toHaveValue("");
     });
 
-    // When: planGenerated fires -> sidebar poll returns Q2 (question changed)
+    // When: planFinished fires -> sidebar poll returns Q2 (question changed)
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-ask2", phase: "Awaiting Input", pendingAskQuestion: "Q2?" }),
     ]);
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
 
     // Then: input-required toast appears (Q1→Q2 transition detected)
     await waitFor(() => expect(screen.getByText("Action required")).toBeInTheDocument());
@@ -255,22 +256,22 @@ describe("App: input-required notification transitions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
-    // sessionCreated: session has Q1
+    // planStarted: session has Q1
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-nodiff", phase: "Awaiting Input", pendingAskQuestion: "Same question?" }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => {
       expect(
         screen.getByPlaceholderText("Describe what you want to implement...")
       ).toHaveValue("");
     });
 
-    // When: planGenerated fires -> sidebar poll returns the same Q1 (no change)
+    // When: planFinished fires -> sidebar poll returns the same Q1 (no change)
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-nodiff", phase: "Awaiting Input", pendingAskQuestion: "Same question?" }),
     ]);
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
 
     // Then: no toast (same pendingAskQuestion → not a new transition)
     await act(async () => { await new Promise<void>((r) => setTimeout(r, 20)); });

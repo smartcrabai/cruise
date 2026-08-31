@@ -36,6 +36,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -418,7 +419,7 @@ describe("App: New Session draft save on value changes", () => {
 
     // When: sessionCreated fires
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
 
     // Then: clearNewSessionDraft is called
@@ -426,7 +427,7 @@ describe("App: New Session draft save on value changes", () => {
 
     // Cleanup
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 });
@@ -685,7 +686,7 @@ describe("App: New Session skip-step selection -- Config change", () => {
  * Set up the createSession mock to support a two-phase emit model:
  *  1. sessionCreated fires immediately after session is persisted - the frontend
  *     should release the New Session form at this point.
- *  2. planGenerated / planFailed fire later, after the form has already been reset.
+ *  2. planFinished / planFailed fire later, after the form has already been reset.
  *
  * The mock captures the channel reference and returns control handles so tests
  * can fire each event at an explicit moment.
@@ -706,13 +707,13 @@ function setupTwoPhaseCreateSession(sessionId = "new-sess-id") {
   );
 
   return {
-    /** Emit sessionCreated - session has been persisted, plan not yet ready. */
-    emitSessionCreated(): void {
-      capturedChannel!.onmessage?.({ event: "sessionCreated", data: { sessionId } });
+    /** Emit planStarted - the draft has been persisted and planning begins. */
+    emitPlanStarted(): void {
+      capturedChannel!.onmessage?.({ event: "planStarted", data: { sessionId, operation: "generate" } });
     },
-    /** Emit planGenerated and resolve the pending createSession promise. */
-    emitPlanGenerated(content = "# Plan content"): void {
-      capturedChannel!.onmessage?.({ event: "planGenerated", data: { sessionId, content } });
+    /** Emit planFinished and resolve the pending createSession promise. */
+    emitPlanFinished(_content = "# Plan content"): void {
+      capturedChannel!.onmessage?.({ event: "planFinished", data: { sessionId, phase: "Awaiting Approval" } });
       resolveCreate(sessionId);
     },
     /** Emit planFailed and resolve the pending createSession promise. */
@@ -731,7 +732,7 @@ describe("App: Non-blocking session creation", () => {
   });
 
   it("resets task input after sessionCreated, before plan generation resolves", async () => {
-    // Given: createSession emits sessionCreated before planGenerated
+    // Given: createSession emits sessionCreated before planFinished
     const control = setupTwoPhaseCreateSession("sess-early");
 
     render(<App />);
@@ -744,7 +745,7 @@ describe("App: Non-blocking session creation", () => {
 
     // When: sessionCreated fires (session is persisted, plan not yet ready)
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
 
     // Then: task input is cleared (form released before plan is ready)
@@ -756,7 +757,7 @@ describe("App: Non-blocking session creation", () => {
 
     // Cleanup: resolve the pending createSession so the test does not leak
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 
@@ -774,7 +775,7 @@ describe("App: Non-blocking session creation", () => {
 
     // When: sessionCreated fires and the form is released (input cleared)
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
     await waitFor(() => {
       expect(
@@ -793,7 +794,7 @@ describe("App: Non-blocking session creation", () => {
 
     // Cleanup
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 
@@ -816,7 +817,7 @@ describe("App: Non-blocking session creation", () => {
 
     // When: sessionCreated fires
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
 
     // Then: task input is cleared but baseDir is preserved for the next session
@@ -831,7 +832,7 @@ describe("App: Non-blocking session creation", () => {
 
     // Cleanup
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 
@@ -859,7 +860,7 @@ describe("App: Non-blocking session creation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
 
     await waitFor(() => {
@@ -868,7 +869,7 @@ describe("App: Non-blocking session creation", () => {
     expect(screen.getByRole("button", { name: "/repos/old" })).toBeInTheDocument();
 
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 
@@ -885,7 +886,7 @@ describe("App: Non-blocking session creation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
     // Verify form was released
     await waitFor(() => {
@@ -920,7 +921,7 @@ describe("App: Non-blocking session creation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
 
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
     await waitFor(() => {
       expect(
@@ -943,7 +944,7 @@ describe("App: Non-blocking session creation", () => {
     });
   });
 
-  it("late planGenerated triggers sidebar refresh without mutating the form", async () => {
+  it("late planFinished triggers sidebar refresh without mutating the form", async () => {
     // Given: form is released by sessionCreated; plan arrives later
     const control = setupTwoPhaseCreateSession("sess-async");
 
@@ -957,7 +958,7 @@ describe("App: Non-blocking session creation", () => {
 
     // sessionCreated: form resets
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
     await waitFor(() => {
       expect(
@@ -965,17 +966,17 @@ describe("App: Non-blocking session creation", () => {
       ).toHaveValue("");
     });
 
-    const callsBeforePlanGenerated = vi.mocked(commands.listSessions).mock.calls.length;
+    const callsBeforePlanFinished = vi.mocked(commands.listSessions).mock.calls.length;
 
-    // When: planGenerated fires late
+    // When: planFinished fires late
     await act(async () => {
-      control.emitPlanGenerated("# Plan content");
+      control.emitPlanFinished("# Plan content");
     });
 
     // Then: sidebar is refreshed so planAvailable becomes visible immediately
     await waitFor(() => {
       expect(vi.mocked(commands.listSessions).mock.calls.length).toBeGreaterThan(
-        callsBeforePlanGenerated
+        callsBeforePlanFinished
       );
     });
 
@@ -1001,7 +1002,7 @@ describe("App: Non-blocking session creation", () => {
 
     // When: sessionCreated fires (plan not yet ready)
     await act(async () => {
-      control.emitSessionCreated();
+      control.emitPlanStarted();
     });
 
     // Then: sidebar refreshes immediately (explicit refresh, not relying on 3-second poll)
@@ -1013,7 +1014,7 @@ describe("App: Non-blocking session creation", () => {
 
     // Cleanup
     await act(async () => {
-      control.emitPlanGenerated();
+      control.emitPlanFinished();
     });
   });
 });
@@ -1145,7 +1146,7 @@ describe("App: Approval-ready notification transitions", () => {
     cleanup();
   });
 
-  it("emits plan-ready toast when session transitions to approval-ready after planGenerated", async () => {
+  it("emits plan-ready toast when session transitions to approval-ready after planFinished", async () => {
     // Given: no sessions in initial sidebar, then plan becomes available
     const control = setupTwoPhaseCreateSession("sess-plan-ready");
 
@@ -1163,16 +1164,16 @@ describe("App: Approval-ready notification transitions", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-plan-ready", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Describe what you want to implement...")).toHaveValue("");
     });
 
-    // When: planGenerated fires -> session becomes approval-ready (planAvailable: true)
+    // When: planFinished fires -> session becomes approval-ready (planAvailable: true)
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-plan-ready", phase: "Awaiting Approval", planAvailable: true }),
     ]);
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
 
     // Then: plan-ready toast appears (transition detected by snapshot detector)
     await waitFor(() => expect(screen.getByText("Plan ready")).toBeInTheDocument());
@@ -1196,7 +1197,7 @@ describe("App: Approval-ready notification transitions", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-planning", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Describe what you want to implement...")).toHaveValue("");
     });
@@ -1449,8 +1450,8 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     );
 
     // Cleanup
-    await act(async () => { control.emitSessionCreated(); });
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanStarted(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
   it("passes useInputAsPlan: false to createSession when checkbox is unchecked (default)", async () => {
@@ -1475,8 +1476,28 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     );
 
     // Cleanup
-    await act(async () => { control.emitSessionCreated(); });
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanStarted(); });
+    await act(async () => { control.emitPlanFinished(); });
+  });
+
+  it("passes noInteractivePlanning without enabling skipPlanning", async () => {
+    const control = setupTwoPhaseCreateSession("sess-no-interactive");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "plan without planning tools",
+    );
+    await userEvent.click(screen.getByRole("checkbox", { name: /non-interactive planning/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    expect(commands.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ noInteractivePlanning: true, useInputAsPlan: false }),
+      expect.anything(),
+    );
+    await act(async () => { control.emitPlanStarted(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
   it("passes the built-in sentinel through the New Session entry point", async () => {
@@ -1503,8 +1524,8 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     );
 
     // Cleanup
-    await act(async () => { control.emitSessionCreated(); });
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanStarted(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
   it("checkbox is disabled while session creation is in progress", async () => {
@@ -1524,8 +1545,8 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
     expect(checkbox).toBeDisabled();
 
     // Cleanup
-    await act(async () => { control.emitSessionCreated(); });
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanStarted(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
   it("does not persist useInputAsPlan in saveNewSessionDraft", async () => {
@@ -1763,7 +1784,7 @@ describe("App: New Session -- ConfigSelect groups entries by source", () => {
 // Draft + starts a FixingGuard before sending SessionCreated.  The sidebar
 // therefore sees phase:"Draft" + fixInProgress:true → PhaseBadge renders
 // "Planning".  On success, the backend promotes to AwaitingApproval before
-// emitting PlanGenerated.
+// emitting planFinished.
 
 describe("App: Planning badge during plan generation (create_session)", () => {
   beforeEach(setupNewSessionMocks);
@@ -1773,7 +1794,7 @@ describe("App: Planning badge during plan generation (create_session)", () => {
   });
 
   it("shows 'Planning' badge in sidebar immediately after sessionCreated while plan is generating", async () => {
-    // Given: createSession will emit sessionCreated before planGenerated
+    // Given: createSession will emit sessionCreated before planFinished
     const control = setupTwoPhaseCreateSession("sess-planning-badge");
 
     render(<App />);
@@ -1788,17 +1809,17 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-planning-badge", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
 
     // Then: sidebar shows "Planning" (not "Awaiting Approval")
     await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
     expect(screen.queryByText("Awaiting Approval")).not.toBeInTheDocument();
 
     // Cleanup
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
-  it("transitions sidebar badge from 'Planning' to 'Awaiting Approval' when planGenerated fires", async () => {
+  it("transitions sidebar badge from 'Planning' to 'Awaiting Approval' when planFinished fires", async () => {
     // Given: createSession flow with two phases
     const control = setupTwoPhaseCreateSession("sess-badge-transition");
 
@@ -1814,14 +1835,14 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-badge-transition", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
 
-    // When: planGenerated fires -- backend promotes to AwaitingApproval
+    // When: planFinished fires -- backend promotes to AwaitingApproval
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-badge-transition", phase: "Awaiting Approval", planAvailable: true }),
     ]);
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
 
     // Then: badge updates to "Awaiting Approval" (plan is now ready for approval)
     await waitFor(() => expect(screen.getByText("Awaiting Approval")).toBeInTheDocument());
@@ -1850,14 +1871,14 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-input-as-plan", phase: "Awaiting Approval", planAvailable: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
 
     // Then: badge shows "Awaiting Approval" directly (no "Planning" intermediate state)
     await waitFor(() => expect(screen.getByText("Awaiting Approval")).toBeInTheDocument());
     expect(screen.queryByText("Planning")).not.toBeInTheDocument();
 
     // Cleanup
-    await act(async () => { control.emitPlanGenerated(); });
+    await act(async () => { control.emitPlanFinished(); });
   });
 
   it("'Planning' badge clears after planFailed while the Draft session remains retryable", async () => {
@@ -1876,7 +1897,7 @@ describe("App: Planning badge during plan generation (create_session)", () => {
     vi.mocked(commands.listSessions).mockResolvedValue([
       makeSession({ id: "sess-plan-fail-badge", phase: "Draft", planAvailable: false, fixInProgress: true }),
     ]);
-    await act(async () => { control.emitSessionCreated(); });
+    await act(async () => { control.emitPlanStarted(); });
     await waitFor(() => expect(screen.getByText("Planning")).toBeInTheDocument());
 
     // When: planFailed fires -- backend keeps the session as Draft for retry

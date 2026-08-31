@@ -36,6 +36,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -105,23 +106,23 @@ function setupRunAllSessions() {
   );
 
   return {
-    emitRunAllStarted(total: number): void {
-      capturedChannel!.onmessage?.({ event: "runAllStarted", data: { total } });
+    emitRunAllStarted(total: number, parallelism = 1): void {
+      capturedChannel!.onmessage?.({ event: "batchStarted", data: { total, parallelism } });
     },
-    emitSessionStarted(sessionId: string, input: string): void {
+    emitSessionStarted(sessionId: string, _input: string): void {
       capturedChannel!.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId, input },
+        event: "batchSessionStarted",
+        data: { id: sessionId },
       });
     },
-    emitSessionFinished(sessionId: string, input: string, phase: SessionPhase, error?: string): void {
+    emitSessionFinished(sessionId: string, _input: string, phase: SessionPhase, error?: string): void {
       capturedChannel!.onmessage?.({
-        event: "runAllSessionFinished",
-        data: { sessionId, input, phase, error },
+        event: "batchSessionFinished",
+        data: { id: sessionId, phase, error: error ?? null },
       });
     },
     emitCompleted(cancelled = 0): void {
-      capturedChannel!.onmessage?.({ event: "runAllCompleted", data: { cancelled } });
+      capturedChannel!.onmessage?.({ event: "batchFinished", data: { cancelled: cancelled > 0 } });
       resolveRunAll();
     },
   };
@@ -148,8 +149,8 @@ describe("App: RunAll — sidebar refreshes immediately on session finish", () =
 
   it("calls listSessions immediately when a RunAll session finishes, without waiting for idle poll", async () => {
     // Given: two sessions in the sidebar; runAllSessions is controlled
-    const sessA = makeSession({ id: "sess-a", input: "task A", phase: "Awaiting Approval", planAvailable: true });
-    const sessB = makeSession({ id: "sess-b", input: "task B", phase: "Awaiting Approval", planAvailable: true });
+    const sessA = makeSession({ id: "sess-a", input: "task A", phase: "Planned", planAvailable: true });
+    const sessB = makeSession({ id: "sess-b", input: "task B", phase: "Planned", planAvailable: true });
     vi.mocked(commands.listSessions).mockResolvedValue([sessA, sessB]);
 
     const control = setupRunAllSessions();
@@ -203,7 +204,7 @@ describe("App: RunAll — completed notification on session finish", () => {
 
   it("emits completed notification when a RunAll session transitions to Completed", async () => {
     // Given: session starts as Awaiting Approval (plan ready)
-    const session = makeSession({ id: "sess-run", input: "task run", phase: "Awaiting Approval", planAvailable: true });
+    const session = makeSession({ id: "sess-run", input: "task run", phase: "Planned", planAvailable: true });
     vi.mocked(commands.listSessions).mockResolvedValue([session]);
 
     const control = setupRunAllSessions();
@@ -240,8 +241,8 @@ describe("App: RunAll — completed notification on session finish", () => {
 
   it("emits a notification for each completed session individually", async () => {
     // Given: two sessions ready to run
-    const sessA = makeSession({ id: "sess-a", input: "task A", phase: "Awaiting Approval", planAvailable: true });
-    const sessB = makeSession({ id: "sess-b", input: "task B", phase: "Awaiting Approval", planAvailable: true });
+    const sessA = makeSession({ id: "sess-a", input: "task A", phase: "Planned", planAvailable: true });
+    const sessB = makeSession({ id: "sess-b", input: "task B", phase: "Planned", planAvailable: true });
     vi.mocked(commands.listSessions).mockResolvedValue([sessA, sessB]);
 
     const control = setupRunAllSessions();
@@ -301,7 +302,7 @@ describe("App: RunAll — completed notification on session finish", () => {
 
   it("includes the session phase error in failed notifications", async () => {
     // Given: session starts as approval-ready
-    const session = makeSession({ id: "sess-run", input: "task run", phase: "Awaiting Approval", planAvailable: true });
+    const session = makeSession({ id: "sess-run", input: "task run", phase: "Planned", planAvailable: true });
     vi.mocked(commands.listSessions).mockResolvedValue([session]);
 
     const control = setupRunAllSessions();

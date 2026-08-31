@@ -69,7 +69,10 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
                     } else {
                         crate::status_eprintln!("{msg}");
                     }
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        () = maybe_cancelled(cancel_token) => return Err(CruiseError::Interrupted),
+                    }
                     continue;
                 }
                 return Err(e);
@@ -87,7 +90,105 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-#[expect(clippy::too_many_lines)]
+#[cfg(unix)]
+fn terminate_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // The prompt shell is its own process group; kill descendants that may
+        // otherwise retain inherited output pipes after cancellation.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+/// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
+fn spawn_prompt_command<S: std::hash::BuildHasher>(
+    command: &[String],
+    model: Option<&str>,
+    env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
+) -> Result<tokio::process::Child> {
+    if command.is_empty() {
+        return Err(CruiseError::InvalidStepConfig(
+            "command list is empty".to_string(),
+        ));
+    }
+    let mut cmd_args = command[1..].to_vec();
+    if let Some(m) = model {
+        cmd_args.push("--model".to_string());
+        cmd_args.push(m.to_string());
+    }
+    let mut cmd = Command::new(&command[0]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.as_std_mut().process_group(0);
+    }
+    cmd.args(&cmd_args)
+        .envs(env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.spawn().map_err(|e| {
+        CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
+    })
+}
+
+async fn write_prompt(
+    child: &mut tokio::process::Child,
+    prompt: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<()> {
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::select! {
+            result = stdin.write_all(prompt.as_bytes()) => result.map_err(CruiseError::IoError)?,
+            () = maybe_cancelled(cancel_token) => {
+                #[cfg(unix)]
+                terminate_process_group(child.id());
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(CruiseError::Interrupted);
+            }
+        }
+        drop(stdin);
+    }
+    Ok(())
+}
+
+async fn drain_output<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    callback: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> String {
+    let Some(pipe) = pipe else {
+        return String::new();
+    };
+    let mut reader = BufReader::new(pipe);
+    let mut buf = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let has_newline = line.ends_with('\n');
+                let trimmed = line.trim_end_matches('\n');
+                if let Some(cb) = callback {
+                    cb(trimmed);
+                }
+                buf.push_str(trimmed);
+                if has_newline {
+                    buf.push('\n');
+                }
+            }
+        }
+    }
+    buf
+}
+
+/// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
 async fn execute_prompt<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
@@ -97,100 +198,19 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
     cwd: Option<&std::path::Path>,
     stream_callbacks: Option<&StreamCallbacks<'_>>,
 ) -> Result<(String, String)> {
-    if command.is_empty() {
-        return Err(CruiseError::InvalidStepConfig(
-            "command list is empty".to_string(),
-        ));
-    }
-
-    let mut cmd_args: Vec<String> = command[1..].to_vec();
-
-    if let Some(m) = model {
-        cmd_args.push("--model".to_string());
-        cmd_args.push(m.to_string());
-    }
-
-    let mut cmd = Command::new(&command[0]);
-    cmd.args(&cmd_args)
-        .envs(env)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let mut child = cmd.spawn().map_err(|e| {
-        CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
-    })?;
-
-    // Write the prompt via stdin to avoid ARG_MAX limits.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(CruiseError::IoError)?;
-        // Close stdin to send EOF.
-        drop(stdin);
-    }
+    let mut child = spawn_prompt_command(command, model, env, cwd)?;
+    write_prompt(&mut child, prompt, cancel_token).await?;
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-
-    let drain_stdout = async {
-        let mut buf = String::new();
-        if let Some(pipe) = stdout_pipe {
-            let mut reader = BufReader::new(pipe);
-            let mut line = String::new();
-            // Extract callback once before loop to avoid per-line overhead
-            let on_stdout = stream_callbacks.and_then(|s| s.on_stdout);
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let has_newline = line.ends_with('\n');
-                        let trimmed = line.trim_end_matches('\n');
-                        if let Some(cb) = on_stdout {
-                            cb(trimmed);
-                        }
-                        buf.push_str(trimmed);
-                        if has_newline {
-                            buf.push('\n');
-                        }
-                    }
-                }
-            }
-        }
-        buf
-    };
-
-    let drain_stderr = async {
-        let mut buf = String::new();
-        if let Some(pipe) = stderr_pipe {
-            let mut reader = BufReader::new(pipe);
-            let mut line = String::new();
-            // Extract callback once before loop to avoid per-line overhead
-            let on_stderr = stream_callbacks.and_then(|s| s.on_stderr);
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let has_newline = line.ends_with('\n');
-                        let trimmed = line.trim_end_matches('\n');
-                        if let Some(cb) = on_stderr {
-                            cb(trimmed);
-                        }
-                        buf.push_str(trimmed);
-                        if has_newline {
-                            buf.push('\n');
-                        }
-                    }
-                }
-            }
-        }
-        buf
-    };
+    let drain_stdout = drain_output(
+        stdout_pipe,
+        stream_callbacks.and_then(|callbacks| callbacks.on_stdout),
+    );
+    let drain_stderr = drain_output(
+        stderr_pipe,
+        stream_callbacks.and_then(|callbacks| callbacks.on_stderr),
+    );
 
     let status;
     let stdout_buf;
@@ -208,6 +228,8 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
             stderr_buf = e;
         }
         () = maybe_cancelled(cancel_token) => {
+            #[cfg(unix)]
+            terminate_process_group(child.id());
             let _ = child.kill().await;
             let _ = child.wait().await;
             return Err(CruiseError::Interrupted);

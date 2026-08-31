@@ -35,6 +35,7 @@ vi.mock("../lib/commands", () => ({
   getSession: vi.fn(),
   getSessionLog: vi.fn(),
   getSessionPlan: vi.fn(),
+  getPendingPrompts: vi.fn().mockResolvedValue([]),
   getNewSessionHistorySummary: vi.fn().mockResolvedValue({ recentWorkingDirs: [] }),
   getNewSessionConfigDefaults: vi.fn().mockResolvedValue({
     steps: [],
@@ -91,7 +92,6 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 function setupRunAllMock() {
   let capturedChannel: { onmessage: ((event: unknown) => void) | null } | null = null;
   let resolveRunAll!: () => void;
-  let capturedTotal = 0;
 
   vi.mocked(commands.runAllSessions).mockImplementationOnce(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,38 +104,37 @@ function setupRunAllMock() {
   );
 
   return {
-    /** Emit runAllStarted event. */
-    emitStarted(total: number): void {
-      capturedTotal = total;
+    /** Emit batchStarted event. */
+    emitStarted(total: number, parallelism = 1): void {
       capturedChannel!.onmessage?.({
-        event: "runAllStarted",
-        data: { total },
+        event: "batchStarted",
+        data: { total, parallelism },
       });
     },
-    /** Emit runAllSessionStarted event. */
-    emitSessionStarted(sessionId: string, input: string, total?: number): void {
+    /** Emit batchSessionStarted event. */
+    emitSessionStarted(sessionId: string, _input: string, _total?: number): void {
       capturedChannel!.onmessage?.({
-        event: "runAllSessionStarted",
-        data: { sessionId, input, total: total ?? capturedTotal },
+        event: "batchSessionStarted",
+        data: { id: sessionId },
       });
     },
-    /** Emit runAllSessionFinished event. */
+    /** Emit batchSessionFinished event. */
     emitSessionFinished(
       sessionId: string,
-      input: string,
+      _input: string,
       phase: Session["phase"],
       error?: string,
     ): void {
       capturedChannel!.onmessage?.({
-        event: "runAllSessionFinished",
-        data: { sessionId, input, phase, error },
+        event: "batchSessionFinished",
+        data: { id: sessionId, phase, error: error ?? null },
       });
     },
-    /** Emit runAllCompleted event. */
+    /** Emit batchFinished event. */
     emitCompleted(cancelled = 0): void {
       capturedChannel!.onmessage?.({
-        event: "runAllCompleted",
-        data: { cancelled },
+        event: "batchFinished",
+        data: { cancelled: cancelled > 0 },
       });
       resolveRunAll();
     },

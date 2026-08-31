@@ -1,6 +1,6 @@
 /// A workflow config file entry discovered in the user workflows directory
 /// (`<config_dir>/workflows/`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConfigEntry {
     pub name: String,
     pub path: String,

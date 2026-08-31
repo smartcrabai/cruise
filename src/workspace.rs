@@ -102,7 +102,7 @@ fn validate_current_branch_session(session: &mut SessionState) -> Result<()> {
                     .to_string(),
             ));
         }
-        eprintln!(
+        crate::status_eprintln!(
             "{} working tree is dirty; running on top of the existing uncommitted changes",
             style("!").yellow().bold()
         );
@@ -140,6 +140,7 @@ fn git_stdout(repo_dir: &Path, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run git {}: {e}", args.join(" "))))?;
 

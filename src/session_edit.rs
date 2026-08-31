@@ -20,28 +20,28 @@ pub struct SessionSettingsUpdate {
     pub current_step_update: CurrentStepUpdate,
 }
 
-/// Update config and skip-step settings for an editable session.
-///
-/// Returns `(updated_state, config_changed)`. `config_changed` is true only when
-/// the requested config path differs from what was stored before the call — callers
-/// can use this to decide whether to regenerate the plan.
-///
-/// # Errors
-///
-/// Returns an error if the session cannot be loaded, the phase is not editable,
-/// the config path cannot be resolved, or the config YAML is invalid.
-pub fn update_session_settings(
+struct PreparedSettings {
+    requested_config_path: Option<String>,
+    old_explicit_config: Option<String>,
+    skipped_steps: Vec<String>,
+    current_step_update: CurrentStepUpdate,
+    is_failed_or_suspended: bool,
+    snapshot_path: std::path::PathBuf,
+    reuse_repo_snapshot: bool,
+    config: crate::config::WorkflowConfig,
+    source: crate::resolver::ConfigSource,
+}
+
+fn prepare_settings(
     manager: &SessionManager,
     session_id: &str,
+    session: &SessionState,
     update: SessionSettingsUpdate,
-) -> Result<(SessionState, bool)> {
-    let mut session = manager.load(session_id)?;
-
+) -> Result<PreparedSettings> {
     let is_failed_or_suspended = matches!(
         &session.phase,
         SessionPhase::Failed(_) | SessionPhase::Suspended
     );
-
     match &session.phase {
         SessionPhase::Draft
         | SessionPhase::AwaitingApproval
@@ -61,38 +61,33 @@ pub fn update_session_settings(
         skipped_steps,
         current_step_update,
     } = update;
-
     let session_uses_builtin = session.config_path.is_none()
         && crate::resolver::ConfigSource::is_builtin_source(&session.config_source);
-    // Preserve a built-in selection when older callers omit the sentinel because
-    // built-in sessions intentionally store no filesystem config_path.
+    let config_selection_provided = requested_config_path.is_some();
     let requested_config_path = requested_config_path
-        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| crate::new_session_history::expand_tilde(&path))
+        .or_else(|| {
+            (!config_selection_provided && session_uses_builtin)
+                .then(|| BUILTIN_CONFIG_KEY.to_string())
+        });
     let old_explicit_config = session
         .config_path
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
-
-    // Failed/Suspended: config path must stay the same
     if is_failed_or_suspended && old_explicit_config != requested_config_path {
         return Err(CruiseError::Other(
             "Cannot change config for a Failed or Suspended session. Only skip steps and current step can be edited.".to_string(),
         ));
     }
-
-    // current_step can only be set for Failed/Suspended
-    if !matches!(current_step_update, CurrentStepUpdate::Unchanged) && !is_failed_or_suspended {
+    if !matches!(&current_step_update, CurrentStepUpdate::Unchanged) && !is_failed_or_suspended {
         return Err(CruiseError::Other(
             "Cannot update current step for a session that is not Failed or Suspended.".to_string(),
         ));
     }
 
-    // Repo-backed sessions may have already removed their temporary clone after
-    // planning. Reuse the self-contained snapshot instead of resolving from the
-    // clone (or silently falling back to the builtin config).
-    let session_dir = manager.sessions_dir().join(session_id);
-    let snapshot_path = session_dir.join("config.yaml");
+    let snapshot_path = manager.sessions_dir().join(session_id).join("config.yaml");
     let reuse_repo_snapshot = session.repo.is_some()
         && requested_config_path.is_none()
         && session.config_path.is_none()
@@ -108,41 +103,112 @@ pub fn update_session_settings(
     };
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, &session.base_dir)?;
     crate::config::validate_config(&config)?;
+    if let CurrentStepUpdate::Set(step_name) = &current_step_update {
+        validate_current_step_name(&config, step_name, &skipped_steps)?;
+    }
+    Ok(PreparedSettings {
+        requested_config_path,
+        old_explicit_config,
+        skipped_steps,
+        current_step_update,
+        is_failed_or_suspended,
+        snapshot_path,
+        reuse_repo_snapshot,
+        config,
+        source,
+    })
+}
+
+fn save_session_with_snapshot(
+    manager: &SessionManager,
+    session: &SessionState,
+    config: &crate::config::WorkflowConfig,
+    snapshot_path: &std::path::Path,
+) -> Result<()> {
+    let prior_snapshot = match std::fs::read(snapshot_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(CruiseError::Other(format!(
+                "failed to snapshot session config: {error}"
+            )));
+        }
+    };
+    if session.config_path.is_none() {
+        let snapshot = crate::repo_clone::serialize_resolved_config(config)?;
+        crate::planning::write_plan_atomically(snapshot_path, snapshot.as_bytes())
+            .map_err(|e| CruiseError::Other(format!("failed to write session config: {e}")))?;
+    }
+    if let Err(error) = manager.save(session) {
+        let restore = match prior_snapshot.as_deref() {
+            Some(bytes) => crate::planning::write_plan_atomically(snapshot_path, bytes),
+            None => match std::fs::remove_file(snapshot_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
+        };
+        if let Err(restore_error) = restore {
+            return Err(CruiseError::Other(format!(
+                "failed to save session settings ({error}) and restore session config ({restore_error})"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+/// Update config and skip-step settings for an editable session.
+///
+/// Returns `(updated_state, config_changed)`. `config_changed` is true only when
+/// the requested config path differs from what was stored before the call — callers
+/// can use this to decide whether to regenerate the plan.
+///
+/// # Errors
+///
+/// Returns an error if the session cannot be loaded, the phase is not editable,
+/// the config path cannot be resolved, or the config YAML is invalid.
+pub fn update_session_settings(
+    manager: &SessionManager,
+    session_id: &str,
+    update: SessionSettingsUpdate,
+) -> Result<(SessionState, bool)> {
+    let mut session = manager.load(session_id)?;
+    let PreparedSettings {
+        requested_config_path,
+        old_explicit_config,
+        skipped_steps,
+        current_step_update,
+        is_failed_or_suspended,
+        snapshot_path,
+        reuse_repo_snapshot,
+        config,
+        source,
+    } = prepare_settings(manager, session_id, &session, update)?;
 
     match current_step_update {
         CurrentStepUpdate::Unchanged => {}
         CurrentStepUpdate::Clear => session.current_step = None,
-        CurrentStepUpdate::Set(step_name) => {
-            validate_current_step_name(&config, &step_name, &skipped_steps)?;
-            session.current_step = Some(step_name);
-        }
+        CurrentStepUpdate::Set(step_name) => session.current_step = Some(step_name),
     }
-
     if !reuse_repo_snapshot {
         session.config_source = source.display_string();
     }
-    // When no explicit config was requested, keep config_path = None so that
-    // load_config falls back to the session-local config.yaml snapshot below.
+    let config_changed = old_explicit_config != requested_config_path;
     session.config_path = requested_config_path.as_ref().and(source.path()).cloned();
+    if config_changed {
+        session.has_dag = false;
+        session.current_step = None;
+        session.current_step_is_node_id = false;
+    }
     session.skipped_steps = skipped_steps;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());
 
-    // Write config.yaml first so that if session.json is saved successfully,
-    // load_config will always find a consistent config on disk.
-    if session.config_path.is_none() {
-        let snapshot = crate::repo_clone::serialize_resolved_config(&config)?;
-        std::fs::write(&snapshot_path, snapshot)
-            .map_err(|e| CruiseError::Other(format!("failed to write session config: {e}")))?;
-    }
-
-    manager.save(&session)?;
-
+    save_session_with_snapshot(manager, &session, &config, &snapshot_path)?;
     if !is_failed_or_suspended {
         record_history(&session, requested_config_path.as_ref(), &source);
     }
-
-    Ok((session, old_explicit_config != requested_config_path))
+    Ok((session, config_changed))
 }
 
 fn record_history(

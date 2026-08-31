@@ -16,7 +16,7 @@ export function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
     const key = String(index);
     const trimmed = (textInputValues[key] ?? "").trim();
     if (!trimmed) return;
-    onRespond({ nextStep: choice.next, textInput: trimmed });
+    onRespond({ nextStep: choice.nextStep, textInput: trimmed });
   };
 
   return (
@@ -69,7 +69,7 @@ export function OptionDialog({ choices, plan, onRespond }: OptionDialogProps) {
               <button
                 key={key}
                 type="button"
-                onClick={() => onRespond({ nextStep: choice.next })}
+                onClick={() => onRespond({ nextStep: choice.nextStep })}
                 className="w-full px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600 text-left"
               >
                 {choice.label}

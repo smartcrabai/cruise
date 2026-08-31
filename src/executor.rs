@@ -35,6 +35,9 @@ use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
 use crate::tool_bridge::ToolBridge;
 
+/// Callback invoked when an SDK backend reports its session identifier.
+pub type SessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
+
 /// A single prompt execution request, backend-agnostic.
 ///
 /// Built by the caller and handed to [`Executor::run`]. `model_or_mode` carries
@@ -66,6 +69,9 @@ pub struct PromptRun<'a> {
     pub stream: Option<&'a StreamCallbacks<'a>>,
     /// Custom tools to inject (SDK mode only).
     pub tools: Vec<CruiseTool>,
+    /// Called as soon as an SDK backend reports its session ID, before tools
+    /// can block waiting for user input.
+    pub on_session_id: Option<&'a SessionIdCallback<'a>>,
     /// Prior session id to resume (SDK mode only).
     pub resume: Option<String>,
 }
@@ -239,12 +245,10 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// SDK backends emit token-level deltas; `StreamCallbacks::on_stdout` is
 /// line-oriented like the command backend) and returning `Err(Interrupted)` as
 /// soon as `cancel_token` fires.
-///
-/// Reached from [`run_with_fallback`] only, so every SDK backend folds its
-/// chunk stream into an outcome identically.
 async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
+    on_session_id: Option<&SessionIdCallback<'_>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
@@ -271,6 +275,11 @@ async fn stream_to_outcome(
             () = maybe_cancelled(cancel_token) => return Err(CruiseError::Interrupted),
             maybe = rx.recv() => match maybe {
                 Some(chunk) => {
+                    if let StreamChunk::Session(id) = &chunk
+                        && let Some(callback) = on_session_id
+                    {
+                        callback(id)?;
+                    }
                     let mut sink = |d: &str| {
                         if let Some(cb) = on_delta {
                             line_buf.push(d, |line| {
@@ -413,7 +422,9 @@ async fn run_with_fallback(
                 error,
             },
             Ok(rx_std) => {
-                let folded = stream_to_outcome(rx_std, on_delta, req.cancel_token).await?;
+                let folded =
+                    stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token)
+                        .await?;
                 let streamed = folded.streamed;
                 match folded.outcome {
                     ChunkOutcome::Done { output, session } => {
@@ -593,6 +604,7 @@ mod tests {
                 working_dir: None,
                 stream: None,
                 tools: Vec::new(),
+                on_session_id: None,
                 resume: None,
             })
             .await;
@@ -667,6 +679,7 @@ mod tests {
             working_dir: None,
             stream: None,
             tools: Vec::new(),
+            on_session_id: None,
             resume: None,
         }
     }
@@ -713,6 +726,7 @@ mod tests {
             working_dir: Some(&dir),
             stream: None,
             tools: vec![tool],
+            on_session_id: None,
             resume: Some("sess-1".to_string()),
         };
         let config = build_claude_config(&req, req.model_or_mode);

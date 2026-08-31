@@ -76,7 +76,10 @@ cruise run
 # Execute a config directly in the current directory (no plan, no worktree, no PR)
 cruise exec "do this"
 
-# List and manage sessions interactively
+# Open the full interactive keyboard client
+cruise tui
+
+# List and manage sessions with the CLI selector
 cruise list
 
 # Remove closed/merged PR sessions and terminal no-PR sessions
@@ -85,6 +88,64 @@ cruise clean
 # Legacy: no subcommand is treated as `cruise plan`
 cruise "implement the feature"
 ```
+
+### TUI (Interactive Keyboard Client)
+
+`cruise tui` is cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
+
+```sh
+# Open the interactive client
+cruise tui
+```
+
+Typical flow: run `cruise tui`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+
+The TUI requires an interactive TTY on macOS or Linux. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh`.
+
+#### Screens and workflows
+
+The TUI has three views:
+
+- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **DAG**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **New Session** -- Create a session or draft from a local Directory or GitHub source. The form supports workflow config selection, skipped steps, task text and images, **Use input as plan**, **Grill me**, and **Non-interactive planning**. Directory and repository paths are typed with completion; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
+
+PR and Issue URLs are shown as text. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login`, `config`, and `exec` operations remain available through their CLI commands rather than TUI screens.
+
+The New Session form autosaves 500 ms after a change. Other screen state is ephemeral. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Destructive, external, and multi-stop actions ask for confirmation. Quitting while work is active confirms before cancelling it. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Empty text answers are rejected. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+
+#### Keyboard map
+
+The TUI is keyboard-only. Keys are fixed and cannot be configured:
+
+| Key | Action |
+|-----|--------|
+| `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
+| `r` | Refresh |
+| `?` | Show help |
+| `q` / `Ctrl-C` | Quit; an active quit confirms and then cancels work |
+| `Tab` / `Shift-Tab` | Move focus forward / backward |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate |
+| `[` / `]` | Move between detail tabs |
+| `a` | Open the action palette |
+| `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
+| `f` | Follow the log |
+| `Enter` | Edit or commit a single-line field; in a multiline field, insert a newline |
+| `Esc` | Leave edit mode |
+| Focused submit button | Submit the current form |
+
+#### Layout, logs, and process behavior
+
+- At **120 or more columns**, the layout uses a fixed **34-column sidebar** and a detail pane.
+- At **80--119 columns**, the layout becomes a single pane.
+- Below **80x24**, the TUI shows a resize notice.
+- `NO_COLOR` is honored; labels and statuses are never conveyed by color alone.
+- Idle updates are event-driven. External state is polled every 3 seconds, and active work uses a 100 ms spinner.
+- The in-memory session log is bounded to the latest 10,000 lines; the Run All view is bounded to the latest 2,000 lines. Complete per-session run output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (by default `~/.local/share/cruise/sessions/<session-id>/run.log`).
+- The TUI cannot hand its stdin to an interactive child command: child processes never share TUI stdin, so such commands cannot prompt through the TUI.
+- Concurrent mutation of the same session by separate cruise processes is unsupported. Within one TUI process, distinct sessions can run concurrently, and Run All uses the configured run-all parallelism.
+
+The CLI remains the canonical client for automation, JSON (`cruise list --json`), and CI/non-interactive use. See the [CLI Reference](#cli-reference) for the existing command workflows.
 
 ### CLI Reference
 
@@ -96,6 +157,7 @@ Commands:
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
   exec         Execute the workflow config directly in the current directory
+  tui         Open the interactive keyboard client for session management
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
   config       Show or update application-level configuration
@@ -105,6 +167,14 @@ Options:
       --plan <INPUT>           Create a plan in the background and return immediately
       --no-force-exec          Ignore force_exec: true and plan as usual
 ```
+
+#### `cruise tui`
+
+```
+cruise tui
+```
+
+Opens the keyboard-only TUI. It requires a macOS/Linux interactive TTY; see [TUI (Interactive Keyboard Client)](#tui-interactive-keyboard-client) for its screens, workflows, keymap, responsive layout, and log behavior. Use the existing CLI commands for automation, JSON, and CI.
 
 #### `cruise plan`
 
@@ -169,7 +239,7 @@ Options:
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
-`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential execution) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the others, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI setting (`cruise config --set-parallelism`).
+`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI/TUI setting (`cruise config --set-parallelism`).
 
 When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
@@ -221,12 +291,12 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
+          Set the maximum number of sessions the desktop GUI and TUI run concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI** executes in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise login`
 
@@ -1091,18 +1161,18 @@ Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: fal
 
 ## Stale Session Detection
 
-When `cruise list` (or the desktop GUI) loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
+When `cruise list`, `cruise tui`, or the desktop GUI loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Suspended sessions can be resumed from `cruise list` or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+Suspended sessions can be resumed from `cruise list`, `cruise tui`, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
 On resume, cruise restores more than just the current step: while running, each step's pre-execution runtime context -- the `{prev.*}` variables and file-change-tracking snapshots -- is best-effort persisted to `dag.json` in the session directory. `cruise run` loads this file when resuming an interrupted session and restores that context, so `{prev.*}` references and file-change detection behave exactly as they would have without the interruption. A save failure, or a missing/corrupt `dag.json`, falls back to the previous resume behavior (no restored context) with a warning; sessions created before this existed are unaffected.
 
 ## Parallel Session Execution
 
-Both the desktop GUI and the CLI support running multiple sessions concurrently during `run --all`.
+The desktop GUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
 
-- **GUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
-- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
+- **GUI/TUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI/TUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
@@ -1112,7 +1182,7 @@ The batch scheduler:
 
 ## New Session Form Persistence
 
-The desktop GUI persists two pieces of state across sessions:
+The desktop GUI and TUI persist two pieces of state across sessions:
 
 - **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path—including the `__builtin__` sentinel for **Built-in default**—, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
 - **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.

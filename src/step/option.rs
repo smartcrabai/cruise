@@ -1,10 +1,11 @@
 use inquire::{InquireError, Select};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CruiseError, Result};
 use crate::step::OptionChoice;
 
-/// Result of executing an option step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OptionResult {
     /// Next step name chosen by the user (None = end of workflow).
     pub next_step: Option<String>,

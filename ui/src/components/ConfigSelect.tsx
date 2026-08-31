@@ -52,9 +52,10 @@ export function ConfigSelect({
   baseDir,
   className = DEFAULT_CLASS_NAME,
 }: ConfigSelectProps): React.ReactElement {
-  const localEntries = configs.filter((c) => c.source === "local");
-  const userEntries = configs.filter((c) => c.source === "user");
-  const otherEntries = configs.filter((c) => c.source !== "local" && c.source !== "user");
+  const entries = configs.filter((config) => config.path !== BUILTIN_CONFIG_PATH);
+  const localEntries = entries.filter((c) => c.source === "local");
+  const userEntries = entries.filter((c) => c.source === "user");
+  const otherEntries = entries.filter((c) => c.source !== "local" && c.source !== "user");
 
   return (
     <select

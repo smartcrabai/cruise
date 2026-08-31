@@ -172,7 +172,7 @@ where
             seen.insert(session_id.clone());
 
             let run_fn_clone = run_fn.clone();
-            let token_clone = cancel_token.clone();
+            let token_clone = cancel_token.child_token();
             join_set.spawn(async move {
                 let scheduled_state = session.clone();
                 let outcome = run_fn_clone(session, token_clone).await;

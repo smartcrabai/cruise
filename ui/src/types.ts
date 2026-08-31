@@ -15,76 +15,71 @@ export type WorkspaceMode = "Worktree" | "CurrentBranch";
 export interface Session {
   id: string;
   phase: SessionPhase;
-  /** Populated when phase === "Failed" */
   phaseError?: string;
   configSource: string;
-  configPath?: string;
+  configPath?: string | null;
   baseDir: string;
-  /** GitHub repository (owner/repo) backing this session, if any. */
   repo?: string;
   input: string;
   title?: string;
-  currentStep?: string;
+  currentStep?: string | null;
   createdAt: string;
   completedAt?: string;
   worktreeBranch?: string;
   workspaceMode: WorkspaceMode;
   prUrl?: string;
-  updatedAt?: string;
+  updatedAt?: string | null;
   awaitingInput?: boolean;
-  /** Transient exec sessions are excluded from Run All. */
-  exec?: boolean;
-  /** Whether a valid (non-empty) plan.md exists for this session. */
-  planAvailable?: boolean;
-  /** Persisted planning ask_user question while phase === "Awaiting Input". */
-  pendingAskQuestion?: string;
-  /** True while a plan-fix request is in progress (persisted in session state). */
+  pendingAskQuestion?: string | null;
+  planError?: string | null;
   fixInProgress?: boolean;
+  exec?: boolean;
+  planAvailable?: boolean;
   skippedSteps: string[];
 }
 
-// --- IPC Events ---------------------------------------------------------------
+// --- IPC events ---------------------------------------------------------------
+export type OperationKind = "generate" | "fix" | "ask" | "replan" | "run" | "batchQueued" | "batchRun" | "mutate";
+export type EventStream = "stdout" | "stderr" | "info";
 
-export interface StepStartedEvent {
-  event: "stepStarted";
-  data: { sessionId: string; step: string };
-}
-
-export interface StepCompletedEvent {
-  event: "stepCompleted";
-  data: { step: string; success: boolean; durationMs: number; output?: string };
-}
-
-export interface ChoiceDto {
+export interface OptionChoicePayload {
   label: string;
   kind: "selector" | "textInput";
-  next?: string;
+  nextStep?: string;
+}
+export type ChoiceDto = OptionChoicePayload;
+
+export interface PendingPrompt {
+  requestId: string;
+  sessionId: string;
+  kind: "ask" | "option";
+  question: string | null;
+  choices: OptionChoicePayload[];
 }
 
-export interface OptionRequiredEvent {
-  event: "optionRequired";
-  data: { requestId: string; choices: ChoiceDto[]; plan?: string };
-}
+export type ApplicationEvent =
+  | { event: "planStarted"; data: { sessionId: string; operation: OperationKind } }
+  | { event: "planChunk"; data: { sessionId: string; stream: EventStream; text: string } }
+  | { event: "askUserRequired"; data: { sessionId: string; requestId: string; question: string } }
+  | { event: "planFinished"; data: { sessionId: string; phase: string } }
+  | { event: "planFailed"; data: { sessionId: string; error: string } }
+  | { event: "planCancelled"; data: { sessionId: string } }
+  | { event: "runStarted"; data: { sessionId: string } }
+  | { event: "runPhase"; data: { sessionId: string; phase: string } }
+  | { event: "stepStarted"; data: { sessionId: string; step: string } }
+  | { event: "optionRequired"; data: { sessionId: string; requestId: string; prompt: string; choices: OptionChoicePayload[] } }
+  | { event: "prCreated"; data: { sessionId: string; url: string } }
+  | { event: "runFinished"; data: { sessionId: string; phase: string } }
+  | { event: "runFailed"; data: { sessionId: string; error: string } }
+  | { event: "runCancelled"; data: { sessionId: string } }
+  | { event: "batchStarted"; data: { total: number; parallelism: number } }
+  | { event: "batchTotalChanged"; data: { total: number } }
+  | { event: "batchSessionStarted"; data: { id: string } }
+  | { event: "batchSessionFinished"; data: { id: string; phase: string; error: string | null } }
+  | { event: "batchFinished"; data: { cancelled: boolean } }
+  | { event: "logChunk"; data: { sessionId: string | null; stream: EventStream; text: string; batch: boolean } };
 
-export interface WorkflowCompletedEvent {
-  event: "workflowCompleted";
-  data: { sessionId: string; run: number; skipped: number; failed: number };
-}
 
-export interface WorkflowFailedEvent {
-  event: "workflowFailed";
-  data: { sessionId: string; error: string };
-}
-
-export interface WorkflowCancelledEvent {
-  event: "workflowCancelled";
-  data: { sessionId: string };
-}
-
-export interface RunAllStartedEvent {
-  event: "runAllStarted";
-  data: { total: number; parallelism: number };
-}
 
 // --- App config ---------------------------------------------------------------
 
@@ -92,44 +87,13 @@ export interface AppConfig {
   runAllParallelism: number;
 }
 
-export interface RunAllSessionStartedEvent {
-  event: "runAllSessionStarted";
-  data: { sessionId: string; input: string };
-}
-
-export interface RunAllSessionFinishedEvent {
-  event: "runAllSessionFinished";
-  data: { sessionId: string; input: string; phase: SessionPhase; error?: string };
-}
-
-export interface RunAllCompletedEvent {
-  event: "runAllCompleted";
-  data: { cancelled: number };
-}
-
-export interface LogChunkEvent {
-  event: "logChunk";
-  data: { sessionId: string; stream: "stdout" | "stderr" | "info"; line: string };
-}
-
-export type WorkflowEvent =
-  | StepStartedEvent
-  | StepCompletedEvent
-  | OptionRequiredEvent
-  | WorkflowCompletedEvent
-  | WorkflowFailedEvent
-  | WorkflowCancelledEvent
-  | LogChunkEvent
-  | RunAllStartedEvent
-  | RunAllSessionStartedEvent
-  | RunAllSessionFinishedEvent
-  | RunAllCompletedEvent;
 
 // --- Cleanup ------------------------------------------------------------------
 
 export interface CleanupResult {
   deleted: number;
   skipped: number;
+  noPrDeleted?: number;
 }
 
 // --- Issue publishing -----------------------------------------------------------
@@ -176,15 +140,10 @@ export interface NewSessionConfigDefaults {
   steps: SkippableStepDto[];
   afterPrSteps: SkippableStepDto[];
   defaultSkippedSteps: string[];
+  /** Present in current desktop responses; optional for older persisted fixtures. */
+  resolvedConfigKey?: string;
 }
 
-export type PlanEvent =
-  | { event: "sessionCreated"; data: { sessionId: string } }
-  | { event: "planGenerating"; data: Record<string, never> }
-  | { event: "planChunk"; data: { sessionId: string; stream: "stdout" | "stderr"; line: string } }
-  | { event: "planGenerated"; data: { sessionId: string; content: string } }
-  | { event: "planFailed"; data: { sessionId: string; error: string } }
-  | { event: "askUserRequired"; data: { sessionId: string; question: string } };
 
 // --- Update readiness ---------------------------------------------------------
 
@@ -217,14 +176,6 @@ export interface NewSessionDraftPersisted {
   skippedSteps: string[];
   updatedAt?: string;
 }
-// --- DAG visualization --------------------------------------------------------
-
-export interface DagDto {
-  startStep: string;
-  steps: DagStepDto[];
-  edges: DagEdgeDto[];
-  currentStep: string | null;
-}
 
 export interface DagStepDto {
   name: string;
@@ -232,22 +183,16 @@ export interface DagStepDto {
   isTerminal: boolean;
 }
 
-export type DagEdgeReason =
-  | "sequential"
-  | "next"
-  | "ifFileChanged"
-  | "ifNoFileChangesRetry"
-  | "ifNoFileChangesFail"
-  | "ifFail"
-  | "ifFailRetry"
-  | "optionChoice"
-  | "groupRetry"
-  | "groupRetryExhausted";
-
 export interface DagEdgeDto {
   from: string;
   to: string | null;
-  reason: DagEdgeReason;
+  reason: string;
   selector: string | null;
 }
 
+export interface DagDto {
+  startStep: string;
+  steps: DagStepDto[];
+  edges: DagEdgeDto[];
+  currentStep?: string | null;
+}

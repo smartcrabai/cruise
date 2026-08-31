@@ -2,7 +2,7 @@ use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionState};
 use crate::worktree_pr::gh_output_line;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublishedIssue {
     pub url: String,
     pub repo: String,
@@ -55,6 +55,7 @@ fn resolve_repo(session: &SessionState) -> Result<String> {
     let output = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(&session.base_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::Other(format!("failed to run git remote get-url origin: {e}")))?;
 
@@ -136,6 +137,7 @@ pub fn publish_plan_issue_and_delete(
             .arg(session.title_or_input())
             .arg("--body-file")
             .arg(&body_path)
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| CruiseError::Other(format!("failed to run gh issue create: {e}")))?;
 
@@ -163,6 +165,7 @@ pub fn publish_plan_issue_and_delete(
             .arg(&url)
             .arg("--body")
             .arg("@cruise run")
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| CruiseError::Other(format!("failed to run gh issue comment: {e}")))?;
 

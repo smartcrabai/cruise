@@ -1,7 +1,6 @@
+use tauri::Manager;
+
 pub mod commands;
-pub mod events;
-pub mod gui_ask_handler;
-pub mod gui_option_handler;
 pub mod state;
 
 /// Tauri application entry point.
@@ -15,9 +14,13 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            let data_dir = cruise::paths::data_dir()?;
+            let manager = cruise::session::SessionManager::new(data_dir);
+            app.manage(state::AppState::new(
+                cruise::application::CruiseApplication::new(manager),
+            ));
             Ok(())
         })
-        .manage(state::AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,
             commands::get_session,
@@ -26,18 +29,21 @@ pub fn run() {
             commands::get_session_log,
             commands::run_session,
             commands::cancel_session,
+            commands::cancel_run_all,
             commands::respond_to_option,
             commands::respond_to_ask,
+            commands::pending_prompts,
             commands::clean_sessions,
             commands::list_configs,
             commands::create_session,
-            commands::create_draft_session,
+            commands::use_input_as_plan,
             commands::approve_session,
             commands::publish_plan_issue,
             commands::delete_session,
             commands::discard_session,
             commands::reset_session,
             commands::update_session,
+            commands::edit_current_step,
             commands::regenerate_session_plan,
             commands::generate_plan_for_draft,
             commands::fix_session,
