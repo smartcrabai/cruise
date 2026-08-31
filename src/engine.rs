@@ -540,6 +540,7 @@ async fn step_loop_iteration(
         has_if_fail,
         has_nfc_condition,
         current_step,
+        step_config.allow_commit,
     )
     .await?;
     state.counters.run += 1;
@@ -743,10 +744,11 @@ async fn execute_step_kind(
     has_if_fail: bool,
     has_nfc_condition: bool,
     current_step: &str,
+    allow_commit: bool,
 ) -> Result<StepExecOutcome> {
     match kind {
         StepKind::Prompt(step) => {
-            let result = run_prompt_step(
+            let result = Box::pin(run_prompt_step(
                 vars,
                 ctx.compiled,
                 step,
@@ -758,7 +760,8 @@ async fn execute_step_kind(
                 timeout,
                 current_step,
                 has_nfc_condition,
-            )
+                allow_commit,
+            ))
             .await;
             let elapsed = step_start.elapsed();
             match result {
@@ -782,6 +785,7 @@ async fn execute_step_kind(
                         skip_step_reason: None,
                     })
                 }
+                Err(e @ CruiseError::CommitGuardViolation(_)) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
                 Err(e) if has_if_fail => {
                     crate::status_eprintln!(
@@ -1051,7 +1055,11 @@ pub fn resolve_command_with_model(
 /// set a step exposes to the model minimal, for a feature most steps never
 /// use. Ordinary run steps get no custom tools; the backend's own built-in
 /// tools do the file editing in SDK mode.
-#[expect(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::type_complexity
+)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
     compiled: &CompiledWorkflow,
@@ -1064,6 +1072,7 @@ pub(crate) async fn run_prompt_step(
     timeout: Option<Duration>,
     timeout_step_name: &str,
     register_skip_tool: bool,
+    allow_commit: bool,
 ) -> Result<Option<String>> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -1080,6 +1089,15 @@ pub(crate) async fn run_prompt_step(
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode =
         executor.step_model_or_mode(step.model.as_deref(), compiled.model.as_deref());
+
+    let commit_guard = if allow_commit {
+        None
+    } else {
+        crate::commit_guard::CommitGuard::prepare(working_dir, env)?
+    };
+    let prompt_env = commit_guard.as_ref().map_or(env, |guard| guard.env());
+    let prompt_cancel_token =
+        cancel_token.map_or_else(CancellationToken::new, CancellationToken::child_token);
 
     // Fire-and-forget capture store for `skip_step`, mirroring
     // `submit_pr_metadata_tool` (see `worktree_pr.rs`): the handler stashes the
@@ -1113,7 +1131,7 @@ pub(crate) async fn run_prompt_step(
         on_stdout: Some(on_stdout),
         on_stderr: Some(on_stderr),
     };
-    let result = {
+    let prompt_result = {
         let on_notice = |msg: &str| {
             spinner.suspend(|| crate::status_eprintln!("  {}", style(msg).dim()));
             if let Some(cb) = on_step_log {
@@ -1124,9 +1142,9 @@ pub(crate) async fn run_prompt_step(
             prompt: &prompt,
             model_or_mode: model_or_mode.as_deref(),
             max_retries: rate_limit_retries,
-            env,
+            env: prompt_env,
             on_notice: Some(&on_notice),
-            cancel_token,
+            cancel_token: Some(&prompt_cancel_token),
             working_dir,
             stream: Some(&stream_callbacks),
             tools,
@@ -1135,14 +1153,16 @@ pub(crate) async fn run_prompt_step(
         });
 
         if let Some(duration) = timeout {
-            match tokio::time::timeout(duration, run_future).await {
+            tokio::pin!(run_future);
+            match tokio::time::timeout(duration, &mut run_future).await {
                 Ok(r) => r,
                 Err(_elapsed) => {
-                    drop(spinner);
-                    return Err(CruiseError::StepTimeout {
+                    prompt_cancel_token.cancel();
+                    let _ = run_future.await;
+                    Err(CruiseError::StepTimeout {
                         step: timeout_step_name.to_string(),
                         after_secs: duration.as_secs(),
-                    });
+                    })
                 }
             }
         } else {
@@ -1150,7 +1170,11 @@ pub(crate) async fn run_prompt_step(
         }
     };
     drop(spinner);
-    let result = result?.result;
+    let result = match commit_guard {
+        Some(guard) => guard.finish(prompt_result)?,
+        None => prompt_result?,
+    }
+    .result;
 
     let output = result.output;
     vars.set_prev_output(Some(output.clone()));
@@ -1614,6 +1638,93 @@ mod tests {
             &|_cp, _dag| Ok(()),
         )
         .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_commit_guard_blocks_by_default_and_allows_explicit_opt_out() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::init_git_repo(repo.path());
+        std::fs::write(repo.path().join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+
+        let agent = home.path().join("commit-agent.sh");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\ncat >/dev/null\ngit commit --no-verify -am agent >/dev/null 2>&1 || true\nprintf 'done\\n'\n",
+        )
+        .unwrap_or_else(|error| panic!("agent stub write failed: {error}"));
+        let mut permissions = std::fs::metadata(&agent)
+            .unwrap_or_else(|error| panic!("agent stub stat failed: {error}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&agent, permissions)
+            .unwrap_or_else(|error| panic!("agent stub chmod failed: {error}"));
+
+        let command = serde_json::to_string(&agent.to_string_lossy())
+            .unwrap_or_else(|error| panic!("command path serialization failed: {error}"));
+        let config = make_config(&format!(
+            "command: [{command}]\nsteps:\n  attempt:\n    prompt: run\n"
+        ));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error:?}"));
+        let StepKind::Prompt(step) = StepKind::try_from(compiled.steps["attempt"].clone())
+            .unwrap_or_else(|error| panic!("step conversion failed: {error}"))
+        else {
+            panic!("expected prompt step");
+        };
+        let head = || {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .unwrap_or_else(|error| panic!("HEAD probe failed: {error}"));
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let before = head();
+
+        let mut guarded_vars = VariableStore::new(String::new());
+        run_prompt_step(
+            &mut guarded_vars,
+            &compiled,
+            &step,
+            0,
+            &HashMap::new(),
+            None,
+            Some(repo.path()),
+            None,
+            Some(Duration::from_secs(5)),
+            "attempt",
+            false,
+            false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("guarded prompt failed: {error}"));
+        assert_eq!(head(), before, "default prompt guard must keep HEAD fixed");
+
+        let mut allowed_vars = VariableStore::new(String::new());
+        run_prompt_step(
+            &mut allowed_vars,
+            &compiled,
+            &step,
+            0,
+            &HashMap::new(),
+            None,
+            Some(repo.path()),
+            None,
+            Some(Duration::from_secs(5)),
+            "attempt",
+            false,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("allowed prompt failed: {error}"));
+        assert_ne!(head(), before, "allow_commit must bypass the prompt guard");
     }
 
     // -- execute_steps_with_dag: NodeRuntime wiring ----------------------------

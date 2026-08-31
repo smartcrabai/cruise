@@ -106,6 +106,10 @@
           "type": "string",
           "description": "Prompt text to send to the LLM"
         },
+        "allow_commit": {
+          "type": "boolean",
+          "description": "Allow this prompt step to create commits or otherwise advance Git HEAD. Defaults to false and is omitted when false during serialization. Only applies to prompt steps; group-call and workflow-call steps cannot set it to true."
+        },
         "instruction": {
           "type": "string",
           "description": "Instruction text for the step"

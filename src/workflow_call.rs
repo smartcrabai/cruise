@@ -209,6 +209,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("if", step.if_condition.is_some()),
         ("timeout", step.timeout.is_some()),
         ("env", !step.env.is_empty()),
+        ("allow_commit", step.allow_commit),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
@@ -1141,6 +1142,43 @@ steps:
         assert!(first.skip.is_some());
         assert!(first.when.is_some());
         assert_eq!(first.next.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_allow_commit_on_workflow_call_site() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "command: [callee]\nsteps:\n  one:\n    prompt: hi\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "command: [parent]\nsteps:\n  shared:\n    workflow_call: ./callee.yaml\n    allow_commit: true\n",
+        )
+        .unwrap_or_else(|e| panic!("parse failed: {e}"));
+
+        let Err(error) = resolve_workflow_calls(config, dir.path()) else {
+            panic!("expected allow_commit on a workflow call site to be rejected");
+        };
+        assert!(error.to_string().contains("allow_commit"));
+    }
+
+    #[test]
+    fn test_resolved_workflow_call_preserves_inner_allow_commit() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "command: [callee]\nsteps:\n  one:\n    prompt: hi\n    allow_commit: true\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "command: [parent]\nsteps:\n  shared:\n    workflow_call: ./callee.yaml\n",
+        )
+        .unwrap_or_else(|e| panic!("parse failed: {e}"));
+
+        let resolved = resolve_workflow_calls(config, dir.path())
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        assert!(resolved.steps["shared/one"].allow_commit);
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod attachments;
 pub mod backend;
 pub mod batch_run;
 pub mod cancellation;
+pub(crate) mod commit_guard;
 pub mod condition;
 pub mod config;
 pub mod configs;

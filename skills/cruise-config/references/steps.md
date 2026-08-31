@@ -20,6 +20,16 @@ steps:
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
 
+Prompt steps are commit-guarded by default: cruise prevents the agent from advancing Git `HEAD` while the step runs. Set `allow_commit: true` only when the prompt is intentionally expected to create a commit or otherwise move `HEAD`:
+
+```yaml
+steps:
+  fix-and-commit:
+    prompt: "Fix the issue and commit the changes"
+    allow_commit: true
+```
+Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior for that prompt. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude`. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
+
 For a longer prompt, load the body from a file:
 
 ```yaml
@@ -102,6 +112,7 @@ steps:
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string | Model for prompt steps (overrides top-level; a model reference in SDK mode) |
+| `allow_commit` | bool | Allow this prompt step to create commits or otherwise advance Git `HEAD` (default `false`; only for prompt steps) |
 | `prompt` | string | Inline prompt body (use with prompt steps) |
 | `prompt_file` | string \| null | File or supported GitHub blob/raw URL whose contents become the prompt; absolute, `~/`, or config-file-relative path (`~`/null means the local home directory) |
 | `instruction` | string | Message shown to the user before the step; input prompt when `{input}` is empty (prompt steps) |
