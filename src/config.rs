@@ -58,11 +58,17 @@ pub struct WorkflowConfig {
     pub sdk: Option<String>,
 
     /// Default model for prompt steps (e.g. "sonnet"). Per-step model overrides this.
-    pub model: Option<String>,
+    /// In SDK mode, a list uses its first entry as the primary model and the
+    /// remaining entries as an implicit fallback chain; command mode uses only
+    /// the first entry.
+    pub model: Option<ModelSpec>,
 
-    /// Model to use for the built-in plan step (falls back to `model`).
+    /// Model to use for the built-in plan step (falls back to `model`). In SDK
+    /// mode, a list uses its first entry as the primary model and the remaining
+    /// entries as an implicit fallback chain; command mode uses only the first
+    /// entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan_model: Option<String>,
+    pub plan_model: Option<ModelSpec>,
 
     /// Global loop-protection ceiling; CLI `--max-retries` overrides; defaults to
     /// [`DEFAULT_MAX_RETRIES`].
@@ -132,8 +138,9 @@ pub struct WorkflowConfig {
     pub description: Option<String>,
 
     /// Retryable-failure policy for the SDK backends. Optional: with no
-    /// `retry:` block cruise keeps its historical behavior (same-model retries
-    /// of provider rate limits only).
+    /// explicit `retry:` block or workflow-level model array with fallback
+    /// entries, cruise keeps its historical behavior (same-model retries of
+    /// provider rate limits only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
 }
@@ -144,6 +151,37 @@ pub struct WorkflowConfig {
 pub enum StringOrVec {
     Single(String),
     Multiple(Vec<String>),
+}
+
+/// A workflow-level model, accepted as either one model reference or an
+/// ordered primary-plus-fallback list.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ModelSpec {
+    /// One model reference.
+    Single(String),
+    /// The first model is primary; later entries are fallbacks in order.
+    Multiple(Vec<String>),
+}
+
+impl ModelSpec {
+    /// Return the primary model reference, if one was configured.
+    #[must_use]
+    pub fn primary(&self) -> Option<&str> {
+        match self {
+            Self::Single(model) => Some(model),
+            Self::Multiple(models) => models.first().map(String::as_str),
+        }
+    }
+
+    /// Return the model references after the primary, in fallback order.
+    #[must_use]
+    pub fn fallback_chain(&self) -> Vec<String> {
+        match self {
+            Self::Single(_) => Vec::new(),
+            Self::Multiple(models) => models.iter().skip(1).cloned().collect(),
+        }
+    }
 }
 
 /// Skip condition: static boolean or a variable reference.
@@ -338,8 +376,9 @@ fn default_max_delay_ms() -> u64 {
 
 /// How the SDK backends handle a retryable failure (rate limit, 5xx, network).
 ///
-/// Opt-in: declaring `retry:` enables the fallback engine in
-/// [`crate::retry`]. The number of retries stays the existing
+/// Opt-in: declaring `retry:`, or using a workflow-level model array with
+/// fallback entries, enables the fallback engine in [`crate::retry`]. The
+/// number of retries stays the existing
 /// `--rate-limit-retries` / [`WorkflowConfig::max_retries`] budget; this block
 /// only decides how long to wait and which model to move to.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -385,6 +424,56 @@ impl WorkflowConfig {
     /// Returns an error if the YAML is invalid or does not match the expected schema.
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
+    }
+
+    /// Derive fallback policy entries from workflow-level model arrays.
+    ///
+    /// Explicit chains remain authoritative. A model array with at least one
+    /// fallback creates the retry policy when necessary, adds only missing
+    /// model-specific entries, and enables model fallback.
+    fn resolve_model_fallbacks(&mut self) {
+        let model_specs = [self.model.as_ref(), self.plan_model.as_ref()];
+        if !model_specs.iter().any(|spec| {
+            spec.as_ref()
+                .is_some_and(|spec| matches!(spec, ModelSpec::Multiple(models) if models.len() > 1))
+        }) {
+            return;
+        }
+
+        let retry = self.retry.get_or_insert_with(|| RetryConfig {
+            base_delay_ms: default_base_delay_ms(),
+            max_delay_ms: default_max_delay_ms(),
+            model_fallback: true,
+            fallback_chains: HashMap::new(),
+        });
+        retry.model_fallback = true;
+        for spec in model_specs.into_iter().flatten() {
+            let Some(primary) = spec.primary() else {
+                continue;
+            };
+            let chain = spec.fallback_chain();
+            if chain.is_empty() {
+                continue;
+            }
+            // `chain_for` strips recognized effort suffixes before looking up
+            // an exact chain. Store generated entries under that same key only
+            // when no explicit exact, provider-wildcard, or default chain
+            // applies to this primary model.
+            let primary_key = crate::backend::effort::split_thinking_suffix(primary).0;
+            let has_explicit_chain = retry.fallback_chains.contains_key(primary)
+                || retry.fallback_chains.contains_key(primary_key)
+                || primary_key.split_once('/').is_some_and(|(provider, _)| {
+                    retry
+                        .fallback_chains
+                        .contains_key(&format!("{provider}{}", crate::retry::WILDCARD_SUFFIX))
+                })
+                || retry
+                    .fallback_chains
+                    .contains_key(crate::retry::DEFAULT_CHAIN_KEY);
+            if !has_explicit_chain {
+                retry.fallback_chains.insert(primary_key.to_string(), chain);
+            }
+        }
     }
 
     /// Resolve the effective PR language.
@@ -457,10 +546,10 @@ impl WorkflowConfig {
     /// `true`, `false`, `1`, or `0`.
     pub fn apply_env_overrides(&mut self) -> crate::error::Result<()> {
         if let Some(v) = read_env_string("CRUISE_MODEL") {
-            self.model = Some(v);
+            self.model = Some(ModelSpec::Single(v));
         }
         if let Some(v) = read_env_string("CRUISE_PLAN_MODEL") {
-            self.plan_model = Some(v);
+            self.plan_model = Some(ModelSpec::Single(v));
         }
         if let Some(v) = read_env_string("CRUISE_SDK") {
             self.sdk = Some(v);
@@ -502,6 +591,7 @@ impl WorkflowConfig {
         if let Some(v) = read_env_bool("CRUISE_FORCE_EXEC")? {
             self.force_exec = v;
         }
+        self.resolve_model_fallbacks();
         Ok(())
     }
 }
@@ -674,7 +764,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     Ok(())
 }
 
-/// Validate the optional `retry:` block: usable delays, and fallback-chain keys
+/// Validate the optional retry policy: usable delays, and fallback-chain keys
 /// and entries that name a model the SDK backends can actually dispatch.
 ///
 /// # Errors
@@ -1425,8 +1515,167 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.model, Some("sonnet".to_string()));
-        assert_eq!(config.plan_model, Some("opus".to_string()));
+        assert_eq!(config.model, Some(ModelSpec::Single("sonnet".to_string())));
+        assert_eq!(
+            config.plan_model,
+            Some(ModelSpec::Single("opus".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_model_and_plan_model_accept_array_form() {
+        let yaml = r"
+command: [claude, -p]
+model:
+  - anthropic/primary
+  - openai/fallback
+plan_model:
+  - anthropic/planning
+  - openai/planning-fallback
+steps:
+  s1:
+    command: echo hi
+";
+
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let model = serialized["model"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("model must serialize as an array: {serialized:?}"));
+        assert_eq!(
+            model.iter().map(|value| value.as_str()).collect::<Vec<_>>(),
+            vec![Some("anthropic/primary"), Some("openai/fallback")]
+        );
+
+        let plan_model = serialized["plan_model"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("plan_model must serialize as an array: {serialized:?}"));
+        assert_eq!(
+            plan_model
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![Some("anthropic/planning"), Some("openai/planning-fallback")]
+        );
+    }
+
+    #[test]
+    fn test_model_array_chain_preserves_explicit_broader_chains() {
+        let yaml = r"
+sdk: jcode
+model:
+  - anthropic/primary:high
+  - openai/array-fallback
+retry:
+  fallback_chains:
+    default:
+      - google/default-fallback
+    anthropic/*:
+      - google/provider-fallback
+steps:
+  s1:
+    prompt: hi
+";
+        let mut config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        config.resolve_model_fallbacks();
+        let retry = config
+            .retry
+            .as_ref()
+            .unwrap_or_else(|| panic!("retry policy should be present"));
+
+        assert_eq!(
+            retry
+                .fallback_chains
+                .get("anthropic/primary")
+                .map(Vec::as_slice),
+            None
+        );
+        assert_eq!(
+            retry.fallback_chains.get("anthropic/*").map(Vec::as_slice),
+            Some(["google/provider-fallback".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn test_model_array_respects_explicit_effort_stripped_exact_chain() {
+        let yaml = r"
+sdk: jcode
+model:
+  - anthropic/primary:high
+  - openai/array-fallback
+retry:
+  fallback_chains:
+    anthropic/primary:
+      - google/explicit-fallback
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let retry = config
+            .retry
+            .as_ref()
+            .unwrap_or_else(|| panic!("retry policy should be present"));
+
+        assert_eq!(
+            retry
+                .fallback_chains
+                .get("anthropic/primary")
+                .map(Vec::as_slice),
+            Some(["google/explicit-fallback".to_string()].as_slice())
+        );
+        assert!(!retry.fallback_chains.contains_key("anthropic/primary:high"));
+    }
+
+    #[test]
+    fn test_model_env_override_removes_implicit_array_policy() {
+        let _process = lock_process();
+        let _model = EnvGuard::set("CRUISE_MODEL", "anthropic/env-model");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let mut config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nmodel: [anthropic/array-model, openai/array-fallback]\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            config.retry, None,
+            "raw parsing must not derive before overrides"
+        );
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(
+            config.model,
+            Some(ModelSpec::Single("anthropic/env-model".to_string()))
+        );
+        assert_eq!(
+            config.retry, None,
+            "a scalar environment override must not retain array-only policy mode"
+        );
+    }
+
+    #[test]
+    fn test_model_env_override_preserves_explicit_retry_policy() {
+        let _process = lock_process();
+        let _model = EnvGuard::set("CRUISE_MODEL", "anthropic/env-model");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let mut config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nmodel: [anthropic/array-model, openai/array-fallback]\nretry:\n  model_fallback: false\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let retry = config
+            .retry
+            .as_ref()
+            .unwrap_or_else(|| panic!("explicit retry policy should remain"));
+        assert!(!retry.model_fallback);
+        assert!(retry.fallback_chains.is_empty());
     }
 
     #[test]
@@ -3249,6 +3498,24 @@ steps:
     }
 
     #[test]
+    fn test_schema_workflow_models_accept_string_or_array_of_strings() {
+        let schema = load_schema();
+        for field in ["model", "plan_model"] {
+            let property = &schema["properties"][field];
+            assert_oneof_types(property, &["string", "array"], field);
+            let array_variant = property["oneOf"]
+                .as_array()
+                .and_then(|variants| variants.iter().find(|variant| variant["type"] == "array"))
+                .unwrap_or_else(|| panic!("{field} must have an array variant"));
+            assert_eq!(
+                array_variant["items"]["type"].as_str(),
+                Some("string"),
+                "{field} array items must be strings"
+            );
+        }
+    }
+
+    #[test]
     fn test_schema_step_skip_is_boolean_or_string() {
         let schema = load_schema();
         let step_props = def_properties(schema, "StepConfig");
@@ -3549,7 +3816,10 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.sdk, Some("claude".to_string()));
-        assert_eq!(config.model, Some("claude-opus-4-6".to_string()));
+        assert_eq!(
+            config.model,
+            Some(ModelSpec::Single("claude-opus-4-6".to_string()))
+        );
     }
 
     /// The removed backends must not be silently remapped onto a surviving one;
@@ -3675,7 +3945,7 @@ steps:
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: model is overridden to the env var value
-        assert_eq!(config.model, Some("opus".to_string()));
+        assert_eq!(config.model, Some(ModelSpec::Single("opus".to_string())));
     }
 
     #[test]
@@ -3693,7 +3963,7 @@ steps:
     command: echo hi
 ";
         let mut config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.model, Some("sonnet".to_string()));
+        assert_eq!(config.model, Some(ModelSpec::Single("sonnet".to_string())));
 
         // When: env overrides are applied
         config
@@ -3701,7 +3971,7 @@ steps:
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: model is unchanged (empty env var is treated as unset)
-        assert_eq!(config.model, Some("sonnet".to_string()));
+        assert_eq!(config.model, Some(ModelSpec::Single("sonnet".to_string())));
     }
 
     #[test]

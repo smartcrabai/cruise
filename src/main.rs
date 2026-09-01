@@ -67,7 +67,7 @@ mod yaml_metadata;
 // open menu would freeze every other concurrently running session.
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
+    if let Err(e) = Box::pin(run()).await {
         eprintln!("Error: {}", e.detailed_message());
         std::process::exit(1);
     }
@@ -85,7 +85,7 @@ async fn run() -> error::Result<()> {
     } = cli::parse_cli();
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
-        Some(cli::Commands::Plan(args)) => plan_cmd::run(args).await,
+        Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
@@ -95,13 +95,13 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Login(args)) => login_cmd::run(&args),
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
-            plan_cmd::launch_background_plan(
+            Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),
                 skip_planning,
                 repo.as_deref(),
                 &images,
                 no_force_exec,
-            )
+            ))
             .await
         }
         None if input.is_none()
@@ -127,7 +127,7 @@ async fn run() -> error::Result<()> {
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
                 images,
             };
-            plan_cmd::run(plan_args).await
+            Box::pin(plan_cmd::run(plan_args)).await
         }
     }
 }

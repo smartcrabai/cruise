@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use console::style;
@@ -34,7 +35,7 @@ pub struct ExecutionContext<'a> {
     pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
     pub cancel_token: Option<&'a CancellationToken>,
     pub option_handler: &'a dyn OptionHandler,
-    pub config_reloader: Option<&'a (dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync)>,
+    pub config_reloader: Option<&'a (dyn Fn() -> Result<Option<ReloadedWorkflow>> + Send + Sync)>,
     /// Working directory for child processes spawned by prompt and command steps.
     /// When set, both the LLM subprocess and shell commands run with this as their `cwd`,
     /// ensuring that relative-path file writes land inside the `FileTracker` root.
@@ -48,6 +49,18 @@ pub struct ExecutionContext<'a> {
     /// the line (trailing newline removed).
     #[expect(clippy::type_complexity)]
     pub on_step_log: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
+}
+
+/// The complete runtime state needed when a config is hot-reloaded.
+///
+/// A compiled workflow carries the new model selection, while the retry policy
+/// is kept separately because `PromptRun` intentionally has no policy field.
+/// Returning both prevents a reloaded model array from using the policy from
+/// the config that started the run.
+#[derive(Clone)]
+pub struct ReloadedWorkflow {
+    pub compiled: CompiledWorkflow,
+    pub retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
 }
 
 /// A snapshot of the DAG node that is about to be executed.
@@ -266,7 +279,7 @@ pub async fn execute_steps_with_dag(
 ) -> Result<ExecutionResult> {
     let mut current_node_id = start_node.clone();
     let workflow_start = Instant::now();
-    let mut reloaded: Option<crate::workflow::CompiledWorkflow> = None;
+    let mut reloaded: Option<ReloadedWorkflow> = None;
     let mut state = LoopState {
         group_retry_counts: HashMap::new(),
         counters: LoopCounters {
@@ -294,21 +307,23 @@ pub async fn execute_steps_with_dag(
         // rebuild below; a reloaded config's own top-level `max_retries` is
         // intentionally ignored mid-run.
         if let Some(reloader) = ctx.config_reloader
-            && let Some(new_compiled) = reloader()?
-            && new_compiled.steps.contains_key(&step_name)
+            && let Some(new_workflow) = reloader()?
+            && new_workflow.compiled.steps.contains_key(&step_name)
         {
-            let new_dag = crate::dag::build_dag(&new_compiled, ctx.max_retries)?;
+            let new_dag = crate::dag::build_dag(&new_workflow.compiled, ctx.max_retries)?;
             if let Some(new_node_id) = new_dag.first_node_for_step(&step_name) {
                 let new_node_id = new_node_id.clone();
                 state.group_retry_counts.clear();
                 state.edge_counts.clear();
-                reloaded = Some(new_compiled);
+                reloaded = Some(new_workflow);
                 *dag = new_dag;
                 current_node_id = new_node_id;
             }
         }
 
-        let active_compiled = reloaded.as_ref().unwrap_or(ctx.compiled);
+        let active_compiled = reloaded
+            .as_ref()
+            .map_or(ctx.compiled, |workflow| &workflow.compiled);
         let active_ctx = ExecutionContext {
             compiled: active_compiled,
             config_reloader: None,
@@ -348,8 +363,15 @@ pub async fn execute_steps_with_dag(
             return Err(CruiseError::Interrupted);
         }
 
-        let outcome =
-            step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?;
+        let outcome = if let Some(workflow) = reloaded.as_ref() {
+            crate::retry::with_active_policy(
+                workflow.retry_policy.clone(),
+                step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state),
+            )
+            .await?
+        } else {
+            step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?
+        };
         if ctx
             .cancel_token
             .is_some_and(CancellationToken::is_cancelled)
@@ -1295,7 +1317,11 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
 
-    if let Some(model) = &config.model {
+    if let Some(model) = config
+        .model
+        .as_ref()
+        .and_then(crate::config::ModelSpec::primary)
+    {
         println!("model: {model}");
     }
 
@@ -1413,9 +1439,7 @@ mod tests {
         tracker_root: std::path::PathBuf,
         max_retries: usize,
         rate_limit_retries: usize,
-        config_reloader: Option<
-            &(dyn Fn() -> Result<Option<crate::workflow::CompiledWorkflow>> + Send + Sync),
-        >,
+        config_reloader: Option<&(dyn Fn() -> Result<Option<ReloadedWorkflow>> + Send + Sync)>,
         cancel_token: Option<&CancellationToken>,
         option_handler: &dyn OptionHandler,
         skipped_steps: &[String],
@@ -3619,7 +3643,7 @@ steps:
         let yaml = "command: [echo]\nsteps:\n  s1:\n    command: echo hi\n";
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_clone = call_count.clone();
-        let reloader = move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
+        let reloader = move || -> Result<Option<ReloadedWorkflow>> {
             count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(None) // no change
         };
@@ -3656,9 +3680,16 @@ steps:
         let updated = std::sync::Arc::new(std::sync::Mutex::new(Some(updated_compiled)));
         let reloader = {
             let updated = updated.clone();
-            move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
+            move || -> Result<Option<ReloadedWorkflow>> {
                 // return the updated config only on the first call
-                Ok(updated.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
+                Ok(updated
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e:?}"))
+                    .take()
+                    .map(|compiled| ReloadedWorkflow {
+                        compiled,
+                        retry_policy: None,
+                    }))
             }
         };
         // When: reloader returns the updated config
@@ -3690,8 +3721,15 @@ steps:
         let new = std::sync::Arc::new(std::sync::Mutex::new(Some(new_compiled)));
         let reloader = {
             let new = new.clone();
-            move || -> Result<Option<crate::workflow::CompiledWorkflow>> {
-                Ok(new.lock().unwrap_or_else(|e| panic!("{e:?}")).take())
+            move || -> Result<Option<ReloadedWorkflow>> {
+                Ok(new
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e:?}"))
+                    .take()
+                    .map(|compiled| ReloadedWorkflow {
+                        compiled,
+                        retry_policy: None,
+                    }))
             }
         };
         // When: reloader returns a config that does not contain the current step

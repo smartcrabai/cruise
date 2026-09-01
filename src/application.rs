@@ -1788,15 +1788,34 @@ async fn execute_plan(
     sink: &Arc<dyn ApplicationEventSink>,
 ) -> Result<()> {
     let config = prepare_plan(manager, context, request).await?;
-    if request.skip_planning {
-        crate::planning::write_input_as_plan(
-            &context.staged_plan_path,
-            &context.state.input_with_attachments(),
-        )
-        .and_then(|_| context.state.use_input_as_plan())
-    } else {
-        run_plan_prompt(runtime, manager, context, request, operation, &config, sink).await
-    }
+    with_plan_retry_policy(&config, async {
+        if request.skip_planning {
+            crate::planning::write_input_as_plan(
+                &context.staged_plan_path,
+                &context.state.input_with_attachments(),
+            )
+            .and_then(|_| context.state.use_input_as_plan())
+        } else {
+            run_plan_prompt(runtime, manager, context, request, operation, &config, sink).await
+        }
+    })
+    .await
+}
+
+/// Run one planning operation with the policy belonging to its resolved config.
+///
+/// Scoping an explicit `None` is important: config resolution also publishes a
+/// process-wide fallback policy for non-task callers, but GUI planning requests
+/// for different sessions may run concurrently.
+async fn with_plan_retry_policy<F, T>(config: &crate::config::WorkflowConfig, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    crate::retry::with_active_policy(
+        crate::retry::policy_for_config(config.retry.clone()),
+        future,
+    )
+    .await
 }
 
 fn finish_plan(
@@ -3850,6 +3869,48 @@ mod tests {
         };
         let value = serde_json::to_value(request).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(value["noInteractivePlanning"], true);
+    }
+
+    #[tokio::test]
+    async fn planning_policy_scope_isolated_between_concurrent_sessions() {
+        let with_fallback = crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml(
+                "model: [primary, fallback]\nsteps:\n  plan:\n    prompt: hi\n",
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
+            ".",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let without_fallback = crate::workflow_call::resolve_workflow_calls(
+            crate::config::WorkflowConfig::from_yaml("steps:\n  plan:\n    prompt: hi\n")
+                .unwrap_or_else(|e| panic!("{e}")),
+            ".",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let stale_policy = crate::retry::policy_for_config(with_fallback.retry.clone())
+            .unwrap_or_else(|| panic!("array model should create a retry policy"));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let result = crate::retry::with_active_policy(Some(stale_policy), async {
+            let first = {
+                let barrier = Arc::clone(&barrier);
+                with_plan_retry_policy(&with_fallback, async move {
+                    barrier.wait().await;
+                    crate::retry::active_policy().is_some()
+                })
+            };
+            let second = {
+                let barrier = Arc::clone(&barrier);
+                with_plan_retry_policy(&without_fallback, async move {
+                    barrier.wait().await;
+                    crate::retry::active_policy().is_none()
+                })
+            };
+            tokio::join!(first, second)
+        })
+        .await;
+
+        assert_eq!(result, (true, true));
     }
 
     #[test]

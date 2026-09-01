@@ -1,8 +1,9 @@
 //! Retryable-failure handling for the SDK backends (`sdk: jcode`, `sdk: claude`).
 //!
 //! `FallbackEngine` decides, after a failed turn, whether to retry and how.
-//! It runs in one of two modes, selected by whether the workflow declares a
-//! `retry:` block ([`crate::config::RetryConfig`]):
+//! It runs in one of two modes, selected by whether the workflow declares an
+//! explicit `retry:` block or a model array with fallback entries
+//! ([`crate::config::RetryConfig`]):
 //!
 //! - **No policy** — cruise's historical behavior: only a backend-reported
 //!   rate limit (`Failure::Limited`) is retryable, always on the same model,
@@ -18,7 +19,8 @@
 //! The retry *budget* is always the caller's existing `PromptRun::max_retries`,
 //! spent per model: this module adds no second retry count, and
 //! `max_retries == 0` (`--rate-limit-retries 0`) disables retrying, and
-//! therefore switching, entirely.
+//! therefore switching for retryable responses; an unusable model reference
+//! can still move to the next entry because no request was sent.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -42,7 +44,7 @@ const RETRY_AFTER_CLAMP: Duration = Duration::from_secs(60);
 
 /// How long a model that failed retryably is skipped when resolving the model
 /// for a later turn. In-memory only: nothing is persisted across processes.
-const MODEL_COOLDOWN: Duration = Duration::from_secs(300);
+const MODEL_COOLDOWN: Duration = Duration::from_mins(30);
 
 /// Characters scanned after a `Retry-After` marker while looking for its value.
 const HINT_SCAN_CHARS: usize = 24;
@@ -115,6 +117,15 @@ const NETWORK_MARKERS: &[&str] = &[
 static ACTIVE_POLICY: LazyLock<RwLock<Option<Arc<RetryPolicy>>>> =
     LazyLock::new(|| RwLock::new(None));
 
+/// Process-wide cooldowns for models that failed retryably.
+///
+/// A workflow may recreate its retry policy when a later turn or config reload
+/// starts, but the plan requires a failed model to remain skipped for the full
+/// cooldown window within this process. The map is deliberately in memory only
+/// and is keyed by the effort-stripped model reference.
+static MODEL_COOLDOWNS: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 // Policy context for one asynchronous run. Tokio task-local storage follows
 // the run future without changing the public `crate::executor::PromptRun`
 // shape or sharing policies between concurrent sessions.
@@ -122,34 +133,27 @@ tokio::task_local! {
     static TASK_POLICY: Option<Arc<RetryPolicy>>;
 }
 
-/// A published `retry:` policy together with the model cooldowns it produced.
+/// A published retry policy, whether explicit or derived from a model array.
 ///
-/// The cooldowns belong to the policy rather than to the process so they are
-/// scoped to the workflow that created them: every prompt of a run snapshots
-/// the same `Arc`, so a model that failed in step 3 is still skipped in step 4,
-/// while another config's runs (and each unit test) keep their own state.
+/// Model cooldowns are process-wide and independent of this policy's config so
+/// recreating a policy for a later turn cannot immediately reuse a failed model.
 pub struct RetryPolicy {
     config: RetryConfig,
-    cooldowns: Mutex<HashMap<String, Instant>>,
 }
 
 impl RetryPolicy {
-    /// Wrap `config` with empty cooldown state.
+    /// Wrap `config` as a retry policy.
     #[must_use]
     pub(crate) fn new(config: RetryConfig) -> Self {
-        Self {
-            config,
-            cooldowns: Mutex::new(HashMap::new()),
-        }
+        Self { config }
     }
 
     /// Mark `model` as recently failed, so later turns prefer its fallbacks.
     ///
     /// Keyed by the effort-stripped reference: `provider/m:high` and
     /// `provider/m:low` are the same model behind the same quota.
-    fn start_cooldown(&self, model: &str) {
-        let mut map = self
-            .cooldowns
+    fn start_cooldown(model: &str) {
+        let mut map = MODEL_COOLDOWNS
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         map.insert(
@@ -160,9 +164,8 @@ impl RetryPolicy {
 
     /// Whether `model` is still cooling down, dropping expired entries as it
     /// goes.
-    fn is_cooling(&self, model: &str) -> bool {
-        let mut map = self
-            .cooldowns
+    fn is_cooling(model: &str) -> bool {
+        let mut map = MODEL_COOLDOWNS
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
@@ -171,7 +174,7 @@ impl RetryPolicy {
     }
 }
 
-/// Build a policy with fresh cooldown state for one resolved workflow config.
+/// Build a retry policy for one resolved workflow config.
 #[must_use]
 pub fn policy_for_config(policy: Option<RetryConfig>) -> Option<Arc<RetryPolicy>> {
     policy.map(|config| Arc::new(RetryPolicy::new(config)))
@@ -333,9 +336,7 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
         return Some(RetryClass::RateLimit);
     }
     if SERVER_MARKERS.iter().any(|marker| lower.contains(marker))
-        || ["500", "502", "503", "504"]
-            .iter()
-            .any(|code| has_status_code(&lower, code))
+        || first_server_status_code(&lower).is_some()
     {
         return Some(RetryClass::ServerError);
     }
@@ -343,6 +344,18 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
         return Some(RetryClass::Network);
     }
     None
+}
+
+/// Return the first standalone HTTP 5xx status code named in `lower`.
+fn first_server_status_code(lower: &str) -> Option<&str> {
+    lower.char_indices().find_map(|(at, ch)| {
+        if ch != '5' {
+            return None;
+        }
+        let code = lower.get(at..at + 3)?;
+        (code.as_bytes()[1..].iter().all(u8::is_ascii_digit) && has_status_code(lower, code))
+            .then_some(code)
+    })
 }
 
 /// Whether `code` occurs as a standalone number preceded, within
@@ -382,7 +395,9 @@ fn failure_detail(class: RetryClass, text: &str) -> String {
     STATUS_CODES
         .iter()
         .find(|code| has_status_code(&lower, code))
-        .map_or_else(|| class.label().to_lowercase(), |code| (*code).to_string())
+        .map(|code| (*code).to_string())
+        .or_else(|| first_server_status_code(&lower).map(str::to_string))
+        .unwrap_or_else(|| class.label().to_lowercase())
 }
 
 /// The server's own retry hint, clamped to [`RETRY_AFTER_CLAMP`].
@@ -456,24 +471,32 @@ fn chain_for(config: &RetryConfig, model: Option<&str>) -> VecDeque<String> {
     let effort = model
         .and_then(|m| split_thinking_suffix(m).1)
         .map(|suffix| format!(":{suffix}"));
-    let entries = base
-        .and_then(|b| {
-            config.fallback_chains.get(b).or_else(|| {
-                b.split_once('/').and_then(|(provider, _)| {
-                    config
-                        .fallback_chains
-                        .get(&format!("{provider}{WILDCARD_SUFFIX}"))
+    let entries = model
+        .and_then(|raw| config.fallback_chains.get(raw))
+        .or_else(|| {
+            base.and_then(|b| {
+                config.fallback_chains.get(b).or_else(|| {
+                    b.split_once('/').and_then(|(provider, _)| {
+                        config
+                            .fallback_chains
+                            .get(&format!("{provider}{WILDCARD_SUFFIX}"))
+                    })
                 })
             })
         })
         .or_else(|| config.fallback_chains.get(DEFAULT_CHAIN_KEY));
 
-    let mut chain = VecDeque::new();
+    let mut chain: VecDeque<String> = VecDeque::new();
     for entry in entries.into_iter().flatten() {
         let Some(candidate) = expand_entry(entry, base, effort.as_deref()) else {
             continue;
         };
-        if Some(candidate.as_str()) == model || chain.contains(&candidate) {
+        let candidate_base = split_thinking_suffix(&candidate).0;
+        if Some(candidate_base) == base
+            || chain
+                .iter()
+                .any(|existing| split_thinking_suffix(existing).0 == candidate_base)
+        {
             continue;
         }
         chain.push_back(candidate);
@@ -512,6 +535,9 @@ pub(crate) struct FallbackEngine {
     /// A cooldown-driven model replacement made before the first attempt,
     /// waiting to be reported.
     startup_switch: Option<(String, String)>,
+    /// No configured model is currently usable because the primary and every
+    /// fallback candidate are cooling down.
+    startup_blocked: bool,
 }
 
 impl FallbackEngine {
@@ -545,14 +571,18 @@ impl FallbackEngine {
             total: 0,
             budget: 0,
             startup_switch: None,
+            startup_blocked: false,
         };
-        if let Some(policy) = engine.policy.clone()
+        if engine.policy.is_some()
             && let Some(current) = engine.model.clone()
-            && policy.is_cooling(&current)
-            && let Some(next) = engine.take_candidate()
+            && RetryPolicy::is_cooling(&current)
         {
-            engine.model = Some(next.clone());
-            engine.startup_switch = Some((current, next));
+            if let Some(next) = engine.take_candidate() {
+                engine.model = Some(next.clone());
+                engine.startup_switch = Some((current, next));
+            } else {
+                engine.startup_blocked = true;
+            }
         }
         // One budget per model, so `max_retries` retries of the primary plus,
         // for every chain entry, its switch and its own `max_retries` retries.
@@ -575,6 +605,12 @@ impl FallbackEngine {
         self.startup_switch.take()
     }
 
+    /// Whether the run must stop rather than reuse a cooling model.
+    #[must_use]
+    pub(crate) fn startup_blocked(&self) -> bool {
+        self.startup_blocked
+    }
+
     /// Decide what to do after a failed turn. `streamed` reports whether the
     /// turn already pushed assistant text to the user's output sink.
     pub(crate) fn next(&mut self, failure: Failure<'_>, streamed: bool) -> RetryAction {
@@ -589,9 +625,21 @@ impl FallbackEngine {
             return self.switch(class, message).unwrap_or(RetryAction::GiveUp);
         }
 
-        // The same model first, so `PromptRun::max_retries` alone decides how
-        // often a model runs: `--rate-limit-retries 0` still means no retry,
-        // and a momentary limit does not cost the primary model.
+        // Provider/server and transport failures use a fallback immediately
+        // when one is available. If switching is disabled or no candidate is
+        // usable, retain the policy's same-model retry behavior instead of
+        // making `model_fallback: false` silently disable all retries.
+        if matches!(class, RetryClass::ServerError | RetryClass::Network)
+            && self.max_retries > 0
+            && !streamed
+            && let Some(action) = self.switch(class, message)
+        {
+            return action;
+        }
+
+        // Rate limits retry the same model first. Server/network failures reach
+        // this path only when no usable fallback can be selected, or when the
+        // turn already streamed visible text.
         if self.attempts < self.max_retries
             && let Some(delay) = self.delay_for(message, self.attempts + 1)
         {
@@ -605,7 +653,7 @@ impl FallbackEngine {
             };
         }
 
-        // Budget spent (or the next delay would exceed `max_delay_ms`): move to
+        // Budget spent or the next delay would exceed `max_delay_ms`: move to
         // the next chain model, with no delay and a fresh budget. Replay
         // safety: a turn whose text the user already saw is never re-run on
         // another model.
@@ -615,8 +663,10 @@ impl FallbackEngine {
         {
             return action;
         }
-        if let Some((policy, model)) = self.policy.as_deref().zip(self.model.as_deref()) {
-            policy.start_cooldown(model);
+        if self.policy.is_some()
+            && let Some(model) = self.model.as_deref()
+        {
+            RetryPolicy::start_cooldown(model);
         }
         RetryAction::GiveUp
     }
@@ -657,8 +707,10 @@ impl FallbackEngine {
     fn switch(&mut self, class: RetryClass, message: &str) -> Option<RetryAction> {
         let to = self.take_candidate()?;
         let from = self.model.replace(to.clone());
-        if let Some((policy, previous)) = self.policy.as_deref().zip(from.as_deref()) {
-            policy.start_cooldown(previous);
+        if self.policy.is_some()
+            && let Some(previous) = from.as_deref()
+        {
+            RetryPolicy::start_cooldown(previous);
         }
         self.attempts = 0;
         self.total += 1;
@@ -673,9 +725,9 @@ impl FallbackEngine {
 
     /// Next chain entry that is not cooling down.
     fn take_candidate(&mut self) -> Option<String> {
-        let policy = self.policy.clone()?;
+        self.policy.as_ref()?;
         while let Some(candidate) = self.chain.pop_front() {
-            if !policy.is_cooling(&candidate) {
+            if !RetryPolicy::is_cooling(&candidate) {
                 return Some(candidate);
             }
         }
@@ -789,6 +841,14 @@ mod tests {
         ] {
             assert_eq!(classify_retryable(message), Some(expected), "for {message}");
         }
+    }
+
+    #[test]
+    fn server_status_detail_includes_any_retryable_5xx_code() {
+        assert_eq!(
+            failure_detail(RetryClass::ServerError, "HTTP status 501"),
+            "501"
+        );
     }
 
     #[test]
@@ -914,6 +974,16 @@ mod tests {
         let config = policy(&[("default", &["openrouter/*"])]);
         let chain = chain_for(&config, Some("anthropic/claude-opus-4-6:high"));
         assert_eq!(chain, ["openrouter/claude-opus-4-6:high"]);
+    }
+
+    #[test]
+    fn retry_chain_drops_same_model_effort_variants() {
+        let config = policy(&[(
+            "test-effort/primary",
+            &["test-effort/primary:low", "test-effort/spare"],
+        )]);
+        let chain = chain_for(&config, Some("test-effort/primary:high"));
+        assert_eq!(chain, ["test-effort/spare"]);
     }
 
     // --- engine ---------------------------------------------------------------
@@ -1042,6 +1112,63 @@ mod tests {
     }
 
     #[test]
+    fn retry_server_error_switches_immediately_without_retrying_the_primary() {
+        let config = policy(&[("test-server/primary", &["test-server/fallback"])]);
+        let mut engine = engine(config, "test-server/primary", 3);
+
+        assert_eq!(
+            engine.next(Failure::Failed("HTTP status 503"), false),
+            RetryAction::Switch {
+                from: Some("test-server/primary".to_string()),
+                to: "test-server/fallback".to_string(),
+                detail: "503".to_string(),
+                attempt: 1,
+                of: 7,
+            }
+        );
+        assert_eq!(engine.model(), Some("test-server/fallback"));
+    }
+
+    #[test]
+    fn retry_server_error_backs_off_when_model_switching_is_unavailable() {
+        let mut config = policy(&[]);
+        config.model_fallback = false;
+        let mut engine = engine(config, "test-server-no-switch/primary", 1);
+
+        assert!(matches!(
+            engine.next(Failure::Failed("HTTP status 503"), false),
+            RetryAction::Backoff {
+                class: RetryClass::ServerError,
+                attempt: 1,
+                of: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            engine.next(Failure::Failed("HTTP status 503"), false),
+            RetryAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn retry_network_failure_switches_immediately_without_retrying_the_primary() {
+        let config = policy(&[("test-network/primary", &["test-network/fallback"])]);
+        let mut engine = engine(config, "test-network/primary", 3);
+
+        assert_eq!(
+            engine.next(Failure::Failed("connection reset by peer"), false),
+            RetryAction::Switch {
+                from: Some("test-network/primary".to_string()),
+                to: "test-network/fallback".to_string(),
+                detail: "network error".to_string(),
+                attempt: 1,
+                of: 7,
+            }
+        );
+        assert_eq!(engine.model(), Some("test-network/fallback"));
+    }
+
+    #[test]
     fn retry_switches_when_the_computed_delay_exceeds_max_delay_ms() {
         let mut config = policy(&[("test-g/only", &["test-g/spare"])]);
         config.base_delay_ms = 5_000;
@@ -1085,7 +1212,29 @@ mod tests {
     }
 
     #[test]
-    fn retry_cooldowns_are_scoped_to_their_own_policy() {
+    fn retry_model_cooldown_last_for_thirty_minutes() {
+        RetryPolicy::start_cooldown("test-cooldown/model");
+
+        let until = MODEL_COOLDOWNS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get("test-cooldown/model")
+            .copied()
+            .unwrap_or_else(|| panic!("cooldown entry missing"));
+        let remaining = until.saturating_duration_since(Instant::now());
+
+        assert!(
+            remaining >= Duration::from_secs(1_790),
+            "cooldown should last about 30 minutes, only {remaining:?} remain"
+        );
+        assert!(
+            remaining <= Duration::from_mins(30),
+            "cooldown should not exceed 30 minutes, {remaining:?} remain"
+        );
+    }
+
+    #[test]
+    fn retry_cooldowns_are_shared_across_policies_in_one_process() {
         let config = policy(&[("test-j/primary", &["test-j/spare"])]);
         let mine = Arc::new(RetryPolicy::new(config.clone()));
         let mut engine = FallbackEngine::new(Some(mine), Some("test-j/primary"), 1);
@@ -1098,21 +1247,36 @@ mod tests {
             RetryAction::Switch { .. }
         ));
 
-        // An unrelated workflow's policy has its own cooldowns.
+        // A later policy in the same process still skips the failed model.
         let theirs = Arc::new(RetryPolicy::new(config));
-        let other = FallbackEngine::new(Some(theirs), Some("test-j/primary"), 1);
-        assert_eq!(other.model(), Some("test-j/primary"));
+        let mut other = FallbackEngine::new(Some(theirs), Some("test-j/primary"), 1);
+        assert_eq!(other.model(), Some("test-j/spare"));
+        assert_eq!(
+            other.take_startup_switch(),
+            Some(("test-j/primary".to_string(), "test-j/spare".to_string()))
+        );
+    }
+
+    #[test]
+    fn retry_does_not_start_when_all_configured_models_are_cooling_down() {
+        RetryPolicy::start_cooldown("test-blocked/primary");
+        RetryPolicy::start_cooldown("test-blocked/spare");
+
+        let config = policy(&[("test-blocked/primary", &["test-blocked/spare"])]);
+        let engine = FallbackEngine::new(
+            Some(Arc::new(RetryPolicy::new(config))),
+            Some("test-blocked/primary"),
+            1,
+        );
+
+        assert!(engine.startup_blocked());
     }
 
     #[test]
     fn retry_cooldown_ignores_the_effort_suffix() {
         // `:high` and `:low` are one model behind one quota.
-        let shared = Arc::new(RetryPolicy::new(policy(&[(
-            "test-k/primary",
-            &["test-k/spare"],
-        )])));
-        shared.start_cooldown("test-k/primary:high");
-        assert!(shared.is_cooling("test-k/primary:low"));
+        RetryPolicy::start_cooldown("test-k/primary:high");
+        assert!(RetryPolicy::is_cooling("test-k/primary:low"));
     }
 
     #[test]

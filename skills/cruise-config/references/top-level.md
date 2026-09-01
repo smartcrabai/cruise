@@ -16,8 +16,10 @@ description: My workflow  # Optional: shown alongside the file name in config se
 
 model: sonnet             # Optional: default model for prompt steps
                           # (in SDK mode, a "provider/model[:effort]" reference)
+                          # In SDK mode, [primary, fallback, ...] is an implicit chain
 plan_model: opus          # Optional: model for the built-in plan step
                           # (in SDK mode, a "provider/model[:effort]" reference)
+                          # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global DAG edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
 languages:                # Optional: prompt languages; defaults to English
@@ -69,7 +71,18 @@ There are three prompt-execution backends:
 
 The prompt body is passed to the spawned process via **stdin** (avoids ARG_MAX limits), not as an argument.
 
-A step-level `model:` overrides the top-level `model:` for that step only.
+A step-level `model:` overrides the top-level `model:` for that step only. In
+SDK mode, workflow-level model arrays use the first entry as the primary and
+the remaining entries as fallbacks. Arrays with fallback entries automatically
+enable model fallback; an explicit `retry.fallback_chains` entry for a primary
+model wins over its array tail. Rate limits retry the current model while its
+retry budget and delay permit, then switch to the next usable fallback when
+one exists. 5xx and
+network failures switch immediately to a usable fallback when
+`--rate-limit-retries` is above zero and no visible text was streamed. Models
+skipped after retryable failures are cooled down for 30 minutes in the current
+process. In command mode, only the first array entry is used and the
+historical same-model retry behavior remains unchanged.
 
 ```yaml
 command:
@@ -88,7 +101,7 @@ steps:
 
 ## `plan_model`
 
-Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is a plain model reference (see [sdk.md](sdk.md)).
+Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is a plain model reference (see [sdk.md](sdk.md)), or an array whose first entry is primary and remaining entries are fallbacks.
 
 ## `description`
 
@@ -160,16 +173,31 @@ runs foreground because no plan worker is needed.
 
 ## Rate-limit retry
 
-When an HTTP 429 is detected, cruise retries the same model with exponential backoff:
+When an HTTP 429 is detected, cruise retries the same model with exponential
+backoff while its retry budget and delay permit:
 
 - Initial delay: 2 seconds
 - Max delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
 
-The SDK backends additionally accept an optional `retry:` block. Declaring it widens rate-limit handling into a fallback policy: 5xx and network failures become retryable too, the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and a model that has spent its retry budget is swapped for the next entry of its fallback chain. Setting `model_fallback: false` (or leaving the chains empty) only turns the *switching* off — the wider classification and the new backoff schedule still apply, so omit the block entirely to keep the historical behavior.
+The SDK backends additionally accept an optional `retry:` block. Declaring it,
+or using a workflow-level model array with fallback entries, widens rate-limit
+handling into a fallback policy: 5xx and network failures become retryable too,
+the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and those
+failures switch immediately to the next usable fallback when
+`--rate-limit-retries` is above zero and no visible text was streamed. A 429
+retries the current model while its retry budget and delay permit, then
+switches to the next usable fallback when one exists. Setting
+`model_fallback: false` (or leaving the chains empty) only turns the *switching*
+off for scalar model configurations; model arrays with fallback entries always
+enable switching. The
+wider classification and the new backoff schedule still apply, so omit the
+block entirely and use scalar or unset model fields to keep the historical
+behavior.
 
 ```yaml
 retry:                    # Optional; SDK backends only. Omitted = same-model 429 retries only
+                          # unless a model array supplies an implicit policy
   base_delay_ms: 500      # Backoff base (default 500); delay is min(base * 2^(attempt-1), 8s) with jitter
   max_delay_ms: 300000    # Waiting cap (default 300000). The computed backoff is already capped at 8s,
                           # so this only binds a server Retry-After hint (itself clamped to 60s): a
@@ -183,4 +211,4 @@ retry:                    # Optional; SDK backends only. Omitted = same-model 42
       - openai-api/gpt-5.5
 ```
 
-Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model that just failed is skipped for 5 minutes (in-memory, and cleared when the config is hot-reloaded). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the DAG loop-protection ceiling, not a retry budget for prompts.
+Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a retryable failure remains skipped for 30 minutes in this process (in-memory, not persisted across processes). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the DAG loop-protection ceiling, not a retry budget for prompts.

@@ -733,8 +733,20 @@ steps:
         // Then: parent top-level settings are retained and callee settings are ignored.
         assert_eq!(config.command, vec!["parent-command".to_string()]);
         assert_eq!(config.sdk, None);
-        assert_eq!(config.model.as_deref(), Some("parent-model"));
-        assert_eq!(config.plan_model.as_deref(), Some("parent-plan-model"));
+        assert_eq!(
+            config
+                .model
+                .as_ref()
+                .and_then(crate::config::ModelSpec::primary),
+            Some("parent-model")
+        );
+        assert_eq!(
+            config
+                .plan_model
+                .as_ref()
+                .and_then(crate::config::ModelSpec::primary),
+            Some("parent-plan-model")
+        );
         assert_eq!(config.pr_language.as_deref(), Some("English"));
         assert_eq!(config.plan_language.as_deref(), Some("English"));
         assert_eq!(
@@ -1272,7 +1284,10 @@ steps:
         let config = resolved_from_path(path);
 
         // Then: model reflects the env var override, not the YAML value
-        assert_eq!(config.model, Some("opus".to_string()));
+        assert_eq!(
+            config.model,
+            Some(crate::config::ModelSpec::Single("opus".to_string()))
+        );
     }
 
     #[test]
@@ -1325,7 +1340,10 @@ steps:
             .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: model reflects the env var override, not the YAML value
-        assert_eq!(resolved.model, Some("opus".to_string()));
+        assert_eq!(
+            resolved.model,
+            Some(crate::config::ModelSpec::Single("opus".to_string()))
+        );
     }
 
     // ---- prompt_file: resolve_local_prompt_path unit tests ----

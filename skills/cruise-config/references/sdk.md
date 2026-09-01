@@ -7,6 +7,7 @@ sdk: jcode
 
 model: anthropic-api/claude-sonnet-4-6   # "provider/model[:effort]" for prompt steps
 plan_model: openai-api/gpt-5.5:high      # model for the built-in plan step (falls back to `model`)
+# model: [anthropic-api/claude-sonnet-4-6, openai-api/gpt-5.5]
 
 steps:
   implement:
@@ -21,7 +22,7 @@ steps:
 
 ## Model fields are plain model references
 
-In both SDK backends, `model` / `plan_model` / per-step `model` carry the same precedence as command mode (step `model` > top-level `model` / `plan_model`), and the value is a model reference:
+In both SDK backends, `model` / `plan_model` / per-step `model` carry the same precedence as command mode (step `model` > top-level `model` / `plan_model`). Workflow-level `model` and `plan_model` may be arrays: the first entry is primary and the remaining entries are an implicit fallback chain. Arrays with fallback entries enable model fallback automatically; explicit `retry.fallback_chains` entries for a primary model take precedence. A 429 retries the current model while its retry budget and delay permit, while a 5xx or network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed. Models skipped after retryable failures are cooled down for 30 minutes in the current process. Each scalar value is a model reference:
 
 | Form | Example | Behavior |
 |------|---------|----------|
@@ -83,4 +84,4 @@ Command and option steps behave identically in both modes.
 
 ## Rate limits and fallback
 
-Both SDK backends retry according to the optional top-level `retry:` block (see `top-level.md`): declaring it — even as `model_fallback: false` or with no chains — makes HTTP 5xx and network errors retryable and switches the backoff to `base_delay_ms` doubling to an 8s ceiling. Without the block, only rate limits are retried, against the same model, with the command backend's 2s-doubling backoff (capped at 60s). The attempt budget is `--rate-limit-retries` either way; `--rate-limit-retries 0` means no retry and therefore no model switch, except for a model reference the backend refuses outright (nothing was sent, so the next chain entry is tried immediately). Every retry starts a **fresh session** — resuming a partially-answered session would duplicate context — and a turn that already streamed visible text is never retried on another model.
+Both SDK backends use policy mode when the top-level `retry:` block is present (see `top-level.md`) or when a workflow-level model array with fallback entries creates an implicit policy. In policy mode, HTTP 5xx and network errors are retryable and the backoff uses `base_delay_ms` doubling to an 8s ceiling. Without either policy, only rate limits are retried, against the same model, with the command backend's 2s-doubling backoff (capped at 60s). The attempt budget is `--rate-limit-retries` either way; `--rate-limit-retries 0` means no retry and therefore no model switch, except for a model reference the backend refuses outright (nothing was sent, so the next chain entry is tried immediately). Every retry starts a **fresh session** — resuming a partially-answered session would duplicate context — and a turn that already streamed visible text is never retried on another model. A model array with fallback entries always enables switching, even if `retry.model_fallback: false` is also present.

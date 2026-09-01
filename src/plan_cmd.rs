@@ -173,13 +173,13 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         ) {
             Some(reason) => eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim()),
             None => {
-                return run_force_exec(
+                return Box::pin(run_force_exec(
                     target,
                     input.trim().to_string(),
                     args.rate_limit_retries,
                     args.dry_run,
                     false,
-                )
+                ))
                 .await;
             }
         }
@@ -336,13 +336,13 @@ pub async fn launch_background_plan(
                 eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
             }
             None => {
-                return run_force_exec(
+                return Box::pin(run_force_exec(
                     target,
                     input.trim().to_string(),
                     DEFAULT_RATE_LIMIT_RETRIES,
                     false,
                     true,
-                )
+                ))
                 .await;
             }
         }
@@ -531,8 +531,16 @@ async fn generate_title_via_sdk(
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
 
     let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let model_or_mode =
-        executor.plan_model_or_mode(config.plan_model.as_deref(), config.model.as_deref());
+    let model_or_mode = executor.plan_model_or_mode(
+        config
+            .plan_model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary),
+        config
+            .model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary),
+    );
     let prompt = format!(
         "Generate a concise session title (max 80 chars) for this task and plan. \
          Call the generate_title tool with your title.\n\n\
@@ -2399,7 +2407,7 @@ steps:
         process.prepend_path(&bin_dir);
 
         // When: the plan entry point is invoked without the opt-out flag
-        let result = run(plan_args(&config_path, false, false)).await;
+        let result = Box::pin(run(plan_args(&config_path, false, false))).await;
 
         // Then: the workflow executes successfully in the current directory
         assert!(
@@ -2450,7 +2458,7 @@ steps:
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: the plan entry point is invoked with --no-force-exec
-        let result = run(plan_args(&config_path, true, false)).await;
+        let result = Box::pin(run(plan_args(&config_path, true, false))).await;
 
         // Then: a normal plan is created instead of direct execution
         assert!(result.is_ok(), "normal plan path failed: {result:?}");
@@ -2508,7 +2516,14 @@ steps:
         process.prepend_path(&bin_dir);
 
         // When: --plan is used without the opt-out flag
-        let result = launch_background_plan("background task", false, None, &[], false).await;
+        let result = Box::pin(launch_background_plan(
+            "background task",
+            false,
+            None,
+            &[],
+            false,
+        ))
+        .await;
 
         // Then: execution stays foreground and bypasses planning lifecycle
         assert!(result.is_ok(), "background force_exec failed: {result:?}");

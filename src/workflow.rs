@@ -217,8 +217,16 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     Ok(CompiledWorkflow {
         command: config.command,
         sdk: config.sdk,
-        model: config.model,
-        plan_model: config.plan_model,
+        model: config
+            .model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary)
+            .map(str::to_string),
+        plan_model: config
+            .plan_model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary)
+            .map(str::to_string),
         env: config.env,
         pr_language,
         plan_language,

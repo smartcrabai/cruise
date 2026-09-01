@@ -196,7 +196,7 @@ Options:
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          GitHub repository to clone into a temporary directory for planning and execution
-      --rate-limit-retries <N>     Maximum number of rate-limit retries per LLM call [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
 ```
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning. Non-git directories fall back to running in place with a warning.
@@ -237,7 +237,7 @@ Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
-      --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
@@ -260,7 +260,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
       --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
-      --rate-limit-retries <N>     Maximum number of rate-limit retries per step [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
@@ -431,6 +431,8 @@ description: |             # one-line summary shown next to the filename in sele
   Team-shared review-heavy flow with auto-PR.
 
 model: sonnet             # default model for all prompt steps (optional)
+# In SDK mode, arrays use the first model, then fall back in order.
+# model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
@@ -497,9 +499,12 @@ sdk: jcode        # optional -- this is the default when neither `command` nor `
 
 model: anthropic-api/claude-opus-4-6   # "provider/model[:effort]" for ordinary prompt steps
 plan_model: openai-api/gpt-5.5:high    # model for the built-in plan step (falls back to `model`)
+# model: [anthropic-api/claude-opus-4-6, openai-api/gpt-5.5, google/gemini]
 ```
 
 In both SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). The optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
+
+At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the first entry is the primary model and later entries form an implicit fallback chain. A model array with fallback entries enables model fallback automatically; an explicit `retry.fallback_chains` entry for the primary model takes precedence over the array tail. A 429 retries the current model while its retry budget and delay permit, then switches to the next usable fallback when one exists. A 5xx or network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed. A model skipped after a retryable failure is cooled down for 30 minutes in the current process. In command mode, only the first entry is used and the historical same-model retry behavior remains unchanged.
 
 - `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- under `sdk: jcode` this names the provider and the model separately; a `/` with an empty side (`"/model"`, `"provider/"`) fails the step with a clear error when the prompt runs, not at config-validation time. Under `sdk: claude` there is no provider part: everything except the `:effort` suffix goes to `claude --model` verbatim, so a `provider/model` value reaches the CLI as one model id and is rejected by it.
 - `"model"` (no `/`) -- the provider is left to the backend's own resolution.
@@ -1144,13 +1149,17 @@ During `cruise run`, the config file is checked for changes between each step. I
 
 ## Rate Limit Retry
 
-When a rate-limit error (HTTP 429) is detected in a prompt or command step, cruise retries the same model with exponential backoff:
+Without an SDK fallback policy, when a rate-limit error (HTTP 429) is detected
+in a prompt or command step, cruise retries the same model with exponential
+backoff:
 
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
 
-The SDK backends additionally accept an optional `retry:` block that widens this into a fallback policy:
+The SDK backends additionally support a fallback policy through an optional
+`retry:` block or a workflow-level model array with fallback entries. An
+explicit `retry:` block can configure the policy:
 
 ```yaml
 retry:
@@ -1169,9 +1178,9 @@ retry:
       - openrouter/*
 ```
 
-With `retry:` set, HTTP 5xx and network failures become retryable too, and a model that has spent its retry budget (`--rate-limit-retries`) is swapped for the next entry of its chain -- immediately, with a fresh budget, on a fresh session. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit or a 5xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A failed model is skipped for the next 5 minutes of the run (in-memory state owned by the active policy, so a config [hot-reload](#config-hot-reload) clears it). A turn that already streamed visible text is never retried on another model.
+With an SDK retry policy, whether declared by `retry:` or implied by a model array with fallback entries, HTTP 5xx and network failures become retryable too, and they switch to the next chain entry immediately when `--rate-limit-retries` is above zero, a usable fallback exists, and no visible text was streamed, with a fresh budget and a fresh session. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit or a 5xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A model skipped because of a retryable failure remains skipped for the next 30 minutes in this process (in-memory state, not persisted across processes). A turn that already streamed visible text is never retried on another model. For a 429, the same-model retry can instead be bypassed when its computed or server-requested delay exceeds `retry.max_delay_ms`.
 
-Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: false` and empty chains included: those only switch model switching off, while 5xx/network classification and the `base_delay_ms`/8s-ceiling backoff schedule stay in force. Omit the block entirely to keep the historical behavior -- rate limits only, same model, 2s doubling to a 60s cap. The `command:` backend always uses the historical behavior and ignores `retry:`.
+Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: false` and empty chains included: those only switch model switching off for scalar model configurations, while 5xx/network classification and the `base_delay_ms`/8s-ceiling backoff schedule stay in force. Workflow-level model arrays with fallback entries always enable switching and generate their fallback chains. Omit the block entirely, and use scalar or unset model fields, to keep the historical behavior -- rate limits only, same model, 2s doubling to a 60s cap. The `command:` backend always uses the historical behavior and ignores `retry:`.
 
 ## Stale Session Detection
 
