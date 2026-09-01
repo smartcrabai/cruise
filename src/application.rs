@@ -1110,9 +1110,15 @@ impl From<bool> for Interactive {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "planning modes are independent request flags exposed by the application API"
+)]
 pub struct PlanRequest {
     #[serde(default)]
     pub grill: bool,
+    #[serde(default)]
+    pub formal_spec: bool,
     #[serde(default)]
     pub skip_planning: bool,
     /// Disable SDK planning tools for this request, even when the workflow
@@ -1133,6 +1139,7 @@ impl Default for PlanRequest {
     fn default() -> Self {
         Self {
             grill: false,
+            formal_spec: false,
             skip_planning: false,
             no_interactive_planning: false,
             interactive: Interactive::default(),
@@ -1652,6 +1659,11 @@ async fn run_plan_prompt(
         rate_limit_retries: request.rate_limit_retries,
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,
+        // Formal specifications are limited to Generate operations. CLI and
+        // official GUI/TUI callers only set the flag for new-session planning,
+        // while direct API Generate callers may use it for any eligible phase.
+        // Replan, Fix, and Ask callers cannot opt in through this field.
+        formal_spec: request.formal_spec && operation == OperationKind::Generate,
         on_session_id: Some(&on_session_id),
         cancel_token: Some(&token),
     };
@@ -3838,6 +3850,157 @@ mod tests {
         };
         let value = serde_json::to_value(request).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(value["noInteractivePlanning"], true);
+    }
+
+    #[test]
+    fn plan_request_formal_spec_defaults_to_false_and_roundtrips_camel_case() {
+        let request: PlanRequest = serde_json::from_str("{}").unwrap_or_else(|e| panic!("{e}"));
+        assert!(!request.formal_spec);
+
+        let request: PlanRequest =
+            serde_json::from_str(r#"{"formalSpec":true}"#).unwrap_or_else(|e| panic!("{e}"));
+        assert!(request.formal_spec);
+        let value = serde_json::to_value(request).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(value["formalSpec"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_passes_formal_spec_request_into_the_initial_prompt() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager);
+        let session = app
+            .create_session(NewSessionRequest {
+                input: "formal planning task".to_string(),
+                base_dir: temp.path().to_path_buf(),
+                config_path: None,
+                config_source: None,
+                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+        let request: PlanRequest =
+            serde_json::from_str(r#"{"formalSpec":true}"#).unwrap_or_else(|e| panic!("{e}"));
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+
+        app.generate(&session.id, request, sink)
+            .await
+            .unwrap_or_else(|e| panic!("formal planning should complete: {e}"));
+
+        let plan = app
+            .session_plan(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            plan.contains("Quint"),
+            "formal plan must include Quint guidance: {plan}"
+        );
+        assert!(
+            plan.contains("Alloy"),
+            "formal plan must include Alloy guidance: {plan}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fix_and_ask_keep_formal_spec_disabled_by_default() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
+        let session = app
+            .create_session(NewSessionRequest {
+                input: "lifecycle boundary task".to_string(),
+                base_dir: temp.path().to_path_buf(),
+                config_path: None,
+                config_source: None,
+                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+        let no_op_sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+        app.generate(
+            &session.id,
+            PlanRequest {
+                skip_planning: true,
+                ..PlanRequest::default()
+            },
+            Arc::clone(&no_op_sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("initial plan should complete: {e}"));
+
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let sink_events = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
+            sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+        app.fix(
+            &session.id,
+            "adjust the plan".to_string(),
+            Arc::clone(&sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fix should complete: {e}"));
+        let fixed_plan = app
+            .session_plan(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!fixed_plan.contains("Quint"));
+        assert!(!fixed_plan.contains("Alloy"));
+
+        events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        app.ask(&session.id, "what changed?".to_string(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("ask should complete: {e}"));
+        let ask_output = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|event| match event {
+                ApplicationEvent::PlanChunk { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!ask_output.contains("Quint"));
+        assert!(!ask_output.contains("Alloy"));
+
+        app.replan(
+            &session.id,
+            PlanRequest {
+                formal_spec: true,
+                feedback: Some("replan without formal mode".to_string()),
+                ..PlanRequest::default()
+            },
+            Arc::clone(&no_op_sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("replan should complete: {e}"));
+        let replanned_plan = app
+            .session_plan(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!replanned_plan.contains("Quint"));
+        assert!(!replanned_plan.contains("Alloy"));
     }
 
     #[test]

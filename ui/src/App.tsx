@@ -1182,6 +1182,8 @@ interface NewSessionDraft {
   /** GitHub repository (owner/repo) used when sourceKind === "repository". */
   repo: string;
   useInputAsPlan: boolean;
+  /** Include Quint and Alloy formal specifications in the initial plan. */
+  formalSpec: boolean;
   /** "Grill me" planning: interview before writing the plan (SDK backend only). */
   grill: boolean;
   /** Disable interactive planning tools; agent writes plan.md directly. */
@@ -1200,6 +1202,7 @@ function createInitialNewSessionDraft(): NewSessionDraft {
     sourceKind: "directory",
     repo: "",
     useInputAsPlan: false,
+    formalSpec: false,
     grill: false,
     noInteractivePlanning: false,
     imageAttachments: [],
@@ -1234,7 +1237,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   const [savingDraft, setSavingDraft] = useState(false);
   const isMountedRef = useRef(true);
 
-  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, grill, noInteractivePlanning, imageAttachments, isGenerating, error } = draft;
+  const { input, configPath, baseDir, sourceKind, repo, useInputAsPlan, formalSpec, grill, noInteractivePlanning, imageAttachments, isGenerating, error } = draft;
   const isRepoMode = sourceKind === "repository";
   // Repository clones don't exist yet at form time, so config lookup falls
   // back to the user-level / builtin configs in repository mode.
@@ -1490,6 +1493,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
         repo: isRepoMode ? repo.trim() : undefined,
         skippedSteps: Array.from(skippedSteps),
         useInputAsPlan,
+        formalSpec,
         grill,
         noInteractivePlanning,
         imageAttachments,
@@ -1682,6 +1686,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
               onDraftChange((prev) => ({
                 ...prev,
                 useInputAsPlan: e.target.checked,
+                formalSpec: e.target.checked ? false : prev.formalSpec,
                 // Mutually exclusive with grill: input-as-plan skips planning entirely.
                 grill: e.target.checked ? false : prev.grill,
               }))
@@ -1690,6 +1695,26 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
             className="accent-blue-500"
           />
           <span className="text-sm text-gray-700 dark:text-gray-300">Use input as plan (skip LLM planning)</span>
+        </label>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={formalSpec}
+            onChange={(e) =>
+              onDraftChange((prev) => ({
+                ...prev,
+                formalSpec: e.target.checked,
+                // Formal specification requires LLM planning, so it is mutually exclusive with input-as-plan.
+                useInputAsPlan: e.target.checked ? false : prev.useInputAsPlan,
+              }))
+            }
+            disabled={isGenerating || useInputAsPlan}
+            className="accent-blue-500"
+          />
+          <span className="text-sm text-gray-700 dark:text-gray-300">
+            Formal specification (Quint and Alloy, with semantic comments)
+          </span>
         </label>
 
         <label className="flex items-center gap-2 cursor-pointer">

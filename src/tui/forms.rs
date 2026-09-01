@@ -61,6 +61,7 @@ pub enum FormField {
     Workspace,
     DirtyTree,
     Grill,
+    FormalSpec,
     SkipPlanning,
     Noninteractive,
     SaveDraft,
@@ -80,7 +81,8 @@ impl FormField {
             Self::SkippedSteps => Self::Workspace,
             Self::Workspace => Self::DirtyTree,
             Self::DirtyTree => Self::Grill,
-            Self::Grill => Self::SkipPlanning,
+            Self::Grill => Self::FormalSpec,
+            Self::FormalSpec => Self::SkipPlanning,
             Self::SkipPlanning => Self::Noninteractive,
             Self::Noninteractive => Self::SaveDraft,
             Self::SaveDraft => Self::Submit,
@@ -100,7 +102,8 @@ impl FormField {
             Self::Workspace => Self::SkippedSteps,
             Self::DirtyTree => Self::Workspace,
             Self::Grill => Self::DirtyTree,
-            Self::SkipPlanning => Self::Grill,
+            Self::FormalSpec => Self::Grill,
+            Self::SkipPlanning => Self::FormalSpec,
             Self::Noninteractive => Self::SkipPlanning,
             Self::SaveDraft => Self::Noninteractive,
             Self::Submit => Self::SaveDraft,
@@ -134,8 +137,13 @@ pub struct SessionOptions {
 }
 
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the TUI exposes independent planning toggles, including formal specification mode"
+)]
 pub struct PlanningFlags {
     pub grill: bool,
+    pub formal_spec: bool,
     pub skip_planning: bool,
     pub noninteractive: bool,
 }
@@ -277,10 +285,18 @@ impl NewSessionForm {
                 }
                 self.mark_changed();
             }
+            FormField::FormalSpec => {
+                self.options.planning.formal_spec = !self.options.planning.formal_spec;
+                if self.options.planning.formal_spec {
+                    self.options.planning.skip_planning = false;
+                }
+                self.mark_changed();
+            }
             FormField::SkipPlanning => {
                 self.options.planning.skip_planning = !self.options.planning.skip_planning;
                 if self.options.planning.skip_planning {
                     self.options.planning.grill = false;
+                    self.options.planning.formal_spec = false;
                     self.options.planning.noninteractive = false;
                 }
                 self.mark_changed();
@@ -374,6 +390,9 @@ impl NewSessionForm {
         {
             return Err("Grill planning requires interactive LLM planning".to_string());
         }
+        if self.options.planning.formal_spec && self.options.planning.skip_planning {
+            return Err("Formal specification requires LLM planning".to_string());
+        }
         if self.source == SourceKind::GitHub && self.repository.text().trim().is_empty() {
             return Err("Select a GitHub repository before creating a session".to_string());
         }
@@ -386,6 +405,10 @@ fn nonempty(value: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::field_reassign_with_default,
+    reason = "form tests intentionally switch focus and toggle individual controls"
+)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -514,5 +537,93 @@ mod tests {
     fn request_maps_empty_working_directory_to_current_directory() {
         let form = NewSessionForm::default();
         assert_eq!(form.request().base_dir, PathBuf::from("."));
+    }
+
+    #[test]
+    fn formal_spec_toggle_can_be_enabled_and_disabled() {
+        let mut form = NewSessionForm::default();
+        form.field = FormField::FormalSpec;
+
+        form.toggle_current();
+        assert!(form.options.planning.formal_spec);
+        form.toggle_current();
+        assert!(!form.options.planning.formal_spec);
+    }
+
+    #[test]
+    fn formal_spec_and_skip_planning_are_mutually_exclusive() {
+        let mut form = NewSessionForm::default();
+        form.field = FormField::SkipPlanning;
+        form.toggle_current();
+        assert!(form.options.planning.skip_planning);
+
+        form.field = FormField::FormalSpec;
+        form.toggle_current();
+        assert!(form.options.planning.formal_spec);
+        assert!(!form.options.planning.skip_planning);
+
+        form.field = FormField::SkipPlanning;
+        form.toggle_current();
+        assert!(!form.options.planning.formal_spec);
+        assert!(form.options.planning.skip_planning);
+    }
+
+    #[test]
+    fn formal_spec_can_coexist_with_grill_and_noninteractive_planning() {
+        let mut form = NewSessionForm::default();
+        form.field = FormField::FormalSpec;
+        form.toggle_current();
+
+        form.field = FormField::Grill;
+        form.toggle_current();
+        assert!(form.options.planning.formal_spec);
+        assert!(form.options.planning.grill);
+
+        form.field = FormField::Grill;
+        form.toggle_current();
+        form.field = FormField::Noninteractive;
+        form.toggle_current();
+        assert!(form.options.planning.formal_spec);
+        assert!(form.options.planning.noninteractive);
+    }
+
+    #[test]
+    fn validate_rejects_formal_spec_with_skip_planning_even_when_set_directly() {
+        let mut form = NewSessionForm::default();
+        form.options.planning.formal_spec = true;
+        form.options.planning.skip_planning = true;
+
+        assert!(form.validate().is_err());
+    }
+
+    #[test]
+    fn formal_spec_is_reachable_in_both_focus_directions() {
+        let mut next = FormField::Source;
+        let mut reached_forward = false;
+        for _ in 0..32 {
+            if next == FormField::FormalSpec {
+                reached_forward = true;
+                break;
+            }
+            next = next.next();
+        }
+        assert!(
+            reached_forward,
+            "Tab traversal must include Formal specification"
+        );
+
+        let mut previous = FormField::Submit;
+        let mut reached_backward = false;
+        for _ in 0..32 {
+            if previous == FormField::FormalSpec {
+                reached_backward = true;
+                break;
+            }
+            previous = previous.previous();
+        }
+        assert!(
+            reached_backward,
+            "reverse Tab traversal must include Formal specification"
+        );
     }
 }

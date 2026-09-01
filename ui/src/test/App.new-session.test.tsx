@@ -1577,6 +1577,111 @@ describe("App: New Session -- useInputAsPlan checkbox", () => {
 
     vi.useRealTimers();
   });
+
+  it("renders Formal specification unchecked by default", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+
+    const checkbox = await screen.findByRole("checkbox", { name: /formal specification/i });
+
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("passes formalSpec: true to createSession when Formal specification is checked", async () => {
+    vi.mocked(commands.createSession).mockResolvedValue("sess-formal-spec");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "formal plan task",
+    );
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /formal specification/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    expect(commands.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ formalSpec: true }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps Formal specification mutually exclusive with Use input as plan", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const formalSpec = await screen.findByRole("checkbox", { name: /formal specification/i });
+    const inputAsPlan = screen.getByRole("checkbox", { name: /use input as plan/i });
+
+    await userEvent.click(formalSpec);
+    expect(formalSpec).toBeChecked();
+    expect(inputAsPlan).not.toBeChecked();
+
+    await userEvent.click(inputAsPlan);
+    expect(inputAsPlan).toBeChecked();
+    expect(formalSpec).not.toBeChecked();
+  });
+
+  it("allows Formal specification with Grill me", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const formalSpec = await screen.findByRole("checkbox", { name: /formal specification/i });
+    const grill = screen.getByRole("checkbox", { name: /grill me/i });
+
+    await userEvent.click(formalSpec);
+    await userEvent.click(grill);
+
+    expect(formalSpec).toBeChecked();
+    expect(grill).toBeChecked();
+  });
+
+  it("allows Formal specification with Non-interactive planning", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    const formalSpec = await screen.findByRole("checkbox", { name: /formal specification/i });
+    const noninteractive = screen.getByRole("checkbox", { name: /non-interactive planning/i });
+
+    await userEvent.click(formalSpec);
+    await userEvent.click(noninteractive);
+
+    expect(formalSpec).toBeChecked();
+    expect(noninteractive).toBeChecked();
+  });
+
+  it("disables Formal specification while session creation is in progress", async () => {
+    vi.mocked(commands.createSession).mockImplementation(
+      () => new Promise<string>(() => {}),
+    );
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.type(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      "pending formal task",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Generate plan" }));
+
+    const formalSpec = await screen.findByRole("checkbox", { name: /formal specification/i });
+    expect(formalSpec).toBeDisabled();
+  });
+
+  it("does not persist formalSpec in saveNewSessionDraft", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "+ New" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /formal specification/i }));
+
+    vi.useFakeTimers();
+    vi.mocked(commands.saveNewSessionDraft).mockClear();
+    fireEvent.change(
+      screen.getByPlaceholderText("Describe what you want to implement..."),
+      { target: { value: "formal draft task" } },
+    );
+    vi.advanceTimersByTime(500);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(commands.saveNewSessionDraft).toHaveBeenCalledWith(
+      expect.not.objectContaining({ formalSpec: expect.anything() }),
+    );
+
+    vi.useRealTimers();
+  });
 });
 
 // --- listConfigs reactive refetch on source change ----------------------------

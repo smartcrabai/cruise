@@ -93,6 +93,11 @@ pub struct PlanArgs {
     #[arg(long)]
     pub skip_planning: bool,
 
+    /// Add Quint and Alloy formal specifications to the initial implementation plan.
+    /// Conflicts with `--skip-planning`, which does not invoke an LLM.
+    #[arg(long, conflicts_with = "skip_planning")]
+    pub formal_spec: bool,
+
     /// Ignore `force_exec: true` in the workflow config and plan as usual.
     #[arg(long)]
     pub no_force_exec: bool,
@@ -1080,5 +1085,54 @@ mod tests {
             }
             _ => panic!("expected Run subcommand"),
         }
+    }
+
+    #[test]
+    fn formal_spec_defaults_to_off() {
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.formal_spec),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn formal_spec_flag_enables_formal_specification_mode() {
+        let cli = Cli::parse_from(["cruise", "plan", "--formal-spec", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.formal_spec),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn formal_spec_conflicts_with_skip_planning() {
+        let result =
+            Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--skip-planning", "task"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn formal_spec_can_be_combined_with_grill() {
+        let result = Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--grill", "task"]);
+        assert!(
+            result.is_ok(),
+            "formal spec and grill should compose: {result:?}"
+        );
+    }
+
+    #[test]
+    fn formal_spec_can_be_combined_with_no_interactive_planning() {
+        let result = Cli::try_parse_from([
+            "cruise",
+            "plan",
+            "--formal-spec",
+            "--no-interactive-planning",
+            "task",
+        ]);
+        assert!(
+            result.is_ok(),
+            "formal spec and non-interactive planning should compose: {result:?}"
+        );
     }
 }

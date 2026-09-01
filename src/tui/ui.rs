@@ -552,6 +552,12 @@ fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(
         Paragraph::new(vec![
             option(
+                FormField::FormalSpec,
+                "Formal specification",
+                yes_no(form.options.planning.formal_spec),
+                Some(form.options.planning.formal_spec),
+            ),
+            option(
                 FormField::SkipPlanning,
                 "Use input as plan",
                 yes_no(form.options.planning.skip_planning),
@@ -563,7 +569,6 @@ fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 yes_no(form.options.planning.noninteractive),
                 Some(form.options.planning.noninteractive),
             ),
-            Line::from(Span::styled("  Tab moves  ·  Space toggles", muted(app))),
         ]),
         columns[1],
     );
@@ -1176,6 +1181,7 @@ mod tests {
             "Workspace",
             "Allow dirty current branch",
             "Grill planning",
+            "Formal specification",
             "Use input as plan",
             "No interactive planning",
             "Skipped steps",

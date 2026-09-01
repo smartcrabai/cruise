@@ -27,6 +27,10 @@ use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_skippable_steps};
 
 /// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the context keeps backend, interactivity, retry, mode, and cancellation settings together"
+)]
 fn cli_plan_ctx<'a>(
     config: &'a WorkflowConfig,
     plan_path: &'a Path,
@@ -34,6 +38,7 @@ fn cli_plan_ctx<'a>(
     interactive: bool,
     rate_limit_retries: usize,
     grill: bool,
+    formal_spec: bool,
     cancel_token: Option<&'a CancellationToken>,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
@@ -52,16 +57,28 @@ fn cli_plan_ctx<'a>(
         rate_limit_retries,
         working_dir,
         grill,
+        formal_spec,
         on_session_id: None,
         cancel_token,
     }
 }
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
-fn force_exec_opt_out(no_force_exec: bool, grill: bool, has_images: bool) -> Option<&'static str> {
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "these independent CLI opt-out flags are the public planning contract"
+)]
+fn force_exec_opt_out(
+    no_force_exec: bool,
+    grill: bool,
+    formal_spec: bool,
+    has_images: bool,
+) -> Option<&'static str> {
     if no_force_exec {
         Some("--no-force-exec")
     } else if grill {
         Some("--grill")
+    } else if formal_spec {
+        Some("--formal-spec")
     } else if has_images {
         Some("image attachment")
     } else {
@@ -148,7 +165,12 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec
     {
-        match force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty()) {
+        match force_exec_opt_out(
+            args.no_force_exec,
+            args.grill,
+            args.formal_spec,
+            !images.is_empty(),
+        ) {
             Some(reason) => eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim()),
             None => {
                 return run_force_exec(
@@ -250,6 +272,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             interactive,
             args.rate_limit_retries,
             args.grill,
+            args.formal_spec,
             Some(&cancel_token),
         );
         let plan_result = tokio::select! {
@@ -308,7 +331,7 @@ pub async fn launch_background_plan(
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec
     {
-        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty()) {
+        match force_exec_opt_out(no_force_exec, false, false, !detected_images.is_empty()) {
             Some(reason) => {
                 eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
             }
@@ -842,6 +865,7 @@ async fn generate_plan_for_session(
         false,
         rate_limit_retries,
         false,
+        false,
         None,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
@@ -1061,6 +1085,7 @@ async fn run_approve_loop(
         !noninteractive,
         rate_limit_retries,
         false,
+        false,
         Some(&cancel_token),
     );
 
@@ -1265,6 +1290,7 @@ pub async fn replan_session(
         std::io::stdin().is_terminal(),
         rate_limit_retries,
         false,
+        false,
         None,
     );
     run_fix_plan(&ctx, &mut vars, &mut resume).await?;
@@ -1400,6 +1426,7 @@ pub async fn generate_plan_for_draft_session(
         std::io::stdin().is_terminal(),
         rate_limit_retries,
         false,
+        false,
         None,
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume)
@@ -1473,6 +1500,7 @@ pub async fn regenerate_plan_for_session(
         Some(&work_dir),
         std::io::stdin().is_terminal(),
         rate_limit_retries,
+        false,
         false,
         None,
     );
@@ -1611,6 +1639,7 @@ mod tests {
             dry_run: false,
             no_force_exec,
             skip_planning,
+            formal_spec: false,
             grill: false,
             no_interactive_planning: false,
             repo: None,
@@ -1643,7 +1672,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_flag() {
         // Given: explicit opt-out
-        let reason = force_exec_opt_out(true, false, false);
+        let reason = force_exec_opt_out(true, false, false, false);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("--no-force-exec"));
@@ -1652,7 +1681,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_grill() {
         // Given: explicit grill planning
-        let reason = force_exec_opt_out(false, true, false);
+        let reason = force_exec_opt_out(false, true, false, false);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("--grill"));
@@ -1661,7 +1690,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_images() {
         // Given: an attached image
-        let reason = force_exec_opt_out(false, false, true);
+        let reason = force_exec_opt_out(false, false, false, true);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("image attachment"));
@@ -1670,10 +1699,36 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_is_none_when_eligible() {
         // Given: no opt-out or incompatible planning request
-        let reason = force_exec_opt_out(false, false, false);
+        let reason = force_exec_opt_out(false, false, false, false);
 
         // Then: force_exec remains eligible
         assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_for_formal_spec() {
+        // Given: explicit formal specification planning
+        let reason = force_exec_opt_out(false, false, true, false);
+
+        // Then: formal specification planning overrides force_exec
+        assert_eq!(reason, Some("--formal-spec"));
+    }
+
+    #[test]
+    fn test_force_exec_opt_out_preserves_explicit_priority() {
+        assert_eq!(
+            force_exec_opt_out(true, true, true, true),
+            Some("--no-force-exec")
+        );
+        assert_eq!(force_exec_opt_out(false, true, true, true), Some("--grill"));
+        assert_eq!(
+            force_exec_opt_out(false, false, true, true),
+            Some("--formal-spec")
+        );
+        assert_eq!(
+            force_exec_opt_out(false, false, false, true),
+            Some("image attachment")
+        );
     }
 
     #[test]

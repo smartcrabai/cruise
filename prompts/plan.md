@@ -15,6 +15,7 @@ Task:
 4. Determine file structure and design patterns (if necessary)
 5. Determine the implementation approach
    - Verify that the chosen implementation approach does not violate known knowledge or policy constraints.
+{plan.formal_spec}
 6. Include the following content in the implementation guidelines for coders:
    - Existing implementation patterns to refer to (file:line number). If similar processing already exists, always specify the source.
    - Scope of impact due to changes. Especially when adding new parameters, list all calling locations where wiring is necessary.

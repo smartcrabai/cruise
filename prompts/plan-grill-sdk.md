@@ -17,6 +17,8 @@ Task:
 - For each requirement, determine whether "changes are needed/not needed." If you decide "not needed," cite the relevant code (file:line) as the basis.
 - If reference materials point to external implementations, determine whether they are "bug fix hints" or "design approaches to adopt," and confirm the interpretation with the user when it changes the plan.
 
+{plan.formal_spec}
+
 **When — and only when — the interview has resolved every branch, write the plan and submit it by calling the `submit_plan` tool with the full plan as markdown.** Do not write the plan to a file directly — `submit_plan` persists it. Submit exactly once, after the interview is complete. The submitted plan must include, for the coders:
 - The agreed-upon implementation approach and design policies (reflecting the decisions reached during the interview).
 - Existing implementation patterns to refer to (file:line). If similar processing already exists, always specify the source.

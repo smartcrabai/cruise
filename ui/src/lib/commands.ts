@@ -139,6 +139,7 @@ export function regenerateSessionPlan(
     sessionId,
     request: {
       grill: false,
+      formalSpec: false,
       skipPlanning: false,
       noInteractivePlanning: false,
       interactive: true,
@@ -201,6 +202,7 @@ type NewSessionParams = {
   repo?: string;
   skippedSteps?: string[];
   useInputAsPlan?: boolean;
+  formalSpec?: boolean;
   grill?: boolean;
   noInteractivePlanning?: boolean;
   imageAttachments?: string[];
@@ -226,6 +228,7 @@ function newSessionRequest(params: NewSessionParams) {
 
 const planRequest = (params: NewSessionParams) => ({
   grill: params.grill ?? false,
+  formalSpec: params.formalSpec ?? false,
   // skipPlanning is reserved for the explicit "use input as plan" flow.
   // Non-interactive planning still invokes the LLM, only without planning tools.
   skipPlanning: false,
@@ -282,6 +285,7 @@ export function generatePlanForDraft(
     sessionId,
     request: {
       grill: request.grill ?? false,
+      formalSpec: false,
       skipPlanning: false,
       noInteractivePlanning: request.noInteractivePlanning ?? false,
       interactive: request.interactive ?? true,
