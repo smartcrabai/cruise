@@ -184,12 +184,12 @@ cruise が使う認証情報はユーザの jcode(TUI) 用 (`~/.jcode`) と**フ
 
   | 形 | 動作 |
   |---|---|
-  | `cruise login` | `JCODE_HOME=<cruise 専用 home>` を設定して `jcode login` を exec — jcode 自身の対話 provider ピッカー / OAuth フローがそのまま走り、認証は cruise 側 home に保存される |
+  | `cruise login` | stdin/stdout/stderr がすべて TTY の場合は Cruise のアクションメニューを表示し、「Sign in or configure a provider」で `JCODE_HOME=<cruise 専用 home>` を設定した `jcode login` に引き渡す。jcode 自身の対話 provider ピッカー / OAuth フローがそのまま走り、認証は cruise 側 home に保存される。いずれかの標準ストリームがリダイレクトされている場合は、メニューなしで `jcode login` に直接委譲する。 |
   | `cruise login <provider>` | 同上で `jcode login <provider>` に引数透過（例: `cruise login anthropic`） |
   | `cruise login --api-key <provider>` | キーを stdin（エコーなし）または環境変数から受け取り、jcode の保存形式（owner-only な `<provider>.env`）へ投入する（対応: claude-api / openai-api / openrouter / cursor / gemini / jcode）。投入手段は P3 スパイク (3) で確定: jcode CLI に非対話 login があればそれを exec、無ければ案 A の daemon API `set_api_key(provider, key)`。cruise の設定ファイルには保存しない |
   | `cruise login --status` | 認証済み provider / 利用可能モデルを一覧表示。手段は P3 スパイク (4) で確定（jcode CLI のモデル一覧 or 案 A: 一時セッション + `get_runtime_info` / `list_models`（いずれも session-scoped API）） |
 
-  実装は薄いラッパに徹する: provider 一覧・OAuth フロー・保存形式はすべて jcode 側の実装をそのまま使い、cruise は `JCODE_HOME` の切り替えと exec/API 呼び出しのみ行う。
+  実装は薄いラッパに徹する: provider 一覧・OAuth フロー・保存形式はすべて jcode 側の実装をそのまま使い、cruise は `JCODE_HOME` の切り替え、アクションメニュー / status 表示、exec/API 呼び出しのみ行う。
 - **カスタム provider（OpenAI 互換エンドポイント等）**: jcode の `[providers.<name>]` プロファイル形式（`config.toml`）を cruise 専用 home の `config.toml` に書くことで追加できる。cruise 独自の provider 記法は発明しない（PROHIBITED §1）。
 - claude backend（`sdk: claude`）の認証は claude CLI 自身のもの（既定はユーザと共用、分離する場合は §3.3 の `CLAUDE_CONFIG_DIR`）で、`cruise login` の対象外。
 - 未認証で `sdk: jcode` を実行した場合は、`cruise login` を案内する明確なエラーを出す（jcode の生エラーを素通ししない）。
