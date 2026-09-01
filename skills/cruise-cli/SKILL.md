@@ -2,7 +2,7 @@
 name: cruise-cli
 1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
-| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
+| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login` (TTY menu) / `cruise login <provider> --api-key` / `cruise login --status` |
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -45,8 +45,12 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
-| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login [provider]` / `cruise login <provider> --api-key` / `cruise login --status` |
+| Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login` (TTY menu) / `cruise login <provider> --api-key` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
+
+### Login
+
+`cruise login` with no arguments opens Cruise's action menu when stdin, stdout, and stderr are TTYs. Choose **Sign in or configure a provider** to hand provider selection, OAuth, and API-key flows to jcode, **Store an API key directly** to enter a provider id and, unless `CRUISE_LOGIN_API_KEY` is set, a hidden key, or **View authentication status** to inspect the private jcode home. Esc or **Exit** closes the menu. Explicit `cruise login <provider>`, `cruise login <provider> --api-key`, and `cruise login --status` remain one-shot shortcuts for scripts and automation. TTY colors honor `NO_COLOR`; non-TTY or redirected invocation skips the menu and decoration and delegates directly to jcode.
 
 > **Legacy shortcut:** `cruise "task"` with positional input and no subcommand is treated as `cruise plan "task"`. Piping (`echo "task" | cruise`) feeds the task on stdin.
 

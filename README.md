@@ -304,15 +304,15 @@ Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/c
 cruise login [OPTIONS] [PROVIDER]
 
 Arguments:
-  [PROVIDER]  Provider to sign in to (e.g. `claude`, `openai`, `anthropic-api`); omit for jcode's interactive picker
+  [PROVIDER]  Provider to sign in to directly; omit when stdin, stdout, and stderr are TTYs for Cruise's action menu and jcode's picker
 
 Options:
-      --api-key  Store an API key for PROVIDER non-interactively instead of running the OAuth flow
-                 (key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin; requires PROVIDER)
+      --api-key  Store an API key for PROVIDER instead of running the OAuth flow
+                 (also available when all three standard streams are TTYs; key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin)
       --status   List the providers configured in cruise's jcode home and the models available to them
 ```
 
-Manages credentials for the default `sdk: jcode` backend. Everything is stored in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), never in your `~/.jcode` and never in a cruise config file. `cruise login` hands the terminal to `jcode login` (interactive picker / OAuth flow); `--api-key` feeds a key to jcode's storage without exposing it on a command line and requires the `PROVIDER` argument (`cruise login --api-key anthropic-api`). See [SDK Mode](#sdk-mode).
+Manages credentials for the default `sdk: jcode` backend. Everything is stored in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), never in your `~/.jcode` and never in a cruise config file. When stdin, stdout, and stderr are all TTYs, argument-free `cruise login` shows a Cruise action menu: provider login hands the terminal to `jcode login`, API-key entry asks for a provider and, unless `CRUISE_LOGIN_API_KEY` is set, a hidden key, status shows authenticated providers and models, and Exit closes the menu. Explicit `cruise login <provider>`, `cruise login <provider> --api-key`, and `cruise login --status` remain one-shot shortcuts for automation. TTY colors honor `NO_COLOR`; if any standard stream is redirected, argument-free invocation delegates without the menu or ANSI decoration. The API key is never a command-line argument and is handed to jcode through stdin. See [SDK Mode](#sdk-mode).
 
 #### `cruise clean`
 
