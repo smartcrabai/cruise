@@ -55,6 +55,11 @@ async fn run_with_application(application: CruiseApplication) -> Result<()> {
     let mut input_error: Option<String> = None;
     let mut redraw = true;
     loop {
+        for payload in app.take_notifications() {
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                crate::desktop_notifications::send_payload_best_effort(&payload);
+            }));
+        }
         if redraw {
             if let Err(error) = terminal.terminal().draw(|frame| ui::draw(frame, &mut app)) {
                 app.cancel_and_quit();

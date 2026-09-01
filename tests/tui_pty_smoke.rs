@@ -61,6 +61,7 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.home.join("state"))
             // Ignore GIT_CONFIG_* pairs inherited from an outer cruise commit guard.
             .env("GIT_CONFIG_COUNT", "0")
+            .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env_remove("CRUISE_CONFIG")
             .env_remove("CRUISE_MODEL")
             .env_remove("CRUISE_PLAN_MODEL")

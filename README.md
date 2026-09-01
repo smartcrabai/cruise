@@ -92,6 +92,13 @@ cruise clean
 cruise "implement the feature"
 ```
 
+On macOS and Linux, the CLI and TUI send best-effort desktop notifications for
+**Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
+Notifications require a desktop session, and a missing notification service or
+permission never changes workflow success, failure, or exit status. Set
+`CRUISE_DISABLE_NOTIFICATIONS=1` in CI, headless environments, or tests to
+disable them.
+
 ### TUI (Interactive Keyboard Client)
 
 Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
@@ -148,6 +155,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 - The in-memory session log is bounded to the latest 10,000 lines; the Run All view is bounded to the latest 2,000 lines. Complete per-session run output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (by default `~/.local/share/cruise/sessions/<session-id>/run.log`).
 - The TUI cannot hand its stdin to an interactive child command: child processes never share TUI stdin, so such commands cannot prompt through the TUI.
 - Concurrent mutation of the same session by separate cruise processes is unsupported. Within one TUI process, distinct sessions can run concurrently, and Run All uses the configured run-all parallelism.
+- On macOS/Linux desktop sessions, the TUI sends best-effort notifications for action-required prompts, ready plans, completed runs, and failures. Notification delivery is asynchronous and never blocks rendering or changes workflow state. Set `CRUISE_DISABLE_NOTIFICATIONS=1` to suppress notifications.
 
 The CLI remains the canonical client for automation, JSON (`cruise list --json`), and CI/non-interactive use. See the [CLI Reference](#cli-reference) for the existing command workflows.
 
@@ -201,6 +209,8 @@ Options:
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning. Non-git directories fall back to running in place with a warning.
 
+Successful plan generation sends a best-effort **Plan ready** desktop notification. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
+
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `Planned`, ready for `cruise run` with no approval step. Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
 
 With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
@@ -244,6 +254,8 @@ Options:
 ```
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
+
+Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and `ask_user` questions send **Action required** immediately before waiting for input.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI/TUI setting (`cruise config --set-parallelism`).
 

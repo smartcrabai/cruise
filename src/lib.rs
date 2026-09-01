@@ -51,3 +51,5 @@ mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
+
+mod desktop_notifications;

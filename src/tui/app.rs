@@ -153,6 +153,8 @@ pub struct TuiApp {
     pub batch_parallelism: usize,
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
+    active_planning: std::collections::HashSet<String>,
+    pending_notifications: VecDeque<crate::desktop_notifications::NotificationPayload>,
     pub skip_cursor: usize,
     pub spinner_frame: usize,
     pub display: DisplayPreferences,
@@ -226,6 +228,8 @@ impl TuiApp {
             batch_parallelism: app_config.run_all_parallelism,
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
+            active_planning: std::collections::HashSet::new(),
+            pending_notifications: VecDeque::new(),
             skip_cursor: 0,
             spinner_frame: 0,
             display: DisplayPreferences {
@@ -243,6 +247,57 @@ impl TuiApp {
         app.refresh();
         app
     }
+
+    pub(crate) fn take_notifications(
+        &mut self,
+    ) -> std::collections::vec_deque::Drain<'_, crate::desktop_notifications::NotificationPayload>
+    {
+        self.pending_notifications.drain(..)
+    }
+
+    fn notification_subject(&self, session_id: &str) -> String {
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.title_or_input().to_string())
+            .or_else(|| {
+                self.application
+                    .read_session(session_id)
+                    .ok()
+                    .map(|session| session.title_or_input().to_string())
+            })
+            .filter(|subject| !subject.trim().is_empty())
+            .unwrap_or_else(|| session_id.to_string())
+    }
+
+    fn enqueue_notification(
+        &mut self,
+        kind: crate::desktop_notifications::WorkflowNotificationKind,
+        session_id: &str,
+        detail: Option<&str>,
+    ) {
+        let subject = self.notification_subject(session_id);
+        self.pending_notifications
+            .push_back(crate::desktop_notifications::build_payload(
+                kind,
+                Some(&subject),
+                detail,
+                session_id,
+            ));
+    }
+
+    fn enqueue_action_required(&mut self, session_id: &str, prompt: &str) {
+        let subject = self.notification_subject(session_id);
+        let detail = format!("{prompt} ({subject})");
+        self.pending_notifications
+            .push_back(crate::desktop_notifications::build_payload(
+                crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
+                None,
+                Some(&detail),
+                session_id,
+            ));
+    }
+
     pub fn refresh(&mut self) {
         let base_dir = if self.form.working_dir.text().trim().is_empty() {
             PathBuf::from(".")
@@ -595,9 +650,26 @@ impl TuiApp {
             },
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central event routing keeps application lifecycle handling together"
+    )]
     fn apply_control(&mut self, event: ApplicationEvent) {
         match event {
-            ApplicationEvent::PlanStarted { operation, .. } => {
+            ApplicationEvent::PlanStarted {
+                session_id,
+                operation,
+            } => {
+                if matches!(
+                    operation,
+                    crate::application::OperationKind::Generate
+                        | crate::application::OperationKind::Fix
+                        | crate::application::OperationKind::Replan
+                ) {
+                    self.active_planning.insert(session_id);
+                } else if operation == crate::application::OperationKind::Ask {
+                    self.active_planning.remove(&session_id);
+                }
                 self.status = Some(format!("{} started", operation_label(operation)));
             }
             ApplicationEvent::PlanChunk {
@@ -609,20 +681,43 @@ impl TuiApp {
                 session_id,
                 request_id,
                 question,
-            } => self.queue_prompt(
-                request_id,
-                session_id,
-                PendingPromptKind::Ask,
-                question,
-                Vec::new(),
-            ),
+            } => {
+                self.enqueue_action_required(&session_id, &question);
+                self.queue_prompt(
+                    request_id,
+                    session_id,
+                    PendingPromptKind::Ask,
+                    question,
+                    Vec::new(),
+                );
+            }
             ApplicationEvent::PlanFinished { session_id, phase } => {
+                let was_planning = self.active_planning.remove(&session_id);
+                if (phase == crate::session::SessionPhase::AwaitingApproval.label()
+                    || phase == crate::session::SessionPhase::Planned.label())
+                    && was_planning
+                {
+                    self.enqueue_notification(
+                        crate::desktop_notifications::WorkflowNotificationKind::PlanReady,
+                        &session_id,
+                        None,
+                    );
+                }
                 self.finish_plan(&session_id, &phase);
             }
             ApplicationEvent::PlanFailed { session_id, error } => {
+                self.active_planning.remove(&session_id);
+                self.enqueue_notification(
+                    crate::desktop_notifications::WorkflowNotificationKind::Failed,
+                    &session_id,
+                    Some(&error),
+                );
                 self.fail_plan(&session_id, error);
             }
-            ApplicationEvent::PlanCancelled { session_id } => self.cancel_plan(&session_id),
+            ApplicationEvent::PlanCancelled { session_id } => {
+                self.active_planning.remove(&session_id);
+                self.cancel_plan(&session_id);
+            }
             ApplicationEvent::RunStarted { session_id } => {
                 self.status = Some(format!("Run started: {session_id}"));
                 self.refresh();
@@ -638,21 +733,36 @@ impl TuiApp {
                 request_id,
                 prompt,
                 choices,
-            } => self.queue_prompt(
-                request_id,
-                session_id,
-                PendingPromptKind::Option,
-                prompt,
-                choices,
-            ),
+            } => {
+                self.enqueue_action_required(&session_id, &prompt);
+                self.queue_prompt(
+                    request_id,
+                    session_id,
+                    PendingPromptKind::Option,
+                    prompt,
+                    choices,
+                );
+            }
             ApplicationEvent::PrCreated { url, .. } => {
                 self.status = Some(format!("Pull request created: {url}"));
                 self.refresh();
             }
             ApplicationEvent::RunFinished { session_id, phase } => {
+                if phase == crate::session::SessionPhase::Completed.label() {
+                    self.enqueue_notification(
+                        crate::desktop_notifications::WorkflowNotificationKind::Completed,
+                        &session_id,
+                        None,
+                    );
+                }
                 self.finish_run(&session_id, &phase);
             }
             ApplicationEvent::RunFailed { session_id, error } => {
+                self.enqueue_notification(
+                    crate::desktop_notifications::WorkflowNotificationKind::Failed,
+                    &session_id,
+                    Some(&error),
+                );
                 self.fail_run(&session_id, error);
             }
             ApplicationEvent::RunCancelled { .. } => self.cancel_run(),
@@ -2677,5 +2787,329 @@ mod tests {
         assert!(result.is_ok(), "session creation failed: {result:?}");
         assert!(plan.formal_spec);
         app.registry.shutdown().await;
+    }
+
+    fn take_one_notification(
+        app: &mut TuiApp,
+    ) -> crate::desktop_notifications::NotificationPayload {
+        let mut notifications = app.take_notifications();
+        assert_eq!(notifications.len(), 1);
+        notifications
+            .next()
+            .unwrap_or_else(|| panic!("expected one queued notification"))
+    }
+
+    #[test]
+    fn ask_user_required_enqueues_one_action_required_notification() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.sessions[0].title = Some("Review deployment plan".to_string());
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-1".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::ActionRequired
+        );
+        assert!(notification.body.contains("Which provider should be used?"));
+        assert!(notification.body.contains("Review deployment plan"));
+    }
+
+    #[test]
+    fn option_required_enqueues_one_action_required_notification() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Running);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::OptionRequired {
+            session_id: "session".to_string(),
+            request_id: "option-1".to_string(),
+            prompt: "Choose a deployment target".to_string(),
+            choices: vec![],
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::ActionRequired
+        );
+        assert!(notification.body.contains("Choose a deployment target"));
+    }
+
+    #[test]
+    fn generate_plan_finished_awaiting_approval_enqueues_plan_ready() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Generate,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Approval".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::PlanReady
+        );
+    }
+
+    #[test]
+    fn fix_plan_finished_awaiting_approval_enqueues_plan_ready() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Fix,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Approval".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::PlanReady
+        );
+    }
+
+    #[test]
+    fn ask_plan_finished_awaiting_approval_does_not_enqueue_plan_ready() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Ask,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Approval".to_string(),
+        }));
+
+        assert!(app.take_notifications().next().is_none());
+    }
+
+    #[test]
+    fn ask_plan_finished_does_not_reuse_a_stale_previous_operation() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Generate,
+        }));
+        // A worker panic reports a generic error rather than a plan terminal
+        // event, so the next operation must replace the prior operation kind.
+        app.apply_event(UiEvent::Error("planning worker panicked".to_string()));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Ask,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Approval".to_string(),
+        }));
+
+        assert!(app.take_notifications().next().is_none());
+    }
+
+    #[test]
+    fn replan_finished_awaiting_approval_enqueues_plan_ready() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Replan,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Approval".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::PlanReady
+        );
+    }
+
+    #[test]
+    fn approved_plan_refresh_enqueues_plan_ready_for_planned_phase() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Planned);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Replan,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Planned".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::PlanReady
+        );
+    }
+
+    #[test]
+    fn plan_failed_enqueues_failed_notification_with_error_detail() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::Failed("error".to_string()),
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFailed {
+            session_id: "session".to_string(),
+            error: "backend unavailable".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::Failed
+        );
+        assert!(notification.body.contains("backend unavailable"));
+    }
+
+    #[test]
+    fn run_failed_enqueues_failed_notification_with_error_detail() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::Failed("error".to_string()),
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::RunFailed {
+            session_id: "session".to_string(),
+            error: "command exited with status 1".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::Failed
+        );
+        assert!(notification.body.contains("command exited with status 1"));
+    }
+
+    #[test]
+    fn completed_run_enqueues_completed_notification() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Completed);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::RunFinished {
+            session_id: "session".to_string(),
+            phase: "Completed".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::Completed
+        );
+    }
+
+    #[test]
+    fn cancelled_suspended_and_non_terminal_events_do_not_enqueue_notifications() {
+        let cases = [
+            UiEvent::Control(ApplicationEvent::PlanCancelled {
+                session_id: "session".to_string(),
+            }),
+            UiEvent::Control(ApplicationEvent::RunCancelled {
+                session_id: "session".to_string(),
+            }),
+            UiEvent::Control(ApplicationEvent::PlanFinished {
+                session_id: "session".to_string(),
+                phase: "Suspended".to_string(),
+            }),
+            UiEvent::Control(ApplicationEvent::RunFinished {
+                session_id: "session".to_string(),
+                phase: "Running".to_string(),
+            }),
+        ];
+
+        for event in cases {
+            let mut app = app();
+            add_session(&mut app, "session", crate::session::SessionPhase::Running);
+            app.apply_event(event);
+            assert!(app.take_notifications().next().is_none());
+        }
+    }
+
+    #[test]
+    fn batch_session_finished_does_not_duplicate_worker_completion_notification() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Completed);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::RunFinished {
+            session_id: "session".to_string(),
+            phase: "Completed".to_string(),
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::BatchSessionFinished {
+            id: "session".to_string(),
+            phase: "Completed".to_string(),
+            error: None,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::BatchFinished {
+            cancelled: false,
+        }));
+
+        let mut notifications = app.take_notifications();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications.next().map(|notification| notification.kind),
+            Some(crate::desktop_notifications::WorkflowNotificationKind::Completed)
+        );
+    }
+
+    #[test]
+    fn initialization_and_refresh_leave_notification_queue_empty() {
+        let mut app = app();
+        assert!(app.take_notifications().next().is_none());
+
+        app.refresh();
+
+        assert!(app.take_notifications().next().is_none());
     }
 }
