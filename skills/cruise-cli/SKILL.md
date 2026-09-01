@@ -214,7 +214,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **desktop GUI and TUI**).
 - In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
-- **Rate limits (HTTP 429)** retry with exponential backoff (2s → 60s), default 5 tries; tune with `--rate-limit-retries`. Loop edges are bounded by `--max-retries` (default 3).
+- **Retries:** Without an SDK fallback policy, HTTP 429 uses exponential backoff (2s → 60s), default 5 tries; an SDK `retry:` block or workflow-level model array with fallback entries also makes 5xx/network failures retryable and can switch to fallback models using the same `--rate-limit-retries` budget. Loop edges are bounded by `--max-retries` (default 3).
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
 
 ## Common recipes

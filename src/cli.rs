@@ -116,7 +116,10 @@ pub struct PlanArgs {
     #[arg(long, value_name = "OWNER/REPO")]
     pub repo: Option<String>,
 
-    /// Maximum number of rate-limit retries per LLM call.
+    /// Maximum number of retries per LLM call.
+    ///
+    /// SDK fallback policies also use this budget for 5xx/network failures and
+    /// fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
@@ -144,7 +147,10 @@ pub struct PlanWorkerArgs {
     #[arg(long)]
     pub session: String,
 
-    /// Maximum number of rate-limit retries per LLM call.
+    /// Maximum number of retries per LLM call.
+    ///
+    /// SDK fallback policies also use this budget for 5xx/network failures and
+    /// fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 }
@@ -175,7 +181,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub max_retries: Option<usize>,
 
-    /// Maximum number of rate-limit retries per step.
+    /// Maximum number of retries per step.
+    ///
+    /// SDK fallback policies also use this budget for 5xx/network failures and
+    /// fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
@@ -242,7 +251,10 @@ pub struct ExecArgs {
     #[arg(long)]
     pub max_retries: Option<usize>,
 
-    /// Maximum number of rate-limit retries per step.
+    /// Maximum number of retries per step.
+    ///
+    /// SDK fallback policies also use this budget for 5xx/network failures and
+    /// fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 

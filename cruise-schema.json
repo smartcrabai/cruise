@@ -24,12 +24,32 @@
       "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess under cruise's own JCODE_HOME (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix; sign in with `cruise login`); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
     },
     "model": {
-      "type": "string",
-      "description": "Default model to use for all steps"
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Default model to use for all steps. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "plan_model": {
-      "type": "string",
-      "description": "Model to use for plan generation steps"
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Model to use for plan generation steps. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "interactive_planning": {
       "type": "boolean",
@@ -90,7 +110,7 @@
     },
     "retry": {
       "$ref": "#/$defs/RetryConfig",
-      "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried, on the same model."
+      "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried on the same model, unless a workflow-level model array with fallback entries supplies an implicit policy."
     }
   },
   "$defs": {
@@ -302,7 +322,7 @@
         },
         "model_fallback": {
           "type": "boolean",
-          "description": "Whether a retryable failure may switch models via fallback_chains. Default: true."
+          "description": "Whether a retryable failure may switch models via fallback_chains. Default: true. Workflow-level model arrays with fallback entries always enable model fallback."
         },
         "fallback_chains": {
           "type": "object",

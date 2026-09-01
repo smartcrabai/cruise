@@ -21,6 +21,7 @@ use crate::session::{
     SessionStateFingerprint, WorkspaceMode, current_iso8601,
 };
 use crate::variable::VariableStore;
+#[cfg(test)]
 use crate::workflow::CompiledWorkflow;
 use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
 
@@ -463,22 +464,27 @@ async fn run_single(
         &mut vars,
         &mut tracker,
     );
-    let config_reloader: Option<Box<dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync>> =
-        session.config_path.as_deref().map(|path| {
-            let path = path.to_path_buf();
-            let last_mtime = Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
-            Box::new(move || {
-                let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                let mut last = lock_unpoisoned(&last_mtime);
-                if current_mtime == *last {
-                    return Ok(None);
-                }
-                let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
-                let compiled = crate::workflow::compile(config)?;
-                *last = current_mtime;
-                Ok(Some(compiled))
-            }) as Box<dyn Fn() -> Result<Option<CompiledWorkflow>> + Send + Sync>
-        });
+    let config_reloader: Option<
+        Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>,
+    > = session.config_path.as_deref().map(|path| {
+        let path = path.to_path_buf();
+        let last_mtime = Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
+        Box::new(move || {
+            let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let mut last = lock_unpoisoned(&last_mtime);
+            if current_mtime == *last {
+                return Ok(None);
+            }
+            let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
+            let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+            let compiled = crate::workflow::compile(config)?;
+            *last = current_mtime;
+            Ok(Some(crate::engine::ReloadedWorkflow {
+                compiled,
+                retry_policy,
+            }))
+        }) as Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>
+    });
     let log_path = manager.run_log_path(&session_id);
     let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");

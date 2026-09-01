@@ -51,7 +51,8 @@ pub struct PromptRun<'a> {
     /// Model name (command mode) or model reference (`sdk: jcode`,
     /// `sdk: claude`).
     pub model_or_mode: Option<&'a str>,
-    /// Maximum rate-limit retries.
+    /// Maximum retries per prompt. SDK fallback policies also use this budget
+    /// for 5xx/network failures and fallback switching.
     pub max_retries: usize,
     /// Environment variables applied to the prompt run.
     ///
@@ -309,8 +310,8 @@ async fn stream_to_outcome(
 /// `claude-agent-sdk` ([`crate::backend::claude`]).
 ///
 /// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model unless the workflow's `retry:` policy names a
-/// fallback model to switch to.
+/// off on the same model unless the workflow's explicit `retry:` policy or
+/// model-array policy names a fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
@@ -395,8 +396,9 @@ impl AttemptFailure {
 /// that rejects the reference itself (an unparseable `provider/model[:effort]`)
 /// is a notice and a move to the next chain entry, not a failed run.
 ///
-/// Without a workflow `retry:` policy this is exactly the historical loop: only
-/// a backend-reported rate limit retries, on the same model, on
+/// Without an explicit workflow `retry:` policy or a model-array policy, this
+/// is exactly the historical loop: only a backend-reported rate limit retries,
+/// on the same model, on
 /// [`crate::step::command::calculate_backoff`]'s 2s-doubling schedule, up to
 /// `req.max_retries` times.
 async fn run_with_fallback(
@@ -407,6 +409,11 @@ async fn run_with_fallback(
 ) -> Result<PromptOutcome> {
     let on_delta = req.stream.and_then(|s| s.on_stdout);
     let mut engine = FallbackEngine::new(policy, req.model_or_mode, req.max_retries);
+    if engine.startup_blocked() {
+        return Err(CruiseError::Other(
+            "all configured models are cooling down after retryable failures".to_string(),
+        ));
+    }
     if let Some((from, to)) = engine.take_startup_switch()
         && let Some(cb) = req.on_notice
     {
@@ -507,8 +514,8 @@ async fn run_with_fallback(
 /// once for the whole run, including its retries, and torn down on return.
 ///
 /// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model unless the workflow's `retry:` policy names a
-/// fallback model to switch to.
+/// off on the same model unless the workflow's explicit `retry:` policy or
+/// model-array policy names a fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
@@ -803,17 +810,20 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-budget/primary");
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
         let outcome = run_with_fallback(
             &req,
             "jcode",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-budget/primary",
+                &["test-executor-budget/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
-                Ok(if model == Some("p/spare") {
+                Ok(if model == Some("test-executor-budget/spare") {
                     canned(vec![StreamChunk::Done("ok".to_string())])
                 } else {
                     canned(vec![limit_chunk()])
@@ -825,12 +835,20 @@ mod tests {
 
         assert_eq!(outcome.result.output, "ok");
         // The primary model spends its own budget before the chain is used.
-        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-budget/primary",
+                "test-executor-budget/primary",
+                "test-executor-budget/spare"
+            ]
+        );
         let notices = recorded(&notices);
         assert!(
-            notices
-                .iter()
-                .any(|n| n == "fallback: p/primary -> p/spare (429, attempt 2/3)"),
+            notices.iter().any(|n| {
+                n == "fallback: test-executor-budget/primary -> test-executor-budget/spare \
+                         (429, attempt 2/3)"
+            }),
             "got: {notices:?}"
         );
     }
@@ -843,12 +861,15 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-zero/primary");
 
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-zero/primary",
+                &["test-executor-zero/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
                 Ok(canned(vec![limit_chunk()]))
@@ -860,7 +881,7 @@ mod tests {
         };
 
         assert!(error.to_string().contains("429"), "got: {error}");
-        assert_eq!(recorded(&models), ["p/primary"]);
+        assert_eq!(recorded(&models), ["test-executor-zero/primary"]);
     }
 
     #[tokio::test]
@@ -876,14 +897,17 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-streamed/primary");
         req.max_retries = 1;
         req.stream = Some(&stream);
 
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-streamed/primary",
+                &["test-executor-streamed/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
                 Ok(canned(vec![
@@ -899,7 +923,13 @@ mod tests {
 
         assert!(error.to_string().contains("429"), "got: {error}");
         // Retried on the same model (historical behavior), never on the spare.
-        assert_eq!(recorded(&models), ["p/primary", "p/primary"]);
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-streamed/primary",
+                "test-executor-streamed/primary"
+            ]
+        );
         assert_eq!(recorded(&lines), ["partial answer", "partial answer"]);
     }
 
@@ -911,16 +941,19 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-no-sink/primary");
         req.max_retries = 1;
 
         let outcome = run_with_fallback(
             &req,
             "claude",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-no-sink/primary",
+                &["test-executor-no-sink/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
-                Ok(if model == Some("p/spare") {
+                Ok(if model == Some("test-executor-no-sink/spare") {
                     canned(vec![StreamChunk::Done("ok".to_string())])
                 } else {
                     canned(vec![
@@ -934,7 +967,14 @@ mod tests {
         .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
 
         assert_eq!(outcome.result.output, "ok");
-        assert_eq!(recorded(&models), ["p/primary", "p/primary", "p/spare"]);
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-no-sink/primary",
+                "test-executor-no-sink/primary",
+                "test-executor-no-sink/spare"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -946,16 +986,19 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-unusable/primary");
         req.on_notice = Some(&on_notice);
 
         let outcome = run_with_fallback(
             &req,
             "jcode",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-unusable/primary",
+                &["test-executor-unusable/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
-                if model == Some("p/spare") {
+                if model == Some("test-executor-unusable/spare") {
                     Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
                 } else {
                     Err(CruiseError::Other("invalid model reference".to_string()))
@@ -966,12 +1009,19 @@ mod tests {
         .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
 
         assert_eq!(outcome.result.output, "ok");
-        assert_eq!(recorded(&models), ["p/primary", "p/spare"]);
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-unusable/primary",
+                "test-executor-unusable/spare"
+            ]
+        );
         let notices = recorded(&notices);
         assert!(
-            notices
-                .iter()
-                .any(|n| n == "fallback: p/primary -> p/spare (unusable model, attempt 1/1)"),
+            notices.iter().any(|n| {
+                n == "fallback: test-executor-unusable/primary -> test-executor-unusable/spare \
+                         (unusable model, attempt 1/1)"
+            }),
             "got: {notices:?}"
         );
     }
@@ -980,7 +1030,7 @@ mod tests {
     async fn an_undispatchable_model_reference_without_a_chain_surfaces_its_error() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-no-chain/primary");
 
         let Err(error) = run_with_fallback(&req, "jcode", None, |_| {
             Err(CruiseError::Other("invalid model reference".to_string()))
@@ -1009,14 +1059,17 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-cancel/primary");
         req.on_notice = Some(&on_notice);
         req.cancel_token = Some(&token);
 
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-cancel/primary",
+                &["test-executor-cancel/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
                 Err(CruiseError::Other("invalid model reference".to_string()))
@@ -1032,7 +1085,7 @@ mod tests {
             "expected Interrupted, got: {error}"
         );
         // The spare was decided on but never spawned.
-        assert_eq!(recorded(&models), ["p/primary"]);
+        assert_eq!(recorded(&models), ["test-executor-cancel/primary"]);
     }
 
     #[tokio::test]
@@ -1041,13 +1094,16 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("p/primary");
+        req.model_or_mode = Some("test-executor-closed/primary");
         req.max_retries = 3;
 
         let Err(error) = run_with_fallback(
             &req,
             "claude",
-            Some(fast_policy(&[("p/primary", &["p/spare"])])),
+            Some(fast_policy(&[(
+                "test-executor-closed/primary",
+                &["test-executor-closed/spare"],
+            )])),
             |model| {
                 record(&models_sink, model.unwrap_or_default());
                 Ok(canned(Vec::new()))
@@ -1064,6 +1120,6 @@ mod tests {
                 .contains("claude stream closed before completion"),
             "got: {error}"
         );
-        assert_eq!(recorded(&models), ["p/primary"]);
+        assert_eq!(recorded(&models), ["test-executor-closed/primary"]);
     }
 }

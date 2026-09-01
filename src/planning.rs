@@ -266,8 +266,14 @@ pub async fn run_plan_prompt_template(
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
     let model_or_mode = executor.plan_model_or_mode(
-        ctx.config.plan_model.as_deref(),
-        ctx.config.model.as_deref(),
+        ctx.config
+            .plan_model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary),
+        ctx.config
+            .model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary),
     );
     // Tool-based planning is gated on `interactive_planning`; when it is off the
     // plan is written to `{plan}` directly via the file-writing templates and no
@@ -397,9 +403,23 @@ pub fn plan_conversation_key(config: &WorkflowConfig, config_identity: &str) -> 
     };
     hasher.update(backend.as_bytes());
     hasher.update([0]);
-    hasher.update(config.model.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(
+        config
+            .model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.update([0]);
-    hasher.update(config.plan_model.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(
+        config
+            .plan_model
+            .as_ref()
+            .and_then(crate::config::ModelSpec::primary)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.update([0]);
     for command in &config.command {
         hasher.update(command.as_bytes());
