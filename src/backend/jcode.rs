@@ -161,6 +161,9 @@ pub(crate) fn jcode_command(binary: &Path, home: &Path) -> std::process::Command
     command
         .arg(NO_UPDATE_FLAG)
         .envs(isolation_env(home))
+        // This is a cruise-login input only. The API-key flow forwards the
+        // value through the child's stdin, never through its environment.
+        .env_remove("CRUISE_LOGIN_API_KEY")
         .stdin(Stdio::null());
     command
 }
@@ -564,6 +567,9 @@ pub fn auth_status<S: std::hash::BuildHasher>(
     command
         .envs(env)
         .envs(isolation_env(home))
+        // Keep the login-only input out of auth probes as well. `auth_status`
+        // starts its child directly rather than through `jcode_command`.
+        .env_remove("CRUISE_LOGIN_API_KEY")
         .stdin(Stdio::null());
     let output = command.output().map_err(|e| {
         CruiseError::Other(format!(
