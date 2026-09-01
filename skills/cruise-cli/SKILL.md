@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --formal-spec / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login` (TTY menu) / `cruise login <provider> --api-key` / `cruise login --status` |
 ---
@@ -29,6 +29,7 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 | Plan in the background, review later, return immediately | `cruise --plan "task"` |
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
+| Add Quint and Alloy formal specifications to the initial plan | `cruise plan --formal-spec "task"` |
 | Disable SDK planning tools and have the agent write `plan.md` directly | `cruise plan --no-interactive-planning "task"` |
 | Attach planning images | `cruise plan --image screenshot.png "task"` (repeat `--image` as needed) |
 | Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |
@@ -43,7 +44,7 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 | Dump session state for scripts | `cruise list --json` |
 | Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
-1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
+1: description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / login), planning variants (--skip-planning / --grill / --formal-spec / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's GUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, and runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is…
 2: | Show / change app-level settings (e.g. GUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / store an API key / inspect what's configured | `cruise login` (TTY menu) / `cruise login <provider> --api-key` / `cruise login --status` |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
@@ -84,6 +85,10 @@ plan/draft  →  [AwaitingInput while `ask_user` waits]  →  AwaitingApproval  
 ### `--no-interactive-planning`
 
 `cruise plan --no-interactive-planning "task"` disables the SDK planning tools (`submit_plan`, `update_plan`, `ask_user`) for this invocation and asks the agent to write `plan.md` directly. Use it with tool-incapable providers. It conflicts with `--grill`; the GUI equivalent is **Non-interactive planning**.
+
+### `--formal-spec`
+
+`cruise plan --formal-spec "task"` keeps the ordinary Markdown implementation plan and adds both Quint and Alloy formal specifications. The initial-plan prompt requires valid syntax, semantic comments in the configured plan language, faithful meaning preservation, internally consistent state/transition models, invariant preservation, and reachable requested final states. It is off by default, may be combined with `--grill` or `--no-interactive-planning`, and works with command and SDK backends without requiring a TTY or SDK tools. It conflicts with `--skip-planning`, which uses the input verbatim. The TUI and desktop New Session forms provide the same toggle. The CLI and standard desktop/TUI workflows expose it only for the initial foreground plan request: it is not persisted and those workflows do not apply it to background `cruise --plan`, Fix, Ask, Replan, or generating a plan for an existing draft. The lower-level application API carries `formalSpec` on `Generate` requests and honors it for callers that invoke that operation directly, including eligible existing-draft Generate calls. When `force_exec: true` is configured, explicitly passing `--formal-spec` selects normal plan generation for that invocation.
 
 ### `--image`
 
@@ -147,7 +152,7 @@ Bare `cruise` opens the official keyboard-only client beside the CLI and desktop
 The TUI has exactly three views:
 
 - **Sessions** — Browse the global session list. Each selected session has **Info**, **DAG**, **Plan**, and **Log** detail tabs. The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The view exposes the complete phase action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions), including Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** — Create a session or draft from a local Directory or GitHub source. The form supports workflow config, skipped steps, task text and image paths, input-as-plan, Grill me, non-interactive planning, draft persistence, and selection history. Paths are typed with completion.
+- **New Session** — Create a session or draft from a local Directory or GitHub source. The form supports workflow config, skipped steps, task text and image paths, input-as-plan, Formal specification, Grill me, non-interactive planning, draft persistence, and selection history. Paths are typed with completion.
 - **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. It uses the configured `run_all_parallelism`; the CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
 
 Ask and Option prompts are handled in the TUI. Required prompts are queued; a single-session prompt opens automatically, while Run All shows a queue badge. PR and Issue URLs are shown as text. Only a dedicated PR/Issue URL action opens a URL, using `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. The CLI-only `login`, `config`, and `exec` operations remain CLI commands rather than TUI screens.

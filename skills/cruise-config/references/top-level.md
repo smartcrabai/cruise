@@ -153,8 +153,10 @@ force_exec: true
 ```
 
 Use `--no-force-exec`, `--repo`, `--grill`, or image attachments to keep normal
-planning. `--skip-planning` and `--no-interactive-planning` do not disable direct
-execution. Background `--plan` runs foreground because no plan worker is needed.
+planning. On the foreground `cruise plan` entry point, `--formal-spec` also keeps
+normal planning and adds formal specifications. `--skip-planning` and
+`--no-interactive-planning` do not disable direct execution. Background `--plan`
+runs foreground because no plan worker is needed.
 
 ## Rate-limit retry
 
