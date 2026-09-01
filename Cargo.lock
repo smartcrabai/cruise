@@ -901,6 +901,7 @@ dependencies = [
  "indexmap 2.14.1",
  "inquire",
  "libc",
+ "notify-rust",
  "ratatui",
  "ratatui-textarea",
  "reedline",

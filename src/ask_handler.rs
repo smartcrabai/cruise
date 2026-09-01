@@ -62,6 +62,12 @@ pub struct CliAskHandler;
 
 impl AskHandler for CliAskHandler {
     fn ask_user(&self, question: &str) -> Result<String> {
+        crate::desktop_notifications::send_best_effort(
+            crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
+            None,
+            Some(question),
+            "CLI",
+        );
         crate::multiline_input::prompt_multiline(question)?.into_result()
     }
 }

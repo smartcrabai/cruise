@@ -16,6 +16,7 @@ mod config_cmd;
 mod configs;
 mod console_mode;
 mod dag;
+mod desktop_notifications;
 mod display;
 mod draft_cmd;
 mod engine;

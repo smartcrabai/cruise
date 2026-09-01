@@ -86,6 +86,29 @@ fn force_exec_opt_out(
     }
 }
 
+fn notification_kind_for_plan_result(
+    result: &Result<()>,
+) -> Option<crate::desktop_notifications::WorkflowNotificationKind> {
+    match result {
+        Ok(()) => Some(crate::desktop_notifications::WorkflowNotificationKind::PlanReady),
+        Err(CruiseError::Interrupted) => None,
+        Err(_) => Some(crate::desktop_notifications::WorkflowNotificationKind::Failed),
+    }
+}
+
+fn notify_plan_result(session: &SessionState, result: &Result<()>) {
+    let Some(kind) = notification_kind_for_plan_result(result) else {
+        return;
+    };
+    let detail = result.as_ref().err().map(ToString::to_string);
+    crate::desktop_notifications::send_best_effort(
+        kind,
+        Some(session.title_or_input()),
+        detail.as_deref(),
+        &session.id,
+    );
+}
+
 async fn run_force_exec(
     target: PlanTarget,
     input: String,
@@ -251,6 +274,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         // images; the LLM running steps will pick those up via plan.md.
         let plan_content = session.input_with_attachments();
         if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &plan_content) {
+            notify_plan_result(&session, &Err(CruiseError::Other(e.to_string())));
             eprintln!(
                 "\n{} Failed to write input as plan. Session {} discarded.",
                 style("✗").red().bold(),
@@ -262,6 +286,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             }
             return Err(e);
         }
+        notify_plan_result(&session, &Ok(()));
     } else {
         let work_dir = plan_working_dir(&session).to_path_buf();
         let cancel_token = CancellationToken::new();
@@ -283,6 +308,9 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             },
         };
         if let Err(e) = plan_result {
+            if !matches!(&e, &CruiseError::Interrupted) {
+                notify_plan_result(&session, &Err(CruiseError::Other(e.to_string())));
+            }
             eprintln!(
                 "\n{} Plan generation failed. Session {} discarded.",
                 style("✗").red().bold(),
@@ -294,6 +322,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             }
             return Err(e);
         }
+        notify_plan_result(&session, &Ok(()));
     }
 
     // Approve-plan loop.
@@ -356,26 +385,20 @@ pub async fn launch_background_plan(
     if skip_planning {
         let plan_path = session.plan_path(&manager.sessions_dir());
         let plan_content = session.input_with_attachments();
-        let write_result = crate::planning::write_input_as_plan(&plan_path, &plan_content);
-        match write_result {
-            Ok(content) => {
+        let skip_result =
+            crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
-                if let Err(e) = finalize_skip_planning_session(&manager, &mut session) {
-                    cleanup_discarded_session_workspace(&manager, &session);
-                    if let Err(del_err) = manager.delete(&session.id) {
-                        eprintln!("warning: failed to clean up session: {del_err}");
-                    }
-                    return Err(e);
-                }
+                finalize_skip_planning_session(&manager, &mut session)
+            });
+        if let Err(error) = skip_result {
+            notify_plan_result(&session, &Err(CruiseError::Other(error.to_string())));
+            cleanup_discarded_session_workspace(&manager, &session);
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
             }
-            Err(e) => {
-                cleanup_discarded_session_workspace(&manager, &session);
-                if let Err(del_err) = manager.delete(&session.id) {
-                    eprintln!("warning: failed to clean up session: {del_err}");
-                }
-                return Err(e);
-            }
+            return Err(error);
         }
+        notify_plan_result(&session, &Ok(()));
         eprintln!(
             "\n{} Session {} created (input used as plan).",
             style("✓").green().bold(),
@@ -427,12 +450,16 @@ pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
             crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
             session.plan_error = None;
             manager.save(&session)?;
+            notify_plan_result(&session, &Ok(()));
             Ok(())
         }
         Err(err) => {
             let plan_error = err.to_string();
             session.plan_error = Some(plan_error.clone());
             manager.save(&session)?;
+            if !matches!(&err, &CruiseError::Interrupted) {
+                notify_plan_result(&session, &Err(CruiseError::Other(plan_error.clone())));
+            }
             Err(CruiseError::Other(plan_error))
         }
     }
@@ -1199,14 +1226,25 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                tokio::select! {
-                    result = run_fix_plan(&ctx, vars, resume) => result?,
+                let fix_result = tokio::select! {
+                    result = run_fix_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
                         cancel_token.cancel();
-                        return Err(CruiseError::Interrupted);
+                        Err(CruiseError::Interrupted)
                     },
-                }
-                plan_content = crate::metadata::read_plan_markdown(plan_path)?;
+                };
+                let _ = fix_result
+                    .as_ref()
+                    .inspect_err(|_| notify_plan_result(session, &fix_result));
+                fix_result?;
+                plan_content = match crate::metadata::read_plan_markdown(plan_path) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        notify_plan_result(session, &Err(CruiseError::Other(error.to_string())));
+                        return Err(error);
+                    }
+                };
+                notify_plan_result(session, &Ok(()));
             }
             "Ask" => {
                 let text = match prompt_multiline("Your question:")? {
@@ -1214,13 +1252,17 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
-                tokio::select! {
-                    result = run_ask_plan(&ctx, vars, resume) => result?,
+                let ask_result = tokio::select! {
+                    result = run_ask_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
                         cancel_token.cancel();
-                        return Err(CruiseError::Interrupted);
+                        Err(CruiseError::Interrupted)
                     },
-                }
+                };
+                let _ = ask_result
+                    .as_ref()
+                    .inspect_err(|_| notify_plan_result(session, &ask_result));
+                ask_result?;
             }
 
             "Publish as Issue" => {
@@ -1278,36 +1320,42 @@ pub async fn replan_session(
     feedback: String,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
-        manager.save(session)?;
-    }
-    let config = manager.load_config(session)?;
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
-    vars.set_prev_input(Some(feedback));
-    let working_dir = session
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| session.base_dir.clone());
-    let mut resume: Option<String> = None;
-    // Fix-plan reuses the standard template regardless of grill.
-    let ctx = cli_plan_ctx(
-        &config,
-        &plan_path,
-        Some(working_dir.as_path()),
-        std::io::stdin().is_terminal(),
-        rate_limit_retries,
-        false,
-        false,
-        None,
-    );
-    run_fix_plan(&ctx, &mut vars, &mut resume).await?;
+    let result = async {
+        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+            manager.save(session)?;
+        }
+        let config = manager.load_config(session)?;
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let mut vars =
+            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+        vars.set_prev_input(Some(feedback));
+        let working_dir = session
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| session.base_dir.clone());
+        let mut resume: Option<String> = None;
+        // Fix-plan reuses the standard template regardless of grill.
+        let ctx = cli_plan_ctx(
+            &config,
+            &plan_path,
+            Some(working_dir.as_path()),
+            std::io::stdin().is_terminal(),
+            rate_limit_retries,
+            false,
+            false,
+            None,
+        );
+        run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
-    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-    session.plan_error = None;
-    manager.save(session)?;
-    Ok(())
+        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+        session.plan_error = None;
+        manager.save(session)?;
+        Ok(())
+    }
+    .await;
+    notify_plan_result(session, &result);
+    result
 }
 
 /// Run the built-in fix-plan prompt.
@@ -1407,55 +1455,61 @@ pub async fn generate_plan_for_draft_session(
     session: &mut SessionState,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    if !matches!(session.phase, SessionPhase::Draft) {
-        return Err(CruiseError::Other(format!(
-            "expected Draft phase, got {}",
-            session.phase.label()
-        )));
-    }
-    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+    let result = async {
+        if !matches!(session.phase, SessionPhase::Draft) {
+            return Err(CruiseError::Other(format!(
+                "expected Draft phase, got {}",
+                session.phase.label()
+            )));
+        }
+        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+            manager.save(session)?;
+        }
+        let config = manager.load_config(session)?;
+        setup_planning_worktree(manager, session)?;
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let mut vars =
+            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+
+        // Own the working dir so `ctx` doesn't borrow `session` across the
+        // mutable `inspect_err` below.
+        let work_dir = plan_working_dir(session).to_path_buf();
+        let mut resume: Option<String> = None;
+        // Draft regeneration uses the standard plan flow; grill is a `cruise plan`
+        // flag and is not threaded through drafts.
+        let ctx = cli_plan_ctx(
+            &config,
+            &plan_path,
+            Some(&work_dir),
+            std::io::stdin().is_terminal(),
+            rate_limit_retries,
+            false,
+            false,
+            None,
+        );
+        generate_plan_markdown(&ctx, &mut vars, &mut resume)
+            .await
+            .inspect_err(|e| {
+                session.plan_error = Some(e.to_string());
+                cleanup_planning_worktree(session);
+                session.worktree_path = None;
+                session.worktree_branch = None;
+                if let Err(save_err) = manager.save(session) {
+                    eprintln!("warning: failed to persist plan error state: {save_err}");
+                }
+            })?;
+
+        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+
+        session.phase = SessionPhase::AwaitingApproval;
+        session.plan_error = None;
         manager.save(session)?;
+        Ok(())
     }
-    let config = manager.load_config(session)?;
-    setup_planning_worktree(manager, session)?;
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
-
-    // Own the working dir so `ctx` doesn't borrow `session` across the
-    // mutable `inspect_err` below.
-    let work_dir = plan_working_dir(session).to_path_buf();
-    let mut resume: Option<String> = None;
-    // Draft regeneration uses the standard plan flow; grill is a `cruise plan`
-    // flag and is not threaded through drafts.
-    let ctx = cli_plan_ctx(
-        &config,
-        &plan_path,
-        Some(&work_dir),
-        std::io::stdin().is_terminal(),
-        rate_limit_retries,
-        false,
-        false,
-        None,
-    );
-    generate_plan_markdown(&ctx, &mut vars, &mut resume)
-        .await
-        .inspect_err(|e| {
-            session.plan_error = Some(e.to_string());
-            cleanup_planning_worktree(session);
-            session.worktree_path = None;
-            session.worktree_branch = None;
-            if let Err(save_err) = manager.save(session) {
-                eprintln!("warning: failed to persist plan error state: {save_err}");
-            }
-        })?;
-
-    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-
-    session.phase = SessionPhase::AwaitingApproval;
-    session.plan_error = None;
-    manager.save(session)?;
-    Ok(())
+    .await;
+    notify_plan_result(session, &result);
+    result
 }
 
 /// Regenerate the plan for a session that is already past the Draft phase.
@@ -1473,78 +1527,84 @@ pub async fn regenerate_plan_for_session(
     session: &mut SessionState,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    match &session.phase {
-        SessionPhase::Draft
-        | SessionPhase::AwaitingInput
-        | SessionPhase::AwaitingApproval
-        | SessionPhase::Planned => {}
-        other => {
-            return Err(CruiseError::Other(format!(
-                "expected Draft, AwaitingInput, AwaitingApproval, or Planned phase, got {}",
-                other.label()
-            )));
+    let result = async {
+        match &session.phase {
+            SessionPhase::Draft
+            | SessionPhase::AwaitingInput
+            | SessionPhase::AwaitingApproval
+            | SessionPhase::Planned => {}
+            other => {
+                return Err(CruiseError::Other(format!(
+                    "expected Draft, AwaitingInput, AwaitingApproval, or Planned phase, got {}",
+                    other.label()
+                )));
+            }
         }
-    }
 
-    let original_phase = session.phase.clone();
+        let original_phase = session.phase.clone();
 
-    if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
+            manager.save(session)?;
+        }
+        let config = manager.load_config(session)?;
+        // Save worktree context before planning; a Planned session already has an
+        // approved worktree that must survive a planning failure.
+        let saved_worktree_path = session.worktree_path.clone();
+        let saved_worktree_branch = session.worktree_branch.clone();
+        setup_planning_worktree(manager, session)?;
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        let mut vars =
+            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+
+        let work_dir = plan_working_dir(session).to_path_buf();
+        let mut resume: Option<String> = None;
+        let ctx = cli_plan_ctx(
+            &config,
+            &plan_path,
+            Some(&work_dir),
+            std::io::stdin().is_terminal(),
+            rate_limit_retries,
+            false,
+            false,
+            None,
+        );
+        generate_plan_markdown(&ctx, &mut vars, &mut resume)
+            .await
+            .inspect_err(|e| {
+                session.plan_error = Some(e.to_string());
+                if saved_worktree_path.is_none() {
+                    // Worktree was freshly created for this planning attempt; clean it up.
+                    cleanup_planning_worktree(session);
+                    session.worktree_path = None;
+                    session.worktree_branch = None;
+                } else {
+                    // Restore the pre-existing approved worktree; do not delete it.
+                    session.worktree_path = saved_worktree_path;
+                    session.worktree_branch = saved_worktree_branch;
+                }
+                if let Err(save_err) = manager.save(session) {
+                    eprintln!("warning: failed to persist plan error state: {save_err}");
+                }
+            })?;
+
+        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
+
+        session.plan_error = None;
+        // Phase transition matching GUI's regenerate_plan (src-tauri/src/commands.rs:1422-1427):
+        // - Draft | AwaitingInput → AwaitingApproval
+        // - AwaitingApproval → AwaitingApproval (no-op)
+        // - Planned → Planned (preserve approval; do NOT silently un-approve)
+        session.phase = match original_phase {
+            SessionPhase::Draft | SessionPhase::AwaitingInput => SessionPhase::AwaitingApproval,
+            _ => original_phase,
+        };
         manager.save(session)?;
+        Ok(())
     }
-    let config = manager.load_config(session)?;
-    // Save worktree context before planning; a Planned session already has an
-    // approved worktree that must survive a planning failure.
-    let saved_worktree_path = session.worktree_path.clone();
-    let saved_worktree_branch = session.worktree_branch.clone();
-    setup_planning_worktree(manager, session)?;
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
-
-    let work_dir = plan_working_dir(session).to_path_buf();
-    let mut resume: Option<String> = None;
-    let ctx = cli_plan_ctx(
-        &config,
-        &plan_path,
-        Some(&work_dir),
-        std::io::stdin().is_terminal(),
-        rate_limit_retries,
-        false,
-        false,
-        None,
-    );
-    generate_plan_markdown(&ctx, &mut vars, &mut resume)
-        .await
-        .inspect_err(|e| {
-            session.plan_error = Some(e.to_string());
-            if saved_worktree_path.is_none() {
-                // Worktree was freshly created for this planning attempt; clean it up.
-                cleanup_planning_worktree(session);
-                session.worktree_path = None;
-                session.worktree_branch = None;
-            } else {
-                // Restore the pre-existing approved worktree; do not delete it.
-                session.worktree_path = saved_worktree_path;
-                session.worktree_branch = saved_worktree_branch;
-            }
-            if let Err(save_err) = manager.save(session) {
-                eprintln!("warning: failed to persist plan error state: {save_err}");
-            }
-        })?;
-
-    let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-    crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-
-    session.plan_error = None;
-    // Phase transition matching GUI's regenerate_plan (src-tauri/src/commands.rs:1422-1427):
-    // - Draft | AwaitingInput → AwaitingApproval
-    // - AwaitingApproval → AwaitingApproval (no-op)
-    // - Planned → Planned (preserve approval; do NOT silently un-approve)
-    session.phase = match original_phase {
-        SessionPhase::Draft | SessionPhase::AwaitingInput => SessionPhase::AwaitingApproval,
-        _ => original_phase,
-    };
-    manager.save(session)?;
-    Ok(())
+    .await;
+    notify_plan_result(session, &result);
+    result
 }
 
 #[cfg(test)]
@@ -1736,6 +1796,26 @@ mod tests {
         assert_eq!(
             force_exec_opt_out(false, false, false, true),
             Some("image attachment")
+        );
+    }
+
+    #[test]
+    fn plan_notification_mapping_distinguishes_success_and_failure() {
+        use crate::desktop_notifications::WorkflowNotificationKind;
+
+        assert_eq!(
+            notification_kind_for_plan_result(&Ok(())),
+            Some(WorkflowNotificationKind::PlanReady)
+        );
+        assert_eq!(
+            notification_kind_for_plan_result(&Err(CruiseError::Other(
+                "planning backend unavailable".to_string(),
+            ))),
+            Some(WorkflowNotificationKind::Failed)
+        );
+        assert_eq!(
+            notification_kind_for_plan_result(&Err(CruiseError::Interrupted)),
+            None
         );
     }
 

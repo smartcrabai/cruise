@@ -29,6 +29,69 @@ const SESSION_STATE_CONFLICT_ABORT_LABEL: &str = "Abort run";
 const SESSION_STATE_CONFLICT_OVERWRITE_LABEL: &str = "Overwrite external state";
 const WORKSPACE_WORKTREE_LABEL: &str = "Create worktree (new branch)";
 const WORKSPACE_CURRENT_BRANCH_LABEL: &str = "Use current branch";
+const OPTION_NOTIFICATION_DETAIL: &str = "Waiting for an option selection";
+
+fn notification_kind_for_run_result(
+    phase: &SessionPhase,
+    result: &Result<()>,
+    dry_run: bool,
+) -> Option<crate::desktop_notifications::WorkflowNotificationKind> {
+    if dry_run {
+        return None;
+    }
+    match (phase, result) {
+        (SessionPhase::Completed, Ok(())) => {
+            Some(crate::desktop_notifications::WorkflowNotificationKind::Completed)
+        }
+        (SessionPhase::Failed(_), Err(_)) => {
+            Some(crate::desktop_notifications::WorkflowNotificationKind::Failed)
+        }
+        _ => None,
+    }
+}
+
+struct NotificationOptionHandler<'a> {
+    inner: &'a dyn OptionHandler,
+    subject: String,
+    session_id: String,
+}
+
+impl NotificationOptionHandler<'_> {
+    fn notify(&self) {
+        crate::desktop_notifications::send_best_effort(
+            crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
+            Some(&self.subject),
+            Some(OPTION_NOTIFICATION_DETAIL),
+            &self.session_id,
+        );
+    }
+}
+
+impl OptionHandler for NotificationOptionHandler<'_> {
+    fn select_option(
+        &self,
+        choices: &[crate::step::OptionChoice],
+        plan: Option<&str>,
+    ) -> Result<crate::step::option::OptionResult> {
+        if !choices.is_empty() {
+            self.notify();
+        }
+        self.inner.select_option(choices, plan)
+    }
+
+    fn select_option_with_cancellation(
+        &self,
+        choices: &[crate::step::OptionChoice],
+        plan: Option<&str>,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<crate::step::option::OptionResult> {
+        if !choices.is_empty() && !cancel_token.is_some_and(CancellationToken::is_cancelled) {
+            self.notify();
+        }
+        self.inner
+            .select_option_with_cancellation(choices, plan, cancel_token)
+    }
+}
 
 #[cfg(test)]
 const TEST_STATE_CONFLICT_ACTION_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_ACTION";
@@ -341,7 +404,6 @@ async fn run_single(
         return Err(CruiseError::Interrupted);
     }
     observer.on_phase(&session_id, RunPhase::Preparing);
-
     let config = manager.load_config(&session)?;
     validate_config(&config)?;
     if !args.dry_run
@@ -488,6 +550,11 @@ async fn run_single(
     let log_path = manager.run_log_path(&session_id);
     let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");
+    let notifying_option_handler = NotificationOptionHandler {
+        inner: option_handler,
+        subject: session.title_or_input().to_string(),
+        session_id: session_id.clone(),
+    };
     let skipped_steps = session.skipped_steps.clone();
     let session_cell = Mutex::new(&mut session);
     let session_fingerprint = Mutex::new(initial_fingerprint);
@@ -531,7 +598,7 @@ async fn run_single(
         on_step_start: &on_step_start,
         on_step_log: Some(&on_step_log),
         cancel_token: Some(&cancel_token),
-        option_handler,
+        option_handler: &notifying_option_handler,
         config_reloader: config_reloader.as_deref(),
         working_dir: Some(execution_workspace.path()),
         skipped_steps: &skipped_steps,
@@ -604,7 +671,7 @@ async fn run_single(
                                     effective_max_retries,
                                     &skipped_steps,
                                     Some(&cancel_token),
-                                    option_handler,
+                                    &notifying_option_handler,
                                     Some(&on_step_log),
                                     Some(&persist_pr),
                                 ),
@@ -694,6 +761,15 @@ async fn run_single(
         session,
         *lock_unpoisoned(&session_fingerprint),
     )?;
+    if let Some(kind) = notification_kind_for_run_result(&session.phase, &overall_result, false) {
+        let detail = overall_result.as_ref().err().map(ToString::to_string);
+        crate::desktop_notifications::send_best_effort(
+            kind,
+            Some(session.title_or_input()),
+            detail.as_deref(),
+            &session.id,
+        );
+    }
     overall_result
 }
 
@@ -3773,6 +3849,54 @@ steps:
         assert!(
             session.completed_at.is_some(),
             "completed_at should be set on failure"
+        );
+    }
+
+    #[test]
+    fn run_notification_mapping_covers_terminal_and_non_terminal_outcomes() {
+        use crate::desktop_notifications::WorkflowNotificationKind;
+
+        assert_eq!(
+            notification_kind_for_run_result(&SessionPhase::Completed, &Ok(()), false),
+            Some(WorkflowNotificationKind::Completed)
+        );
+        assert_eq!(
+            notification_kind_for_run_result(
+                &SessionPhase::Failed("persisted failure".to_string()),
+                &Err(CruiseError::CommandError("command failed".to_string())),
+                false,
+            ),
+            Some(WorkflowNotificationKind::Failed)
+        );
+        assert_eq!(
+            notification_kind_for_run_result(
+                &SessionPhase::Running,
+                &Err(CruiseError::StepPaused),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            notification_kind_for_run_result(
+                &SessionPhase::Suspended,
+                &Err(CruiseError::Interrupted),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            notification_kind_for_run_result(
+                &SessionPhase::Running,
+                &Err(CruiseError::SessionStateConflict(
+                    "changed externally".to_string()
+                )),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            notification_kind_for_run_result(&SessionPhase::Completed, &Ok(()), true),
+            None
         );
     }
 
