@@ -2173,6 +2173,7 @@ impl TuiApp {
         };
         let plan_request = PlanRequest {
             grill: self.form.options.planning.grill,
+            formal_spec: self.form.options.planning.formal_spec,
             skip_planning: self.form.options.planning.skip_planning,
             no_interactive_planning: self.form.options.planning.noninteractive,
             interactive: Interactive::new(!self.form.options.planning.noninteractive),
@@ -2636,5 +2637,45 @@ mod tests {
     fn empty_session_quit_is_immediate() {
         let mut app = app();
         assert!(app.handle_action(Action::Quit));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_session_passes_formal_spec_only_to_its_initial_plan_request() {
+        let _lock = crate::test_support::lock_process();
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|error| panic!("{error}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let config = temp.path().join("cruise.yaml");
+        std::fs::write(&config, "command: [cat]\nsteps:\n  s1:\n    prompt: plan\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            temp.path().join("sessions"),
+        ));
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new(application, events, logs_sender);
+        app.view = View::NewSession;
+        app.form.input.set_text("formal TUI task");
+        app.form
+            .working_dir
+            .set_text(&temp.path().to_string_lossy());
+        app.form.config.set_text(&config.to_string_lossy());
+        app.form.options.planning.formal_spec = true;
+
+        app.create_session();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("timed out waiting for session creation: {error}"))
+            .unwrap_or_else(|| panic!("session creation channel closed"));
+        let UiEvent::SessionCreated { result, plan } = event else {
+            panic!("expected SessionCreated event, got another event");
+        };
+        assert!(result.is_ok(), "session creation failed: {result:?}");
+        assert!(plan.formal_spec);
+        app.registry.shutdown().await;
     }
 }

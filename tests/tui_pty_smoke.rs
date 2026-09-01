@@ -435,7 +435,7 @@ fn new_session_form_creates_a_planned_session_with_selected_options() {
     tui.send(b"\t\t\t\t\t\t");
     tui.send(b" ");
     tui.send(b"\t ");
-    tui.send(b"\t\t ");
+    tui.send(b"\t\t\t ");
     tui.send(b"\x1b[F");
     tui.send(b"\r");
     tui.wait_for_output("Planning finished: Planned", START_TIMEOUT);

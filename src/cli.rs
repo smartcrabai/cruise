@@ -93,6 +93,11 @@ pub struct PlanArgs {
     #[arg(long)]
     pub skip_planning: bool,
 
+    /// Add Quint and Alloy formal specifications to the initial implementation plan.
+    /// Conflicts with `--skip-planning`, which does not invoke an LLM.
+    #[arg(long, conflicts_with = "skip_planning")]
+    pub formal_spec: bool,
+
     /// Ignore `force_exec: true` in the workflow config and plan as usual.
     #[arg(long)]
     pub no_force_exec: bool,
@@ -265,16 +270,21 @@ pub struct ExecArgs {
 
 #[derive(Parser, Debug)]
 pub struct LoginArgs {
-    /// Provider to sign in to (e.g. `claude`, `openai`, `anthropic-api`).
-    /// Omit to let jcode's interactive picker choose.
+    /// Provider to sign in to directly (e.g. `claude`, `openai`, `anthropic-api`).
+    /// When stdin, stdout, and stderr are all TTYs, omit this to open Cruise's
+    /// action menu; choosing provider login then hands control to jcode's
+    /// interactive picker. If any stream is redirected, omission delegates
+    /// directly to jcode without the menu.
     pub provider: Option<String>,
 
-    /// Store an API key non-interactively instead of running the OAuth flow.
-    ///
-    /// The key is read from the `CRUISE_LOGIN_API_KEY` environment variable if
-    /// set, otherwise from piped stdin. Requires a provider argument. The key is
-    /// handed to jcode, which stores it under cruise's `JCODE_HOME`; cruise
-    /// never writes it to its own config.
+    /// Store an API key instead of running the OAuth flow. When all three
+    /// standard streams are TTYs, this is also available from Cruise's
+    /// argument-free action menu. The key is read from the
+    /// `CRUISE_LOGIN_API_KEY` environment variable if set, otherwise from an
+    /// echo-less prompt or piped stdin. Requires a provider argument, but never
+    /// accepts the key as an inline command-line argument. The key is handed to
+    /// jcode, which stores it under cruise's `JCODE_HOME`; cruise never writes
+    /// it to its own config.
     #[arg(long, conflicts_with = "status")]
     pub api_key: bool,
 
@@ -784,10 +794,10 @@ mod tests {
     // -- Login subcommand ------------------------------------------------------
 
     #[test]
-    fn test_login_subcommand_without_arguments_is_the_interactive_flow() {
+    fn test_login_subcommand_without_arguments_opens_the_cruise_action_menu() {
         // Given: `cruise login` with nothing else
         let cli = Cli::parse_from(["cruise", "login"]);
-        // When/Then: no provider, no flags -- jcode's own picker takes over
+        // When/Then: no provider, no flags -- runtime selects Cruise's TTY menu
         match cli.command {
             Some(Commands::Login(args)) => {
                 assert_eq!(args.provider, None);
@@ -837,6 +847,29 @@ mod tests {
         assert!(
             Cli::try_parse_from(["cruise", "login", "--api-key", "--status"]).is_err(),
             "--api-key and --status are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn login_help_describes_the_tty_menu_and_non_inline_api_key() {
+        let mut command = Cli::command();
+        let login = command
+            .find_subcommand_mut("login")
+            .unwrap_or_else(|| panic!("login subcommand is missing"));
+        let help = login.render_help().to_string();
+        let lowercase_help = help.to_ascii_lowercase();
+
+        assert!(
+            lowercase_help.contains("menu"),
+            "login help should describe the argument-free menu: {help}"
+        );
+        assert!(
+            help.contains("CRUISE_LOGIN_API_KEY") && help.contains("stdin"),
+            "login help should describe safe API-key input: {help}"
+        );
+        assert!(
+            help.contains("--api-key") && lowercase_help.contains("argument"),
+            "login help should make clear that the key is not an inline argument: {help}"
         );
     }
 
@@ -1092,5 +1125,54 @@ mod tests {
             }
             _ => panic!("expected Run subcommand"),
         }
+    }
+
+    #[test]
+    fn formal_spec_defaults_to_off() {
+        let cli = Cli::parse_from(["cruise", "plan", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(!args.formal_spec),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn formal_spec_flag_enables_formal_specification_mode() {
+        let cli = Cli::parse_from(["cruise", "plan", "--formal-spec", "task"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert!(args.formal_spec),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn formal_spec_conflicts_with_skip_planning() {
+        let result =
+            Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--skip-planning", "task"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn formal_spec_can_be_combined_with_grill() {
+        let result = Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--grill", "task"]);
+        assert!(
+            result.is_ok(),
+            "formal spec and grill should compose: {result:?}"
+        );
+    }
+
+    #[test]
+    fn formal_spec_can_be_combined_with_no_interactive_planning() {
+        let result = Cli::try_parse_from([
+            "cruise",
+            "plan",
+            "--formal-spec",
+            "--no-interactive-planning",
+            "task",
+        ]);
+        assert!(
+            result.is_ok(),
+            "formal spec and non-interactive planning should compose: {result:?}"
+        );
     }
 }
