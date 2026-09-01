@@ -10,9 +10,13 @@ use crate::error::{CruiseError, Result};
 const GUARD_DIR: &str = "commit-guard";
 const HOOK_DIR: &str = "hooks";
 const HOOK_NAME: &str = "reference-transaction";
+/// Carries the guarded repository's git common dir to the hook.
+const GUARDED_ENV: &str = "CRUISE_GUARD_COMMON_DIR";
 const HOOK_CONTENT: &str = r#"#!/bin/sh
 # Cruise commit guard: reject transactions that move HEAD or a local branch.
 set -f
+# `cd` must never consult CDPATH: a match there prints the directory on stdout.
+CDPATH=''
 
 reject() {
     echo "cruise commit guard: $1" >&2
@@ -34,6 +38,25 @@ is_ref_value() {
     esac
 }
 
+# Absolute physical common dir of the repository running this transaction. Git
+# exports GIT_DIR to hooks, which also works while `git init` creates HEAD and
+# `git rev-parse` still refuses the half-built repository.
+current_common_dir() {
+    dir=${GIT_DIR-}
+    if [ -z "$dir" ]; then
+        dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+    elif [ -f "$dir/commondir" ]; then
+        common=$(cat "$dir/commondir" 2>/dev/null) || return 1
+        [ -n "$common" ] || return 1
+        case "$common" in
+            /*) dir=$common ;;
+            *) dir=$dir/$common ;;
+        esac
+    fi
+    [ -n "$dir" ] || return 1
+    (cd "$dir" 2>/dev/null && pwd -P) || return 1
+}
+
 state="${1-}"
 case "$state" in
     committed|aborted)
@@ -43,6 +66,18 @@ case "$state" in
         exit 0
         ;;
     preparing|prepared)
+        guarded=${CRUISE_GUARD_COMMON_DIR-}
+        [ -n "$guarded" ] || reject "the guarded repository is unknown"
+        current=$(current_common_dir) ||
+            reject "cannot determine the current repository"
+        # `-ef` also covers spellings `pwd -P` leaves alone, such as a case
+        # variant on a case-insensitive filesystem.
+        if [ "$current" != "$guarded" ] && ! [ "$current" -ef "$guarded" ] 2>/dev/null; then
+            while IFS= read -r _line; do
+                :
+            done
+            exit 0
+        fi
         seen=0
         while IFS= read -r line; do
             [ -n "$line" ] || reject "malformed reference-transaction input"
@@ -114,8 +149,12 @@ impl CommitGuard {
             return Ok(None);
         }
 
+        // Scope the hook to this repository so unrelated repositories below the
+        // prompt process keep working with an inherited guard environment.
+        let common_dir = guarded_common_dir(cwd, env)?;
         let hook_dir = install_hook()?;
-        let guarded_env = build_guard_env(env, &hook_dir)?;
+        let mut guarded_env = build_guard_env(env, &hook_dir)?;
+        guarded_env.insert(GUARDED_ENV.to_string(), common_dir);
         let before = head_state(cwd, &guarded_env)?;
 
         Ok(Some(Self {
@@ -274,6 +313,40 @@ fn is_git_worktree(cwd: &Path, env: &HashMap<String, String>) -> Result<bool> {
     Err(guard_error(format_git_failure("worktree probe", &output)))
 }
 
+/// Absolute physical git common dir of the repository containing `cwd`, shared
+/// by all its worktrees. Canonicalized because the hook compares it against
+/// `pwd -P`, and probed with the original environment: the guard env does not
+/// exist yet.
+fn guarded_common_dir(cwd: &Path, env: &HashMap<String, String>) -> Result<String> {
+    let output = run_git(
+        cwd,
+        env,
+        [OsStr::new("rev-parse"), OsStr::new("--git-common-dir")],
+    )?;
+    if !output.status.success() {
+        return Err(guard_error(format_git_failure(
+            "git common dir probe",
+            &output,
+        )));
+    }
+    let probed = utf8_stdout("git common dir probe", &output)?;
+    let probed = probed.trim();
+    if probed.is_empty() {
+        return Err(guard_error(
+            "git common dir probe returned a malformed path",
+        ));
+    }
+    let common_dir = fs::canonicalize(cwd.join(probed)).map_err(|error| {
+        guard_error(format!(
+            "cannot resolve the guarded git common dir {probed}: {error}"
+        ))
+    })?;
+    common_dir
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| guard_error("guarded git common dir is not valid UTF-8"))
+}
+
 fn head_state(cwd: &Path, env: &HashMap<String, String>) -> Result<HeadState> {
     let target_output = run_git(
         cwd,
@@ -428,7 +501,7 @@ fn install_hook() -> Result<PathBuf> {
         ))
     })?;
     let hook_path = hooks.join(HOOK_NAME);
-    if fs::read(&hook_path).is_ok_and(|content| content == HOOK_CONTENT.as_bytes()) {
+    if fs::read(&hook_path).is_ok_and(|existing| existing == HOOK_CONTENT.as_bytes()) {
         set_mode(&hook_path, 0o755)?;
     } else {
         atomic_write_hook(&hook_path)?;
@@ -601,6 +674,11 @@ mod tests {
 
     #[test]
     fn malformed_active_config_pair_fails_closed() {
+        // `effective_env_value` falls back to the process environment, so an
+        // inherited GIT_CONFIG_VALUE_0 (cruise running under an outer guard)
+        // would otherwise satisfy the missing pair member.
+        let _lock = crate::test_support::lock_process();
+        let _value_guard = crate::test_support::EnvGuard::remove("GIT_CONFIG_VALUE_0");
         let mut env = HashMap::new();
         env.insert("GIT_CONFIG_COUNT".to_string(), "1".to_string());
         env.insert("GIT_CONFIG_KEY_0".to_string(), "user.name".to_string());
@@ -608,32 +686,73 @@ mod tests {
         assert!(matches!(result, Err(CruiseError::CommitGuardViolation(_))));
     }
 
+    /// Run the installed hook body the way git would: `sh -c <body> <name>
+    /// <phase>` with the transaction lines on stdin, from `cwd`.
+    #[cfg(unix)]
+    fn run_hook(cwd: &Path, phase: &str, input: &str, extra_env: &[(&str, &str)]) -> Output {
+        use std::io::Write as _;
+
+        // Absolute interpreter: a PATH override must hide `git`, not `sh` itself.
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(HOOK_CONTENT)
+            .arg("cruise-reference-transaction")
+            .arg(phase)
+            .current_dir(cwd)
+            // Start from a guard-free environment: count 0 disables inherited
+            // GIT_CONFIG_* pairs, and the identity comes from `extra_env` only.
+            .env("GIT_CONFIG_COUNT", "0")
+            .env_remove(GUARDED_ENV)
+            .envs(extra_env.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("failed to spawn hook: {error}"));
+        child
+            .stdin
+            .take()
+            .unwrap_or_else(|| panic!("hook stdin unavailable"))
+            .write_all(input.as_bytes())
+            .unwrap_or_else(|error| panic!("failed to write hook input: {error}"));
+        child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("failed to wait for hook: {error}"))
+    }
+
+    /// The value `guarded_common_dir` would hand the hook for `dir`.
+    #[cfg(unix)]
+    fn probe_common_dir(dir: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(dir)
+            .env("GIT_CONFIG_COUNT", "0")
+            .output()
+            .unwrap_or_else(|error| panic!("common dir probe failed to start: {error}"));
+        assert!(
+            output.status.success(),
+            "common dir probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        fs::canonicalize(dir.join(probed))
+            .unwrap_or_else(|error| panic!("canonicalize failed: {error}"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[cfg(unix)]
     #[test]
     fn hook_rejects_branch_updates_and_accepts_terminal_phases() {
-        use std::io::Write as _;
-
+        let repo = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::run_git_ok(repo.path(), &["init"]);
+        let common_dir = probe_common_dir(repo.path());
         let run = |phase: &str, input: &str| {
-            let mut child = Command::new("sh")
-                .arg("-c")
-                .arg(HOOK_CONTENT)
-                .arg("cruise-reference-transaction")
-                .arg(phase)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap_or_else(|error| panic!("failed to spawn hook: {error}"));
-            child
-                .stdin
-                .take()
-                .unwrap_or_else(|| panic!("hook stdin unavailable"))
-                .write_all(input.as_bytes())
-                .unwrap_or_else(|error| panic!("failed to write hook input: {error}"));
-            child
-                .wait_with_output()
-                .unwrap_or_else(|error| panic!("failed to wait for hook: {error}"))
+            run_hook(repo.path(), phase, input, &[(GUARDED_ENV, &common_dir)])
         };
+
         let input = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
         assert!(!run("preparing", &input).status.success());
         assert!(!run("prepared", &input).status.success());
@@ -646,6 +765,70 @@ mod tests {
         assert!(!run("prepared", head_symref).status.success());
         assert!(run("committed", "malformed\n").status.success());
         assert!(run("aborted", "malformed\n").status.success());
+    }
+
+    /// Both scope inputs are fail-closed: a missing guarded identity and a
+    /// current repository the hook cannot resolve.
+    #[cfg(unix)]
+    #[test]
+    fn hook_rejects_when_the_scope_is_unresolvable() {
+        let repo = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::run_git_ok(repo.path(), &["init"]);
+        let common_dir = probe_common_dir(repo.path());
+        let input = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+
+        let no_identity = run_hook(repo.path(), "preparing", &input, &[]);
+        assert!(!no_identity.status.success());
+        assert!(
+            String::from_utf8_lossy(&no_identity.stderr).contains("cruise commit guard:"),
+            "unexpected hook stderr: {}",
+            String::from_utf8_lossy(&no_identity.stderr)
+        );
+
+        // Not a repository at all, so the current common dir cannot be probed.
+        let outside = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let unresolvable = run_hook(
+            outside.path(),
+            "prepared",
+            &input,
+            &[(GUARDED_ENV, &common_dir)],
+        );
+        assert!(!unresolvable.status.success());
+        assert!(
+            String::from_utf8_lossy(&unresolvable.stderr).contains("cruise commit guard:"),
+            "unexpected hook stderr: {}",
+            String::from_utf8_lossy(&unresolvable.stderr)
+        );
+    }
+
+    /// Git may hand the hook a relative `GIT_DIR`, and `cd` would consult an
+    /// exported `CDPATH` for it and print the match on stdout.
+    #[cfg(unix)]
+    #[test]
+    fn hook_resolves_a_relative_git_dir_regardless_of_cdpath() {
+        let repo = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::run_git_ok(repo.path(), &["init"]);
+        let common_dir = probe_common_dir(repo.path());
+        let decoy = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        fs::create_dir(decoy.path().join(".git"))
+            .unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+
+        let input = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let rejected = run_hook(
+            repo.path(),
+            "preparing",
+            &input,
+            &[
+                (GUARDED_ENV, &common_dir),
+                ("GIT_DIR", ".git"),
+                ("CDPATH", &decoy.path().to_string_lossy()),
+            ],
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("are not allowed"),
+            "a relative GIT_DIR in the guarded repository must still be rejected: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
     }
 
     #[cfg(unix)]
@@ -798,6 +981,111 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&other.stdout).trim(),
             advanced.as_str()
+        );
+    }
+
+    /// Regression test for the reported incident: a guard installed for one
+    /// repository must not break git in unrelated repositories that inherit the
+    /// guard environment.
+    #[cfg(unix)]
+    #[test]
+    fn an_inherited_guard_environment_does_not_break_an_unrelated_repository() {
+        let _lock = crate::test_support::lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let guarded = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::init_git_repo(guarded.path());
+        let guard = CommitGuard::prepare(Some(guarded.path()), &HashMap::new())
+            .unwrap_or_else(|error| panic!("guard setup failed: {error}"))
+            .unwrap_or_else(|| panic!("expected a Git worktree guard"));
+
+        // Put the guard's config into the *process* environment, exactly as an
+        // agent-spawned test run would inherit it.
+        let hooks_path =
+            install_hook().unwrap_or_else(|error| panic!("hook install failed: {error}"));
+        let _count = crate::test_support::EnvGuard::set("GIT_CONFIG_COUNT", "1");
+        let _key = crate::test_support::EnvGuard::set("GIT_CONFIG_KEY_0", "core.hooksPath");
+        let _value = crate::test_support::EnvGuard::set("GIT_CONFIG_VALUE_0", &hooks_path);
+        let _identity =
+            crate::test_support::EnvGuard::set(GUARDED_ENV, probe_common_dir(guarded.path()));
+
+        let fresh = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        // `git init` creates HEAD through a reference transaction while the
+        // repository is still half-built, so the hook cannot probe it with
+        // `git rev-parse` and must fall back to GIT_DIR.
+        let created = Command::new("git")
+            .args(["init", "--quiet", "."])
+            .current_dir(fresh.path())
+            .output()
+            .unwrap_or_else(|error| panic!("git init failed to start: {error}"));
+        assert!(
+            created.status.success(),
+            "creating an unrelated repository must not be guarded: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        crate::test_support::init_git_repo(fresh.path());
+        // Commit inheriting the guard config verbatim: the hook is found, sees a
+        // foreign common dir and stands down.
+        fs::write(fresh.path().join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let unrelated = Command::new("git")
+            .args(["commit", "-am", "unrelated"])
+            .current_dir(fresh.path())
+            .output()
+            .unwrap_or_else(|error| panic!("commit failed to start: {error}"));
+        assert!(
+            unrelated.status.success(),
+            "an unrelated repository must not be guarded: {}",
+            String::from_utf8_lossy(&unrelated.stderr)
+        );
+
+        // The guarded repository itself is still blocked.
+        fs::write(guarded.path().join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let blocked = Command::new("git")
+            .args(["commit", "-am", "blocked"])
+            .current_dir(guarded.path())
+            .envs(guard.env())
+            .output()
+            .unwrap_or_else(|error| panic!("commit failed to start: {error}"));
+        assert!(!blocked.status.success());
+    }
+
+    /// All worktrees of one repository share a common dir, so a guard prepared
+    /// on a linked worktree still blocks the main checkout.
+    #[cfg(unix)]
+    #[test]
+    fn guard_prepared_on_a_linked_worktree_blocks_the_main_checkout() {
+        let _lock = crate::test_support::lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let main = root.path().join("main");
+        fs::create_dir(&main).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        crate::test_support::init_git_repo(&main);
+        let linked = root.path().join("linked");
+        crate::test_support::run_git_ok(
+            &main,
+            &["worktree", "add", "-b", "linked", &linked.to_string_lossy()],
+        );
+
+        let guard = CommitGuard::prepare(Some(&linked), &HashMap::new())
+            .unwrap_or_else(|error| panic!("guard setup failed: {error}"))
+            .unwrap_or_else(|| panic!("expected a Git worktree guard"));
+
+        fs::write(main.join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let commit = Command::new("git")
+            .args(["commit", "-am", "blocked"])
+            .current_dir(&main)
+            .envs(guard.env())
+            .output()
+            .unwrap_or_else(|error| panic!("commit failed to start: {error}"));
+        assert!(!commit.status.success());
+        assert!(
+            String::from_utf8_lossy(&commit.stderr).contains("cruise commit guard"),
+            "unexpected commit error: {}",
+            String::from_utf8_lossy(&commit.stderr)
         );
     }
 }

@@ -595,14 +595,14 @@ steps:
       Create an implementation plan for:
       {input}
     timeout: 10m                  # per-step timeout (optional; see Step Timeout)
-    allow_commit: false          # default: guard this prompt from advancing Git HEAD
+    allow_commit: false           # default: guard this prompt from moving Git HEAD in this repository
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
 
-Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
+Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
-Set `allow_commit: true` on the actual prompt, not a `group:` or `workflow_call:` invocation. The guard is a best-effort same-user policy, not a security boundary: nested or other repositories are not post-checked, and it is disabled outside a Git worktree or without a working directory.
+Set `allow_commit: true` on the actual prompt, not a `group:` or `workflow_call:` invocation. The guard is implemented by injecting `core.hooksPath` and `CRUISE_GUARD_COMMON_DIR` through the step's child environment, which installs a `reference-transaction` hook that rejects ref updates only in the repository named by that variable. Only that rejection is repository-scoped: the injected hooks path applies to every git invocation below the step, in every repository, so a repository's own hooks (`pre-commit`, `commit-msg`, `pre-push`, ...) do not run under a guarded step, not even in an unrelated repository whose ref updates are allowed. The hook identifies the current repository from the `GIT_DIR` that git exports to hooks, following the `commondir` file for linked worktrees, and falls back to `git rev-parse --git-common-dir`. The guard is fail-closed: if the repository of a transaction cannot be resolved the transaction is rejected and the step fails with a commit guard violation, while a missing working directory or a directory outside a Git worktree is still a graceful no-op. It remains a best-effort same-user policy, not a security boundary: other repositories are not post-checked.
 
 For longer prompts, load the prompt body from a file with `prompt_file`:
 
@@ -710,7 +710,7 @@ after-pr:
 
 `after-pr` steps run only after PR creation succeeds. They can use all normal template variables plus the PR-specific variables listed below.
 
-Prompt steps in `after-pr` are guarded by the same default. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD`; command and option steps are unaffected.
+Prompt steps in `after-pr` are guarded by the same default, with the same repository scope and the same fail-closed behaviour. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD` in the session repository; command and option steps are unaffected.
 
 ### Flow Control
 

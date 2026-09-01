@@ -70,6 +70,9 @@ pub fn lock_process() -> ProcessLock {
 pub fn run_git_ok(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
+        // Git reads only pairs with index < count, so count 0 disables any `GIT_CONFIG_*`
+        // pairs inherited from an outer cruise commit guard.
+        .env("GIT_CONFIG_COUNT", "0")
         .current_dir(dir)
         .output()
         .unwrap_or_else(|e| panic!("git command failed to start: {e}"));
@@ -247,4 +250,42 @@ pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
         EnvGuard::remove("XDG_STATE_HOME"),
         EnvGuard::remove("CRUISE_CONFIG"),
     ]
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{EnvGuard, init_git_repo, lock_process, run_git_ok};
+
+    /// A `reference-transaction` hook that rejects every ref update, mimicking the
+    /// cruise commit guard's hook without depending on its implementation.
+    fn install_rejecting_hook(hooks_dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(hooks_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let hook = hooks_dir.join("reference-transaction");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut perms = std::fs::metadata(&hook)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook, perms).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn run_git_ok_ignores_an_inherited_commit_guard_hooks_path() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let hooks_dir = dir.path().join("guard-hooks");
+        install_rejecting_hook(&hooks_dir);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _lock = lock_process();
+        let _count = EnvGuard::set("GIT_CONFIG_COUNT", "1");
+        let _key = EnvGuard::set("GIT_CONFIG_KEY_0", "core.hooksPath");
+        let _value = EnvGuard::set("GIT_CONFIG_VALUE_0", hooks_dir.as_os_str());
+
+        // init_git_repo / run_git_ok must be unaffected and reach a real commit.
+        init_git_repo(&repo);
+        run_git_ok(&repo, &["rev-parse", "--verify", "HEAD"]);
+    }
 }

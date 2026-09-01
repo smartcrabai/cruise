@@ -130,6 +130,8 @@ exit 64
             .env("CRUISE_LOGIN_TEST_LOG", &self.log)
             .env("CRUISE_LOGIN_AUTH_JSON", auth_json)
             .env("CRUISE_LOGIN_MODELS_JSON", models_json)
+            // Ignore GIT_CONFIG_* pairs inherited from an outer cruise commit guard.
+            .env("GIT_CONFIG_COUNT", "0")
             .env_remove("CRUISE_CONFIG")
             .env_remove("NO_COLOR")
             .env_remove("CRUISE_LOGIN_API_KEY")
