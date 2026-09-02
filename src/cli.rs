@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 pub(crate) const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
 pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
@@ -67,6 +67,8 @@ pub enum Commands {
     /// from your `~/.jcode`, so signing in here never touches your own jcode
     /// login.
     Login(LoginArgs),
+    /// Run a cruise command on a remote host through OpenSSH.
+    Ssh(SshArgs),
     /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
     #[command(name = "mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
@@ -292,6 +294,35 @@ pub struct LoginArgs {
     /// available to them, then exit.
     #[arg(long)]
     pub status: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct SshArgs {
+    /// OpenSSH destination (`[user@]host` or a configured host alias).
+    pub destination: String,
+
+    /// Change to this directory before starting cruise on the remote host.
+    #[arg(long, value_name = "PATH")]
+    pub cwd: Option<String>,
+
+    /// Remote cruise executable name or path.
+    #[arg(long, value_name = "PATH", default_value = "cruise")]
+    pub cruise_bin: String,
+
+    /// PTY allocation policy. `auto` follows the local terminal state.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub tty: SshTtyMode,
+
+    /// Arguments passed to the remote cruise command after `--`.
+    #[arg(last = true, value_name = "CRUISE_ARG")]
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SshTtyMode {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Parser, Debug)]
@@ -615,6 +646,16 @@ mod tests {
         let cli = Cli::parse_from(["cruise", "add hello world"]);
         assert!(cli.command.is_none());
         assert_eq!(cli.input, Some("add hello world".to_string()));
+    }
+
+    #[test]
+    fn legacy_task_named_ssh_uses_explicit_plan_subcommand() {
+        let cli = Cli::parse_from(["cruise", "plan", "ssh"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("ssh")),
+            _ => panic!("expected explicit plan subcommand"),
+        }
+        assert!(Cli::try_parse_from(["cruise", "ssh"]).is_err());
     }
 
     #[test]
@@ -1174,5 +1215,57 @@ mod tests {
             result.is_ok(),
             "formal spec and non-interactive planning should compose: {result:?}"
         );
+    }
+
+    #[test]
+    fn ssh_subcommand_defaults_to_bare_cruise_and_auto_tty() {
+        let cli = Cli::parse_from(["cruise", "ssh", "devbox"]);
+        match cli.command {
+            Some(Commands::Ssh(args)) => {
+                assert_eq!(args.destination, "devbox");
+                assert_eq!(args.cwd, None);
+                assert_eq!(args.cruise_bin, "cruise");
+                assert_eq!(args.tty, SshTtyMode::Auto);
+                assert!(args.args.is_empty());
+            }
+            _ => panic!("expected Ssh subcommand"),
+        }
+    }
+
+    #[test]
+    fn ssh_subcommand_preserves_options_after_separator() {
+        let cli = Cli::parse_from([
+            "cruise",
+            "ssh",
+            "devbox",
+            "--cwd",
+            "/srv/project",
+            "--cruise-bin",
+            "/opt/cruise",
+            "--tty",
+            "never",
+            "--",
+            "--plan",
+            "task with spaces",
+            "--config",
+            "/srv/project/cruise.yaml",
+        ]);
+        match cli.command {
+            Some(Commands::Ssh(args)) => {
+                assert_eq!(args.cwd.as_deref(), Some("/srv/project"));
+                assert_eq!(args.cruise_bin, "/opt/cruise");
+                assert_eq!(args.tty, SshTtyMode::Never);
+                assert_eq!(
+                    args.args,
+                    vec![
+                        "--plan",
+                        "task with spaces",
+                        "--config",
+                        "/srv/project/cruise.yaml"
+                    ]
+                );
+            }
+            _ => panic!("expected Ssh subcommand"),
+        }
     }
 }
