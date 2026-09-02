@@ -1,7 +1,7 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread;
@@ -44,12 +44,23 @@ impl Fixture {
     }
 
     fn start(&self, columns: u16, rows: u16, no_color: bool) -> PtySession {
+        self.start_with_options(columns, rows, no_color, None)
+    }
+
+    fn start_with_options(
+        &self,
+        columns: u16,
+        rows: u16,
+        no_color: bool,
+        path_prefix: Option<&Path>,
+    ) -> PtySession {
         PtySession::start(
             Path::new(env!("CARGO_BIN_EXE_cruise")),
             self,
             columns,
             rows,
             no_color,
+            path_prefix,
         )
     }
 
@@ -78,6 +89,24 @@ impl Fixture {
             command.env("NO_COLOR", "1");
         } else {
             command.env_remove("NO_COLOR");
+        }
+    }
+
+    fn configure_with_options(
+        &self,
+        command: &mut Command,
+        no_color: bool,
+        path_prefix: Option<&Path>,
+    ) {
+        self.configure(command, no_color);
+        if let Some(prefix) = path_prefix {
+            let mut paths = vec![prefix.to_path_buf()];
+            if let Some(path) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&path));
+            }
+            let path = std::env::join_paths(paths)
+                .unwrap_or_else(|error| panic!("failed to construct PTY PATH: {error}"));
+            command.env("PATH", path);
         }
     }
 
@@ -206,7 +235,14 @@ struct PtySession {
     rows: u16,
 }
 impl PtySession {
-    fn start(binary: &Path, fixture: &Fixture, columns: u16, rows: u16, no_color: bool) -> Self {
+    fn start(
+        binary: &Path,
+        fixture: &Fixture,
+        columns: u16,
+        rows: u16,
+        no_color: bool,
+        path_prefix: Option<&Path>,
+    ) -> Self {
         let stdout_path = fixture.root.path().join("tui.stdout");
         let stderr_path = fixture.root.path().join("tui.stderr");
         let stdout = File::create(&stdout_path).unwrap_or_else(|error| panic!("{error}"));
@@ -220,7 +256,7 @@ impl PtySession {
         command.args(["-q", "/dev/null", "/bin/sh", "-c", &command_line]);
         #[cfg(target_os = "linux")]
         command.args(["-q", "-e", "-c", &command_line, "/dev/null"]);
-        fixture.configure(&mut command, no_color);
+        fixture.configure_with_options(&mut command, no_color, path_prefix);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::from(stdout))
@@ -265,15 +301,22 @@ impl PtySession {
     }
 
     fn wait_for_output(&self, expected: &str, timeout: Duration) {
+        self.wait_for_screen(timeout, |screen| screen.contains(expected));
+    }
+
+    fn wait_for_screen<F>(&self, timeout: Duration, predicate: F) -> String
+    where
+        F: Fn(&str) -> bool,
+    {
         let deadline = Instant::now() + timeout;
         loop {
             let screen = self.screen();
-            if screen.contains(expected) {
-                return;
+            if predicate(&screen) {
+                return screen;
             }
             assert!(
                 Instant::now() < deadline,
-                "PTY screen missing {expected:?}:\n{screen}\nraw transcript: {}",
+                "PTY screen did not satisfy predicate:\n{screen}\nraw transcript: {}",
                 self.transcript()
             );
             thread::sleep(Duration::from_millis(25));
@@ -352,6 +395,96 @@ fn assert_palette(tui: &mut PtySession, actions: &[&str]) {
         tui.wait_for_output(action, START_TIMEOUT);
     }
     tui.send(b"\x1b");
+}
+
+#[cfg(unix)]
+fn install_fake_jcode(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = dir.join("jcode");
+    let script = r#"#!/bin/sh
+set -eu
+
+case " $* " in
+  *" version --json "*)
+    printf '%s\n' '{"semver":"0.81.1"}'
+    ;;
+  *" auth status --json "*)
+    printf '%s\n' '{"any_available":true,"providers":[{"id":"fake","status":"available"}]}'
+    ;;
+  *" run --ndjson "*)
+    count_file="$0.count"
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    else
+      count=0
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -eq 1 ]; then
+      printf '%s' "$CRUISE_TOOL_SOCKET" > "$0.socket"
+      printf '%s\n' '{"type":"start","session_id":"fake-planning-session","provider":"fake"}'
+      while [ ! -f "$0.complete" ]; do
+        sleep 0.02
+      done
+    else
+      printf '%s\n' '{"type":"start","session_id":"fake-follow-up","provider":"fake"}'
+    fi
+    printf '%s\n' '{"type":"done","text":"fake planning turn complete"}'
+    ;;
+  *)
+    printf '%s\n' 'unexpected fake jcode invocation' >&2
+    exit 1
+    ;;
+esac
+"#;
+    std::fs::write(&path, script).unwrap_or_else(|error| panic!("{error}"));
+    let mut permissions = std::fs::metadata(&path)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).unwrap_or_else(|error| panic!("{error}"));
+    path
+}
+
+#[cfg(unix)]
+fn call_tool(
+    socket: &Path,
+    id: u64,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> serde_json::Value {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)
+        .unwrap_or_else(|error| panic!("failed to connect to ToolBridge socket: {error}"));
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    });
+    writeln!(stream, "{request}")
+        .unwrap_or_else(|error| panic!("failed to send ToolBridge request: {error}"));
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .unwrap_or_else(|error| panic!("failed to read ToolBridge response: {error}"));
+    serde_json::from_str(response.trim())
+        .unwrap_or_else(|error| panic!("invalid ToolBridge response: {error}: {response}"))
+}
+
+#[cfg(unix)]
+fn wait_for_file(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -738,4 +871,99 @@ fn active_run_all_can_be_cancelled_and_suspends_the_session() {
         .load(&id)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(state.phase, SessionPhase::Suspended);
+}
+
+#[test]
+#[cfg(unix)]
+fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let fake_bin = fixture.root.path().join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap_or_else(|error| panic!("{error}"));
+    let fake_jcode = install_fake_jcode(&fake_bin);
+    let mut tui = fixture.start_with_options(120, 30, true, Some(&fake_bin));
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"interactive ask user e2e");
+    tui.send(b"\x10");
+    let socket_file = PathBuf::from(format!("{}.socket", fake_jcode.display()));
+    wait_for_file(&socket_file, START_TIMEOUT);
+    let socket = std::fs::read_to_string(&socket_file)
+        .unwrap_or_else(|error| panic!("failed to read ToolBridge socket path: {error}"));
+    let socket = PathBuf::from(socket);
+    wait_for_file(&socket, START_TIMEOUT);
+
+    let ask_thread = thread::spawn({
+        let socket = socket.clone();
+        move || {
+            call_tool(
+                &socket,
+                1,
+                "ask_user",
+                &serde_json::json!({ "question": "First line\nSecond line" }),
+            )
+        }
+    });
+    let prompt_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        let rows = screen.lines().collect::<Vec<_>>();
+        rows.windows(2)
+            .any(|pair| pair[0].contains("First line") && pair[1].contains("Second line"))
+            && screen.contains("Prompt")
+            && screen.contains("Enter submit")
+    });
+    assert!(prompt_screen.contains("First line"));
+    assert!(prompt_screen.contains("Second line"));
+
+    tui.send(b"answer from PTY\r");
+    let response = ask_thread
+        .join()
+        .unwrap_or_else(|_| panic!("ask_user ToolBridge thread panicked"));
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(response["result"]["content"][0]["text"], "answer from PTY");
+
+    let cleared_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        !screen.contains("First line")
+            && !screen.contains("Second line")
+            && !screen.contains("Enter submit")
+            && !screen.contains("Prompt")
+    });
+    assert!(!cleared_screen.contains("First line"));
+    assert!(!cleared_screen.contains("Enter submit"));
+
+    let submit = call_tool(
+        &socket,
+        2,
+        "submit_plan",
+        &serde_json::json!({
+            "content": "# Interactive E2E Plan\n\n- preserve the answer path\n"
+        }),
+    );
+    assert_eq!(submit["result"]["isError"], false);
+    std::fs::write(format!("{}.complete", fake_jcode.display()), b"done")
+        .unwrap_or_else(|error| panic!("failed to release fake jcode: {error}"));
+
+    tui.wait_for_screen(START_TIMEOUT, |screen| screen.contains("Awaiting Approval"));
+    tui.send(b"q");
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    assert!(transcript.contains("\u{1b}[?1049l"));
+    assert!(transcript.contains("\u{1b}[?25h"));
+
+    let session = fixture
+        .manager
+        .list()
+        .unwrap_or_else(|error| panic!("{error}"))
+        .into_iter()
+        .find(|session| session.input == "interactive ask user e2e")
+        .unwrap_or_else(|| panic!("interactive session was not persisted"));
+    assert!(matches!(
+        session.phase,
+        SessionPhase::AwaitingApproval | SessionPhase::Planned
+    ));
+    let plan = std::fs::read_to_string(session.plan_path(&fixture.manager.sessions_dir()))
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(plan.contains("Interactive E2E Plan"));
 }
