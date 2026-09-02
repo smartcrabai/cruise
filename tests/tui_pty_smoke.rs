@@ -467,7 +467,13 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
         .into_iter()
         .find(|session| session.input == "config candidate PTY test")
         .unwrap_or_else(|| panic!("config PTY session was not persisted"));
-    assert_eq!(session.config_path, Some(custom_dir.join("workflow.yaml")));
+    let expected_config_path = std::fs::canonicalize(custom_dir.join("workflow.yaml"))
+        .unwrap_or_else(|error| panic!("failed to canonicalize expected config path: {error}"));
+    let actual_config_path = session.config_path.map(|path| {
+        std::fs::canonicalize(&path)
+            .unwrap_or_else(|error| panic!("failed to canonicalize persisted config path: {error}"))
+    });
+    assert_eq!(actual_config_path, Some(expected_config_path));
 }
 
 fn write_test_workflow(path: &Path, step: &str) {
