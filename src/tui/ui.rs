@@ -1078,13 +1078,31 @@ mod tests {
         view: View,
         configure: impl FnOnce(&mut TuiApp),
     ) -> Vec<String> {
+        rendered_lines_with_lock(
+            width,
+            height,
+            no_color,
+            view,
+            Some(crate::test_support::lock_process()),
+            configure,
+        )
+    }
+
+    fn rendered_lines_with_lock(
+        width: u16,
+        height: u16,
+        no_color: bool,
+        view: View,
+        process_lock: Option<crate::test_support::ProcessLock>,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> Vec<String> {
         let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = crate::application::CruiseApplication::new(
             crate::session::SessionManager::new(temp.path().to_path_buf()),
         );
         let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let (log_tx, _) = tokio::sync::mpsc::channel(4);
-        let mut app = TuiApp::new(application, event_tx, log_tx);
+        let mut app = TuiApp::new_for_test_with_lock(application, event_tx, log_tx, process_lock);
         app.display.no_color = no_color;
         app.view = view;
         configure(&mut app);
@@ -1217,14 +1235,15 @@ mod tests {
         .unwrap_or_else(|error| panic!("{error}"));
         let _env_guard = crate::test_support::EnvGuard::set("CRUISE_CONFIG", &config_path);
 
-        let view = rendered_view_with(80, 24, true, View::NewSession, |app| {
+        let view = rendered_lines_with_lock(80, 24, true, View::NewSession, None, |app| {
             app.form.step = Step::Config;
             app.form
                 .working_dir
                 .set_text(&config_dir.path().to_string_lossy());
             app.form.config.set_text(&config_path.to_string_lossy());
             app.refresh();
-        });
+        })
+        .join("\n");
 
         let selected_config_lines = view
             .lines()

@@ -165,6 +165,8 @@ pub struct TuiApp {
     pub history_summary: Option<crate::application::NewSessionHistorySummary>,
     pub config_sources: Vec<crate::resolver::ConfigCandidate>,
     pub config_defaults: Option<crate::application::NewSessionConfigDefaults>,
+    #[cfg(test)]
+    test_process_lock: Option<crate::test_support::ProcessLock>,
 }
 
 impl TuiApp {
@@ -224,8 +226,22 @@ impl TuiApp {
             history_summary,
             config_sources: Vec::new(),
             config_defaults: None,
+            #[cfg(test)]
+            test_process_lock: None,
         };
         app.refresh();
+        app
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_lock(
+        application: CruiseApplication,
+        events: UnboundedSender<UiEvent>,
+        logs_sender: mpsc::Sender<UiEvent>,
+        process_lock: Option<crate::test_support::ProcessLock>,
+    ) -> Self {
+        let mut app = Self::new(application, events, logs_sender);
+        app.test_process_lock = process_lock;
         app
     }
 
@@ -2496,14 +2512,24 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn app() -> TuiApp {
+    fn app_with_lock(test_process_lock: Option<crate::test_support::ProcessLock>) -> TuiApp {
         let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = CruiseApplication::new(crate::session::SessionManager::new(
             temp.path().to_path_buf(),
         ));
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
         let (logs_sender, _) = tokio::sync::mpsc::channel(2);
-        TuiApp::new(application, events, logs_sender)
+        let mut app = TuiApp::new(application, events, logs_sender);
+        app.test_process_lock = test_process_lock;
+        app
+    }
+
+    fn app() -> TuiApp {
+        app_with_lock(Some(crate::test_support::lock_process()))
+    }
+
+    fn app_without_lock() -> TuiApp {
+        app_with_lock(None)
     }
 
     fn add_session(app: &mut TuiApp, id: &str, phase: crate::session::SessionPhase) {
@@ -2681,7 +2707,7 @@ mod tests {
         write_workflow(&first_dir.path().join("cruise.yaml"), "first");
         write_workflow(&second_dir.path().join("cruise.yaml"), "second");
 
-        let mut app = app();
+        let mut app = app_without_lock();
         app.view = View::NewSession;
         app.form.config.set_text("");
         app.form
@@ -2723,7 +2749,7 @@ mod tests {
         write_workflow(&first, "first_step");
         write_workflow(&second, "second_step");
 
-        let mut app = app();
+        let mut app = app_without_lock();
         app.view = View::NewSession;
         app.form.input.set_text("task");
         app.form
@@ -2884,7 +2910,7 @@ mod tests {
         let missing = fake_home.path().join("missing-cruise-config.yaml");
         let _env_guard = crate::test_support::EnvGuard::set("CRUISE_CONFIG", &missing);
 
-        let app = app();
+        let app = app_without_lock();
         assert!(matches!(
             &app.modal,
             Some(Modal::Error(message)) if message.contains("missing-cruise-config.yaml")
