@@ -423,7 +423,7 @@ fn new_session_form_saves_a_draft_without_planning() {
 }
 
 #[test]
-fn quick_new_session_starts_planning_with_ctrl_p() {
+fn new_session_ctrl_p_validates_before_starting_planning() {
     if !tui_available() {
         return;
     }
@@ -431,12 +431,13 @@ fn quick_new_session_starts_planning_with_ctrl_p() {
     let mut tui = fixture.start(120, 30, true);
 
     tui.send(b"n");
-    tui.send(b"quick path through terminal e2e");
     tui.send(b"\x10");
-    tui.wait_for_output("Generate started", START_TIMEOUT);
+    tui.wait_for_output(
+        "Task description or an image attachment is required",
+        START_TIMEOUT,
+    );
+    tui.send(b"\x1b");
     tui.send(b"q");
-    tui.wait_for_output("Active work will be cancelled", START_TIMEOUT);
-    tui.send(b"\r");
 
     let (status, transcript) = tui.finish();
     assert!(status.success(), "cruise failed in PTY: {transcript}");
@@ -445,9 +446,8 @@ fn quick_new_session_starts_planning_with_ctrl_p() {
         .list()
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(
-        sessions
-            .iter()
-            .any(|session| session.input == "quick path through terminal e2e")
+        sessions.is_empty(),
+        "validation unexpectedly created a session"
     );
 }
 
