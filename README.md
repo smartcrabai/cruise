@@ -15,6 +15,8 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 - [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
 - [`jcode` CLI](https://github.com/1jehuang/jcode) v0.81.1 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `cruise login` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
 - [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, not `cruise login`.
+- An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
+- A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
 ## Installation
 
@@ -88,9 +90,23 @@ cruise list
 # Remove closed/merged PR sessions and terminal no-PR sessions
 cruise clean
 
+# Open the TUI in a remote project
+cruise ssh devbox --cwd /srv/project
+
+# Run remote commands and forward stdin or root options unchanged
+cruise ssh devbox --cwd /srv/project -- plan "implement the feature"
+echo "implement the feature" | cruise ssh devbox --cwd /srv/project -- plan
+cruise ssh devbox -- list --json | jq .
+cruise ssh devbox -- run
+cruise ssh devbox -- --plan "implement the feature"
+cruise ssh devbox -- --plan "implement the feature" --repo owner/repository
+
 # Legacy: positional input without a subcommand is treated as `cruise plan`
 cruise "implement the feature"
 ```
+
+The `ssh` subcommand reserves the exact legacy input `ssh`; to plan a task whose
+entire text is `ssh`, use `cruise plan "ssh"`.
 
 On macOS and Linux, the CLI and TUI send best-effort desktop notifications for
 **Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
@@ -178,11 +194,32 @@ Commands:
   clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
   config       Show or update application-level configuration
   login        Sign cruise's default SDK backend (jcode) in to a provider
+  ssh          Run a cruise command on a remote host through OpenSSH
 
 Options:
       --plan <INPUT>           Create a plan in the background and return immediately
       --no-force-exec          Ignore force_exec: true and plan as usual
 ```
+
+#### `cruise ssh`
+
+```
+cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
+```
+
+`cruise ssh` starts one `ssh` client process and delegates the complete command to the remote `cruise`. With no forwarded arguments, a remote `cruise` starts its TUI when a PTY is available. The destination is an OpenSSH `[user@]host` or `~/.ssh/config` alias; use that config for ports, identity files, agents, and ProxyJump.
+
+Options:
+
+```
+      --cwd <PATH>                 Change to this remote directory before starting cruise
+      --cruise-bin <PATH>          Remote cruise executable or path [default: cruise]
+      --tty <auto|always|never>    PTY policy: follow local TTYs, force a PTY, or disable one [default: auto]
+```
+
+Everything after `--` is passed to the remote cruise in the same order and is parsed there. In `auto` mode, a local TTY requests a PTY; piped or redirected streams do not, which keeps commands such as `cruise ssh host -- list --json` suitable for scripts. `--tty always` and `--tty never` override that choice.
+
+The remote host is the execution boundary: its sessions, config, jcode authentication, worktrees, and repository clones are stored under its XDG directories and are not shared with local `cruise` commands. `--cwd`, `--config`, `--image`, and other path arguments are interpreted on the remote host. Cruise does not upload local files, copy credentials or environment variables, install the remote binary, or synchronize repositories. The desktop GUI remains a local session client and does not browse remote sessions.
 
 #### `cruise`
 
@@ -282,7 +319,7 @@ Options:
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
-When `force_exec: true` is set in the workflow config, `cruise "task"`, `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, `--formal-spec`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. `--formal-spec` is available only on the foreground `plan` subcommand and causes normal initial plan generation for that invocation.
+When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact input `ssh`, which is reserved for the `ssh` subcommand), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, `--formal-spec`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. `--formal-spec` is available only on the foreground `plan` subcommand and causes normal initial plan generation for that invocation.
 
 #### `cruise --plan`
 
