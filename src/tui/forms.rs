@@ -128,10 +128,6 @@ pub struct SessionOptions {
 }
 
 #[derive(Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the TUI stores shortcut-selected modes alongside formal specification"
-)]
 pub struct PlanningFlags {
     pub grill: bool,
     pub formal_spec: bool,

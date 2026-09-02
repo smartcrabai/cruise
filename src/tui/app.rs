@@ -975,83 +975,8 @@ impl TuiApp {
         if self.operation_state.quit_requested {
             return false;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if key.code == KeyCode::Enter
-                && matches!(
-                    self.modal.as_ref(),
-                    Some(Modal::Input {
-                        multiline: true,
-                        ..
-                    })
-                )
-            {
-                if let Some(Modal::Input {
-                    command,
-                    editor,
-                    regenerate,
-                    ..
-                }) = self.modal.take()
-                {
-                    self.apply_input_command(command, editor.text(), regenerate);
-                }
-                return false;
-            }
-            if key.code == KeyCode::Char('r')
-                && matches!(
-                    self.modal.as_ref(),
-                    Some(Modal::Input {
-                        multiline: true,
-                        ..
-                    })
-                )
-            {
-                let regenerate = if let Some(Modal::Input { regenerate, .. }) = self.modal.as_mut()
-                {
-                    *regenerate = !*regenerate;
-                    *regenerate
-                } else {
-                    false
-                };
-                self.status = Some(
-                    if regenerate {
-                        "Settings will save and regenerate"
-                    } else {
-                        "Settings will save only"
-                    }
-                    .to_string(),
-                );
-                return false;
-            }
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.modal.is_none() && self.view == View::NewSession {
-                let mode = match key.code {
-                    KeyCode::Char('p') => Some((false, false)),
-                    KeyCode::Char('g') => Some((true, false)),
-                    KeyCode::Char('u') => Some((false, true)),
-                    KeyCode::Char('s') => {
-                        self.form.editing = false;
-                        self.save_as_draft();
-                        return false;
-                    }
-                    KeyCode::Enter => return false,
-                    _ => None,
-                };
-                if let Some((grill, skip_planning)) = mode {
-                    let planning = &mut self.form.options.planning;
-                    planning.grill = grill;
-                    planning.skip_planning = skip_planning;
-                    if skip_planning {
-                        planning.formal_spec = false;
-                    }
-                    self.form.editing = false;
-                    self.create_session();
-                    return false;
-                }
-            }
-            if matches!(key.code, KeyCode::Char('p' | 'g' | 'u' | 's')) {
-                return false;
-            }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
+            return false;
         }
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             if matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
@@ -1103,6 +1028,79 @@ impl TuiApp {
         should_quit
     }
 
+    fn handle_control_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Enter
+            && matches!(
+                self.modal.as_ref(),
+                Some(Modal::Input {
+                    multiline: true,
+                    ..
+                })
+            )
+        {
+            if let Some(Modal::Input {
+                command,
+                editor,
+                regenerate,
+                ..
+            }) = self.modal.take()
+            {
+                self.apply_input_command(command, editor.text(), regenerate);
+            }
+            return true;
+        }
+        if key.code == KeyCode::Char('r')
+            && matches!(
+                self.modal.as_ref(),
+                Some(Modal::Input {
+                    multiline: true,
+                    ..
+                })
+            )
+        {
+            let regenerate = if let Some(Modal::Input { regenerate, .. }) = self.modal.as_mut() {
+                *regenerate = !*regenerate;
+                *regenerate
+            } else {
+                false
+            };
+            self.status = Some(
+                if regenerate {
+                    "Settings will save and regenerate"
+                } else {
+                    "Settings will save only"
+                }
+                .to_string(),
+            );
+            return true;
+        }
+        if self.modal.is_none() && self.view == View::NewSession {
+            let mode = match key.code {
+                KeyCode::Char('p') => Some((false, false)),
+                KeyCode::Char('g') => Some((true, false)),
+                KeyCode::Char('u') => Some((false, true)),
+                KeyCode::Char('s') => {
+                    self.form.editing = false;
+                    self.save_as_draft();
+                    return true;
+                }
+                KeyCode::Enter => return true,
+                _ => None,
+            };
+            if let Some((grill, skip_planning)) = mode {
+                let planning = &mut self.form.options.planning;
+                planning.grill = grill;
+                planning.skip_planning = skip_planning;
+                if skip_planning {
+                    planning.formal_spec = false;
+                }
+                self.form.editing = false;
+                self.create_session();
+                return true;
+            }
+        }
+        matches!(key.code, KeyCode::Char('p' | 'g' | 'u' | 's'))
+    }
     fn is_form_editor_key(&self, key: KeyEvent, _action: Action) -> bool {
         if self.modal.is_some() || self.view != View::NewSession || !self.form.editing {
             return false;
