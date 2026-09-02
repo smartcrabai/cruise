@@ -523,10 +523,7 @@ fn step_hint(app: &TuiApp) -> String {
                 format!("Enter next · ↑↓ gh repos ({found}) · {BACK}")
             }
         }
-        Step::Config => format!(
-            "Enter next · Tab complete · ↑↓ configs ({}) · {BACK}",
-            app.config_sources.len()
-        ),
+        Step::Config => format!("↑↓ select · type path · Tab complete · Enter next · {BACK}"),
         Step::SkippedSteps if app.skip_choices().is_empty() => {
             format!("Comma-separated step ids · Enter next · {BACK}")
         }
@@ -551,7 +548,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::Attachments => return render_step_editor(frame, app, area, &form.attachments),
         Step::WorkingDirectory => return render_step_editor(frame, app, area, &form.working_dir),
         Step::Repository => return render_step_editor(frame, app, area, &form.repository),
-        Step::Config => return render_step_editor(frame, app, area, &form.config),
+        Step::Config => return render_config_choices(frame, app, area),
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Source => two_way(
             "Directory",
@@ -609,6 +606,33 @@ fn render_step_editor(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, editor: &
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(editor.widget(), inner);
+}
+
+fn render_config_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let [editor_area, choices_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    render_step_editor(frame, app, editor_area, &app.form.config);
+
+    let current = app.form.config.text();
+    let current = current.trim();
+    let mut selected = current.is_empty().then_some(0);
+    let mut matched = false;
+    let mut lines = Vec::with_capacity(app.config_sources.len() + 1);
+    lines.push(choice_line(app, "Auto-detect", current.is_empty()));
+    for (index, source) in app.config_sources.iter().enumerate() {
+        let source_selected = !matched && source.selection_value() == current;
+        matched |= source_selected;
+        selected = selected.or(source_selected.then_some(index + 1));
+        lines.push(choice_line(app, source.label(), source_selected));
+    }
+    let visible = usize::from(choices_area.height.max(1));
+    let offset = selected
+        .unwrap_or(0)
+        .saturating_sub(visible.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        choices_area,
+    );
 }
 
 fn render_skip_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -1087,6 +1111,126 @@ mod tests {
         configure: impl FnOnce(&mut TuiApp),
     ) -> String {
         rendered_lines_with(width, height, no_color, view, configure).join("\n")
+    }
+
+    #[test]
+    fn config_step_shows_auto_and_cli_candidates_at_minimum_and_wide_sizes() {
+        for width in [80, 120] {
+            let view = rendered_view_with(width, 24, true, View::NewSession, |app| {
+                let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+                std::fs::write(
+                    config_dir.path().join("cruise.yaml"),
+                    "command: [echo]\nsteps:\n  local:\n    command: echo local\n",
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+                app.form.step = Step::Config;
+                app.form.config.set_text("");
+                app.form
+                    .working_dir
+                    .set_text(&config_dir.path().to_string_lossy());
+                app.refresh();
+            });
+
+            assert!(
+                view.contains("Auto-detect"),
+                "missing Auto candidate at width {width}"
+            );
+            assert!(
+                view.contains("cruise.yaml"),
+                "missing CLI candidate at width {width}"
+            );
+            assert!(
+                view.contains("Built-in default"),
+                "missing built-in candidate at width {width}"
+            );
+            assert!(
+                view.contains("▸ Auto-detect"),
+                "Auto candidate is not visibly selected at width {width}"
+            );
+            assert!(
+                view.contains("↑↓"),
+                "missing arrow-key hint at width {width}"
+            );
+            assert!(
+                view.contains("Tab complete"),
+                "missing Tab hint at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_step_keeps_an_arbitrary_path_visible_in_the_editor() {
+        let view = rendered_view_with(80, 24, true, View::NewSession, |app| {
+            app.form.step = Step::Config;
+            app.form.config.set_text("custom/path/workflow.yaml");
+        });
+
+        assert!(view.contains("custom/path/workflow.yaml"));
+    }
+
+    #[test]
+    fn config_candidate_list_scrolls_to_the_selected_late_entry() {
+        let view = rendered_view_with(80, 24, true, View::NewSession, |app| {
+            let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+            let cruise_dir = config_dir.path().join(".cruise");
+            std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|error| panic!("{error}"));
+            for index in 0..10 {
+                std::fs::write(
+                    cruise_dir.join(format!("config-{index:02}.yaml")),
+                    format!(
+                        "command: [echo]\nsteps:\n  step_{index}:\n    command: echo {index}\n"
+                    ),
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+            }
+            let selected = cruise_dir.join("config-09.yaml");
+            app.form.step = Step::Config;
+            app.form
+                .working_dir
+                .set_text(&config_dir.path().to_string_lossy());
+            app.form.config.set_text(&selected.to_string_lossy());
+            app.refresh();
+        });
+
+        assert!(view.contains("config-09.yaml"));
+        assert!(
+            view.contains("config-08.yaml"),
+            "the visible window should include entries near the selected entry"
+        );
+        assert!(
+            !view.contains("config-00.yaml"),
+            "the list should scroll instead of rendering every candidate at once"
+        );
+    }
+
+    #[test]
+    fn duplicate_env_and_local_config_candidates_have_one_selection_marker() {
+        let _lock = crate::test_support::lock_process();
+        let fake_home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_dir.path().join("cruise.yaml");
+        std::fs::write(
+            &config_path,
+            "command: [echo]\nsteps:\n  local:\n    command: echo local\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let _env_guard = crate::test_support::EnvGuard::set("CRUISE_CONFIG", &config_path);
+
+        let view = rendered_view_with(80, 24, true, View::NewSession, |app| {
+            app.form.step = Step::Config;
+            app.form
+                .working_dir
+                .set_text(&config_dir.path().to_string_lossy());
+            app.form.config.set_text(&config_path.to_string_lossy());
+            app.refresh();
+        });
+
+        let selected_config_lines = view
+            .lines()
+            .filter(|line| line.contains("cruise.yaml") && line.contains("▸ "))
+            .count();
+        assert_eq!(selected_config_lines, 1);
     }
 
     #[test]

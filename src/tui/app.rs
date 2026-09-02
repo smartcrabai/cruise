@@ -163,7 +163,7 @@ pub struct TuiApp {
     pub github_repositories: Vec<String>,
     pub last_refresh: Instant,
     pub history_summary: Option<crate::application::NewSessionHistorySummary>,
-    pub config_sources: Vec<crate::configs::ConfigEntry>,
+    pub config_sources: Vec<crate::resolver::ConfigCandidate>,
     pub config_defaults: Option<crate::application::NewSessionConfigDefaults>,
 }
 
@@ -180,25 +180,6 @@ impl TuiApp {
         if let Some(summary) = history_summary.as_ref() {
             form.apply_history_defaults(summary);
         }
-        let working_dir = form.working_dir.text();
-        let base_dir = PathBuf::from(if working_dir.trim().is_empty() {
-            "."
-        } else {
-            working_dir.trim()
-        });
-        let config = form.config.text();
-        let repository = form.repository.text();
-        let config_defaults = application
-            .new_session_config_defaults(
-                &base_dir,
-                (!config.trim().is_empty()).then_some(config.trim()),
-                (!repository.trim().is_empty()).then_some(repository.trim()),
-            )
-            .ok();
-        if let Some(defaults) = config_defaults.as_ref() {
-            form.apply_default_skips(&defaults.default_skipped_steps);
-        }
-        let config_sources = application.discover_config_sources(&base_dir);
         let mut app = Self {
             application,
             registry: OperationRegistry::default(),
@@ -241,8 +222,8 @@ impl TuiApp {
             github_repositories: Vec::new(),
             last_refresh: Instant::now(),
             history_summary,
-            config_sources,
-            config_defaults,
+            config_sources: Vec::new(),
+            config_defaults: None,
         };
         app.refresh();
         app
@@ -298,30 +279,90 @@ impl TuiApp {
             ));
     }
 
-    pub fn refresh(&mut self) {
-        let base_dir = if self.form.working_dir.text().trim().is_empty() {
+    fn config_base_dir(&self) -> PathBuf {
+        let working_dir = self.form.working_dir.text();
+        if working_dir.trim().is_empty() {
             PathBuf::from(".")
         } else {
-            PathBuf::from(crate::new_session_history::expand_tilde(
-                self.form.working_dir.text().trim(),
-            ))
-        };
-        let config_path = self.form.config.text().trim().to_string();
-        let repo = self.form.repository.text().trim().to_string();
-        self.config_sources = self.application.discover_config_sources(&base_dir);
-        self.config_defaults = self
-            .application
-            .new_session_config_defaults(
-                &base_dir,
-                (!config_path.is_empty()).then_some(config_path.as_str()),
-                (self.form.source == SourceKind::GitHub && !repo.is_empty())
-                    .then_some(repo.as_str()),
-            )
-            .ok();
-        if let Some(defaults) = self.config_defaults.as_ref() {
-            self.form
-                .apply_default_skips(&defaults.default_skipped_steps);
+            PathBuf::from(crate::new_session_history::expand_tilde(working_dir.trim()))
         }
+    }
+
+    fn refresh_config_sources(&mut self, base_dir: &Path) -> bool {
+        let mut sources = match self.application.discover_tui_config_candidates(base_dir) {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.config_sources.clear();
+                self.config_defaults = None;
+                self.set_error(error.to_string());
+                return false;
+            }
+        };
+        if self.form.source == SourceKind::GitHub {
+            sources.retain(|source| !source.is_local());
+        }
+        self.config_sources = sources;
+        true
+    }
+
+    fn sync_config_defaults(&mut self) -> bool {
+        let base_dir = self.config_base_dir();
+        let config = self.form.config.text();
+        let config = config.trim();
+        // GitHub sessions resolve an empty config selection only after the
+        // repository has been cloned.  Resolving it against the caller's
+        // working directory here could load an unrelated local cruise.yaml
+        // and populate skip choices that do not exist in the clone.
+        if self.form.source == SourceKind::GitHub && config.is_empty() {
+            self.form.apply_default_skips(&[]);
+            self.config_defaults = None;
+            return true;
+        }
+        let repository = self.form.repository.text();
+        let repository = repository.trim();
+        let config = (!config.is_empty()).then_some(config);
+        let repository = (self.form.source == SourceKind::GitHub && !repository.is_empty())
+            .then_some(repository);
+        match self
+            .application
+            .new_session_config_defaults(&base_dir, config, repository)
+        {
+            Ok(defaults) => {
+                self.form
+                    .apply_default_skips(&defaults.default_skipped_steps);
+                self.config_defaults = Some(defaults);
+                true
+            }
+            Err(error) => {
+                self.config_defaults = None;
+                self.set_error(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn refresh_config_context(&mut self) {
+        let base_dir = self.config_base_dir();
+        if !self.refresh_config_sources(&base_dir) {
+            return;
+        }
+
+        let config = self.form.config.text();
+        let config = config.trim();
+        let config_is_candidate = config.is_empty()
+            || self
+                .config_sources
+                .iter()
+                .any(|source| source.selection_value() == config);
+        if config_is_candidate {
+            self.sync_config_defaults();
+        } else {
+            self.config_defaults = None;
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        self.refresh_config_context();
         self.history_summary = self.application.new_session_history_summary().ok();
         match self.application.list_sessions() {
             Ok(mut sessions) => {
@@ -1272,6 +1313,9 @@ impl TuiApp {
     /// Accept the current answer and ask the next question; the last question
     /// starts (or drafts) the session with the chosen launch mode.
     fn advance_step(&mut self) {
+        if self.form.step == Step::Config && !self.sync_config_defaults() {
+            return;
+        }
         if let Err(error) = self.form.validate_step() {
             self.set_error(error);
             return;
@@ -1279,10 +1323,16 @@ impl TuiApp {
         if self.form.step == Step::Launch {
             self.launch(self.form.launch);
         } else {
-            self.form.advance();
+            let advanced = self.form.advance();
+            if advanced && self.form.step == Step::Config {
+                self.refresh_config_context();
+            }
         }
     }
     fn launch(&mut self, launch: Launch) {
+        if self.form.step == Step::Config && !self.sync_config_defaults() {
+            return;
+        }
         self.form.select_launch(launch);
         if launch == Launch::SaveDraft {
             self.save_as_draft();
@@ -1471,7 +1521,10 @@ impl TuiApp {
                             .cycle_working_directory(&summary.recent_working_dirs, delta);
                     }
                 }
-                Step::Config => self.form.cycle_config(&self.config_sources, delta),
+                Step::Config => {
+                    self.form.cycle_config(&self.config_sources, delta);
+                    self.sync_config_defaults();
+                }
                 Step::Repository => self.form.cycle_repository(&self.github_repositories, delta),
                 step if step.is_choice() => self.choose(delta),
                 _ => {}
@@ -2283,7 +2336,10 @@ impl TuiApp {
             return None;
         }
         let mut request = self.form.request();
-        if !self.form.skipped_explicit && request.skipped_steps.is_empty() {
+        if !self.form.skipped_explicit
+            && request.skipped_steps.is_empty()
+            && (request.repo.is_none() || request.config_path.is_some())
+        {
             let base = request.base_dir.clone();
             let config = request
                 .config_path
@@ -2496,6 +2552,11 @@ mod tests {
         }
     }
 
+    fn write_workflow(path: &std::path::Path, step: &str) {
+        let yaml = format!("command: [echo]\nsteps:\n  {step}:\n    command: echo {step}\n");
+        std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
+    }
+
     #[test]
     fn task_question_takes_typed_text_and_enter_inserts_a_newline() {
         let mut app = app();
@@ -2608,6 +2669,226 @@ mod tests {
         );
         assert!(!app.handle_key(key(KeyCode::Up)));
         assert_eq!(app.form.repository.text(), "acme/a");
+    }
+
+    #[test]
+    fn config_candidates_follow_the_working_directory_when_entering_config_step() {
+        let _lock = crate::test_support::lock_process();
+        let fake_home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let first_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let second_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_workflow(&first_dir.path().join("cruise.yaml"), "first");
+        write_workflow(&second_dir.path().join("cruise.yaml"), "second");
+
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.config.set_text("");
+        app.form
+            .working_dir
+            .set_text(&first_dir.path().to_string_lossy());
+        app.form.step = Step::WorkingDirectory;
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(
+            app.form.config.text(),
+            first_dir.path().join("cruise.yaml").to_string_lossy()
+        );
+
+        app.form.config.set_text("");
+        app.form
+            .working_dir
+            .set_text(&second_dir.path().to_string_lossy());
+        app.form.step = Step::WorkingDirectory;
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(
+            app.form.config.text(),
+            second_dir.path().join("cruise.yaml").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn config_selection_refreshes_skipped_step_choices_immediately() {
+        let _lock = crate::test_support::lock_process();
+        let fake_home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let repo_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let cruise_dir = repo_dir.path().join(".cruise");
+        std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|error| panic!("{error}"));
+        let first = repo_dir.path().join("cruise.yaml");
+        let second = cruise_dir.join("second.yaml");
+        write_workflow(&first, "first_step");
+        write_workflow(&second, "second_step");
+
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.input.set_text("task");
+        app.form
+            .working_dir
+            .set_text(&repo_dir.path().to_string_lossy());
+        app.form.config.set_text(&first.to_string_lossy());
+        app.form.step = Step::Config;
+        app.refresh();
+        assert!(
+            app.skip_choices()
+                .iter()
+                .any(|(label, _)| label == "first_step")
+        );
+
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.config.text(), second.to_string_lossy());
+        assert!(
+            app.skip_choices()
+                .iter()
+                .any(|(label, _)| label == "second_step")
+        );
+        assert!(
+            !app.skip_choices()
+                .iter()
+                .any(|(label, _)| label == "first_step")
+        );
+    }
+
+    #[test]
+    fn github_auto_detect_waits_for_the_clone_before_loading_config_defaults() {
+        let project = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_workflow(&project.path().join("cruise.yaml"), "local_only");
+
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.input.set_text("task");
+        app.form.source = SourceKind::GitHub;
+        app.form.repository.set_text("acme/cruise");
+        app.form
+            .working_dir
+            .set_text(&project.path().to_string_lossy());
+        app.form.config.set_text("");
+        app.form.step = Step::Config;
+        app.refresh();
+
+        assert!(
+            !app.config_sources
+                .iter()
+                .any(crate::resolver::ConfigCandidate::is_local),
+            "caller-local configs must not be offered for GitHub sessions"
+        );
+        assert!(
+            app.config_defaults.is_none(),
+            "auto-detect must wait until the repository clone exists"
+        );
+        assert!(app.skip_choices().is_empty());
+
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("expected a valid GitHub request"));
+        assert!(
+            request.skipped_steps.is_empty(),
+            "auto-detect must not copy skip ids from the caller-local config"
+        );
+    }
+
+    #[test]
+    fn invalid_config_path_blocks_leaving_config_step_and_shows_error() {
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.input.set_text("task");
+        app.form.step = Step::Config;
+        app.form.config.set_text("/path/that/does/not/exist.yaml");
+        app.config_defaults = None;
+
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message)) if message.contains("does/not/exist.yaml")
+        ));
+    }
+
+    #[test]
+    fn invalid_config_path_blocks_launch_shortcuts_from_config_step() {
+        for shortcut in ['p', 'g', 'u', 's'] {
+            let mut app = app();
+            app.view = View::NewSession;
+            app.form.input.set_text("task");
+            app.form.step = Step::Config;
+            app.form.config.set_text("/path/that/does/not/exist.yaml");
+
+            assert!(!app.handle_key(KeyEvent::new(
+                KeyCode::Char(shortcut),
+                KeyModifiers::CONTROL,
+            )));
+            assert_eq!(app.form.step, Step::Config);
+            assert!(matches!(
+                &app.modal,
+                Some(Modal::Error(message)) if message.contains("does/not/exist.yaml")
+            ));
+            assert!(app.registry.tasks_empty());
+        }
+    }
+
+    #[test]
+    fn valid_config_path_is_resolved_before_leaving_config_step() {
+        let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_dir.path().join("custom.yaml");
+        write_workflow(&config_path, "custom_step");
+        let expected_key =
+            crate::new_session_history::resolved_config_key_for_session(&config_path);
+
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.input.set_text("task");
+        app.form.step = Step::Config;
+        app.form.config.set_text(&config_path.to_string_lossy());
+        app.config_defaults = None;
+
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::SkippedSteps);
+        assert_eq!(
+            app.config_defaults
+                .as_ref()
+                .map(|defaults| defaults.resolved_config_key.as_str()),
+            Some(expected_key.as_str())
+        );
+    }
+
+    #[test]
+    fn config_refresh_preserves_an_arbitrary_path_not_in_the_candidate_list() {
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.step = Step::Config;
+        app.form.config.set_text("custom/path/workflow.yaml");
+        app.refresh();
+        assert_eq!(app.form.config.text(), "custom/path/workflow.yaml");
+    }
+
+    #[test]
+    fn j_and_k_remain_text_input_on_the_config_question() {
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.step = Step::Config;
+        app.form.config.set_text("");
+
+        assert!(!app.handle_key(key(KeyCode::Char('j'))));
+        assert!(!app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.form.config.text(), "jk");
+    }
+
+    #[test]
+    fn invalid_cruise_config_is_reported_when_tui_refreshes_candidates() {
+        let _lock = crate::test_support::lock_process();
+        let fake_home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let missing = fake_home.path().join("missing-cruise-config.yaml");
+        let _env_guard = crate::test_support::EnvGuard::set("CRUISE_CONFIG", &missing);
+
+        let app = app();
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message)) if message.contains("missing-cruise-config.yaml")
+        ));
     }
 
     #[test]
