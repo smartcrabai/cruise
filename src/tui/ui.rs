@@ -840,10 +840,12 @@ fn render_prompt_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(prompt) = app.prompts.active.as_ref() else {
         return;
     };
-    let mut lines = vec![Line::from(Span::styled(
-        prompt.question.as_str(),
-        accent(app, true),
-    ))];
+    let mut lines = prompt
+        .question
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .map(|line| Line::from(Span::styled(line, accent(app, true))))
+        .collect::<Vec<_>>();
     if !prompt.choices.is_empty() {
         lines.push(Line::from(""));
         for (idx, choice) in prompt.choices.iter().enumerate() {
@@ -875,7 +877,12 @@ fn render_prompt_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     lines.push(Line::from(
         "Enter submit   Esc dismiss (request remains queued)",
     ));
-    render_text_modal(frame, app, area, 78, 14, "Prompt", lines);
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
+        .max(14)
+        .min(area.height.saturating_sub(2));
+    render_text_modal(frame, app, area, 78, height, "Prompt", lines);
 }
 
 fn render_input_modal(
@@ -1204,6 +1211,33 @@ mod tests {
             log_row > summary_row + 4,
             "Run All did not stack: {lines:?}"
         );
+    }
+
+    #[test]
+    fn prompt_modal_preserves_multiline_questions_and_bottom_controls_at_minimum_size() {
+        let lines = rendered_lines_with(80, 24, true, View::Sessions, |app| {
+            app.prompts.active = Some(crate::tui::prompts::PromptItem {
+                request_id: "ask-1".to_string(),
+                session_id: "session-1".to_string(),
+                kind: crate::application::PendingPromptKind::Ask,
+                question: "first line\nsecond line".to_string(),
+                choices: Vec::new(),
+            });
+            app.modal = Some(Modal::Prompt);
+        });
+        let first_row = lines
+            .iter()
+            .position(|line| line.contains("first line"))
+            .unwrap_or_else(|| panic!("missing first question line: {lines:?}"));
+        let second_row = lines
+            .iter()
+            .position(|line| line.contains("second line"))
+            .unwrap_or_else(|| panic!("missing second question line: {lines:?}"));
+        assert_eq!(second_row, first_row + 1, "question lines must be adjacent");
+        assert!(!lines[first_row].contains("second line"));
+        let screen = lines.join("\n");
+        assert!(screen.contains("Answer:"));
+        assert!(screen.contains("Enter submit   Esc dismiss (request remains queued)"));
     }
 
     #[test]

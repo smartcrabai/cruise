@@ -397,9 +397,7 @@ impl NewSessionForm {
             }
             Step::FormalSpec => {
                 self.options.planning.formal_spec = !self.options.planning.formal_spec;
-                if self.options.planning.formal_spec {
-                    self.options.planning.skip_planning = false;
-                }
+                self.options.planning.skip_planning &= !self.options.planning.formal_spec;
                 self.mark_changed();
             }
             Step::Launch => {
@@ -423,9 +421,7 @@ impl NewSessionForm {
         let planning = &mut self.options.planning;
         planning.grill = launch == Launch::Grill;
         planning.skip_planning = launch == Launch::InputPlan;
-        if planning.skip_planning {
-            planning.formal_spec = false;
-        }
+        planning.formal_spec &= !planning.skip_planning;
     }
     pub fn input(&mut self, event: KeyEvent) {
         match self.step {

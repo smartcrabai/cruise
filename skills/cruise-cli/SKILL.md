@@ -143,7 +143,7 @@ The interactive menu changes with the session's phase:
 cruise
 ```
 
-Typical flow: run `cruise`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+Typical flow: run `cruise`, press `n` to open **New Session** at the task question, type the task, then either press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**.
 
 Bare `cruise` opens the official keyboard-only client beside the CLI and desktop GUI. It exposes the GUI's session-management workflows in a terminal. It requires an interactive TTY on macOS or Linux; non-TTY use is not supported. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh`.
 
@@ -152,12 +152,12 @@ Bare `cruise` opens the official keyboard-only client beside the CLI and desktop
 The TUI has exactly three views:
 
 - **Sessions** — Browse the global session list. Each selected session has **Info**, **DAG**, **Plan**, and **Log** detail tabs. The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The view exposes the complete phase action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions), including Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** — Create a session or draft from a local Directory or GitHub source. The form supports workflow config, skipped steps, task text and image paths, input-as-plan, Formal specification, Grill me, non-interactive planning, draft persistence, and selection history. Paths are typed with completion.
+- **New Session** — Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained.
 - **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. It uses the configured `run_all_parallelism`; the CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
 
 Ask and Option prompts are handled in the TUI. Required prompts are queued; a single-session prompt opens automatically, while Run All shows a queue badge. PR and Issue URLs are shown as text. Only a dedicated PR/Issue URL action opens a URL, using `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. The CLI-only `login`, `config`, and `exec` operations remain CLI commands rather than TUI screens.
 
-The New Session form autosaves 500 ms after changes. Other screen state is ephemeral. Destructive, external, and multi-stop actions require confirmation; quitting with active work confirms before cancelling it. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Empty text answers are rejected. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral. Destructive, external, and multi-stop actions require confirmation; quitting with active work confirms before cancelling it. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Empty text answers are rejected. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 ### TUI keyboard map
 
@@ -166,19 +166,24 @@ Keys are fixed and cannot be configured:
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
+| `n` | Open New Session at its first question, the task, ready to type |
 | `r` | Refresh |
 | `?` | Show help |
 | `q` / `Ctrl-C` | Quit; an active quit confirms and then cancels work |
-| `Tab` / `Shift-Tab` | Move focus forward / backward |
-| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate |
+| `Ctrl-P` | Create the New Session from the current answers and start normal planning |
+| `Ctrl-G` | Create the New Session from the current answers and start grill planning |
+| `Ctrl-U` | Create the New Session from the current answers using the input directly as the plan |
+| `Ctrl-S` | Save the New Session answers as a draft |
+| `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches); move between detail tabs elsewhere |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate; in the dialogue, move between choices, recall recent directories, discovered configs, or `gh` repositories, or move through the skipped-step list |
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
-| `Enter` | Edit or commit a single-line field; in a multiline field, insert a newline |
-| `Space` (not editing) | Toggle the source or focused option, cycle available directory/config/repository choices, or toggle the selected skipped step |
-| `Esc` | Leave edit mode |
-| Focused submit button | Submit the current form |
+| `Enter` | Accept the answer and move to the next question; on the launch question, start or draft the session; in the task and image editors, insert a newline |
+| `Ctrl-Enter` | Move to the next question from the task or image editor |
+| `Space` | Toggle the current choice or the highlighted skipped step |
+| `Esc` | Back one question; at the first question, return to Sessions |
 
 ### TUI layout, logs, and concurrency
 

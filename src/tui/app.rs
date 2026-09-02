@@ -954,6 +954,9 @@ impl TuiApp {
         if self.prompts.active.is_none() && matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
             self.modal = None;
         }
+        if self.prompts.active.is_none() {
+            self.modal_state.prompt_modal_pending = false;
+        }
         self.open_prompt_if_allowed();
     }
 
@@ -1339,11 +1342,12 @@ impl TuiApp {
         else {
             return false;
         };
-        let completed = if trailing_separator {
-            format!("{parent_raw}{name}")
-        } else if parent_raw.is_empty() {
+        let completed = if parent_raw.is_empty() {
             name
-        } else if parent_raw.ends_with('/') || parent_raw.ends_with(std::path::MAIN_SEPARATOR) {
+        } else if trailing_separator
+            || parent_raw.ends_with('/')
+            || parent_raw.ends_with(std::path::MAIN_SEPARATOR)
+        {
             format!("{parent_raw}{name}")
         } else {
             format!("{parent_raw}/{name}")
@@ -1356,9 +1360,7 @@ impl TuiApp {
             Step::Config => self.form.config.set_text(&completed),
             Step::Attachments => {
                 let mut lines = attachment_lines.unwrap_or_default();
-                if lines.is_empty() {
-                    lines.push(completed);
-                } else if let Some(last) = lines.last_mut() {
+                if let Some(last) = lines.last_mut() {
                     *last = completed;
                 }
                 self.form.attachments.set_text(&lines.join("\n"));
@@ -2161,7 +2163,7 @@ impl TuiApp {
                 self.prompts.close_active();
                 self.modal_state.prompt_modal_pending = false;
                 self.modal = None;
-                self.open_prompt_if_allowed();
+                self.sync_prompts();
             }
             Err(error) => {
                 self.modal_state.prompt_modal_pending = true;
@@ -2807,6 +2809,25 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Resize)));
         app.on_resize(80, 24);
         assert!(matches!(app.modal, Some(Modal::Prompt)));
+    }
+
+    #[test]
+    fn syncing_a_resolved_active_prompt_closes_every_prompt_ui_state() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.handle_action(Action::Open);
+        app.modal_state.prompt_modal_pending = true;
+
+        app.sync_prompts();
+
+        assert!(app.prompts.active.is_none());
+        assert!(app.modal.is_none());
+        assert!(!app.modal_state.prompt_modal_pending);
     }
 
     #[test]
