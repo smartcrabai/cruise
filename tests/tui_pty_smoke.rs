@@ -405,10 +405,7 @@ fn new_session_form_saves_a_draft_without_planning() {
     tui.send(b"2");
     tui.send(b"\r");
     tui.send(b"draft created through terminal e2e");
-    tui.send(b"\x1b");
-    tui.send(b"\x1b[F");
-    tui.send(b"\x1b[Z");
-    tui.send(b"\r");
+    tui.send(b"\x13");
     tui.wait_for_output("Saved draft", START_TIMEOUT);
     tui.send(b"q");
 
@@ -426,7 +423,36 @@ fn new_session_form_saves_a_draft_without_planning() {
 }
 
 #[test]
-fn new_session_form_creates_a_planned_session_with_selected_options() {
+fn quick_new_session_starts_planning_with_ctrl_p() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.send(b"n");
+    tui.send(b"quick path through terminal e2e");
+    tui.send(b"\x10");
+    tui.wait_for_output("Generate started", START_TIMEOUT);
+    tui.send(b"q");
+    tui.wait_for_output("Active work will be cancelled", START_TIMEOUT);
+    tui.send(b"\r");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let sessions = fixture
+        .manager
+        .list()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.input == "quick path through terminal e2e")
+    );
+}
+
+#[test]
+fn new_session_form_applies_workspace_options_with_ctrl_u() {
     if !tui_available() {
         return;
     }
@@ -440,11 +466,8 @@ fn new_session_form_creates_a_planned_session_with_selected_options() {
     tui.send(b"\t\t\t\t\t\t");
     tui.send(b" ");
     tui.send(b"\t ");
-    tui.send(b"\t\t\t ");
-    tui.send(b"\x1b[F");
-    tui.send(b"\r");
-    tui.wait_for_output("Planning finished: Planned", START_TIMEOUT);
-    thread::sleep(Duration::from_millis(250));
+    tui.send(b"\x15");
+    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -536,7 +559,7 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
 
     tui.wait_for_output("No sessions yet", START_TIMEOUT);
     tui.send(b"2");
-    tui.wait_for_output("Create session and start", START_TIMEOUT);
+    tui.wait_for_output("Ctrl+U Input plan", START_TIMEOUT);
     tui.send(b"?");
     tui.wait_for_output("Keyboard-only; no mouse or child-owned TTY.", START_TIMEOUT);
     tui.send(b"\x1b");

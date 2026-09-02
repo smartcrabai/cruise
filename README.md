@@ -108,7 +108,7 @@ Running `cruise` with no arguments opens cruise's official interactive keyboard 
 cruise
 ```
 
-Typical flow: run `cruise`, press `2` to create a session from **New Session**, press `1` to inspect or act on it in **Sessions**, then press `3` to run the planned queue in **Run All**.
+Typical flow: run `cruise`, press `n`, type the task, then press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**.
 
 The TUI requires an interactive TTY on macOS or Linux. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh`.
 
@@ -117,7 +117,7 @@ The TUI requires an interactive TTY on macOS or Linux. It is an interactive clie
 The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **DAG**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** -- Create a session or draft from a local Directory or GitHub source. The form supports workflow config selection, skipped steps, task text and images, **Use input as plan**, **Formal specification**, **Grill me**, and **Non-interactive planning**. Directory and repository paths are typed with completion; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **New Session** -- Create a session or draft from a local Directory or GitHub source. `Ctrl-P`, `Ctrl-G`, and `Ctrl-U` choose normal planning, grill planning, or input-as-plan at submission time; the form keeps orthogonal options such as workflow config, skipped steps, images, and formal specification. Directory and repository paths are typed with completion; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
 PR and Issue URLs are shown as text. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login`, `config`, and `exec` operations remain available through their CLI commands rather than TUI screens.
@@ -131,9 +131,14 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
+| `n` | Open New Session with the task editor ready |
 | `r` | Refresh |
 | `?` | Show help |
 | `q` / `Ctrl-C` | Quit; an active quit confirms and then cancels work |
+| `Ctrl-P` | Create the current New Session and start normal planning |
+| `Ctrl-G` | Create the current New Session and start grill planning |
+| `Ctrl-U` | Create the current New Session using the input directly as the plan |
+| `Ctrl-S` | Save the current New Session as a draft |
 | `Tab` / `Shift-Tab` | Move focus forward / backward |
 | Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate |
 | `[` / `]` | Move between detail tabs |
@@ -143,7 +148,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `Enter` | Edit or commit a single-line field; in a multiline field, insert a newline |
 | `Space` (not editing) | Toggle the source or focused option, cycle available directory/config/repository choices, or toggle the selected skipped step |
 | `Esc` | Leave edit mode |
-| Focused submit button | Submit the current form |
+| Focused submit button | Submit the current form with its selected planning options |
 
 #### Layout, logs, and process behavior
 

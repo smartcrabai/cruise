@@ -1023,6 +1023,36 @@ impl TuiApp {
                 return false;
             }
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.modal.is_none() && self.view == View::NewSession {
+                let mode = match key.code {
+                    KeyCode::Char('p') => Some((false, false)),
+                    KeyCode::Char('g') => Some((true, false)),
+                    KeyCode::Char('u') => Some((false, true)),
+                    KeyCode::Char('s') => {
+                        self.form.editing = false;
+                        self.save_as_draft();
+                        return false;
+                    }
+                    KeyCode::Enter => return false,
+                    _ => None,
+                };
+                if let Some((grill, skip_planning)) = mode {
+                    let planning = &mut self.form.options.planning;
+                    planning.grill = grill;
+                    planning.skip_planning = skip_planning;
+                    if skip_planning {
+                        planning.formal_spec = false;
+                    }
+                    self.form.editing = false;
+                    self.create_session();
+                    return false;
+                }
+            }
+            if matches!(key.code, KeyCode::Char('p' | 'g' | 'u' | 's')) {
+                return false;
+            }
+        }
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             if matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
                 match key.code {
@@ -1124,6 +1154,12 @@ impl TuiApp {
             }
             Action::ViewNewSession => {
                 self.view = View::NewSession;
+                false
+            }
+            Action::NewSession => {
+                self.view = View::NewSession;
+                self.form.set_field(FormField::Input);
+                self.form.editing = true;
                 false
             }
             Action::ViewRunAll => {
@@ -2285,8 +2321,8 @@ impl TuiApp {
             grill: self.form.options.planning.grill,
             formal_spec: self.form.options.planning.formal_spec,
             skip_planning: self.form.options.planning.skip_planning,
-            no_interactive_planning: self.form.options.planning.noninteractive,
-            interactive: Interactive::new(!self.form.options.planning.noninteractive),
+            no_interactive_planning: false,
+            interactive: Interactive::new(true),
             ..PlanRequest::default()
         };
         if self.registry.create(
@@ -2448,6 +2484,68 @@ mod tests {
     fn detail_tabs_cycle_in_both_directions() {
         assert_eq!(DetailTab::Info.next(), DetailTab::Dag);
         assert_eq!(DetailTab::Info.previous(), DetailTab::Log);
+    }
+
+    #[test]
+    fn new_session_shortcut_opens_task_editor() {
+        let mut app = app();
+        assert!(!app.handle_action(Action::NewSession));
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.field, FormField::Input);
+        assert!(app.form.editing);
+    }
+
+    #[test]
+    fn planning_shortcuts_select_mode_and_submit() {
+        let cases = [
+            ('p', (false, true, false)),
+            ('g', (true, true, false)),
+            ('u', (false, false, true)),
+        ];
+        for (key, expected) in cases {
+            let mut app = app();
+            app.handle_action(Action::NewSession);
+            let planning = &mut app.form.options.planning;
+            planning.grill = true;
+            planning.formal_spec = true;
+            planning.skip_planning = true;
+
+            assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
+            let planning = &app.form.options.planning;
+            assert_eq!(
+                (planning.grill, planning.formal_spec, planning.skip_planning),
+                expected
+            );
+            assert!(matches!(
+                &app.modal,
+                Some(Modal::Error(message))
+                    if message == "Task description or an image attachment is required"
+            ));
+            assert!(!app.form.editing);
+        }
+    }
+
+    #[test]
+    fn ctrl_enter_no_longer_submits_new_session() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        app.form.set_field(FormField::Submit);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL,)));
+        assert!(app.modal.is_none());
+        assert!(app.registry.tasks_empty());
+    }
+
+    #[test]
+    fn planning_and_draft_shortcuts_do_not_edit_open_prompts() {
+        let mut app = app();
+        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.handle_action(Action::Open);
+        for key in ['p', 'g', 'u', 's'] {
+            assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
+            assert!(matches!(app.modal, Some(Modal::Prompt)));
+            assert!(app.prompts.answer.text().is_empty());
+        }
+        assert!(!app.form.options.planning.grill);
     }
 
     #[test]

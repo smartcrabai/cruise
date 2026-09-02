@@ -60,10 +60,7 @@ pub enum FormField {
     SkippedSteps,
     Workspace,
     DirtyTree,
-    Grill,
     FormalSpec,
-    SkipPlanning,
-    Noninteractive,
     SaveDraft,
     Submit,
 }
@@ -80,11 +77,8 @@ impl FormField {
             Self::Attachments => Self::SkippedSteps,
             Self::SkippedSteps => Self::Workspace,
             Self::Workspace => Self::DirtyTree,
-            Self::DirtyTree => Self::Grill,
-            Self::Grill => Self::FormalSpec,
-            Self::FormalSpec => Self::SkipPlanning,
-            Self::SkipPlanning => Self::Noninteractive,
-            Self::Noninteractive => Self::SaveDraft,
+            Self::DirtyTree => Self::FormalSpec,
+            Self::FormalSpec => Self::SaveDraft,
             Self::SaveDraft => Self::Submit,
             Self::Submit => Self::Source,
         }
@@ -101,11 +95,8 @@ impl FormField {
             Self::SkippedSteps => Self::Attachments,
             Self::Workspace => Self::SkippedSteps,
             Self::DirtyTree => Self::Workspace,
-            Self::Grill => Self::DirtyTree,
-            Self::FormalSpec => Self::Grill,
-            Self::SkipPlanning => Self::FormalSpec,
-            Self::Noninteractive => Self::SkipPlanning,
-            Self::SaveDraft => Self::Noninteractive,
+            Self::FormalSpec => Self::DirtyTree,
+            Self::SaveDraft => Self::FormalSpec,
             Self::Submit => Self::SaveDraft,
         }
     }
@@ -139,13 +130,12 @@ pub struct SessionOptions {
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the TUI exposes independent planning toggles, including formal specification mode"
+    reason = "the TUI stores shortcut-selected modes alongside formal specification"
 )]
 pub struct PlanningFlags {
     pub grill: bool,
     pub formal_spec: bool,
     pub skip_planning: bool,
-    pub noninteractive: bool,
 }
 
 impl Default for NewSessionForm {
@@ -277,34 +267,9 @@ impl NewSessionForm {
                 self.options.allow_dirty_working_tree = !self.options.allow_dirty_working_tree;
                 self.mark_changed();
             }
-            FormField::Grill => {
-                self.options.planning.grill = !self.options.planning.grill;
-                if self.options.planning.grill {
-                    self.options.planning.skip_planning = false;
-                    self.options.planning.noninteractive = false;
-                }
-                self.mark_changed();
-            }
             FormField::FormalSpec => {
                 self.options.planning.formal_spec = !self.options.planning.formal_spec;
                 if self.options.planning.formal_spec {
-                    self.options.planning.skip_planning = false;
-                }
-                self.mark_changed();
-            }
-            FormField::SkipPlanning => {
-                self.options.planning.skip_planning = !self.options.planning.skip_planning;
-                if self.options.planning.skip_planning {
-                    self.options.planning.grill = false;
-                    self.options.planning.formal_spec = false;
-                    self.options.planning.noninteractive = false;
-                }
-                self.mark_changed();
-            }
-            FormField::Noninteractive => {
-                self.options.planning.noninteractive = !self.options.planning.noninteractive;
-                if self.options.planning.noninteractive {
-                    self.options.planning.grill = false;
                     self.options.planning.skip_planning = false;
                 }
                 self.mark_changed();
@@ -385,9 +350,7 @@ impl NewSessionForm {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.options.planning.grill
-            && (self.options.planning.skip_planning || self.options.planning.noninteractive)
-        {
+        if self.options.planning.grill && self.options.planning.skip_planning {
             return Err("Grill planning requires interactive LLM planning".to_string());
         }
         if self.options.planning.formal_spec && self.options.planning.skip_planning {
@@ -551,40 +514,20 @@ mod tests {
     }
 
     #[test]
-    fn formal_spec_and_skip_planning_are_mutually_exclusive() {
-        let mut form = NewSessionForm::default();
-        form.field = FormField::SkipPlanning;
-        form.toggle_current();
-        assert!(form.options.planning.skip_planning);
+    fn planning_focus_skips_shortcut_owned_modes() {
+        assert_eq!(FormField::DirtyTree.next(), FormField::FormalSpec);
+        assert_eq!(FormField::FormalSpec.previous(), FormField::DirtyTree);
+        assert_eq!(FormField::FormalSpec.next(), FormField::SaveDraft);
+    }
 
+    #[test]
+    fn formal_spec_clears_input_plan_mode() {
+        let mut form = NewSessionForm::default();
+        form.options.planning.skip_planning = true;
         form.field = FormField::FormalSpec;
         form.toggle_current();
         assert!(form.options.planning.formal_spec);
         assert!(!form.options.planning.skip_planning);
-
-        form.field = FormField::SkipPlanning;
-        form.toggle_current();
-        assert!(!form.options.planning.formal_spec);
-        assert!(form.options.planning.skip_planning);
-    }
-
-    #[test]
-    fn formal_spec_can_coexist_with_grill_and_noninteractive_planning() {
-        let mut form = NewSessionForm::default();
-        form.field = FormField::FormalSpec;
-        form.toggle_current();
-
-        form.field = FormField::Grill;
-        form.toggle_current();
-        assert!(form.options.planning.formal_spec);
-        assert!(form.options.planning.grill);
-
-        form.field = FormField::Grill;
-        form.toggle_current();
-        form.field = FormField::Noninteractive;
-        form.toggle_current();
-        assert!(form.options.planning.formal_spec);
-        assert!(form.options.planning.noninteractive);
     }
 
     #[test]
