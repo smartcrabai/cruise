@@ -6,6 +6,7 @@ pub enum Action {
     Quit,
     ViewSessions,
     ViewNewSession,
+    NewSession,
     ViewRunAll,
     Refresh,
     Help,
@@ -43,6 +44,7 @@ pub fn action_for(event: KeyEvent) -> Action {
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('1') => Action::ViewSessions,
         KeyCode::Char('2') => Action::ViewNewSession,
+        KeyCode::Char('n') => Action::NewSession,
         KeyCode::Char('3') => Action::ViewRunAll,
         KeyCode::Char('r') => Action::Refresh,
         KeyCode::Char('?') => Action::Help,
@@ -82,6 +84,8 @@ mod tests {
         assert_eq!(action_for(key(KeyCode::Char('j'))), Action::Down);
         assert_eq!(action_for(key(KeyCode::Char('k'))), Action::Up);
         assert_eq!(action_for(key(KeyCode::Char(']'))), Action::DetailNext);
+        assert_eq!(action_for(key(KeyCode::Char('n'))), Action::NewSession);
+        assert_eq!(action_for(key(KeyCode::F(5))), Action::None);
     }
 
     #[test]

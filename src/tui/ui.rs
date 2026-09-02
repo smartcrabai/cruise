@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
@@ -45,7 +45,7 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let mut spans = vec![Span::styled(" CRUISE ", selection(app)), Span::raw("  ")];
     for (view, label) in [
         (View::Sessions, " 1 Sessions "),
-        (View::NewSession, " 2 New Session "),
+        (View::NewSession, " 2/n New Session "),
         (View::RunAll, " 3 Run All "),
     ] {
         spans.push(Span::styled(
@@ -95,15 +95,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ));
     }
     let hints: &[(&str, &str)] = match app.view {
-        View::Sessions if app.sessions.is_empty() => &[("2", "new"), ("?", "help"), ("q", "quit")],
-        View::Sessions => &[("a", "actions"), ("?", "help"), ("q", "quit")],
-        View::NewSession => &[
-            ("Tab", "focus"),
-            ("Enter", "select"),
+        View::Sessions if app.sessions.is_empty() => &[("n", "new"), ("?", "help"), ("q", "quit")],
+        View::Sessions => &[
+            ("Enter", "actions"),
+            ("Tab", "detail"),
             ("?", "help"),
             ("q", "quit"),
         ],
-        View::RunAll => &[("a", "run/stop"), ("?", "help"), ("q", "quit")],
+        View::NewSession => &[("Ctrl+P", "plan"), ("Ctrl+G", "grill"), ("Ctrl+U", "input")],
+        View::RunAll => &[("Enter", "run/stop"), ("?", "help"), ("q", "quit")],
     };
     for &(shortcut, description) in hints {
         spans.extend([
@@ -166,9 +166,10 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(session) = app.active_session() else {
         frame.render_widget(
-            Paragraph::new("\n  No sessions yet\n\n  Press 2 to create one.")
-                .style(muted(app))
-                .block(panel(app, " Detail ", false)),
+            Paragraph::new(
+                "\n  No sessions yet\n\n  Press n, type a task, then Ctrl+P/G/U to start.",
+            )
+            .block(panel(app, " Detail ", false)),
             area,
         );
         return;
@@ -411,7 +412,7 @@ fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Length(2),
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Length(2),
     ])
@@ -486,9 +487,9 @@ fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
             FormField::Input,
             rows[0],
             if form.field == FormField::Input && form.editing {
-                "Task description (Enter newline · Esc done)"
+                "Task description (type · Ctrl+P/G/U start · Esc done)"
             } else {
-                "Task description (Enter to edit)"
+                "Task description (Enter edit · Ctrl+P/G/U start)"
             },
             &form.input,
         ),
@@ -540,36 +541,16 @@ fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 yes_no(form.options.allow_dirty_working_tree),
                 Some(form.options.allow_dirty_working_tree),
             ),
-            option(
-                FormField::Grill,
-                "Grill planning",
-                yes_no(form.options.planning.grill),
-                Some(form.options.planning.grill),
-            ),
         ]),
         columns[0],
     );
     frame.render_widget(
-        Paragraph::new(vec![
-            option(
-                FormField::FormalSpec,
-                "Formal specification",
-                yes_no(form.options.planning.formal_spec),
-                Some(form.options.planning.formal_spec),
-            ),
-            option(
-                FormField::SkipPlanning,
-                "Use input as plan",
-                yes_no(form.options.planning.skip_planning),
-                Some(form.options.planning.skip_planning),
-            ),
-            option(
-                FormField::Noninteractive,
-                "No interactive planning",
-                yes_no(form.options.planning.noninteractive),
-                Some(form.options.planning.noninteractive),
-            ),
-        ]),
+        Paragraph::new(vec![option(
+            FormField::FormalSpec,
+            "Formal specification",
+            yes_no(form.options.planning.formal_spec),
+            Some(form.options.planning.formal_spec),
+        )]),
         columns[1],
     );
 }
@@ -621,23 +602,25 @@ fn render_session_actions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .collect::<Vec<_>>()
         .join(", ");
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    let actions =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[0]);
-    for (area, title, field) in [
-        (actions[0], "Save draft", FormField::SaveDraft),
-        (actions[1], "Create session and start", FormField::Submit),
-    ] {
-        frame.render_widget(
-            Paragraph::new(title)
-                .alignment(Alignment::Center)
-                .style(if form.field == field {
-                    selection(app)
-                } else {
-                    active_nav(app)
-                }),
-            area,
-        );
-    }
+    let draft_style = if form.field == FormField::SaveDraft {
+        selection(app)
+    } else {
+        active_nav(app)
+    };
+    let submit_style = if form.field == FormField::Submit {
+        selection(app)
+    } else {
+        active_nav(app)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Ctrl+S Save draft  ", draft_style),
+            Span::styled("Ctrl+P Planning  ", submit_style),
+            Span::styled("Ctrl+G Grill  ", submit_style),
+            Span::styled("Ctrl+U Input plan", submit_style),
+        ])),
+        rows[0],
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  CONFIG SOURCES  ", label(app)),
@@ -812,19 +795,22 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let body = "1/2/3  switch views
+    let body = "n  new session, ready to type     1/2/3  switch views
+Ctrl+P  planning     Ctrl+G  grill     Ctrl+U  input plan
+Ctrl+S  save draft
 Tab / Shift-Tab  move focus or detail tab
 ↑↓ / j/k  navigate     PgUp/PgDn/Home/End  jump
 ←→ / [ ]  detail tabs
-a  actions   o  prompt/link   f  follow log   r  refresh
-Enter  edit/commit/submit; newline in multiline fields
+a / Enter  actions   o  prompt/link   f  follow log   r  refresh
+Enter  edit/select; newline in multiline fields
 Space  toggle/cycle the focused option when not editing
-Ctrl+Enter  save multiline input
+Ctrl+Enter  save multiline input in action dialogs
 Ctrl+R  toggle save/regenerate
 Esc  close or finish editing   ?  help   q/Ctrl-C  quit
 
+Fast path: n → type the task → Ctrl+P/G/U.
 Keyboard-only; no mouse or child-owned TTY.";
-    render_text_modal(frame, app, area, 68, 16, "Keyboard map", body);
+    render_text_modal(frame, app, area, 72, 20, "Keyboard map", body);
 }
 fn render_publish_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, trigger_cruise: bool) {
     let text = format!(
@@ -1180,13 +1166,11 @@ mod tests {
             "Image paths",
             "Workspace",
             "Allow dirty current branch",
-            "Grill planning",
             "Formal specification",
-            "Use input as plan",
-            "No interactive planning",
             "Skipped steps",
-            "Save draft",
-            "Create session and start",
+            "Ctrl+P Planning",
+            "Ctrl+G Grill",
+            "Ctrl+U Input plan",
         ] {
             assert!(form.contains(expected), "missing control: {expected}");
         }
@@ -1195,8 +1179,10 @@ mod tests {
     #[test]
     fn new_session_footer_shows_form_controls_instead_of_session_actions() {
         let form = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(form.contains("Tab focus"));
-        assert!(form.contains("Enter select"));
+        assert!(form.contains("Ctrl+P plan"));
+        assert!(form.contains("Ctrl+G grill"));
+        assert!(form.contains("Ctrl+U input"));
+        assert!(!form.contains("F5"));
         assert!(!form.contains("a actions"));
     }
 
@@ -1209,6 +1195,7 @@ mod tests {
             "switch views",
             "move focus or detail tab",
             "save multiline input",
+            "Ctrl+U  input plan",
             "toggle save/regenerate",
             "Keyboard-only; no mouse or child-owned TTY.",
         ] {
