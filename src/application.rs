@@ -1921,6 +1921,19 @@ impl CruiseApplication {
         crate::configs::list_user_configs()
     }
 
+    /// Collect config candidates for the TUI using the resolver's CLI ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured `CRUISE_CONFIG` path is invalid or
+    /// otherwise cannot be accessed.
+    pub fn discover_tui_config_candidates(
+        &self,
+        base_dir: &std::path::Path,
+    ) -> Result<Vec<crate::resolver::ConfigCandidate>> {
+        crate::resolver::collect_config_candidates(base_dir)
+    }
+
     #[must_use]
     pub fn discover_config_sources(
         &self,

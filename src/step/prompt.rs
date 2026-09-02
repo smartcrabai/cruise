@@ -144,7 +144,11 @@ async fn write_prompt(
 ) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         tokio::select! {
-            result = stdin.write_all(prompt.as_bytes()) => result.map_err(CruiseError::IoError)?,
+            result = stdin.write_all(prompt.as_bytes()) => match result {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(error) => return Err(CruiseError::IoError(error)),
+            },
             () = maybe_cancelled(cancel_token) => {
                 #[cfg(unix)]
                 terminate_process_group(child.id());
@@ -366,6 +370,35 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result.output.trim_end(), "hello model");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_prompt_accepts_a_successful_command_that_closes_stdin_early() {
+        let _guard = crate::test_support::lock_process();
+        // A command that does not read stdin can exit while a large prompt is
+        // still being written.  A successful exit remains a valid result.
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf output".to_string(),
+        ];
+        let prompt = "x".repeat(1024 * 1024);
+        let result = run_prompt(
+            &command,
+            None,
+            &prompt,
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert_eq!(result.output, "output");
     }
 
     #[cfg(unix)]
