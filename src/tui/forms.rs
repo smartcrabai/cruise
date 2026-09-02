@@ -41,6 +41,28 @@ impl Editor {
     pub fn widget(&self) -> &TextArea<'static> {
         &self.area
     }
+    /// Replace the text with the neighbour of the current value in `values`,
+    /// wrapping at both ends.  An unknown current value starts at the first entry.
+    fn cycle<T, F>(&mut self, values: &[T], delta: isize, text: F)
+    where
+        F: for<'a> Fn(&'a T) -> &'a str,
+    {
+        if values.is_empty() {
+            return;
+        }
+        let current = self.text();
+        let current = current.trim();
+        let len = values.len().cast_signed();
+        let index = values
+            .iter()
+            .position(|value| text(value) == current)
+            .map_or(0, |index| {
+                (index.cast_signed() + delta)
+                    .rem_euclid(len)
+                    .cast_unsigned()
+            });
+        self.set_text(text(&values[index]));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,61 +71,124 @@ pub enum SourceKind {
     GitHub,
 }
 
+/// One question of the New Session dialogue.  Questions are asked in
+/// [`Step::ORDER`]; [`NewSessionForm::applies`] hides the ones that earlier
+/// answers make moot (for example the working directory of a GitHub clone).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormField {
+pub enum Step {
+    Task,
+    Attachments,
     Source,
-    Input,
     WorkingDirectory,
     Repository,
     Config,
-    Attachments,
     SkippedSteps,
     Workspace,
     DirtyTree,
     FormalSpec,
+    Launch,
+}
+
+impl Step {
+    pub const ORDER: [Self; 11] = [
+        Self::Task,
+        Self::Attachments,
+        Self::Source,
+        Self::WorkingDirectory,
+        Self::Repository,
+        Self::Config,
+        Self::SkippedSteps,
+        Self::Workspace,
+        Self::DirtyTree,
+        Self::FormalSpec,
+        Self::Launch,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Task => "Task",
+            Self::Attachments => "Images",
+            Self::Source => "Source",
+            Self::WorkingDirectory => "Working directory",
+            Self::Repository => "GitHub repository",
+            Self::Config => "Workflow config",
+            Self::SkippedSteps => "Skipped steps",
+            Self::Workspace => "Workspace",
+            Self::DirtyTree => "Dirty working tree",
+            Self::FormalSpec => "Formal specification",
+            Self::Launch => "Launch",
+        }
+    }
+
+    /// Answered by typing into an editor.  Skipped steps are also typed when
+    /// the workflow config offers no step list; the reducer decides that.
+    #[must_use]
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::Task
+                | Self::Attachments
+                | Self::WorkingDirectory
+                | Self::Repository
+                | Self::Config
+        )
+    }
+    /// Text steps where Enter inserts a newline; Tab or Ctrl+Enter moves on.
+    #[must_use]
+    pub fn is_multiline(self) -> bool {
+        matches!(self, Self::Task | Self::Attachments)
+    }
+    /// Answered by picking from a fixed list with ↑↓ or Space.
+    #[must_use]
+    pub fn is_choice(self) -> bool {
+        matches!(
+            self,
+            Self::Source | Self::Workspace | Self::DirtyTree | Self::FormalSpec | Self::Launch
+        )
+    }
+}
+
+/// How the dialogue ends: which planning mode starts, or whether the answers
+/// are only kept as a draft session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    Planning,
+    Grill,
+    InputPlan,
     SaveDraft,
-    Submit,
 }
 
-impl FormField {
+impl Launch {
+    pub const ALL: [Self; 4] = [
+        Self::Planning,
+        Self::Grill,
+        Self::InputPlan,
+        Self::SaveDraft,
+    ];
+
     #[must_use]
-    pub fn next(self) -> Self {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Source => Self::Input,
-            Self::Input => Self::WorkingDirectory,
-            Self::WorkingDirectory => Self::Repository,
-            Self::Repository => Self::Config,
-            Self::Config => Self::Attachments,
-            Self::Attachments => Self::SkippedSteps,
-            Self::SkippedSteps => Self::Workspace,
-            Self::Workspace => Self::DirtyTree,
-            Self::DirtyTree => Self::FormalSpec,
-            Self::FormalSpec => Self::SaveDraft,
-            Self::SaveDraft => Self::Submit,
-            Self::Submit => Self::Source,
+            Self::Planning => "Start planning",
+            Self::Grill => "Grill planning (interview first)",
+            Self::InputPlan => "Use the input as the plan (no LLM planning)",
+            Self::SaveDraft => "Save as draft",
         }
     }
     #[must_use]
-    pub fn previous(self) -> Self {
+    pub fn shortcut(self) -> &'static str {
         match self {
-            Self::Source => Self::Submit,
-            Self::Input => Self::Source,
-            Self::WorkingDirectory => Self::Input,
-            Self::Repository => Self::WorkingDirectory,
-            Self::Config => Self::Repository,
-            Self::Attachments => Self::Config,
-            Self::SkippedSteps => Self::Attachments,
-            Self::Workspace => Self::SkippedSteps,
-            Self::DirtyTree => Self::Workspace,
-            Self::FormalSpec => Self::DirtyTree,
-            Self::SaveDraft => Self::FormalSpec,
-            Self::Submit => Self::SaveDraft,
+            Self::Planning => "Ctrl+P",
+            Self::Grill => "Ctrl+G",
+            Self::InputPlan => "Ctrl+U",
+            Self::SaveDraft => "Ctrl+S",
         }
     }
 }
 
-/// State for the New Session screen.  Only the draft fields persist; focus and
-/// provider toggles are intentionally ephemeral.
+/// State for the New Session dialogue.  Only the draft fields persist; the
+/// current step and provider toggles are intentionally ephemeral.
 pub struct NewSessionForm {
     pub input: Editor,
     pub working_dir: Editor,
@@ -111,10 +196,10 @@ pub struct NewSessionForm {
     pub config: Editor,
     pub attachments: Editor,
     pub skipped: Editor,
-    pub field: FormField,
-    pub editing: bool,
+    pub step: Step,
     pub source: SourceKind,
     pub workspace_mode: WorkspaceMode,
+    pub launch: Launch,
     pub options: SessionOptions,
     pub skipped_explicit: bool,
     pub dirty: bool,
@@ -150,14 +235,14 @@ impl NewSessionForm {
             config: Editor::new(draft.requested_config_path.as_deref().unwrap_or("")),
             attachments: Editor::default(),
             skipped: Editor::new(&draft.skipped_steps.join(", ")),
-            field: FormField::Input,
-            editing: false,
+            step: Step::Task,
             source: if draft.repo.is_some() {
                 SourceKind::GitHub
             } else {
                 SourceKind::Directory
             },
             workspace_mode: WorkspaceMode::Worktree,
+            launch: Launch::Planning,
             options: SessionOptions::default(),
             skipped_explicit: !draft.skipped_steps.is_empty(),
             dirty: false,
@@ -186,6 +271,18 @@ impl NewSessionForm {
             .map(ToString::to_string)
             .collect()
     }
+    #[must_use]
+    pub fn attachment_paths(&self) -> Vec<PathBuf> {
+        self.attachments
+            .text()
+            .lines()
+            .filter_map(|line| {
+                let path = line.trim();
+                (!path.is_empty())
+                    .then(|| PathBuf::from(crate::new_session_history::expand_tilde(path)))
+            })
+            .collect()
+    }
 
     #[must_use]
     pub fn draft(&self) -> NewSessionDraft {
@@ -206,16 +303,6 @@ impl NewSessionForm {
         let base_dir = self.working_dir.text().trim().to_string();
         let config_path = nonempty(&self.config.text())
             .map(|path| PathBuf::from(crate::new_session_history::expand_tilde(&path)));
-        let attachments = self
-            .attachments
-            .text()
-            .lines()
-            .filter_map(|line| {
-                let path = line.trim();
-                (!path.is_empty())
-                    .then(|| PathBuf::from(crate::new_session_history::expand_tilde(path)))
-            })
-            .collect();
         let repo = (self.source == SourceKind::GitHub)
             .then(|| nonempty(&self.repository.text()))
             .flatten();
@@ -234,9 +321,52 @@ impl NewSessionForm {
                 self.workspace_mode
             },
             allow_dirty_working_tree: self.options.allow_dirty_working_tree,
-            attachments,
+            attachments: self.attachment_paths(),
             skipped_steps: self.selected_skipped_steps(),
         }
+    }
+
+    /// Whether `step` is asked given the answers so far.
+    #[must_use]
+    pub fn applies(&self, step: Step) -> bool {
+        match step {
+            Step::WorkingDirectory | Step::Workspace => self.source == SourceKind::Directory,
+            Step::Repository => self.source == SourceKind::GitHub,
+            Step::DirtyTree => {
+                self.source == SourceKind::Directory
+                    && self.workspace_mode == WorkspaceMode::CurrentBranch
+            }
+            _ => true,
+        }
+    }
+    /// The questions of this dialogue, in order.
+    pub fn steps(&self) -> impl Iterator<Item = Step> + '_ {
+        Step::ORDER.into_iter().filter(|step| self.applies(*step))
+    }
+    /// Move to the next question; `false` when the dialogue is at its last one.
+    pub fn advance(&mut self) -> bool {
+        let current = self.step;
+        let next = self.steps().skip_while(|step| *step != current).nth(1);
+        if let Some(next) = next {
+            self.step = next;
+            true
+        } else {
+            false
+        }
+    }
+    /// Move back to the previous question; `false` when already at the first.
+    pub fn retreat(&mut self) -> bool {
+        let current = self.step;
+        let previous = self.steps().take_while(|step| *step != current).last();
+        if let Some(previous) = previous {
+            self.step = previous;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn rewind(&mut self) {
+        self.step = Step::Task;
     }
 
     pub fn toggle_workspace(&mut self) {
@@ -246,9 +376,11 @@ impl NewSessionForm {
         };
         self.mark_changed();
     }
-    pub fn toggle_current(&mut self) {
-        match self.field {
-            FormField::Source => {
+    /// Change the answer of the current choice step by `delta` positions.
+    /// Two-way choices toggle; text steps are unaffected.
+    pub fn choose(&mut self, delta: isize) {
+        match self.step {
+            Step::Source => {
                 self.source = match self.source {
                     SourceKind::Directory => SourceKind::GitHub,
                     SourceKind::GitHub => SourceKind::Directory,
@@ -258,40 +390,105 @@ impl NewSessionForm {
                 }
                 self.mark_changed();
             }
-            FormField::Workspace => self.toggle_workspace(),
-            FormField::DirtyTree => {
+            Step::Workspace => self.toggle_workspace(),
+            Step::DirtyTree => {
                 self.options.allow_dirty_working_tree = !self.options.allow_dirty_working_tree;
                 self.mark_changed();
             }
-            FormField::FormalSpec => {
+            Step::FormalSpec => {
                 self.options.planning.formal_spec = !self.options.planning.formal_spec;
                 if self.options.planning.formal_spec {
                     self.options.planning.skip_planning = false;
                 }
                 self.mark_changed();
             }
+            Step::Launch => {
+                let len = Launch::ALL.len().cast_signed();
+                let index = Launch::ALL
+                    .iter()
+                    .position(|launch| *launch == self.launch)
+                    .map_or(0, |index| {
+                        (index.cast_signed() + delta)
+                            .rem_euclid(len)
+                            .cast_unsigned()
+                    });
+                self.launch = Launch::ALL[index];
+            }
             _ => {}
         }
     }
+    /// Record the launch mode in the planning flags carried by the request.
+    pub fn select_launch(&mut self, launch: Launch) {
+        self.launch = launch;
+        let planning = &mut self.options.planning;
+        planning.grill = launch == Launch::Grill;
+        planning.skip_planning = launch == Launch::InputPlan;
+        if planning.skip_planning {
+            planning.formal_spec = false;
+        }
+    }
     pub fn input(&mut self, event: KeyEvent) {
-        match self.field {
-            FormField::Input => self.input.input(event),
-            FormField::WorkingDirectory => self.working_dir.input(event),
-            FormField::Repository => self.repository.input(event),
-            FormField::Config => self.config.input(event),
-            FormField::Attachments => self.attachments.input(event),
-            FormField::SkippedSteps => self.skipped.input(event),
+        match self.step {
+            Step::Task => self.input.input(event),
+            Step::WorkingDirectory => self.working_dir.input(event),
+            Step::Repository => self.repository.input(event),
+            Step::Config => self.config.input(event),
+            Step::Attachments => self.attachments.input(event),
+            Step::SkippedSteps => self.skipped.input(event),
             _ => return,
         }
         self.mark_changed();
-        if self.field == FormField::SkippedSteps {
+        if self.step == Step::SkippedSteps {
             self.skipped_explicit = true;
         }
     }
 
-    pub fn set_field(&mut self, field: FormField) {
-        self.field = field;
-        self.editing = false;
+    /// The answer shown once a step has been passed.
+    #[must_use]
+    pub fn answer(&self, step: Step) -> String {
+        match step {
+            Step::Task => {
+                let text = self.input.text();
+                let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+                match (lines.next(), lines.next()) {
+                    (None, _) => "(none)".to_string(),
+                    (Some(first), None) => first.to_string(),
+                    (Some(first), Some(_)) => format!("{first} …"),
+                }
+            }
+            Step::Attachments => match self.attachment_paths().len() {
+                0 => "none".to_string(),
+                1 => "1 image".to_string(),
+                count => format!("{count} images"),
+            },
+            Step::Source => match self.source {
+                SourceKind::Directory => "Directory",
+                SourceKind::GitHub => "GitHub repository",
+            }
+            .to_string(),
+            Step::WorkingDirectory => nonempty(&self.working_dir.text())
+                .unwrap_or_else(|| "current directory".to_string()),
+            Step::Repository => self.repository.text().trim().to_string(),
+            Step::Config => {
+                nonempty(&self.config.text()).unwrap_or_else(|| "auto-detect".to_string())
+            }
+            Step::SkippedSteps => {
+                let skipped = self.selected_skipped_steps();
+                if skipped.is_empty() {
+                    "none".to_string()
+                } else {
+                    skipped.join(", ")
+                }
+            }
+            Step::Workspace => match self.workspace_mode {
+                WorkspaceMode::Worktree => "worktree",
+                WorkspaceMode::CurrentBranch => "current branch",
+            }
+            .to_string(),
+            Step::DirtyTree => yes_no(self.options.allow_dirty_working_tree).to_string(),
+            Step::FormalSpec => yes_no(self.options.planning.formal_spec).to_string(),
+            Step::Launch => self.launch.label().to_string(),
+        }
     }
 
     pub fn apply_history_defaults(
@@ -317,32 +514,47 @@ impl NewSessionForm {
         }
     }
 
-    /// Cycle through recent working directories recorded by session history.
-    pub fn cycle_working_directory(&mut self, paths: &[String]) {
+    /// Recall recent working directories recorded by session history.
+    pub fn cycle_working_directory(&mut self, paths: &[String], delta: isize) {
         if paths.is_empty() {
             return;
         }
-        let current = self.working_dir.text();
-        let index = paths
-            .iter()
-            .position(|path| path == current.trim())
-            .map_or(0, |index| (index + 1) % paths.len());
-        self.working_dir.set_text(&paths[index]);
+        self.working_dir.cycle(paths, delta, |path| path);
         self.mark_changed();
     }
 
-    pub fn cycle_config(&mut self, sources: &[crate::configs::ConfigEntry]) {
+    pub fn cycle_config(&mut self, sources: &[crate::configs::ConfigEntry], delta: isize) {
         if sources.is_empty() {
             return;
         }
-        let config = self.config.text();
-        let current = config.trim();
-        let index = sources
-            .iter()
-            .position(|entry| entry.path == current)
-            .map_or(0, |idx| (idx + 1) % sources.len());
-        self.config.set_text(&sources[index].path);
+        self.config
+            .cycle(sources, delta, |entry| entry.path.as_str());
         self.mark_changed();
+    }
+
+    /// Recall repositories reported by `gh repo list`.
+    pub fn cycle_repository(&mut self, repositories: &[String], delta: isize) {
+        if repositories.is_empty() {
+            return;
+        }
+        self.repository
+            .cycle(repositories, delta, |repository| repository);
+        self.mark_changed();
+    }
+
+    /// Check the current answer before moving to the next question.
+    pub fn validate_step(&self) -> Result<(), String> {
+        match self.step {
+            Step::Attachments
+                if self.input.text().trim().is_empty() && self.attachment_paths().is_empty() =>
+            {
+                Err("Task description or an image attachment is required".to_string())
+            }
+            Step::Repository if self.repository.text().trim().is_empty() => {
+                Err("Select a GitHub repository before creating a session".to_string())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -363,10 +575,14 @@ fn nonempty(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.trim().to_string())
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::field_reassign_with_default,
-    reason = "form tests intentionally switch focus and toggle individual controls"
+    reason = "form tests intentionally switch steps and toggle individual controls"
 )]
 mod tests {
     use super::*;
@@ -385,10 +601,10 @@ mod tests {
     #[test]
     fn request_maps_source_config_skip_images_and_workspace_mode() {
         let mut form = NewSessionForm {
-            field: FormField::Source,
+            step: Step::Source,
             ..NewSessionForm::default()
         };
-        form.toggle_current();
+        form.choose(1);
         assert_eq!(form.source, SourceKind::GitHub);
         form.repository.set_text(" acme/cruise ");
         form.config.set_text(" workflow.yaml ");
@@ -444,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn config_cycles_and_text_input_marks_form_dirty() {
+    fn config_cycles_both_ways_and_text_input_marks_form_dirty() {
         let mut form = NewSessionForm::default();
         let sources = [
             crate::configs::ConfigEntry {
@@ -458,12 +674,16 @@ mod tests {
                 description: None,
             },
         ];
-        form.cycle_config(&sources);
+        form.cycle_config(&sources, 1);
         assert_eq!(form.config.text(), "a.yaml");
-        form.cycle_config(&sources);
+        form.cycle_config(&sources, 1);
         assert_eq!(form.config.text(), "b.yaml");
+        form.cycle_config(&sources, -1);
+        assert_eq!(form.config.text(), "a.yaml");
+        form.cycle_config(&sources, -1);
+        assert_eq!(form.config.text(), "b.yaml", "recall wraps at the start");
 
-        form.set_field(FormField::SkippedSteps);
+        form.step = Step::SkippedSteps;
         form.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(form.dirty);
         assert!(form.skipped_explicit);
@@ -475,7 +695,7 @@ mod tests {
         form.apply_default_skips(&skipped);
         assert_eq!(form.selected_skipped_steps(), skipped);
         assert!(!form.skipped_explicit);
-        form.set_field(FormField::SkippedSteps);
+        form.step = Step::SkippedSteps;
         form.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(form.skipped_explicit);
         form.apply_default_skips(&["other".to_string()]);
@@ -486,10 +706,12 @@ mod tests {
     fn recent_working_directories_cycle_in_order() {
         let mut form = NewSessionForm::default();
         let recent = vec!["/tmp/one".to_string(), "/tmp/two".to_string()];
-        form.cycle_working_directory(&recent);
+        form.cycle_working_directory(&recent, 1);
         assert_eq!(form.working_dir.text(), "/tmp/one");
-        form.cycle_working_directory(&recent);
+        form.cycle_working_directory(&recent, 1);
         assert_eq!(form.working_dir.text(), "/tmp/two");
+        form.cycle_working_directory(&recent, 1);
+        assert_eq!(form.working_dir.text(), "/tmp/one");
     }
 
     #[test]
@@ -499,29 +721,22 @@ mod tests {
     }
 
     #[test]
-    fn formal_spec_toggle_can_be_enabled_and_disabled() {
+    fn formal_spec_choice_can_be_enabled_and_disabled() {
         let mut form = NewSessionForm::default();
-        form.field = FormField::FormalSpec;
+        form.step = Step::FormalSpec;
 
-        form.toggle_current();
+        form.choose(1);
         assert!(form.options.planning.formal_spec);
-        form.toggle_current();
+        form.choose(-1);
         assert!(!form.options.planning.formal_spec);
-    }
-
-    #[test]
-    fn planning_focus_skips_shortcut_owned_modes() {
-        assert_eq!(FormField::DirtyTree.next(), FormField::FormalSpec);
-        assert_eq!(FormField::FormalSpec.previous(), FormField::DirtyTree);
-        assert_eq!(FormField::FormalSpec.next(), FormField::SaveDraft);
     }
 
     #[test]
     fn formal_spec_clears_input_plan_mode() {
         let mut form = NewSessionForm::default();
         form.options.planning.skip_planning = true;
-        form.field = FormField::FormalSpec;
-        form.toggle_current();
+        form.step = Step::FormalSpec;
+        form.choose(1);
         assert!(form.options.planning.formal_spec);
         assert!(!form.options.planning.skip_planning);
     }
@@ -536,33 +751,143 @@ mod tests {
     }
 
     #[test]
-    fn formal_spec_is_reachable_in_both_focus_directions() {
-        let mut next = FormField::Source;
-        let mut reached_forward = false;
-        for _ in 0..32 {
-            if next == FormField::FormalSpec {
-                reached_forward = true;
-                break;
-            }
-            next = next.next();
-        }
-        assert!(
-            reached_forward,
-            "Tab traversal must include Formal specification"
+    fn directory_dialogue_asks_directory_questions_only() {
+        let form = NewSessionForm::default();
+        assert_eq!(
+            form.steps().collect::<Vec<_>>(),
+            vec![
+                Step::Task,
+                Step::Attachments,
+                Step::Source,
+                Step::WorkingDirectory,
+                Step::Config,
+                Step::SkippedSteps,
+                Step::Workspace,
+                Step::FormalSpec,
+                Step::Launch,
+            ]
         );
+    }
 
-        let mut previous = FormField::Submit;
-        let mut reached_backward = false;
-        for _ in 0..32 {
-            if previous == FormField::FormalSpec {
-                reached_backward = true;
-                break;
-            }
-            previous = previous.previous();
-        }
-        assert!(
-            reached_backward,
-            "reverse Tab traversal must include Formal specification"
+    #[test]
+    fn dirty_tree_question_appears_only_for_current_branch_runs() {
+        let mut form = NewSessionForm::default();
+        assert!(!form.applies(Step::DirtyTree));
+        form.step = Step::Workspace;
+        form.choose(1);
+        assert_eq!(form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(form.applies(Step::DirtyTree));
+        assert!(form.advance());
+        assert_eq!(form.step, Step::DirtyTree);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::FormalSpec);
+    }
+
+    #[test]
+    fn github_dialogue_replaces_directory_questions_with_repository() {
+        let mut form = NewSessionForm {
+            step: Step::Source,
+            ..NewSessionForm::default()
+        };
+        form.workspace_mode = WorkspaceMode::CurrentBranch;
+        form.choose(1);
+        assert_eq!(form.source, SourceKind::GitHub);
+        assert_eq!(
+            form.workspace_mode,
+            WorkspaceMode::Worktree,
+            "GitHub clones always run in a worktree"
         );
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Repository);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Config);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::SkippedSteps);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::FormalSpec);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Launch);
+        assert!(!form.advance(), "Launch is the last question");
+        assert_eq!(form.step, Step::Launch);
+    }
+
+    #[test]
+    fn retreat_walks_back_to_the_first_question_and_stops() {
+        let mut form = NewSessionForm::default();
+        form.step = Step::Source;
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Attachments);
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Task);
+        assert!(!form.retreat());
+        assert_eq!(form.step, Step::Task);
+    }
+
+    #[test]
+    fn launch_choice_cycles_and_maps_to_planning_flags() {
+        let mut form = NewSessionForm::default();
+        form.step = Step::Launch;
+        form.choose(-1);
+        assert_eq!(form.launch, Launch::SaveDraft);
+        form.choose(1);
+        assert_eq!(form.launch, Launch::Planning);
+        form.choose(2);
+        assert_eq!(form.launch, Launch::InputPlan);
+
+        form.options.planning.formal_spec = true;
+        form.select_launch(Launch::InputPlan);
+        assert!(form.options.planning.skip_planning);
+        assert!(!form.options.planning.grill);
+        assert!(
+            !form.options.planning.formal_spec,
+            "input-as-plan cannot carry a formal specification"
+        );
+        form.select_launch(Launch::Grill);
+        assert!(form.options.planning.grill);
+        assert!(!form.options.planning.skip_planning);
+        assert!(form.validate().is_ok());
+    }
+
+    #[test]
+    fn step_validation_requires_task_or_image_and_repository() {
+        let mut form = NewSessionForm::default();
+        form.step = Step::Attachments;
+        assert_eq!(
+            form.validate_step(),
+            Err("Task description or an image attachment is required".to_string())
+        );
+        form.attachments.set_text("shot.png");
+        assert!(form.validate_step().is_ok());
+        form.attachments.set_text("");
+        form.input.set_text("do the thing");
+        assert!(form.validate_step().is_ok());
+
+        form.source = SourceKind::GitHub;
+        form.step = Step::Repository;
+        assert_eq!(
+            form.validate_step(),
+            Err("Select a GitHub repository before creating a session".to_string())
+        );
+        form.repository.set_text("acme/cruise");
+        assert!(form.validate_step().is_ok());
+    }
+
+    #[test]
+    fn answers_summarise_each_step() {
+        let mut form = NewSessionForm::default();
+        assert_eq!(form.answer(Step::Task), "(none)");
+        form.input.set_text("first line\nsecond line");
+        assert_eq!(form.answer(Step::Task), "first line …");
+        assert_eq!(form.answer(Step::Attachments), "none");
+        form.attachments.set_text("a.png\nb.png");
+        assert_eq!(form.answer(Step::Attachments), "2 images");
+        assert_eq!(form.answer(Step::WorkingDirectory), "current directory");
+        assert_eq!(form.answer(Step::Config), "auto-detect");
+        assert_eq!(form.answer(Step::SkippedSteps), "none");
+        form.skipped.set_text("build, test");
+        assert_eq!(form.answer(Step::SkippedSteps), "build, test");
+        assert_eq!(form.answer(Step::Workspace), "worktree");
+        assert_eq!(form.answer(Step::FormalSpec), "no");
+        assert_eq!(form.answer(Step::Launch), "Start planning");
     }
 }

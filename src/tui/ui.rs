@@ -10,7 +10,7 @@ use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
 
 use super::app::{DetailTab, Modal, TuiApp, View, action_label};
-use super::forms::{Editor, FormField, NewSessionForm, SourceKind};
+use super::forms::{Editor, Launch, SourceKind, Step};
 pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
     if area.width < 80 || area.height < 24 {
@@ -102,7 +102,12 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             ("?", "help"),
             ("q", "quit"),
         ],
-        View::NewSession => &[("Ctrl+P", "plan"), ("Ctrl+G", "grill"), ("Ctrl+U", "input")],
+        View::NewSession => &[
+            ("Enter", "next"),
+            ("Shift-Tab", "back"),
+            ("Ctrl+P/G/U", "start now"),
+            ("?", "help"),
+        ],
         View::RunAll => &[("Enter", "run/stop"), ("?", "help"), ("q", "quit")],
     };
     for &(shortcut, description) in hints {
@@ -167,7 +172,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(session) = app.active_session() else {
         frame.render_widget(
             Paragraph::new(
-                "\n  No sessions yet\n\n  Press n, type a task, then Ctrl+P/G/U to start.",
+                "\n  No sessions yet\n\n  Press n, type a task, then Tab through the questions\n  or press Ctrl+P/G/U to start right away.",
             )
             .block(panel(app, " Detail ", false)),
             area,
@@ -405,269 +410,247 @@ fn render_log(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let form = &app.form;
+    let steps = form.steps().collect::<Vec<_>>();
+    let current = steps
+        .iter()
+        .position(|step| *step == form.step)
+        .unwrap_or(0);
+    let answered = &steps[..current];
+    let upcoming = &steps[current + 1..];
     let rows = Layout::vertical([
-        Constraint::Min(4),
         Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
+        Constraint::Length(u16::try_from(answered.len()).unwrap_or(u16::MAX)),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(u16::try_from(upcoming.len()).unwrap_or(u16::MAX)),
     ])
     .split(area);
-    render_session_editors(frame, app, &rows);
-    render_session_source(frame, app, rows[1]);
-    render_session_options(frame, app, rows[6]);
-    render_session_skips(frame, app, rows[7]);
-    render_session_actions(frame, app, rows[8]);
-}
-
-fn render_session_source(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let form = &app.form;
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            field_marker(app, form.field == FormField::Source),
-            Span::styled("SOURCE  ", label(app)),
+            Span::styled(" NEW SESSION  ", label(app)),
             Span::styled(
-                " DIRECTORY ",
-                if form.source == SourceKind::Directory {
-                    active_nav(app)
-                } else {
-                    muted(app)
-                },
-            ),
-            Span::styled(
-                " GITHUB ",
-                if form.source == SourceKind::GitHub {
-                    active_nav(app)
-                } else {
-                    muted(app)
-                },
-            ),
-            Span::styled("   Space to switch", muted(app)),
-        ])),
-        area,
-    );
-}
-
-fn render_session_editors(frame: &mut Frame<'_>, app: &TuiApp, rows: &[Rect]) {
-    let form = &app.form;
-    let recent_title = app
-        .history_summary
-        .as_ref()
-        .filter(|summary| !summary.recent_working_dirs.is_empty())
-        .map_or_else(
-            || "Working directory".to_string(),
-            |summary| {
-                format!(
-                    "Working directory (Space cycles recent: {})",
-                    summary
-                        .recent_working_dirs
-                        .iter()
-                        .take(3)
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            },
-        );
-    let repository_title =
-        if form.source == SourceKind::GitHub && !app.github_repositories.is_empty() {
-            format!(
-                "GitHub repository (Space/source; {} found)",
-                app.github_repositories.len()
-            )
-        } else {
-            "GitHub repository owner/name".to_string()
-        };
-    for (field, row, title, editor) in [
-        (
-            FormField::Input,
-            rows[0],
-            if form.field == FormField::Input && form.editing {
-                "Task description (type · Ctrl+P/G/U start · Esc done)"
-            } else {
-                "Task description (Enter edit · Ctrl+P/G/U start)"
-            },
-            &form.input,
-        ),
-        (
-            FormField::WorkingDirectory,
-            rows[2],
-            recent_title.as_str(),
-            &form.working_dir,
-        ),
-        (
-            FormField::Repository,
-            rows[3],
-            repository_title.as_str(),
-            &form.repository,
-        ),
-        (
-            FormField::Config,
-            rows[4],
-            "Workflow config (Space cycles discovered entries)",
-            &form.config,
-        ),
-        (
-            FormField::Attachments,
-            rows[5],
-            "Image paths (one per line)",
-            &form.attachments,
-        ),
-    ] {
-        render_editor(frame, app, form, field, row, title, editor);
-    }
-}
-
-fn render_session_options(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let form = &app.form;
-    let option = |field, name, value, enabled| option_line(app, form, field, name, value, enabled);
-    let columns =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            option(
-                FormField::Workspace,
-                "Workspace",
-                workspace_label(form.workspace_mode),
-                None,
-            ),
-            option(
-                FormField::DirtyTree,
-                "Allow dirty current branch",
-                yes_no(form.options.allow_dirty_working_tree),
-                Some(form.options.allow_dirty_working_tree),
-            ),
-        ]),
-        columns[0],
-    );
-    frame.render_widget(
-        Paragraph::new(vec![option(
-            FormField::FormalSpec,
-            "Formal specification",
-            yes_no(form.options.planning.formal_spec),
-            Some(form.options.planning.formal_spec),
-        )]),
-        columns[1],
-    );
-}
-
-fn render_session_skips(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    fn collect_labels<'a>(
-        nodes: &'a [crate::workflow::SkippableStepNode],
-        labels: &mut Vec<&'a str>,
-    ) {
-        for node in nodes {
-            labels.push(&node.id);
-            collect_labels(&node.children, labels);
-        }
-    }
-
-    let form = &app.form;
-    let mut labels = Vec::new();
-    if let Some(defaults) = app.config_defaults.as_ref() {
-        collect_labels(&defaults.steps, &mut labels);
-        collect_labels(&defaults.after_pr_steps, &mut labels);
-    }
-    let title = if labels.is_empty() {
-        "Skipped steps  ·  Enter edit".to_string()
-    } else {
-        let selected = app.skip_cursor % labels.len();
-        format!(
-            "Skipped steps  ·  choice: {}  ·  ↑↓ choose  ·  Space toggle  ·  Enter edit",
-            labels[selected]
-        )
-    };
-    render_editor(
-        frame,
-        app,
-        form,
-        FormField::SkippedSteps,
-        area,
-        &title,
-        &form.skipped,
-    );
-}
-
-fn render_session_actions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let form = &app.form;
-    let config_names = app
-        .config_sources
-        .iter()
-        .take(3)
-        .map(|entry| entry.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    let draft_style = if form.field == FormField::SaveDraft {
-        selection(app)
-    } else {
-        active_nav(app)
-    };
-    let submit_style = if form.field == FormField::Submit {
-        selection(app)
-    } else {
-        active_nav(app)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Ctrl+S Save draft  ", draft_style),
-            Span::styled("Ctrl+P Planning  ", submit_style),
-            Span::styled("Ctrl+G Grill  ", submit_style),
-            Span::styled("Ctrl+U Input plan", submit_style),
-        ])),
-        rows[0],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  CONFIG SOURCES  ", label(app)),
-            Span::styled(
-                if config_names.is_empty() {
-                    "none"
-                } else {
-                    &config_names
-                },
+                format!("question {} of {}", current + 1, steps.len()),
                 muted(app),
             ),
         ])),
+        rows[0],
+    );
+    let answer_width = usize::from(area.width).saturating_sub(26);
+    frame.render_widget(
+        Paragraph::new(
+            answered
+                .iter()
+                .map(|step| {
+                    Line::from(vec![
+                        Span::styled("  ✓ ", success(app)),
+                        Span::styled(format!("{:<20}  ", step.label()), muted(app)),
+                        Span::raw(truncate(&form.answer(*step), answer_width)),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+        ),
         rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ▸ ", accent(app, true)),
+            Span::styled(step_question(form.step), accent(app, true)),
+        ])),
+        rows[2],
+    );
+    let [_, control] =
+        Layout::horizontal([Constraint::Length(4), Constraint::Min(1)]).areas(rows[3]);
+    render_step_control(frame, app, control);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("    {}", step_hint(app)),
+            muted(app),
+        ))),
+        rows[4],
+    );
+    frame.render_widget(
+        Paragraph::new(
+            upcoming
+                .iter()
+                .map(|step| Line::from(Span::styled(format!("    {}", step.label()), muted(app))))
+                .collect::<Vec<_>>(),
+        ),
+        rows[5],
     );
 }
 
-fn render_editor(
-    frame: &mut Frame<'_>,
-    app: &TuiApp,
-    form: &NewSessionForm,
-    field: FormField,
-    area: Rect,
-    title: &str,
-    editor: &Editor,
-) {
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    let focused = form.field == field;
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            field_marker(app, focused),
-            Span::styled(
-                title,
-                if focused {
-                    accent(app, true)
-                } else {
-                    muted(app)
-                },
-            ),
-        ])),
-        rows[0],
-    );
+fn step_question(step: Step) -> &'static str {
+    match step {
+        Step::Task => "What should cruise do?",
+        Step::Attachments => "Any images to attach? (optional; one path per line)",
+        Step::Source => "Where is the code?",
+        Step::WorkingDirectory => "Which directory? (blank = current directory)",
+        Step::Repository => "Which GitHub repository? (owner/name)",
+        Step::Config => "Which workflow config? (blank = auto-detect)",
+        Step::SkippedSteps => "Skip any workflow steps?",
+        Step::Workspace => "Where should cruise execute?",
+        Step::DirtyTree => "Run on the current branch even with uncommitted changes?",
+        Step::FormalSpec => "Include Quint and Alloy formal specifications in the plan?",
+        Step::Launch => "How should this session start?",
+    }
+}
+
+fn step_hint(app: &TuiApp) -> String {
+    const BACK: &str = "Shift-Tab/Esc back";
+    match app.form.step {
+        Step::Task => {
+            "Enter newline · Tab or Ctrl+Enter next · Ctrl+P/G/U start now · Esc leave".to_string()
+        }
+        Step::Attachments => format!("Enter newline · Tab complete path, then next · {BACK}"),
+        Step::WorkingDirectory => {
+            let recent = app
+                .history_summary
+                .as_ref()
+                .map_or(0, |summary| summary.recent_working_dirs.len());
+            if recent == 0 {
+                format!("Enter next · Tab complete path · {BACK}")
+            } else {
+                format!("Enter next · Tab complete path · ↑↓ recent ({recent}) · {BACK}")
+            }
+        }
+        Step::Repository => {
+            let found = app.github_repositories.len();
+            if found == 0 {
+                format!("Enter next · {BACK}")
+            } else {
+                format!("Enter next · ↑↓ gh repos ({found}) · {BACK}")
+            }
+        }
+        Step::Config => format!(
+            "Enter next · Tab complete · ↑↓ configs ({}) · {BACK}",
+            app.config_sources.len()
+        ),
+        Step::SkippedSteps if app.skip_choices().is_empty() => {
+            format!("Comma-separated step ids · Enter next · {BACK}")
+        }
+        Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
+        Step::Launch => format!("↑↓ choose · Enter go · {BACK}"),
+        Step::Source | Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
+            format!("↑↓ or Space choose · Enter next · {BACK}")
+        }
+    }
+}
+
+fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let form = &app.form;
+    let two_way = |first: &'static str, second: &'static str, second_selected: bool| {
+        vec![
+            choice_line(app, first, !second_selected),
+            choice_line(app, second, second_selected),
+        ]
+    };
+    let lines = match form.step {
+        Step::Task => return render_step_editor(frame, app, area, &form.input),
+        Step::Attachments => return render_step_editor(frame, app, area, &form.attachments),
+        Step::WorkingDirectory => return render_step_editor(frame, app, area, &form.working_dir),
+        Step::Repository => return render_step_editor(frame, app, area, &form.repository),
+        Step::Config => return render_step_editor(frame, app, area, &form.config),
+        Step::SkippedSteps => return render_skip_choices(frame, app, area),
+        Step::Source => two_way(
+            "Directory",
+            "GitHub repository (cloned with gh)",
+            form.source == SourceKind::GitHub,
+        ),
+        Step::Workspace => two_way(
+            "Worktree (isolated branch checkout)",
+            "Current branch (in place)",
+            form.workspace_mode == WorkspaceMode::CurrentBranch,
+        ),
+        Step::DirtyTree => two_way(
+            "No, require a clean working tree",
+            "Yes, allow uncommitted changes",
+            form.options.allow_dirty_working_tree,
+        ),
+        Step::FormalSpec => two_way(
+            "No",
+            "Yes, include Quint and Alloy specifications",
+            form.options.planning.formal_spec,
+        ),
+        Step::Launch => Launch::ALL
+            .iter()
+            .map(|launch| {
+                choice_line(
+                    app,
+                    format!("{:<46}{}", launch.label(), launch.shortcut()),
+                    *launch == form.launch,
+                )
+            })
+            .collect(),
+    };
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn choice_line(app: &TuiApp, text: impl Into<String>, selected: bool) -> Line<'static> {
+    let text = text.into();
+    Line::from(vec![
+        Span::styled(if selected { "▸ " } else { "  " }, accent(app, true)),
+        Span::styled(
+            text,
+            if selected {
+                selection(app)
+            } else {
+                Style::default()
+            },
+        ),
+    ])
+}
+
+fn render_step_editor(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, editor: &Editor) {
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(border(app, focused));
-    let inner = block.inner(rows[1]);
-    frame.render_widget(block, rows[1]);
+        .border_style(border(app, true));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     frame.render_widget(editor.widget(), inner);
+}
+
+fn render_skip_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let choices = app.skip_choices();
+    if choices.is_empty() {
+        render_step_editor(frame, app, area, &app.form.skipped);
+        return;
+    }
+    let selected = app
+        .form
+        .selected_skipped_steps()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let cursor = app.skip_cursor % choices.len();
+    let lines = choices
+        .iter()
+        .enumerate()
+        .map(|(index, (label, ids))| {
+            let checked = ids.iter().all(|id| selected.contains(id));
+            Line::from(vec![
+                Span::styled(if index == cursor { "▸ " } else { "  " }, accent(app, true)),
+                Span::styled(
+                    if checked { "[x] " } else { "[ ] " },
+                    if checked { success(app) } else { muted(app) },
+                ),
+                Span::styled(
+                    label.clone(),
+                    if index == cursor {
+                        selection(app)
+                    } else {
+                        Style::default()
+                    },
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let visible = usize::from(area.height.max(1));
+    let offset = cursor.saturating_sub(visible - 1);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        area,
+    );
 }
 
 fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
@@ -795,18 +778,19 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let body = "n  new session, ready to type     1/2/3  switch views
+    let body = "n  new session, one question at a time     1/2/3  switch views
 Ctrl+P  planning     Ctrl+G  grill     Ctrl+U  input plan
-Ctrl+S  save draft
-Tab / Shift-Tab  move focus or detail tab
-↑↓ / j/k  navigate     PgUp/PgDn/Home/End  jump
+Ctrl+S  save draft   (each starts from any question)
+Tab / Shift-Tab  next / previous question, or detail tab
+Enter  next question; newline in the task and image editors
+Ctrl+Enter  next question from a multiline editor
+↑↓ / j/k  choose, recall history, or navigate
+Space  toggle the current choice     PgUp/PgDn/Home/End  jump
 ←→ / [ ]  detail tabs
 a / Enter  actions   o  prompt/link   f  follow log   r  refresh
-Enter  edit/select; newline in multiline fields
-Space  toggle/cycle the focused option when not editing
 Ctrl+Enter  save multiline input in action dialogs
 Ctrl+R  toggle save/regenerate
-Esc  close or finish editing   ?  help   q/Ctrl-C  quit
+Esc  close, or back one question   ?  help   q/Ctrl-C  quit
 
 Fast path: n → type the task → Ctrl+P/G/U.
 Keyboard-only; no mouse or child-owned TTY.";
@@ -1022,46 +1006,6 @@ fn panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> Block<'
         .border_style(border(app, focused))
 }
 
-fn field_marker(app: &TuiApp, focused: bool) -> Span<'static> {
-    Span::styled(
-        if focused { "▸ " } else { "  " },
-        if focused {
-            accent(app, true)
-        } else {
-            muted(app)
-        },
-    )
-}
-
-fn option_line<'a>(
-    app: &TuiApp,
-    form: &NewSessionForm,
-    field: FormField,
-    name: &'a str,
-    value: &'a str,
-    enabled: Option<bool>,
-) -> Line<'a> {
-    let focused = form.field == field;
-    let value_style = match enabled {
-        Some(true) => success(app),
-        Some(false) => muted(app),
-        None => accent(app, false),
-    };
-    Line::from(vec![
-        field_marker(app, focused),
-        Span::styled(
-            name,
-            if focused {
-                accent(app, true)
-            } else {
-                Style::default()
-            },
-        ),
-        Span::raw("  "),
-        Span::styled(value, value_style),
-    ])
-}
-
 fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
     match phase {
         SessionPhase::Completed => success(app),
@@ -1077,9 +1021,6 @@ fn workspace_label(mode: WorkspaceMode) -> &'static str {
         WorkspaceMode::Worktree => "worktree",
         WorkspaceMode::CurrentBranch => "current branch",
     }
-}
-fn yes_no(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
 }
 fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
@@ -1155,35 +1096,79 @@ mod tests {
     }
 
     #[test]
-    fn minimum_new_session_layout_keeps_every_control_visible() {
-        let form = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        for expected in [
-            "Task description",
-            "SOURCE",
+    fn minimum_new_session_layout_shows_one_question_with_the_remaining_ones_listed() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
+        assert!(view.contains("question 1 of 9"));
+        assert!(view.contains("What should cruise do?"));
+        for upcoming in [
+            "Images",
+            "Source",
             "Working directory",
-            "GitHub repository",
             "Workflow config",
-            "Image paths",
-            "Workspace",
-            "Allow dirty current branch",
-            "Formal specification",
             "Skipped steps",
-            "Ctrl+P Planning",
-            "Ctrl+G Grill",
-            "Ctrl+U Input plan",
+            "Workspace",
+            "Formal specification",
+            "Launch",
         ] {
-            assert!(form.contains(expected), "missing control: {expected}");
+            assert!(
+                view.contains(upcoming),
+                "missing upcoming question: {upcoming}"
+            );
+        }
+        assert!(
+            !view.contains("GitHub repository"),
+            "directory sessions do not ask for a repository"
+        );
+        assert!(view.contains("Tab or Ctrl+Enter next"));
+    }
+
+    #[test]
+    fn answered_questions_are_summarised_above_the_current_one() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
+            app.form.input.set_text("add dark mode\nwith a toggle");
+            app.form.working_dir.set_text("~/apps/demo");
+            app.form.config.set_text("");
+            app.form.step = Step::Config;
+        });
+        assert!(view.contains("question 5 of 9"));
+        assert!(view.contains("✓ Task"));
+        assert!(view.contains("add dark mode …"));
+        assert!(view.contains("✓ Working directory"));
+        assert!(view.contains("~/apps/demo"));
+        assert!(view.contains("Which workflow config?"));
+    }
+
+    #[test]
+    fn launch_question_lists_every_mode_with_its_shortcut() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
+            app.form.input.set_text("task");
+            app.form.step = Step::Launch;
+            app.form.launch = Launch::Grill;
+        });
+        assert!(view.contains("question 9 of 9"));
+        assert!(view.contains("How should this session start?"));
+        assert!(view.contains("▸ Grill planning (interview first)"));
+        for expected in [
+            "Start planning",
+            "Use the input as the plan (no LLM planning)",
+            "Save as draft",
+            "Ctrl+P",
+            "Ctrl+G",
+            "Ctrl+U",
+            "Ctrl+S",
+        ] {
+            assert!(view.contains(expected), "missing launch choice: {expected}");
         }
     }
 
     #[test]
-    fn new_session_footer_shows_form_controls_instead_of_session_actions() {
-        let form = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(form.contains("Ctrl+P plan"));
-        assert!(form.contains("Ctrl+G grill"));
-        assert!(form.contains("Ctrl+U input"));
-        assert!(!form.contains("F5"));
-        assert!(!form.contains("a actions"));
+    fn new_session_footer_shows_dialogue_controls_instead_of_session_actions() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
+        assert!(view.contains("Enter next"));
+        assert!(view.contains("Shift-Tab back"));
+        assert!(view.contains("Ctrl+P/G/U start now"));
+        assert!(!view.contains("F5"));
+        assert!(!view.contains("a actions"));
     }
 
     #[test]
@@ -1193,10 +1178,11 @@ mod tests {
         });
         for expected in [
             "switch views",
-            "move focus or detail tab",
+            "next / previous question, or detail tab",
             "save multiline input",
             "Ctrl+U  input plan",
             "toggle save/regenerate",
+            "back one question",
             "Keyboard-only; no mouse or child-owned TTY.",
         ] {
             assert!(help.contains(expected), "missing help text: {expected}");
@@ -1221,8 +1207,8 @@ mod tests {
     }
 
     #[test]
-    fn skipped_step_navigation_shows_the_current_choice() {
-        let form = rendered_view_with(80, 24, false, View::NewSession, |app| {
+    fn skipped_step_question_lists_checkboxes_with_the_cursor_on_the_current_choice() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
             let step = |id: &str| crate::workflow::SkippableStepNode {
                 id: id.to_string(),
                 expanded_step_ids: vec![id.to_string()],
@@ -1234,11 +1220,26 @@ mod tests {
                 default_skipped_steps: Vec::new(),
                 resolved_config_key: "test".to_string(),
             });
-            app.form.field = FormField::SkippedSteps;
+            app.form.skipped.set_text("review");
+            app.form.step = Step::SkippedSteps;
             app.skip_cursor = 1;
         });
 
-        assert!(form.contains("choice: review"));
+        assert!(view.contains("Skip any workflow steps?"));
+        assert!(view.contains("  [ ] build"));
+        assert!(view.contains("▸ [x] review"));
+        assert!(view.contains("Space toggle"));
+    }
+
+    #[test]
+    fn skipped_step_question_falls_back_to_typing_without_a_step_list() {
+        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
+            app.config_defaults = None;
+            app.form.skipped.set_text("lint, verify");
+            app.form.step = Step::SkippedSteps;
+        });
+        assert!(view.contains("lint, verify"));
+        assert!(view.contains("Comma-separated step ids"));
     }
 
     #[test]

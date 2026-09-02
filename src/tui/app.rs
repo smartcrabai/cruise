@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use super::forms::{Editor, FormField, NewSessionForm, SourceKind};
+use super::forms::{Editor, Launch, NewSessionForm, SourceKind, Step};
 use super::input::{self, Action};
 use super::prompts::PromptQueue;
 use super::registry::{OperationRegistry, UiEvent};
@@ -578,6 +578,7 @@ impl TuiApp {
                     self.evict_inactive_caches();
                     self.start_plan(state.id, plan);
                     self.form.mark_saved();
+                    self.form.rewind();
                 }
                 Err(error) => self.set_error(error),
             },
@@ -585,6 +586,7 @@ impl TuiApp {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
                     self.form.mark_saved();
+                    self.form.rewind();
                     self.view = View::Sessions;
                     self.refresh();
                     self.selected = self
@@ -1017,7 +1019,7 @@ impl TuiApp {
             }
         }
         let action = input::action_for(key);
-        if self.is_form_editor_key(key, action) {
+        if self.is_form_editor_key(key) {
             self.form.input(key);
             return false;
         }
@@ -1075,46 +1077,36 @@ impl TuiApp {
             return true;
         }
         if self.modal.is_none() && self.view == View::NewSession {
-            let mode = match key.code {
-                KeyCode::Char('p') => Some((false, false)),
-                KeyCode::Char('g') => Some((true, false)),
-                KeyCode::Char('u') => Some((false, true)),
-                KeyCode::Char('s') => {
-                    self.form.editing = false;
-                    self.save_as_draft();
+            let launch = match key.code {
+                KeyCode::Char('p') => Some(Launch::Planning),
+                KeyCode::Char('g') => Some(Launch::Grill),
+                KeyCode::Char('u') => Some(Launch::InputPlan),
+                KeyCode::Char('s') => Some(Launch::SaveDraft),
+                KeyCode::Enter => {
+                    self.advance_step();
                     return true;
                 }
-                KeyCode::Enter => return true,
                 _ => None,
             };
-            if let Some((grill, skip_planning)) = mode {
-                let planning = &mut self.form.options.planning;
-                planning.grill = grill;
-                planning.skip_planning = skip_planning;
-                if skip_planning {
-                    planning.formal_spec = false;
-                }
-                self.form.editing = false;
-                self.create_session();
+            if let Some(launch) = launch {
+                self.launch(launch);
                 return true;
             }
         }
         matches!(key.code, KeyCode::Char('p' | 'g' | 'u' | 's'))
     }
-    fn is_form_editor_key(&self, key: KeyEvent, _action: Action) -> bool {
-        if self.modal.is_some() || self.view != View::NewSession || !self.form.editing {
-            return false;
-        }
-        let text_field = matches!(
-            self.form.field,
-            FormField::Input
-                | FormField::WorkingDirectory
-                | FormField::Repository
-                | FormField::Config
-                | FormField::Attachments
-                | FormField::SkippedSteps
-        );
-        if !text_field || key.modifiers.contains(KeyModifiers::CONTROL) {
+    /// Skipped steps are picked from the workflow's step list when one is
+    /// known and typed as comma-separated ids otherwise.
+    fn step_is_text(&self) -> bool {
+        self.form.step.is_text()
+            || (self.form.step == Step::SkippedSteps && self.skip_choices().is_empty())
+    }
+    fn is_form_editor_key(&self, key: KeyEvent) -> bool {
+        if self.modal.is_some()
+            || self.view != View::NewSession
+            || key.modifiers.contains(KeyModifiers::CONTROL)
+            || !self.step_is_text()
+        {
             return false;
         }
         matches!(
@@ -1125,13 +1117,8 @@ impl TuiApp {
                 | KeyCode::Right
                 | KeyCode::Home
                 | KeyCode::End
-                | KeyCode::Up
-                | KeyCode::Down
-        ) || (key.code == KeyCode::Enter
-            && matches!(
-                self.form.field,
-                FormField::Input | FormField::Attachments | FormField::SkippedSteps
-            ))
+        ) || (self.form.step.is_multiline()
+            && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter))
     }
     pub fn handle_action(&mut self, action: Action) -> bool {
         if matches!(action, Action::Quit) {
@@ -1156,8 +1143,7 @@ impl TuiApp {
             }
             Action::NewSession => {
                 self.view = View::NewSession;
-                self.form.set_field(FormField::Input);
-                self.form.editing = true;
+                self.form.rewind();
                 false
             }
             Action::ViewRunAll => {
@@ -1217,7 +1203,11 @@ impl TuiApp {
             }
             Action::Enter => self.enter_action(),
             Action::Escape => {
-                self.form.editing = false;
+                // Text questions swallow letters and digits, so Esc is the
+                // way out: one question back, and off the screen at the first.
+                if self.view == View::NewSession && !self.form.retreat() {
+                    self.view = View::Sessions;
+                }
                 false
             }
             Action::Character(' ') => {
@@ -1238,14 +1228,11 @@ impl TuiApp {
 
     fn handle_tab(&mut self, next: bool) -> bool {
         if self.view == View::NewSession {
-            if next && self.form.editing && self.complete_current_path() {
-                return false;
+            if !next {
+                self.form.retreat();
+            } else if !self.complete_current_path() {
+                self.advance_step();
             }
-            self.form.set_field(if next {
-                self.form.field.next()
-            } else {
-                self.form.field.previous()
-            });
         } else {
             self.tab = if next {
                 self.tab.next()
@@ -1257,48 +1244,57 @@ impl TuiApp {
         false
     }
 
+    /// Space reaches here only on list steps; text steps consume it as input.
     fn handle_space(&mut self) {
-        if self.view != View::NewSession || self.form.editing {
+        if self.view != View::NewSession {
             return;
         }
-        if self.form.field == FormField::WorkingDirectory {
-            if let Some(summary) = self.history_summary.as_ref() {
-                self.form
-                    .cycle_working_directory(&summary.recent_working_dirs);
-            }
-        } else if self.form.field == FormField::Config {
-            self.form.cycle_config(&self.config_sources);
-        } else if self.form.field == FormField::SkippedSteps {
+        if self.form.step == Step::SkippedSteps {
             self.toggle_skip_choice();
-        } else if self.form.field == FormField::Repository
-            && self.form.source == SourceKind::GitHub
-            && !self.github_repositories.is_empty()
-        {
-            let current = self.form.repository.text();
-            let index = self
-                .github_repositories
-                .iter()
-                .position(|repo| repo == current.trim())
-                .map_or(0, |idx| (idx + 1) % self.github_repositories.len());
-            self.form
-                .repository
-                .set_text(&self.github_repositories[index]);
-            self.form.mark_changed();
-        } else {
-            self.form.toggle_current();
-            if self.form.field == FormField::Source && self.form.source == SourceKind::GitHub {
-                let _ = self
-                    .registry
-                    .repositories(self.application.clone(), self.events.clone());
-            }
+        } else if self.form.step.is_choice() {
+            self.choose(1);
         }
     }
+    fn choose(&mut self, delta: isize) {
+        self.form.choose(delta);
+        if self.form.step == Step::Source
+            && self.form.source == SourceKind::GitHub
+            && self.github_repositories.is_empty()
+        {
+            let _ = self
+                .registry
+                .repositories(self.application.clone(), self.events.clone());
+        }
+    }
+    /// Accept the current answer and ask the next question; the last question
+    /// starts (or drafts) the session with the chosen launch mode.
+    fn advance_step(&mut self) {
+        if let Err(error) = self.form.validate_step() {
+            self.set_error(error);
+            return;
+        }
+        if self.form.step == Step::Launch {
+            self.launch(self.form.launch);
+        } else {
+            self.form.advance();
+        }
+    }
+    fn launch(&mut self, launch: Launch) {
+        self.form.select_launch(launch);
+        if launch == Launch::SaveDraft {
+            self.save_as_draft();
+        } else {
+            self.create_session();
+        }
+    }
+    /// Complete the path under the cursor; `false` when nothing changed so
+    /// Tab can move on to the next question instead.
     fn complete_current_path(&mut self) -> bool {
-        let field = self.form.field;
-        let (raw, attachment_lines) = match field {
-            FormField::WorkingDirectory => (self.form.working_dir.text(), None),
-            FormField::Config => (self.form.config.text(), None),
-            FormField::Attachments => {
+        let step = self.form.step;
+        let (raw, attachment_lines) = match step {
+            Step::WorkingDirectory => (self.form.working_dir.text(), None),
+            Step::Config => (self.form.config.text(), None),
+            Step::Attachments => {
                 let text = self.form.attachments.text();
                 let lines = text
                     .split('\n')
@@ -1310,6 +1306,9 @@ impl TuiApp {
             _ => return false,
         };
         let raw = raw.trim();
+        if raw.is_empty() {
+            return false;
+        }
         let trailing_separator =
             raw == "~" || raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
         let (parent_raw, prefix) = if raw == "~" {
@@ -1334,7 +1333,7 @@ impl TuiApp {
             &parent_raw
         };
         let expanded = crate::new_session_history::expand_tilde(parent_for_fs);
-        let Some(name) = Self::path_completion_candidates(field, Path::new(&expanded), &prefix)
+        let Some(name) = Self::path_completion_candidates(step, Path::new(&expanded), &prefix)
             .into_iter()
             .next()
         else {
@@ -1349,10 +1348,13 @@ impl TuiApp {
         } else {
             format!("{parent_raw}/{name}")
         };
-        match field {
-            FormField::WorkingDirectory => self.form.working_dir.set_text(&completed),
-            FormField::Config => self.form.config.set_text(&completed),
-            FormField::Attachments => {
+        if completed == raw {
+            return false;
+        }
+        match step {
+            Step::WorkingDirectory => self.form.working_dir.set_text(&completed),
+            Step::Config => self.form.config.set_text(&completed),
+            Step::Attachments => {
                 let mut lines = attachment_lines.unwrap_or_default();
                 if lines.is_empty() {
                     lines.push(completed);
@@ -1367,7 +1369,7 @@ impl TuiApp {
         true
     }
 
-    fn path_completion_candidates(field: FormField, expanded: &Path, prefix: &str) -> Vec<String> {
+    fn path_completion_candidates(step: Step, expanded: &Path, prefix: &str) -> Vec<String> {
         let mut candidates = std::fs::read_dir(expanded)
             .ok()
             .into_iter()
@@ -1378,15 +1380,15 @@ impl TuiApp {
                     return None;
                 }
                 let is_dir = entry.file_type().ok()?.is_dir();
-                let allowed = match field {
-                    FormField::WorkingDirectory => is_dir,
-                    FormField::Config => {
+                let allowed = match step {
+                    Step::WorkingDirectory => is_dir,
+                    Step::Config => {
                         is_dir
                             || Path::new(&name)
                                 .extension()
                                 .is_some_and(|ext| matches!(ext.to_str(), Some("yaml" | "yml")))
                     }
-                    FormField::Attachments => {
+                    Step::Attachments => {
                         is_dir
                             || Path::new(&name).extension().is_some_and(|ext| {
                                 matches!(
@@ -1404,7 +1406,8 @@ impl TuiApp {
         candidates
     }
 
-    fn skip_choices(&self) -> Vec<(String, Vec<String>)> {
+    /// Skippable steps of the resolved workflow as `(label, expanded ids)`.
+    pub(super) fn skip_choices(&self) -> Vec<(String, Vec<String>)> {
         fn visit(
             nodes: &[crate::workflow::SkippableStepNode],
             out: &mut Vec<(String, Vec<String>)>,
@@ -1451,21 +1454,25 @@ impl TuiApp {
     }
     fn navigate(&mut self, delta: isize) -> bool {
         if self.view == View::NewSession {
-            if self.form.field == FormField::SkippedSteps && !self.form.editing {
-                let count = self.skip_choices().len();
-                if count > 0 {
-                    self.skip_cursor = (self.skip_cursor.cast_signed() + delta)
-                        .rem_euclid(count.cast_signed())
-                        .cast_unsigned();
+            match self.form.step {
+                Step::SkippedSteps => {
+                    let count = self.skip_choices().len();
+                    if count > 0 {
+                        self.skip_cursor = (self.skip_cursor.cast_signed() + delta)
+                            .rem_euclid(count.cast_signed())
+                            .cast_unsigned();
+                    }
                 }
-            } else {
-                for _ in 0..delta.unsigned_abs() {
-                    self.form.set_field(if delta.is_negative() {
-                        self.form.field.previous()
-                    } else {
-                        self.form.field.next()
-                    });
+                Step::WorkingDirectory => {
+                    if let Some(summary) = self.history_summary.as_ref() {
+                        self.form
+                            .cycle_working_directory(&summary.recent_working_dirs, delta);
+                    }
                 }
+                Step::Config => self.form.cycle_config(&self.config_sources, delta),
+                Step::Repository => self.form.cycle_repository(&self.github_repositories, delta),
+                step if step.is_choice() => self.choose(delta),
+                _ => {}
             }
         } else if self.view == View::Sessions && self.tab == DetailTab::Dag {
             self.move_detail(delta);
@@ -1480,7 +1487,7 @@ impl TuiApp {
     }
     fn navigate_home(&mut self) -> bool {
         if self.view == View::NewSession {
-            self.form.set_field(FormField::Source);
+            self.form.rewind();
         } else if self.tab == DetailTab::Log {
             self.display.follow_log = false;
             self.log_scroll = self.current_line_count();
@@ -1493,7 +1500,7 @@ impl TuiApp {
     }
     fn navigate_end(&mut self) -> bool {
         if self.view == View::NewSession {
-            self.form.set_field(FormField::Submit);
+            self.form.step = Step::Launch;
         } else if self.tab == DetailTab::Log {
             self.display.follow_log = true;
             self.log_scroll = 0;
@@ -1690,23 +1697,7 @@ impl TuiApp {
     fn enter_action(&mut self) -> bool {
         match self.view {
             View::NewSession => {
-                if self.form.field == FormField::SaveDraft {
-                    self.save_as_draft();
-                } else if self.form.field == FormField::Submit {
-                    self.create_session();
-                } else if matches!(
-                    self.form.field,
-                    FormField::Input
-                        | FormField::Attachments
-                        | FormField::SkippedSteps
-                        | FormField::WorkingDirectory
-                        | FormField::Repository
-                        | FormField::Config
-                ) {
-                    self.form.editing = !self.form.editing;
-                } else if !self.form.editing {
-                    self.form.set_field(self.form.field.next());
-                }
+                self.advance_step();
                 false
             }
             View::RunAll | View::Sessions => {
@@ -2485,30 +2476,203 @@ mod tests {
     }
 
     #[test]
-    fn new_session_shortcut_opens_task_editor() {
+    fn new_session_shortcut_starts_the_dialogue_at_the_task_question() {
         let mut app = app();
+        app.form.step = Step::Config;
         assert!(!app.handle_action(Action::NewSession));
         assert_eq!(app.view, View::NewSession);
-        assert_eq!(app.form.field, FormField::Input);
-        assert!(app.form.editing);
+        assert_eq!(app.form.step, Step::Task);
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(app: &mut TuiApp, text: &str) {
+        for character in text.chars() {
+            assert!(!app.handle_key(key(KeyCode::Char(character))));
+        }
     }
 
     #[test]
-    fn planning_shortcuts_select_mode_and_submit() {
+    fn task_question_takes_typed_text_and_enter_inserts_a_newline() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        type_text(&mut app, "quit now jk");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        type_text(&mut app, "second");
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "quit now jk\nsecond");
+        assert!(app.form.dirty);
+    }
+
+    #[test]
+    fn tab_and_ctrl_enter_advance_while_shift_tab_and_escape_go_back() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        type_text(&mut app, "task");
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Attachments);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
+        assert_eq!(app.form.step, Step::Source);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert!(!app.handle_key(key(KeyCode::BackTab)));
+        assert_eq!(app.form.step, Step::Source);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Attachments);
+        assert_eq!(app.view, View::NewSession);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions, "Esc at the first question leaves");
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.input.text(), "task", "answers survive leaving");
+        assert!(app.modal.is_none());
+        assert!(app.registry.tasks_empty());
+    }
+
+    #[test]
+    fn leaving_the_image_question_requires_a_task_or_an_image() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Attachments);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Attachments);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message == "Task description or an image attachment is required"
+        ));
+        app.modal = None;
+        type_text(&mut app, "shot.png");
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
+        assert_eq!(app.form.step, Step::Source);
+    }
+
+    #[test]
+    fn choosing_github_asks_for_a_repository_and_requires_one() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("task");
+        app.form.step = Step::Source;
+        app.github_repositories = vec!["acme/cruise".to_string()];
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Repository);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Repository);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message == "Select a GitHub repository before creating a session"
+        ));
+        app.modal = None;
+        type_text(&mut app, "acme/cruise");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+    }
+
+    #[test]
+    fn arrow_keys_recall_history_on_single_line_questions() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        app.form.step = Step::WorkingDirectory;
+        app.form.working_dir.set_text("");
+        app.history_summary = Some(crate::application::NewSessionHistorySummary {
+            recent_working_dirs: vec!["/tmp/one".to_string(), "/tmp/two".to_string()],
+            last_requested_config_path: None,
+            last_working_dir: None,
+        });
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.working_dir.text(), "/tmp/one");
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.working_dir.text(), "/tmp/two");
+        assert!(!app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.form.working_dir.text(), "/tmp/one");
+
+        app.form.step = Step::Repository;
+        app.form.source = SourceKind::GitHub;
+        app.github_repositories = vec!["acme/a".to_string(), "acme/b".to_string()];
+        assert!(!app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(
+            app.form.repository.text(),
+            "k",
+            "letters type even when they double as navigation keys"
+        );
+        assert!(!app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.form.repository.text(), "acme/a");
+    }
+
+    #[test]
+    fn skipped_step_question_toggles_choices_with_space() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        let step = |id: &str| crate::workflow::SkippableStepNode {
+            id: id.to_string(),
+            expanded_step_ids: vec![id.to_string()],
+            children: Vec::new(),
+        };
+        app.config_defaults = Some(crate::application::NewSessionConfigDefaults {
+            steps: vec![step("build"), step("review")],
+            after_pr_steps: Vec::new(),
+            default_skipped_steps: Vec::new(),
+            resolved_config_key: "test".to_string(),
+        });
+        app.form.step = Step::SkippedSteps;
+        assert!(!app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.skip_cursor, 1);
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert_eq!(
+            app.form.selected_skipped_steps(),
+            vec!["review".to_string()]
+        );
+        assert!(app.form.skipped_explicit);
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert!(app.form.selected_skipped_steps().is_empty());
+    }
+
+    #[test]
+    fn current_branch_workspace_adds_the_dirty_tree_question() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("task");
+        app.form.step = Step::Workspace;
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::FormalSpec);
+        assert!(!app.handle_key(key(KeyCode::BackTab)));
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::DirtyTree);
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert!(app.form.options.allow_dirty_working_tree);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::FormalSpec);
+    }
+
+    #[test]
+    fn planning_shortcuts_select_mode_and_submit_from_any_question() {
         let cases = [
-            ('p', (false, true, false)),
-            ('g', (true, true, false)),
-            ('u', (false, false, true)),
+            ('p', Launch::Planning, (false, true, false)),
+            ('g', Launch::Grill, (true, true, false)),
+            ('u', Launch::InputPlan, (false, false, true)),
         ];
-        for (key, expected) in cases {
+        for (key, launch, expected) in cases {
             let mut app = app();
             app.handle_action(Action::NewSession);
+            app.form.step = Step::Config;
             let planning = &mut app.form.options.planning;
             planning.grill = true;
             planning.formal_spec = true;
             planning.skip_planning = true;
 
             assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
+            assert_eq!(app.form.launch, launch);
             let planning = &app.form.options.planning;
             assert_eq!(
                 (planning.grill, planning.formal_spec, planning.skip_planning),
@@ -2519,18 +2683,29 @@ mod tests {
                 Some(Modal::Error(message))
                     if message == "Task description or an image attachment is required"
             ));
-            assert!(!app.form.editing);
         }
     }
 
     #[test]
-    fn ctrl_enter_no_longer_submits_new_session() {
+    fn launch_question_submits_the_highlighted_mode_with_enter() {
         let mut app = app();
         app.handle_action(Action::NewSession);
-        app.form.set_field(FormField::Submit);
-        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL,)));
-        assert!(app.modal.is_none());
-        assert!(app.registry.tasks_empty());
+        app.form.step = Step::Launch;
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.launch, Launch::InputPlan);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert!(app.form.options.planning.skip_planning);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message == "Task description or an image attachment is required"
+        ));
+        assert_eq!(
+            app.form.step,
+            Step::Launch,
+            "a rejected launch stays on its question"
+        );
     }
 
     #[test]
