@@ -1447,77 +1447,12 @@ fn prompt_for_plan_input() -> Result<String> {
     prompt_multiline("What would you like to implement?")?.into_result()
 }
 
-/// Drive plan generation for a session currently in `Draft` phase.
+/// Generate or regenerate the plan for a session.
 ///
-/// On success the session transitions to `AwaitingApproval`.
-pub async fn generate_plan_for_draft_session(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    rate_limit_retries: usize,
-) -> Result<()> {
-    let result = async {
-        if !matches!(session.phase, SessionPhase::Draft) {
-            return Err(CruiseError::Other(format!(
-                "expected Draft phase, got {}",
-                session.phase.label()
-            )));
-        }
-        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
-            manager.save(session)?;
-        }
-        let config = manager.load_config(session)?;
-        setup_planning_worktree(manager, session)?;
-        let plan_path = session.plan_path(&manager.sessions_dir());
-        let mut vars =
-            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
-
-        // Own the working dir so `ctx` doesn't borrow `session` across the
-        // mutable `inspect_err` below.
-        let work_dir = plan_working_dir(session).to_path_buf();
-        let mut resume: Option<String> = None;
-        // Draft regeneration uses the standard plan flow; grill is a `cruise plan`
-        // flag and is not threaded through drafts.
-        let ctx = cli_plan_ctx(
-            &config,
-            &plan_path,
-            Some(&work_dir),
-            std::io::stdin().is_terminal(),
-            rate_limit_retries,
-            false,
-            false,
-            None,
-        );
-        generate_plan_markdown(&ctx, &mut vars, &mut resume)
-            .await
-            .inspect_err(|e| {
-                session.plan_error = Some(e.to_string());
-                cleanup_planning_worktree(session);
-                session.worktree_path = None;
-                session.worktree_branch = None;
-                if let Err(save_err) = manager.save(session) {
-                    eprintln!("warning: failed to persist plan error state: {save_err}");
-                }
-            })?;
-
-        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-
-        session.phase = SessionPhase::AwaitingApproval;
-        session.plan_error = None;
-        manager.save(session)?;
-        Ok(())
-    }
-    .await;
-    notify_plan_result(session, &result);
-    result
-}
-
-/// Regenerate the plan for a session that is already past the Draft phase.
-///
-/// Unlike [`generate_plan_for_draft_session`], this function accepts sessions in
-/// `Draft | AwaitingInput | AwaitingApproval | Planned` phases. The phase
-/// transition after successful regeneration matches the GUI's `regenerate_plan`
-/// command (`src-tauri/src/commands.rs:1422-1427`):
+/// Accepts sessions in `Draft | AwaitingInput | AwaitingApproval | Planned`
+/// phases; this is the path behind `cruise list` → Generate Plan / Replan. The
+/// phase transition after successful regeneration matches the GUI's
+/// `regenerate_plan` command (`src-tauri/src/commands.rs:1422-1427`):
 ///
 /// - `Draft | AwaitingInput` → `AwaitingApproval`
 /// - `AwaitingApproval` → `AwaitingApproval` (no-op)
