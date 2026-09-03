@@ -115,7 +115,7 @@ Either path logs the declared reason (`intentional no-changes declared: <reason>
 
 ## `if: fail:` — failure handler
 
-Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a `no-file-changes: failed` directive triggers. The value is either a step name (jump) or `{ retry: true }` (re-execute the same step).
+Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a `no-file-changes: failed` directive triggers. The value is either a step name (jump) or a mapping; only `{ retry: true }` re-executes the same step. `{}`, `{ retry: false }`, and mappings with unknown keys parse (`retry` defaults to `false`, unknown keys are ignored) and fall through to the normal transition without retrying.
 
 ```yaml
 steps:
@@ -169,6 +169,6 @@ steps:
 
 ## Loop protection
 
-Every transition edge (`from → to` pair) is counted. When the same edge is taken more than `--max-retries` times (default: 3), the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `if.fail` goto / `retry`.
+Every transition edge (`from → to` pair) is counted. When the same edge is taken more than the effective ceiling — `--max-retries` when provided, otherwise the workflow's top-level `max_retries`, otherwise 3 — the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `if.fail` goto / `retry`.
 
 Additionally, a top-level step cycle that mixes conditional edges (`if.file-changed` jumps and `if.fail` goto targets) with unconditional sequential edges is rejected at startup: once the conditional back-edge has fired `max_retries` times, the unconditional edges would always exceed the ceiling, whatever its value. Purely unconditional cycles and group-confined retry loops (a group with `max_retries`) are still accepted -- the latter degrade into a graceful skip when retries are exhausted; a group retry loop without `max_retries` has no such skip and counts as an unsafe conditional edge.

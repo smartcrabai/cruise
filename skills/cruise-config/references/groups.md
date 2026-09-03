@@ -10,7 +10,7 @@ max_retries: 4
 groups:
   review:
     if:
-      file-changed: test    # if any group step changes files, jump back to the first group step
+      file-changed: test    # if any group step changes files, jump to `test`; sequencing then re-enters the group
     max_retries: 3          # max number of group-level loop iterations (optional)
     steps:                  # inline definition of group steps
       simplify:
@@ -73,5 +73,5 @@ steps:
 
 ## Group execution behavior
 
-- When `if: file-changed` targets a step and group execution modifies files, execution jumps back to the **first step of the group** and the whole group re-runs.
+- When a group-level `if: file-changed` condition fires, execution jumps to its configured `file-changed:` target step; if normal sequencing from that target reaches the group again, the group then reruns.
 - `max_retries` caps the number of group-level loop iterations. When the cap is reached, the workflow continues normally (to the next step).

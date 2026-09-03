@@ -38,16 +38,14 @@ trimmed and blank values are ignored. Boolean values must be `true`, `false`,
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
 `languages.pr` and `languages.plan` settings. When these variables are unset,
 nested language fields take precedence over the deprecated top-level fields,
-then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or
-`LANGUAGE`, then the default is `English`. Unsupported or language-neutral
-locales use `English`.
+then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once; if that value is not a supported locale, no other variable is consulted and the default is `English`. Unsupported or language-neutral locales use `English`.
 
 ## Session title generation
 
 After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the GUI sidebar:
 
-- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) invokes the agent with the `generate_title` tool, using `plan_model`, then `model`, then the backend default. Failure falls back to the first heading or first non-empty line of `plan.md`.
+- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) invokes the agent with the `generate_title` tool only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model`, then `model`, then the backend default. SDK title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
 - **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
-- Background `cruise --plan … --skip-planning` derives the title directly from `plan.md` and makes no model call.
+- `cruise list` **Approve**, GUI/TUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
 
 No `llm:` workflow field or `CRUISE_LLM_*` override exists. Title generation uses the configured execution backend and model resolution above.

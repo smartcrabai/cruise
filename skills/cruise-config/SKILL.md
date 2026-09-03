@@ -65,7 +65,7 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, command, option; `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{plan.language}`, `{pr.*}` |
-| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / legacy `fail-if-no-file-changes` |
+| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge/override rules and SDK/command session-title generation |
@@ -84,7 +84,7 @@ After writing or editing a config, verify each of the following:
 4. **`next:` targets**: do referenced step names exist (no typos)?
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `prompt_file` / `command` / `if:`?
 6. **`if.no-file-changes`**: is the value either `retry` or `failed`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
-7. **`if.fail`**: is the value either an existing step name or `{ retry: true }`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
+7. **`if.fail`**: is the value either an existing step name or a mapping? Only `{ retry: true }` retries the current step — `{}`, `{ retry: false }`, and mappings with unknown keys parse and simply fall through without retrying. Make sure it isn't used inside `after-pr` or in a group-level `if:`.
 8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`?
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)

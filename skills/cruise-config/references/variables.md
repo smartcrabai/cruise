@@ -2,7 +2,8 @@
 
 Variables can be referenced as `{name}` inside `prompt` (including content loaded by
 `prompt_file`) / `command` / `env` / `plan` / `instruction` / `when.exists`.
-Referencing an undefined variable is an error.
+Availability depends on the execution phase and step type. Referencing an undefined
+variable is an error.
 
 ## Variable list
 
@@ -14,7 +15,7 @@ Referencing an undefined variable is an error.
 | `{prev.stderr}` | Stderr captured from the previous command step |
 | `{prev.success}` | Exit status of the previous command step (`"true"` / `"false"` string) |
 | `{plan}` | Absolute path of the session's plan file (set automatically by `cruise run`) |
-| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default) |
+| `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default); available while resolving planning prompts only |
 | `{pr.number}` | PR number, available after a PR has been created |
 | `{pr.url}` | PR URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
@@ -33,11 +34,11 @@ The substitution is done by a hand-written parser, with Rust-`format!`-style bra
 ## Availability
 
 - `{plan}` is set automatically by `cruise run` to the session's `plan.md` absolute path. It is undefined outside `cruise run`.
+- `{plan.language}` is registered for planning-phase prompts, but normal workflow execution via `cruise run` initializes only `{plan}` (plus runtime `{prev.*}` values), so references to `{plan.language}` in execution-step fields fail with `UndefinedVariable`.
 - `{pr.number}` / `{pr.url}` are defined only after `gh pr create` succeeds — effectively only inside `after-pr`.
-- `{prev.*}` availability depends on the previous step's type:
-  - After a prompt step: `{prev.output}` only.
-  - After an option step: `{prev.input}` only (set when a `text-input` option was chosen).
-  - After a command step: `{prev.stderr}` and `{prev.success}`.
+- After a successful prompt step, `{prev.output}` and `{prev.stderr}` are set, `{prev.input}` is cleared, and `{prev.success}` is retained.
+- After a completed command step, `{prev.stderr}` and `{prev.success}` are set, while `{prev.output}` and `{prev.input}` are cleared.
+- After a non-empty option step, `{prev.output}` is cleared, `{prev.input}` is updated only for a `text-input` choice (a selector leaves the previous value), and `{prev.stderr}` / `{prev.success}` are retained. Skipped steps and empty-option steps leave all `{prev.*}` unchanged.
 
 ## `{model}` is not a variable
 

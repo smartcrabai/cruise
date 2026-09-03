@@ -3,7 +3,10 @@
 Each step primarily holds one of `prompt` (an inline LLM prompt, or a prompt loaded
 from `prompt_file`), `command` (shell execution), or `option` (interactive
 selection). A step that only holds `group:` (a group call) is the exception — see
-[groups.md](groups.md).
+[groups.md](groups.md). A pure `workflow_call:` call site (optionally with `skip`,
+`when`, or `next`) is also accepted during config loading and expanded into
+executable steps, including under `after-pr`; it cannot be nested in a group or
+combined with executable step fields.
 
 ## Prompt step (LLM call)
 
@@ -123,8 +126,8 @@ steps:
 | `skip` | bool \| string | Skip condition (see [flow-control.md](flow-control.md)) |
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
-| `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours (see [flow-control.md](flow-control.md)) |
+| `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt and command steps only, option steps ignore it, and for command arrays it limits each command independently rather than the whole step (see [flow-control.md](flow-control.md)) |
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
-| `fail-if-no-file-changes` | bool | Legacy: fail when no files changed (see [flow-control.md](flow-control.md)) |
+| `fail-if-no-file-changes` | — | Rejected as an unknown field; use `if.no-file-changes: failed` instead (see [flow-control.md](flow-control.md)) |
