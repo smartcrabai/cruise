@@ -144,7 +144,13 @@ async fn write_prompt(
 ) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         tokio::select! {
-            result = stdin.write_all(prompt.as_bytes()) => result.map_err(CruiseError::IoError)?,
+            result = stdin.write_all(prompt.as_bytes()) => match result {
+                Ok(()) => {}
+                // A command may not consume stdin and can exit before the prompt
+                // is written. Its exit status is checked after output is drained.
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(error) => return Err(CruiseError::IoError(error)),
+            },
             () = maybe_cancelled(cancel_token) => {
                 #[cfg(unix)]
                 terminate_process_group(child.id());
