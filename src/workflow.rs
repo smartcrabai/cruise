@@ -207,6 +207,7 @@ impl CompiledWorkflow {
 /// membership style, contains empty groups, nested group calls, or
 /// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
+    crate::config::validate_parallel_steps(&config)?;
     let (steps, invocations, step_to_invocation) = expand_steps(&config.steps, &config.groups)?;
     let (after_pr, after_pr_invocations, after_pr_step_to_invocation) =
         expand_steps(&config.after_pr, &config.groups)?;

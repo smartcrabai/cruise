@@ -708,9 +708,59 @@ steps:
       - cargo test
 ```
 
+#### Parallel Steps
+
+Use `parallel:` to run named prompt or command steps concurrently within one
+session. The next step starts after every child finishes.
+
+```yaml
+steps:
+  checks:
+    parallel:
+      lint:
+        command: cargo clippy -- -D warnings
+      tests:
+        command: cargo test
+      review:
+        prompt: Review the changes and report findings without editing files.
+        timeout: 10m
+    timeout: 15m
+  summarize:
+    prompt: "Summarize the check results: {prev.output}"
+```
+
+- All children start together in the session's existing working directory.
+  Use independent commands or file edits; cruise does not isolate or merge child
+  changes. Concurrent edits to the same files or Git state can conflict.
+- Each child receives the same input and `{prev.*}` values from before the
+  block. Environment precedence is workflow < parallel block < child. Children
+  can use `model`, `env`, `skip`, `when`, and `timeout`; `prompt_file` resolves
+  relative to its config as usual. Command arrays remain sequential per child.
+- After joining, `{prev.output}` is a JSON object keyed by child name in YAML
+  declaration order. Each entry has `output` (prompt text, or `null` for commands),
+  `stderr` (including execution errors), `success`, and `skipped`.
+  `{prev.success}` is true when every child succeeded or was skipped;
+  `{prev.stderr}` combines child errors with their names. Logs include
+  `[parent/child]` prefixes. Command children have no interactive stdin.
+- A child failure does not cancel siblings. The block counts as one step and
+  one failure at most, following normal step failure semantics. Put `if.fail`
+  or `next` on the parent; a retry reruns the entire block. Unhandled prompt or
+  execution errors stop the workflow after siblings finish. Nonzero command
+  exits and timeouts follow the ordinary step failure path.
+- A child timeout affects only that child. A parent timeout cancels unfinished
+  children and waits for them to stop before taking the failure path. Ctrl+C
+  stops all children. Resume restarts the whole interrupted block, including
+  children that already finished. DAG display and step selection treat the
+  block as one step.
+- Parallel blocks also work inside `groups`, `after-pr`, and called workflows.
+  Children must be prompt/command steps; child `next`, `if`, `option`,
+  `instruction`, `plan`, `group`, `workflow_call`, nested `parallel`, and
+  `allow_commit: true` are rejected. Configure flow control on the parent and
+  perform commits in a subsequent sequential step.
+
 #### Step Timeout
 
-Prompt and command steps may set `timeout:` to abort the step if it runs too long (option steps ignore it; in a command array each command gets the timeout). Accepted formats:
+Prompt, command, and parallel steps may set `timeout:` to abort the step if it runs too long (option steps ignore it; in a command array each command gets the timeout; on a parallel block it limits the whole block). Accepted formats:
 
 | Suffix | Meaning | Example |
 |--------|---------|---------|

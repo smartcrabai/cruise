@@ -163,6 +163,13 @@
           "type": "string",
           "description": "Next step to execute after this one"
         },
+        "parallel": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "allOf": [{ "pattern": "^[^/]+$" }, { "pattern": "\\S" }] },
+          "additionalProperties": { "$ref": "#/$defs/ParallelChild" },
+          "description": "Named prompt/command children run concurrently in the same workspace. Join all children before advancing; interrupted blocks restart as a whole."
+        },
         "skip": {
           "oneOf": [
             {
@@ -212,7 +219,44 @@
           "not": {
             "required": ["prompt", "prompt_file"]
           }
+        },
+        {
+          "if": { "required": ["parallel"] },
+          "then": {
+            "properties": {
+              "prompt": { "type": "null" },
+              "prompt_file": { "type": "null" },
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" },
+              "model": { "type": "null" },
+              "instruction": { "type": "null" },
+              "plan": { "type": "null" },
+              "allow_commit": { "const": false }
+            }
+          }
         }
+      ]
+    },
+    "ParallelChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "$ref": "#/$defs/StepConfig/properties/prompt" },
+        "prompt_file": { "$ref": "#/$defs/StepConfig/properties/prompt_file" },
+        "command": { "allOf": [{ "$ref": "#/$defs/StepConfig/properties/command" }, { "minItems": 1 }] },
+        "model": { "$ref": "#/$defs/StepConfig/properties/model" },
+        "env": { "$ref": "#/$defs/StepConfig/properties/env" },
+        "skip": { "$ref": "#/$defs/StepConfig/properties/skip" },
+        "when": { "$ref": "#/$defs/StepConfig/properties/when" },
+        "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
+        "allow_commit": { "const": false }
+      },
+      "oneOf": [
+        { "required": ["prompt"] },
+        { "required": ["prompt_file"] },
+        { "required": ["command"] }
       ]
     },
     "WhenCondition": {

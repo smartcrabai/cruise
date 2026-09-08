@@ -134,7 +134,9 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
     on_step_log: Option<&StepLogCallback<'_>>,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<CommandResult> {
-    let quiet = crate::console_mode::is_quiet();
+    // Parallel children supply a log callback even outside the dashboard;
+    // capture their streams and close stdin so siblings cannot compete for it.
+    let quiet = crate::console_mode::is_quiet() || on_step_log.is_some();
     let mut child = spawn_command(cmd, env, cwd, quiet)?;
 
     let stdout_pipe = child.stdout.take();
