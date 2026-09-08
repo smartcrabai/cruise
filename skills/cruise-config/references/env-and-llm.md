@@ -26,6 +26,23 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **SDK mode**: prompt steps receive `env:` in the environment of the backend's child process — the `jcode` CLI under `sdk: jcode`, the `claude` CLI under `sdk: claude` (see [sdk.md](sdk.md)). Command steps still spawn a shell and receive `env:` as usual.
 
+## OpenAI priority processing with jcode
+
+For `sdk: jcode` with the `openai` (ChatGPT/Codex subscription) or `openai-api` provider, set `JCODE_OPENAI_SERVICE_TIER` in `env:` to request `service_tier="priority"`:
+
+```yaml
+sdk: jcode
+model: openai/gpt-5.5
+env:
+  JCODE_OPENAI_SERVICE_TIER: "priority"
+
+steps:
+  implement:
+    prompt: "{input}"
+```
+
+The environment variable overrides jcode's `[provider].openai_service_tier` setting. Per-step `env:` can override it for an individual step; use `"off"` to omit the service-tier override. Verified with jcode v0.84.0, whose default is already `"priority"` ([jcode defaults](https://github.com/1jehuang/jcode/blob/v0.84.0/crates/jcode-base/src/config/default_file.rs#L369)).
+
 ## Process-level config overrides
 
 The CLI and desktop GUI apply these environment variables when loading a
