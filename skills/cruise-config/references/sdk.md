@@ -39,6 +39,8 @@ A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode`
 
 `sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.81.1 or newer** is required — an older binary is rejected with a clear error, because the NDJSON event shape is the whole contract. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows which ones cruise can already authenticate as. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
 
+For OpenAI priority processing, configure `env.JCODE_OPENAI_SERVICE_TIER: "priority"`; see [the configuration example](env-and-llm.md#openai-priority-processing-with-jcode).
+
 ### Authentication and isolation
 
 Credentials, sessions, `config.toml`, and MCP registration live in **cruise's own jcode home** (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), completely separate from your `~/.jcode` — cruise never reads or writes it, and runs jcode with telemetry and the auto-update check disabled. Sign in with:
