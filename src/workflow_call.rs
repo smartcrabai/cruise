@@ -167,8 +167,14 @@ fn resolve_step_map(
 
     for (step_name, step) in steps {
         let mut step = step;
+        crate::config::validate_parallel_step(&step_name, &step)?;
         if step.workflow_call.is_none() {
             inline_prompt_file(&step_name, &mut step, base_dir)?;
+            if let Some(children) = &mut step.parallel {
+                for (child_name, child) in children {
+                    inline_prompt_file(&format!("{step_name}/{child_name}"), child, base_dir)?;
+                }
+            }
             insert_unique(&mut resolved, step_name, step)?;
             continue;
         }
@@ -205,6 +211,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("plan", step.plan.is_some()),
         ("option", step.option.is_some()),
         ("command", step.command.is_some()),
+        ("parallel", step.parallel.is_some()),
         ("group", step.group.is_some()),
         ("if", step.if_condition.is_some()),
         ("timeout", step.timeout.is_some()),
@@ -1999,5 +2006,47 @@ steps:
         let msg = err.to_string();
         assert!(msg.contains("prompt_file"), "unexpected error: {msg}");
         assert!(msg.contains('~'), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn parallel_prompt_files_resolve_inside_called_workflow_and_after_pr() {
+        let _lock = crate::test_support::lock_process();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let child_dir = dir.path().join("child");
+        std::fs::create_dir(&child_dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(child_dir.join("review.md"), "Review {input}")
+            .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            child_dir.join("workflow.yml"),
+            r"
+steps:
+  checks:
+    parallel:
+      review: { prompt_file: review.md }
+      lint: { command: cargo clippy }
+",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.path().join("workflow.yml"),
+            r"
+steps:
+  call: { workflow_call: child/workflow.yml }
+after-pr:
+  call: { workflow_call: child/workflow.yml }
+",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let config = resolve_workflow_calls_from_path(dir.path().join("workflow.yml"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for steps in [&config.steps, &config.after_pr] {
+            let children = steps["call/checks"]
+                .parallel
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing parallel"));
+            assert_eq!(children["review"].prompt.as_deref(), Some("Review {input}"));
+            assert!(children["review"].prompt_file.is_none());
+        }
+        crate::config::validate_config(&config).unwrap_or_else(|e| panic!("{e}"));
     }
 }

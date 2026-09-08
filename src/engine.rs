@@ -15,6 +15,8 @@ use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
 use crate::variable::VariableStore;
 use crate::workflow::CompiledWorkflow;
 
+mod parallel;
+
 /// Result of a completed `execute_steps` run.
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -769,6 +771,21 @@ async fn execute_step_kind(
     allow_commit: bool,
 ) -> Result<StepExecOutcome> {
     match kind {
+        StepKind::Parallel(children) => {
+            let outcome = parallel::run_parallel_step(
+                ctx,
+                children,
+                vars,
+                merged_env,
+                timeout,
+                has_if_fail,
+                current_step,
+            )
+            .await?;
+            *failed += usize::from(outcome.failed);
+            log_step_result(step_start.elapsed(), !outcome.failed);
+            Ok(outcome)
+        }
         StepKind::Prompt(step) => {
             let result = Box::pin(run_prompt_step(
                 vars,
@@ -833,7 +850,7 @@ async fn execute_step_kind(
                     env: merged_env,
                     working_dir: ctx.working_dir,
                     timeout,
-                    on_step_log: ctx.on_step_log,
+                    on_step_log: ctx.on_step_log.filter(|_| crate::console_mode::is_quiet()),
                     cancel_token: ctx.cancel_token,
                 },
             )
@@ -1222,18 +1239,13 @@ pub(crate) async fn run_command_step(
         .map(|c| vars.resolve(c))
         .collect::<Result<Vec<_>>>()?;
 
-    let on_step_log = if crate::console_mode::is_quiet() {
-        options.on_step_log
-    } else {
-        None
-    };
     let result = crate::step::command::run_commands(
         &cmds,
         options.rate_limit_retries,
         options.env,
         options.working_dir,
         options.timeout,
-        on_step_log,
+        options.on_step_log,
         options.cancel_token,
     )
     .await?;
@@ -1366,7 +1378,9 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             }
         }
 
-        let kind_label = if step.prompt.is_some() || step.prompt_file.is_some() {
+        let kind_label = if step.parallel.is_some() {
+            "parallel"
+        } else if step.prompt.is_some() || step.prompt_file.is_some() {
             "prompt"
         } else if step.command.is_some() && step.option.is_none() {
             "command"
@@ -1402,6 +1416,17 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
         }
 
         println!();
+
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                let kind = if child.command.is_some() {
+                    "command"
+                } else {
+                    "prompt"
+                };
+                println!("    {child_name} [{kind}]");
+            }
+        }
 
         if !step.env.is_empty() {
             print_env_vars(&step.env, "    env: ");

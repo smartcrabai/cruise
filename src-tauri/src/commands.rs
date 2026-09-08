@@ -157,7 +157,9 @@ fn session_config(state: &SessionState) -> CruiseResult<cruise::config::Workflow
 }
 
 fn step_kind(config: &cruise::config::StepConfig) -> String {
-    if config.prompt.is_some() {
+    if config.parallel.is_some() {
+        "parallel".to_string()
+    } else if config.prompt.is_some() {
         "prompt".to_string()
     } else if config.option.is_some() {
         "option".to_string()

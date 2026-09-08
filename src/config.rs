@@ -220,6 +220,10 @@ pub struct StepConfig {
     /// Shell command(s) to run (command steps only).
     pub command: Option<StringOrVec>,
 
+    /// Named prompt/command steps executed concurrently, joined as one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<IndexMap<String, StepConfig>>,
+
     /// Explicit next step name, overriding sequential order.
     pub next: Option<String>,
 
@@ -755,12 +759,102 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
+    validate_parallel_steps(config)?;
     validate_groups(config)?;
     validate_mixed_conditional_cycles(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
     validate_retry(config)?;
+    Ok(())
+}
+
+pub(crate) fn validate_parallel_steps(config: &WorkflowConfig) -> crate::error::Result<()> {
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        validate_parallel_step(name, step)?;
+    }
+    Ok(())
+}
+
+/// Parallel blocks are a single control-flow/checkpoint unit. Children cannot
+/// choose successors or request interactive input while siblings are running.
+pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let Some(children) = &step.parallel else {
+        return Ok(());
+    };
+    if children.is_empty() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "parallel step '{name}' must contain at least one child"
+        )));
+    }
+    if step.prompt.is_some()
+        || step.prompt_file.is_some()
+        || step.command.is_some()
+        || step.option.is_some()
+        || step.group.is_some()
+        || step.workflow_call.is_some()
+        || step.model.is_some()
+        || step.instruction.is_some()
+        || step.plan.is_some()
+        || step.allow_commit
+    {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout"
+        )));
+    }
+    for (child_name, child) in children {
+        let path = format!("{name}/{child_name}");
+        if child_name.trim().is_empty() || child_name.contains('/') {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{path}' must have a non-empty name without '/'"
+            )));
+        }
+        let kinds = usize::from(child.prompt.is_some())
+            + usize::from(child.prompt_file.is_some())
+            + usize::from(child.command.is_some());
+        if kinds != 1
+            || child.parallel.is_some()
+            || child.option.is_some()
+            || child.group.is_some()
+            || child.workflow_call.is_some()
+            || child.next.is_some()
+            || child.if_condition.is_some()
+            || child.instruction.is_some()
+            || child.plan.is_some()
+            || child.allow_commit
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
+                 only model, env, skip, when, and timeout may accompany it"
+            )));
+        }
+        if matches!(&child.command, Some(StringOrVec::Multiple(commands)) if commands.is_empty()) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{path}' must have at least one command"
+            )));
+        }
+        if let Some(timeout) = &child.timeout {
+            crate::timeout::parse_timeout(timeout).map_err(|_| {
+                CruiseError::InvalidStepConfig(format!(
+                    "parallel child '{path}' has invalid timeout: '{timeout}'"
+                ))
+            })?;
+        }
+        if let Some(exists) = child.when.as_ref().and_then(|when| when.exists.as_ref())
+            && (exists.is_empty() || (!exists.contains('{') && glob::Pattern::new(exists).is_err()))
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{path}' has invalid when.exists glob: '{exists}'"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -3488,6 +3582,94 @@ steps:
                     && required.iter().any(|v| v.as_str() == Some("prompt_file"))
             })
         }));
+    }
+
+    #[test]
+    fn parallel_config_round_trips_and_rejects_unsupported_children() {
+        let valid = WorkflowConfig::from_yaml(
+            "steps:\n  checks:\n    parallel:\n      lint: { command: cargo clippy }\n      review: { prompt: Review changes }\n",
+        ).unwrap_or_else(|e| panic!("{e}"));
+        validate_config(&valid).unwrap_or_else(|e| panic!("{e}"));
+        let serialized = serde_yaml::to_string(&valid).unwrap_or_else(|e| panic!("{e}"));
+        let restored = WorkflowConfig::from_yaml(&serialized).unwrap_or_else(|e| panic!("{e}"));
+        validate_config(&restored).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            restored.steps["checks"]
+                .parallel
+                .as_ref()
+                .map(IndexMap::len),
+            Some(2)
+        );
+
+        for child in [
+            "{}",
+            "{ command: [] }",
+            "{ prompt: review, command: 'true' }",
+            "{ prompt: review, prompt_file: review.md }",
+            "{ command: 'true', next: done }",
+            "{ command: 'true', if: { fail: done } }",
+            "{ command: 'true', instruction: input }",
+            "{ command: 'true', plan: plan.md }",
+            "{ prompt: review, allow_commit: true }",
+            "{ option: [] }",
+            "{ group: review }",
+            "{ workflow_call: review.yml }",
+            "{ parallel: { nested: { command: 'true' } } }",
+            "{ command: 'true', timeout: '0' }",
+            "{ command: 'true', when: { exists: '[' } }",
+            "{ command: 'true', when: { exists: '' } }",
+        ] {
+            let yaml = format!("steps:\n  checks:\n    parallel:\n      bad: {child}\n");
+            let config =
+                WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{child}: {e}"));
+            let error = validate_config(&config)
+                .err()
+                .unwrap_or_else(|| panic!("accepted {child}"));
+            assert!(error.to_string().contains("checks/bad"), "{error}");
+            assert!(
+                crate::workflow::compile(config).is_err(),
+                "compile accepted {child}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_validation_covers_parent_groups_and_after_pr() {
+        for body in [
+            "parallel: {}",
+            "parallel: { child: { command: 'true' } }\n    command: 'true'",
+            "parallel: { child: { command: 'true' } }\n    workflow_call: child.yml",
+            "parallel: { child: { command: 'true' } }\n    group: review",
+            "parallel: { child: { command: 'true' } }\n    allow_commit: true",
+            "parallel: { 'bad/name': { command: 'true' } }",
+            "parallel: { ' ': { command: 'true' } }",
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!("steps:\n  checks:\n    {body}\n"))
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert!(validate_config(&config).is_err(), "accepted {body}");
+        }
+        for yaml in [
+            "steps: {}\nafter-pr:\n  checks:\n    parallel: {}\n",
+            "steps: {}\ngroups:\n  review:\n    steps:\n      checks:\n        parallel: {}\n",
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e}"));
+            assert!(validate_config(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn parallel_schema_has_named_children() {
+        let schema = load_schema();
+        let parallel = &schema["$defs"]["StepConfig"]["properties"]["parallel"];
+        assert_eq!(parallel["minProperties"], 1);
+        assert_eq!(
+            parallel["additionalProperties"]["$ref"],
+            "#/$defs/ParallelChild"
+        );
+        assert_eq!(
+            schema["$defs"]["ParallelChild"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]
