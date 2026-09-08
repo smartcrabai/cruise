@@ -2,10 +2,11 @@
 
 ## Env-var merge rules
 
-`env:` has two levels: top-level and per-step. Values are subject to template variable resolution.
+`env:` supports workflow and step levels, plus a child level inside `parallel` blocks. Values are subject to template variable resolution.
 
 - Top-level `env:` applies to every step.
 - Per-step `env:` is merged on top of the top-level map; identical keys are overridden.
+- A parallel child merges its `env:` over the parent block: workflow < parallel block < child. Each child resolves its own values against the incoming variables. Overrides stay local to that child; already-resolved inherited values are not expanded again.
 
 ```yaml
 env:                        # applied to every step

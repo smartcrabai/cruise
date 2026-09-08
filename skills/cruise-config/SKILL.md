@@ -1,6 +1,6 @@
 ---
 name: cruise-config
-description: Use when creating or editing a cruise YAML config file (cruise.yaml / .cruise.yaml). Covers inline and file-backed prompt steps (`prompt` / `prompt_file`), variables, flow control, groups, after-pr, and validation rules — full spec is split across reference docs.
+description: Use when creating or editing a cruise YAML config file (cruise.yaml / .cruise.yaml). Covers inline and file-backed prompt steps (`prompt` / `prompt_file`), parallel prompt/command blocks, variables, flow control, groups, after-pr, and validation rules — full spec is split across reference docs.
 ---
 
 cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p` via a YAML config. This skill documents the config file format.
@@ -63,7 +63,7 @@ The full spec is split into the files below. Load only the sections you need.
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
-| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, command, option; `instruction`, `timeout` |
+| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
@@ -79,7 +79,7 @@ The full spec is split into the files below. Load only the sections you need.
 After writing or editing a config, verify each of the following:
 
 1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither is set, the default `jcode` backend runs. When `sdk` is set, is it `jcode` or `claude`? (Any other value is a validation error.)
-2. **Step type uniqueness**: each step primarily holds one of `prompt` / `prompt_file` / `command` / `option` (group-call steps are the exception and hold none of these). Use `prompt_file` for long prompts; relative paths are resolved relative to the configuration file (or the called workflow's directory).
+2. **Step type uniqueness**: each executable step holds one of `prompt` / `prompt_file` / `command` / `option` / `parallel` (pure `group` and `workflow_call` call sites hold none of these). Parallel children must be prompt/command steps; apply the parent and child restrictions in [references/steps.md](references/steps.md#parallel-step). Use `prompt_file` for long prompts; relative paths are resolved relative to the configuration file (or the called workflow's directory).
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is only set during `cruise run`; `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `prompt_file` / `command` / `if:`?
@@ -88,5 +88,5 @@ After writing or editing a config, verify each of the following:
 8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`?
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
-11. **YAML order**: steps execute in declaration order — does that match the intended flow?
+11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
 12. **Retry loops**: is any top-level step cycle mixing conditional jumps (`if.file-changed`, `if.fail` goto) with unconditional sequential edges? Such cycles are rejected at startup — confine retry loops inside a group under `groups:` with `max_retries` (see [references/flow-control.md](references/flow-control.md)).

@@ -620,7 +620,7 @@ No additional configuration is required.
 
 ### Environment Variables
 
-Environment variables can be set at two levels. Step-level values override top-level values for that step only. Values support template variable substitution.
+Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
 The CLI and desktop GUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
@@ -922,7 +922,7 @@ Not every no-change is a failure to route around -- sometimes the plan explicitl
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
 - **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, to keep the exposed tool set minimal on steps that can never call it. Not available in classic `command:` mode -- use the output marker there.
 
-Either path logs the declared reason so the decision stays visible in the run output.
+Either path logs the declared reason so the decision stays visible in the run output. Parallel children cannot make this declaration for their parent: child output markers are stored inside the aggregate JSON, and children do not receive the `skip_step` tool. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
 
 #### Failure handling (`if.fail`)
 
@@ -1010,7 +1010,7 @@ steps:
 
 ### Workflow Composition (`workflow_call`)
 
-A step can delegate to another workflow config file by setting `workflow_call` instead of `prompt`, `prompt_file`, `command`, or `option`. The called workflow's steps are inlined into the parent at the call site, with each step ID prefixed by the call-site name (e.g. `shared-review/simplify`).
+A step can delegate to another workflow config file by setting `workflow_call` instead of `prompt`, `prompt_file`, `command`, `option`, or `parallel`. The called workflow's steps are inlined into the parent at the call site, with each step ID prefixed by the call-site name (e.g. `shared-review/simplify`).
 
 ```yaml
 steps:
@@ -1062,10 +1062,10 @@ steps:
 | Variable | Description |
 |----------|-------------|
 | `{input}` | Initial input from CLI argument or stdin |
-| `{prev.output}` | LLM output from the previous step |
+| `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
-| `{prev.stderr}` | Stderr captured from the previous command or prompt step |
-| `{prev.success}` | Exit status of the previous command step (`true`/`false`) |
+| `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
+| `{prev.success}` | Previous command success, or parallel block success (`true`/`false`; skipped children count as successful) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
 | `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default) |
 | `{pr.number}` | Pull request number, available after a PR has been created |

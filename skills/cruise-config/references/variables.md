@@ -10,10 +10,10 @@ variable is an error.
 | Variable | Description |
 |----------|-------------|
 | `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here |
-| `{prev.output}` | LLM output of the previous step |
+| `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
-| `{prev.stderr}` | Stderr captured from the previous command step |
-| `{prev.success}` | Exit status of the previous command step (`"true"` / `"false"` string) |
+| `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
+| `{prev.success}` | Previous command success, or parallel block success (`"true"` / `"false"` string; skipped children count as successful) |
 | `{plan}` | Absolute path of the session's plan file (set automatically by `cruise run`) |
 | `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default); available while resolving planning prompts only |
 | `{pr.number}` | PR number, available after a PR has been created |
@@ -38,6 +38,7 @@ The substitution is done by a hand-written parser, with Rust-`format!`-style bra
 - `{pr.number}` / `{pr.url}` are defined only after `gh pr create` succeeds — effectively only inside `after-pr`.
 - After a successful prompt step, `{prev.output}` and `{prev.stderr}` are set, `{prev.input}` is cleared, and `{prev.success}` is retained.
 - After a completed command step, `{prev.stderr}` and `{prev.success}` are set, while `{prev.output}` and `{prev.input}` are cleared.
+- After a parallel block joins, `{prev.output}` is a JSON object in child declaration order, `{prev.stderr}` combines named child errors, `{prev.success}` is the aggregate success flag, and `{prev.input}` is cleared. Each child receives a private copy of the variables from before the block; siblings cannot read each other's results. See [steps.md](steps.md#parallel-step) for the result fields and failure semantics.
 - After a non-empty option step, `{prev.output}` is cleared, `{prev.input}` is updated only for a `text-input` choice (a selector leaves the previous value), and `{prev.stderr}` / `{prev.success}` are retained. Skipped steps and empty-option steps leave all `{prev.*}` unchanged.
 
 ## `{model}` is not a variable

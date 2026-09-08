@@ -113,6 +113,8 @@ Sometimes a step legitimately makes no file changes — for example, the plan ex
 
 Either path logs the declared reason (`intentional no-changes declared: <reason>`) so the decision stays visible in the run output even though it silently changes what would otherwise be a failure/retry.
 
+Parallel children cannot make this declaration for their parent: child output markers remain inside the aggregate JSON, and children do not receive `skip_step`. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
+
 ## `if: fail:` — failure handler
 
 Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a `no-file-changes: failed` directive triggers. The value is either a step name (jump) or a mapping; only `{ retry: true }` re-executes the same step. `{}`, `{ retry: false }`, and mappings with unknown keys parse (`retry` defaults to `false`, unknown keys are ignored) and fall through to the normal transition without retrying.
@@ -142,7 +144,7 @@ steps:
 
 ## `timeout:` — per-step time limit
 
-Plain digits mean seconds; `m` / `h` suffixes mean minutes / hours. Applies to prompt and command steps.
+Plain digits mean seconds; `m` / `h` suffixes mean minutes / hours. Applies to prompt, command, and parallel steps. For command arrays, each command gets its own timeout. A parallel parent limits the entire block and cancels unfinished children; a child timeout affects only that child. Option steps ignore `timeout`.
 
 ```yaml
 steps:
