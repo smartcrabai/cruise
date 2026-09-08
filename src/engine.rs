@@ -795,7 +795,7 @@ async fn execute_step_kind(
                 merged_env,
                 ctx.cancel_token,
                 ctx.working_dir,
-                ctx.on_step_log,
+                PromptStepOutput::Console(ctx.on_step_log),
                 timeout,
                 current_step,
                 has_nfc_condition,
@@ -1083,6 +1083,14 @@ pub fn resolve_command_with_model(
     })
 }
 
+/// Output destination for a prompt step.
+pub(crate) enum PromptStepOutput<'a> {
+    /// Print normal terminal output and also notify the optional log sink.
+    Console(Option<&'a crate::step::command::StepLogCallback<'a>>),
+    /// Let a container own formatting and both terminal/file delivery.
+    Redirect(&'a crate::step::command::StepLogCallback<'a>),
+}
+
 /// Execute a prompt step, updating variable state and returning the LLM
 /// output. Returns the `skip_step` tool's captured reason, if the agent called
 /// it during this turn (`None` otherwise).
@@ -1094,11 +1102,7 @@ pub fn resolve_command_with_model(
 /// set a step exposes to the model minimal, for a feature most steps never
 /// use. Ordinary run steps get no custom tools; the backend's own built-in
 /// tools do the file editing in SDK mode.
-#[expect(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::type_complexity
-)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
     compiled: &CompiledWorkflow,
@@ -1107,7 +1111,7 @@ pub(crate) async fn run_prompt_step(
     env: &HashMap<String, String>,
     cancel_token: Option<&CancellationToken>,
     working_dir: Option<&std::path::Path>,
-    on_step_log: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
+    output: PromptStepOutput<'_>,
     timeout: Option<Duration>,
     timeout_step_name: &str,
     register_skip_tool: bool,
@@ -1153,15 +1157,23 @@ pub(crate) async fn run_prompt_step(
         Vec::new()
     };
 
-    let spinner = crate::spinner::Spinner::start("Cruising...");
+    let (on_step_log, console_output) = match output {
+        PromptStepOutput::Console(log) => (log, true),
+        PromptStepOutput::Redirect(log) => (Some(log), false),
+    };
+    let spinner = console_output.then(|| crate::spinner::Spinner::start("Cruising..."));
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        spinner.suspend(|| crate::status_eprintln!("  {line}"));
+        if let Some(spinner) = &spinner {
+            spinner.suspend(|| crate::status_eprintln!("  {line}"));
+        }
         if let Some(cb) = on_step_log {
             cb("stdout", line);
         }
     };
     let on_stderr: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        spinner.suspend(|| crate::status_eprintln!("  {} {}", style("stderr:").dim(), line));
+        if let Some(spinner) = &spinner {
+            spinner.suspend(|| crate::status_eprintln!("  {} {}", style("stderr:").dim(), line));
+        }
         if let Some(cb) = on_step_log {
             cb("stderr", line);
         }
@@ -1172,7 +1184,9 @@ pub(crate) async fn run_prompt_step(
     };
     let prompt_result = {
         let on_notice = |msg: &str| {
-            spinner.suspend(|| crate::status_eprintln!("  {}", style(msg).dim()));
+            if let Some(spinner) = &spinner {
+                spinner.suspend(|| crate::status_eprintln!("  {}", style(msg).dim()));
+            }
             if let Some(cb) = on_step_log {
                 cb("info", msg);
             }
@@ -1746,7 +1760,7 @@ mod tests {
             &HashMap::new(),
             None,
             Some(repo.path()),
-            None,
+            PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
             false,
@@ -1765,7 +1779,7 @@ mod tests {
             &HashMap::new(),
             None,
             Some(repo.path()),
-            None,
+            PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
             false,

@@ -141,7 +141,9 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let output_deadline = timeout.map(|duration| Instant::now() + duration);
+    // Keep the process group id even if the shell exits before its descendants.
+    let process_group = child.id();
+    let command_started = Instant::now();
 
     let stdout_task = quiet.then(|| {
         tokio::spawn(async move {
@@ -158,36 +160,62 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
         }
     });
 
-    let wait_result = async {
-        if let Some(duration) = timeout {
-            tokio::time::timeout(duration, child.wait()).await
-        } else {
-            Ok(child.wait().await)
-        }
-    };
-    let status_result = tokio::select! {
-        result = wait_result => result,
+    let result = tokio::select! {
+        result = async {
+            if let Some(duration) = timeout {
+                tokio::time::timeout(duration, child.wait())
+                    .await
+                    .map_err(|_| CruiseError::StepTimeout {
+                        step: cmd.to_string(),
+                        after_secs: duration.as_secs(),
+                    })?
+            } else {
+                child.wait().await
+            }
+            .map_err(|error| CruiseError::CommandError(error.to_string()))
+        } => match result {
+            Ok(status) => {
+                let deadline = timeout.map_or_else(
+                    || Instant::now() + Duration::from_secs(5),
+                    |duration| command_started + duration,
+                );
+                let (stdout, stderr) = collect_command_output(
+                    stdout_task,
+                    stderr_task,
+                    deadline,
+                    process_group,
+                    cancel_token,
+                )
+                .await?;
+                Ok((status, stdout, stderr))
+            }
+            Err(error) => {
+                terminate_process_group(process_group);
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                abort_output_task(stdout_task);
+                abort_output_task(Some(stderr_task));
+                Err(error)
+            }
+        },
         () = cancel_wait(cancel_token) => {
-            terminate_process_group(child.id());
+            terminate_process_group(process_group);
             let _ = child.kill().await;
             let _ = child.wait().await;
-            abort_output_task(stdout_task).await;
-            abort_output_task(Some(stderr_task)).await;
-            return Err(CruiseError::Interrupted);
+            abort_output_task(stdout_task);
+            abort_output_task(Some(stderr_task));
+            Err(CruiseError::Interrupted)
+        },
+    };
+    let (status, stdout, stderr) = match result {
+        Ok(output) => output,
+        Err(error) => {
+            if let CruiseError::StepTimeout { after_secs, .. } = &error {
+                crate::status_eprintln!("  step timed out after {after_secs}s");
+            }
+            return Err(error);
         }
     };
-
-    if status_result.is_err() {
-        terminate_process_group(child.id());
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-    }
-
-    let stdout = match stdout_task {
-        Some(task) => collect_output(task, output_deadline).await,
-        None => String::new(),
-    };
-    let stderr = collect_output(stderr_task, output_deadline).await;
 
     if quiet && let Some(log) = on_step_log {
         for line in stdout.lines() {
@@ -198,26 +226,13 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
         }
     }
 
-    match status_result {
-        Ok(Ok(status)) => {
-            if !quiet && !stderr.is_empty() {
-                eprint!("{stderr}");
-            }
-            Ok(CommandResult {
-                success: status.success(),
-                stderr,
-            })
-        }
-        Ok(Err(e)) => Err(CruiseError::CommandError(e.to_string())),
-        Err(_elapsed) => {
-            let secs = timeout.map_or(0, |duration| duration.as_secs());
-            crate::status_eprintln!("  step timed out after {secs}s");
-            Err(CruiseError::StepTimeout {
-                step: cmd.to_string(),
-                after_secs: secs,
-            })
-        }
+    if !quiet && !stderr.is_empty() {
+        eprint!("{stderr}");
     }
+    Ok(CommandResult {
+        success: status.success(),
+        stderr,
+    })
 }
 
 const MAX_CAPTURED_OUTPUT: usize = 4 * 1024 * 1024;
@@ -238,12 +253,11 @@ async fn read_output_bounded<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) ->
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-async fn abort_output_task(task: Option<tokio::task::JoinHandle<String>>) {
+fn abort_output_task(task: Option<tokio::task::JoinHandle<String>>) {
     let Some(task) = task else {
         return;
     };
     task.abort();
-    let _ = task.await;
 }
 
 fn terminate_process_group(pid: Option<u32>) {
@@ -260,19 +274,50 @@ fn terminate_process_group(pid: Option<u32>) {
     }
 }
 async fn collect_output(
-    mut task: tokio::task::JoinHandle<String>,
-    deadline: Option<Instant>,
-) -> String {
-    let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(5));
+    task: &mut tokio::task::JoinHandle<String>,
+    deadline: Instant,
+) -> (String, bool) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     tokio::select! {
-        result = &mut task => result.unwrap_or_default(),
+        result = &mut *task => (result.unwrap_or_default(), false),
         () = tokio::time::sleep(remaining) => {
             task.abort();
-            let _ = task.await;
-            String::new()
+            (String::new(), true)
         }
     }
+}
+
+async fn collect_command_output(
+    mut stdout_task: Option<tokio::task::JoinHandle<String>>,
+    mut stderr_task: tokio::task::JoinHandle<String>,
+    deadline: Instant,
+    process_group: Option<u32>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+) -> Result<(String, String)> {
+    let output = tokio::select! {
+        output = async {
+            tokio::join!(
+                async {
+                    match stdout_task.as_mut() {
+                        Some(task) => collect_output(task, deadline).await,
+                        None => (String::new(), false),
+                    }
+                },
+                collect_output(&mut stderr_task, deadline),
+            )
+        } => output,
+        () = cancel_wait(cancel_token) => {
+            terminate_process_group(process_group);
+            abort_output_task(stdout_task);
+            abort_output_task(Some(stderr_task));
+            return Err(CruiseError::Interrupted);
+        }
+    };
+    let ((stdout, stdout_timed_out), (stderr, stderr_timed_out)) = output;
+    if stdout_timed_out || stderr_timed_out {
+        terminate_process_group(process_group);
+    }
+    Ok((stdout, stderr))
 }
 
 /// Run one external process with null stdin and cancellation-aware process
@@ -301,6 +346,7 @@ pub(crate) async fn run_process_output_cancelled(
     let mut child = builder
         .spawn()
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
+    let process_group = child.id();
     let stdout = child
         .stdout
         .take()
@@ -312,28 +358,31 @@ pub(crate) async fn run_process_output_cancelled(
     let status = tokio::select! {
         result = child.wait() => result,
         () = cancel_wait(cancel_token) => {
-            terminate_process_group(child.id());
+            terminate_process_group(process_group);
             let _ = child.kill().await;
             let _ = child.wait().await;
-            abort_output_task(stdout).await;
-            abort_output_task(stderr).await;
+            abort_output_task(stdout);
+            abort_output_task(stderr);
             return Err(CruiseError::Interrupted);
         }
     }
     .map_err(|e| CruiseError::CommandError(e.to_string()))?;
-    let deadline = Some(Instant::now() + Duration::from_secs(5));
+    let deadline = Instant::now() + Duration::from_secs(5);
     let stdout = match stdout {
-        Some(task) => collect_output(task, deadline).await,
-        None => String::new(),
+        Some(mut task) => collect_output(&mut task, deadline).await,
+        None => (String::new(), false),
     };
     let stderr = match stderr {
-        Some(task) => collect_output(task, deadline).await,
-        None => String::new(),
+        Some(mut task) => collect_output(&mut task, deadline).await,
+        None => (String::new(), false),
     };
+    if stdout.1 || stderr.1 {
+        terminate_process_group(process_group);
+    }
     Ok(std::process::Output {
         status,
-        stdout: stdout.into_bytes(),
-        stderr: stderr.into_bytes(),
+        stdout: stdout.0.into_bytes(),
+        stderr: stderr.0.into_bytes(),
     })
 }
 

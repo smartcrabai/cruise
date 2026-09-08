@@ -448,3 +448,239 @@ after-pr:
     assert!(fixture.root.path().join("docs").exists());
     assert!(fixture.root.path().join("notify").exists());
 }
+
+#[tokio::test]
+async fn parallel_env_model_arrays_and_stdin_keep_child_boundaries() {
+    let _lock = crate::test_support::lock_process();
+    let mut fixture = Fixture::new(
+        r#"
+command: [sh, -c, 'cat >/dev/null; printf "%s:%s:%s:%s" "$1" "$SHARED" "$WORKFLOW_ONLY" "$PARENT_ONLY"', agent, '{model}']
+model: workflow-model
+env:
+  SHARED: workflow
+  WORKFLOW_ONLY: inherited
+steps:
+  checks:
+    env:
+      SHARED: parent
+      PARENT_ONLY: '{input}'
+    parallel:
+      override:
+        model: child-model
+        env: { SHARED: child }
+        prompt: '{input}'
+      inherited:
+        prompt: '{input}'
+      commands:
+        command:
+          - 'if read line; then exit 1; fi; echo first > order'
+          - 'test "$(cat order)" = first; echo second >> order; exit 7'
+          - 'touch unexpected'
+"#,
+    );
+    fixture.vars.set_prev_input(Some("old choice".to_string()));
+    let result = fixture
+        .run(None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(result.failed, 1);
+    let outputs = fixture.outputs();
+    assert_eq!(
+        outputs["override"]["output"],
+        "child-model:child:inherited:input"
+    );
+    assert_eq!(
+        outputs["inherited"]["output"],
+        "workflow-model:parent:inherited:input"
+    );
+    assert_eq!(outputs["commands"]["output"], serde_json::Value::Null);
+    assert_eq!(outputs["commands"]["success"], false);
+    assert_eq!(fixture.vars.prev_input(), None);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("order")).unwrap_or_default(),
+        "first\nsecond\n"
+    );
+    assert!(!fixture.root.path().join("unexpected").exists());
+}
+
+#[tokio::test]
+async fn parallel_prompt_failure_recovery_waits_for_siblings() {
+    let _lock = crate::test_support::lock_process();
+    let mut fixture = Fixture::new(
+        r"
+command: [sh, -c, 'exit 7']
+steps:
+  checks:
+    parallel:
+      broken: { prompt: fail }
+      sibling: { command: 'sleep 0.1; touch completed' }
+    if: { fail: recovered }
+    next: unexpected
+  recovered:
+    command: test -f completed && touch recovered
+    next: done
+  unexpected:
+    command: touch unexpected
+  done:
+    command: 'true'
+",
+    );
+    let result = fixture
+        .run(None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(result.failed, 0);
+    assert!(fixture.root.path().join("recovered").exists());
+    assert!(!fixture.root.path().join("unexpected").exists());
+}
+
+#[tokio::test]
+async fn parallel_parent_timeout_stops_descendants_after_shell_exit() {
+    let _lock = crate::test_support::lock_process();
+    let mut fixture = Fixture::new(
+        r"
+steps:
+  checks:
+    timeout: '1'
+    parallel:
+      background: { command: '(sleep 2; touch leaked) &' }
+      sibling: { command: 'sleep 30' }
+    if: { fail: recovered }
+  recovered:
+    command: touch recovered
+",
+    );
+    let result = fixture
+        .run(None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(result.failed, 0);
+    assert!(fixture.root.path().join("recovered").exists());
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(
+        !fixture.root.path().join("leaked").exists(),
+        "descendant outlived the parallel timeout"
+    );
+}
+
+#[cfg(unix)]
+fn install_claude_stub(root: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = root.join("claude");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncat >/dev/null\ntouch \"$CHILD.started\"\nsleep 2\ntouch \"$CHILD.stopped\"\n",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parallel_sdk_timeouts_wait_for_backend_shutdown_before_successor() {
+    let _lock = crate::test_support::lock_process();
+    for timeout_owner in ["parent", "child"] {
+        let parent_timeout = if timeout_owner == "parent" {
+            "    timeout: '1'\n"
+        } else {
+            ""
+        };
+        let child_timeout = if timeout_owner == "child" {
+            "        timeout: '1'\n"
+        } else {
+            ""
+        };
+        let mut fixture = Fixture::new(&format!(
+            "sdk: claude\nsteps:\n  checks:\n{parent_timeout}    parallel:\n      agent:\n        prompt: wait\n        env: {{ CHILD: agent }}\n{child_timeout}      sibling:\n        command: 'sleep 1.2; touch sibling.done'\n    if: {{ fail: recovered }}\n  recovered:\n    command: 'test -f agent.stopped && test -f agent.started && touch recovered'\n"
+        ));
+        install_claude_stub(fixture.root.path());
+        let _path = crate::test_support::prepend_to_path(fixture.root.path());
+        let result = fixture
+            .run(None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let stopped_before_successor = fixture.root.path().join("recovered").exists();
+        // Keep the fixture alive while the old implementation's detached worker exits.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(
+            stopped_before_successor,
+            "{timeout_owner} timeout returned before SDK shutdown: {result:?}"
+        );
+        assert_eq!(result.failed, 0);
+        if timeout_owner == "child" {
+            assert!(fixture.root.path().join("sibling.done").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parallel_sdk_cancellation_waits_for_every_backend() {
+    let _lock = crate::test_support::lock_process();
+    let mut fixture = Fixture::new(
+        r"
+sdk: claude
+steps:
+  checks:
+    parallel:
+      first: { prompt: wait, env: { CHILD: first } }
+      second: { prompt: wait, env: { CHILD: second } }
+  unexpected:
+    command: touch unexpected
+",
+    );
+    install_claude_stub(fixture.root.path());
+    let _path = crate::test_support::prepend_to_path(fixture.root.path());
+    let token = CancellationToken::new();
+    let root = fixture.root.path().to_path_buf();
+    let cancel = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.join("first.started").exists() || !root.join("second.started").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("SDK children failed to start: {e}"));
+        token.cancel();
+    };
+    let (result, ()) = tokio::join!(fixture.run(Some(&token), None), cancel);
+    let stopped_at_return =
+        root.join("first.stopped").exists() && root.join("second.stopped").exists();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert!(matches!(result, Err(CruiseError::Interrupted)));
+    assert!(
+        stopped_at_return,
+        "cancel returned while SDK children were running"
+    );
+    assert!(!root.join("unexpected").exists());
+}
+
+#[tokio::test]
+async fn parallel_classic_prompt_timeout_stops_descendants_after_shell_exit() {
+    let _lock = crate::test_support::lock_process();
+    let mut fixture = Fixture::new(
+        r"
+command: [sh, -c, 'cat >/dev/null; (sleep 2; touch leaked) &']
+steps:
+  checks:
+    timeout: '1'
+    parallel:
+      agent: { prompt: review }
+    if: { fail: recovered }
+  recovered:
+    command: touch recovered
+",
+    );
+    let result = fixture
+        .run(None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(result.failed, 0);
+    assert!(fixture.root.path().join("recovered").exists());
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(
+        !fixture.root.path().join("leaked").exists(),
+        "prompt descendant outlived the timeout"
+    );
+}
