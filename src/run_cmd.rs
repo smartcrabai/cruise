@@ -604,17 +604,22 @@ async fn run_single(
         skipped_steps: &skipped_steps,
     };
     let exec_result = crate::retry::with_active_policy(retry_policy.clone(), async {
+        let execution = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start_node,
+            &on_node_start,
+        );
+        tokio::pin!(execution);
         tokio::select! {
-            result = execute_steps_with_dag(
-                &ctx,
-                &mut vars,
-                &mut tracker,
-                &mut dag,
-                &start_node,
-                &on_node_start,
-            ) => result,
+            result = &mut execution => result,
             _ = tokio::signal::ctrl_c() => {
                 cancel_token.cancel();
+                // Keep polling so every running child can stop and release
+                // its workspace before this session becomes resumable.
+                let _ = execution.await;
                 Err(CruiseError::Interrupted)
             },
         }

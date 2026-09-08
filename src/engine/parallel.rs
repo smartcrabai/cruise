@@ -138,9 +138,8 @@ async fn run_child(
     let log = |stream: &str, line: &str| {
         if let Some(log) = ctx.on_step_log {
             log(stream, &format!("[{name}] {line}"));
-        } else {
-            crate::status_eprintln!("[{name}] {line}");
         }
+        crate::status_eprintln!("[{name}] {line}");
     };
     if ctx
         .cancel_token
@@ -182,7 +181,7 @@ async fn run_child(
                     &env,
                     ctx.cancel_token,
                     ctx.working_dir,
-                    Some(&log),
+                    super::PromptStepOutput::Redirect(&log),
                     timeout,
                     &name,
                     false,

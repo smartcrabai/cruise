@@ -200,6 +200,10 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
 ) -> Result<(String, String)> {
     let mut child = spawn_prompt_command(command, model, env, cwd)?;
     write_prompt(&mut child, prompt, cancel_token).await?;
+    // `Child::id()` becomes None once wait completes, even when descendants
+    // are still holding the output pipes open.
+    #[cfg(unix)]
+    let process_group = child.id();
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -229,7 +233,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         }
         () = maybe_cancelled(cancel_token) => {
             #[cfg(unix)]
-            terminate_process_group(child.id());
+            terminate_process_group(process_group);
             let _ = child.kill().await;
             let _ = child.wait().await;
             return Err(CruiseError::Interrupted);
