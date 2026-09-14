@@ -42,7 +42,7 @@ steps:
     prompt: "{input}"
 ```
 
-The environment variable overrides jcode's `[provider].openai_service_tier` setting. Per-step `env:` can override it for an individual step; use `"off"` to omit the service-tier override. Verified with jcode v0.84.0, whose default is already `"priority"` ([jcode defaults](https://github.com/1jehuang/jcode/blob/v0.84.0/crates/jcode-base/src/config/default_file.rs#L369)).
+jcode v0.84.0 defaults `[provider].openai_service_tier` to `"priority"` ([jcode defaults](https://github.com/1jehuang/jcode/blob/v0.84.0/crates/jcode-base/src/config/default_file.rs#L369)), but cruise turns it off: every `jcode run` gets `JCODE_OPENAI_SERVICE_TIER=off` unless the workflow `env:` or cruise's own process environment already sets the variable (either wins as-is; per-step `env:` overrides top-level `env:`). Set `"priority"` (or `"flex"`) to opt in. The variable overrides jcode's `config.toml` setting.
 
 ## Process-level config overrides
 
