@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1.25
-FROM oven/bun:1-slim
+# syntax=docker/dockerfile:1.27@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+FROM oven/bun:1-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61
 
 ARG TARGETARCH=amd64
 ARG GH_VERSION=2.72.0
