@@ -45,8 +45,8 @@ function makeDag(overrides: Partial<DagDto> = {}): DagDto {
       { name: "test", kind: "command", isTerminal: true },
     ],
     edges: [
-      { from: "build", to: "test", reason: "ifFileChanged", selector: "src/**" },
-      { from: "test", to: null, reason: "sequential", selector: null },
+      { from: "build", to: "test", reason: "ifFileChanged", selector: "src/**", traversals: 0, budgetedTraversals: 0 },
+      { from: "test", to: null, reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
     ],
     ...overrides,
   };
@@ -72,13 +72,13 @@ describe("WorkflowDagPanel", () => {
   });
 
   describe("loading state", () => {
-    it("'Loading DAG…' is shown before getSessionDag resolves", () => {
+    it("'Loading Graph…' is shown before getSessionDag resolves", () => {
       // Given: getSessionDag never resolves within this test
       mockGetSessionDag.mockReturnValue(new Promise(() => {}));
       // When
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
       // Then
-      expect(screen.getByText("Loading DAG…")).toBeInTheDocument();
+      expect(screen.getByText("Loading Graph…")).toBeInTheDocument();
     });
   });
 
@@ -131,8 +131,8 @@ describe("WorkflowDagPanel", () => {
           { name: "test", kind: "command", isTerminal: true },
         ],
         edges: [
-          { from: "build", to: "test", reason: "IfFileChanged", selector: "src/**" },
-          { from: "test", to: null, reason: "Sequential", selector: null },
+          { from: "build", to: "test", reason: "IfFileChanged", selector: "src/**", traversals: 0, budgetedTraversals: 0 },
+          { from: "test", to: null, reason: "Sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
         ],
       });
       mockMermaidRender.mockResolvedValue({ svg: "<svg></svg>" });
@@ -143,6 +143,35 @@ describe("WorkflowDagPanel", () => {
       const [, source] = mockMermaidRender.mock.calls[0];
       expect(source).toContain('s0_build -->|"IfFileChanged: src/**"| s1_test');
       expect(source).toContain("s1_test --> end_terminal");
+    });
+
+    it("preserves an edge back to an earlier step when rendering a cycle", async () => {
+      // Given: a workflow graph with a conditional back edge from review to test
+      mockGetSessionDag.mockResolvedValue({
+        startStep: "test",
+        currentStep: "review",
+        steps: [
+          { name: "test", kind: "command", isTerminal: false },
+          { name: "review", kind: "command", isTerminal: false },
+          { name: "finish", kind: "command", isTerminal: true },
+        ],
+        edges: [
+          { from: "test", to: "review", reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
+          { from: "review", to: "test", reason: "ifFileChanged", selector: "src/**", traversals: 0, budgetedTraversals: 0 },
+          { from: "review", to: "finish", reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
+          { from: "finish", to: null, reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
+        ],
+      });
+      mockMermaidRender.mockResolvedValue({ svg: "<svg></svg>" });
+
+      // When
+      render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
+      await waitFor(() => expect(mockMermaidRender).toHaveBeenCalled());
+
+      // Then: the cycle is represented as a real Mermaid back edge, not dropped
+      // because the target appears earlier in declaration order.
+      const [, source] = mockMermaidRender.mock.calls[0];
+      expect(source).toMatch(/s1_review -->\|"[^"\n]+"\| s0_test/);
     });
 
     it("passes a Mermaid source with style lines for the start and current steps", async () => {
@@ -172,13 +201,13 @@ describe("WorkflowDagPanel", () => {
   });
 
   describe("empty state", () => {
-    it("'No DAG available.' is shown when steps is empty", async () => {
+    it("'No Graph available.' is shown when steps is empty", async () => {
       // Given
       mockGetSessionDag.mockResolvedValue(makeDag({ steps: [], edges: [], currentStep: null }));
       // When
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
       // Then
-      await waitFor(() => expect(screen.getByText("No DAG available.")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("No Graph available.")).toBeInTheDocument());
     });
 
     it("does not call mermaid.render when steps is empty", async () => {
@@ -186,7 +215,7 @@ describe("WorkflowDagPanel", () => {
       mockGetSessionDag.mockResolvedValue(makeDag({ steps: [], edges: [], currentStep: null }));
       // When
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
-      await waitFor(() => expect(screen.getByText("No DAG available.")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("No Graph available.")).toBeInTheDocument());
       // Then
       expect(mockMermaidRender).not.toHaveBeenCalled();
       expect(mockMermaidInitialize).not.toHaveBeenCalled();
@@ -194,19 +223,19 @@ describe("WorkflowDagPanel", () => {
   });
 
   describe("error state", () => {
-    it("shows 'Failed to render DAG:' with the error text when getSessionDag rejects", async () => {
+    it("shows 'Failed to render Graph:' with the error text when getSessionDag rejects", async () => {
       // Given
       mockGetSessionDag.mockRejectedValue(new Error("network failure"));
       // When
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
       // Then
       await waitFor(() => {
-        expect(screen.getByText(/Failed to render DAG:/)).toBeInTheDocument();
+        expect(screen.getByText(/Failed to render Graph:/)).toBeInTheDocument();
       });
       expect(screen.getByText(/network failure/)).toBeInTheDocument();
     });
 
-    it("shows 'Failed to render DAG:' with the error text when mermaid.render rejects", async () => {
+    it("shows 'Failed to render Graph:' with the error text when mermaid.render rejects", async () => {
       // Given
       mockGetSessionDag.mockResolvedValue(makeDag());
       mockMermaidRender.mockRejectedValue(new Error("render failure"));
@@ -214,7 +243,7 @@ describe("WorkflowDagPanel", () => {
       render(<WorkflowDagPanel {...baseProps} sessionId="session-1" />);
       // Then
       await waitFor(() => {
-        expect(screen.getByText(/Failed to render DAG:/)).toBeInTheDocument();
+        expect(screen.getByText(/Failed to render Graph:/)).toBeInTheDocument();
       });
       expect(screen.getByText(/render failure/)).toBeInTheDocument();
     });

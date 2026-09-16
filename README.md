@@ -132,7 +132,7 @@ The TUI requires an interactive TTY on macOS or Linux. It is an interactive clie
 
 The TUI has three views:
 
-- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **DAG**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The DAG tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
@@ -288,7 +288,7 @@ Arguments:
 Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
-      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
+      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
@@ -313,7 +313,7 @@ Arguments:
 
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
-      --max-retries <N>            Maximum number of times a single loop edge may be traversed [default: 3]
+      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed [default: 3]
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
@@ -750,7 +750,7 @@ steps:
 - A child timeout affects only that child. A parent timeout cancels unfinished
   children and waits for them to stop before taking the failure path. Ctrl+C
   stops all children. Resume restarts the whole interrupted block, including
-  children that already finished. DAG display and step selection treat the
+  children that already finished. Graph display and step selection treat the
   block as one step.
 - Parallel blocks also work inside `groups`, `after-pr`, and called workflows.
   Children must be prompt/command steps; child `next`, `if`, `option`,
@@ -886,7 +886,7 @@ steps:
 
 > **Note:** The snapshot is taken **before** the step with the `if:` condition runs. If no files change during the step's execution, the workflow proceeds to the next step (or follows the `next:` field if set).
 
-> **Warning:** A top-level cycle that mixes an `if.file-changed` jump back with unconditional sequential edges -- exactly the `test` → `review` → `test` shape above -- is rejected at startup, since it always exceeds the loop-protection ceiling once the conditional edge has exhausted its retries. Confine such retry loops inside a [step group](#step-groups) with `max_retries`.
+> Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 #### No file changes detection (`if.no-file-changes`)
 
@@ -953,7 +953,7 @@ steps:
 
 `if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`, else top-level `max_retries`, else 3), so a misconfigured retry loop will not run forever.
 
-A step cycle that mixes a conditional jump (`if.file-changed` / `if.fail` goto) with unconditional sequential edges is rejected at startup: once the conditional edge exhausts its retries, the unconditional edges would always exceed the loop-protection ceiling. Confine such loops inside a group under `groups:` with `max_retries`, as in the example below, so exhausted retries degrade into a graceful skip. A group retry loop without `max_retries` has no such graceful skip and is treated as an unsafe conditional edge.
+Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 **Constraints:**
 - `if.fail` is rejected at the group level and in `after-pr` steps.
@@ -1245,7 +1245,7 @@ steps:
     command: "git add -A && git commit -m 'feat: {input}'"
 ```
 
-The retry loop is confined inside a group so that exhausted retries degrade into a graceful skip instead of a flat step cycle, which is rejected at startup.
+Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 ## Config Hot-Reload
 
@@ -1294,7 +1294,11 @@ When `cruise list`, the TUI (`cruise`), or the desktop GUI loads sessions, any s
 
 Suspended sessions can be resumed from `cruise list` or the TUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
-On resume, cruise restores more than just the current step: while running, each step's pre-execution runtime context -- the `{prev.*}` variables and file-change-tracking snapshots -- is best-effort persisted to `dag.json` in the session directory. `cruise run` loads this file when resuming an interrupted session and restores that context, so `{prev.*}` references and file-change detection behave exactly as they would have without the interruption. A save failure, or a missing/corrupt `dag.json`, falls back to the previous resume behavior (no restored context) with a warning; sessions created before this existed are unaffected.
+Execution uses a fixed-size directed **Graph**, with one stable node per compiled step (a parallel block remains one unit). Increasing `max_retries` does not expand the graph. The versioned `dag.json` checkpoint is authoritative for the next step, accepted edge traversals, budgeted traversals, group-call retry counts, `{prev.*}` variables and file snapshots. Checkpoints are written atomically before the first step and after accepted transitions, normal completion and loop protection. A persistence failure stops execution before the next side effect. A mid-step interruption retains the pre-step checkpoint, so external command effects are not exactly-once.
+
+Normal resume and prompt/model reloads retain counters. `--max-retries` applies a new ceiling to the saved counts, including when lowered. A rejected transition remains pending and cannot replenish its budget by resuming. Changing the resume position retains counters. Only an explicit restart creates a new execution and archives the previous checkpoint. Removing the current step during hot reload keeps the old workflow rather than silently returning to its start.
+
+The compatibility filename `dag.json` and IPC name `get_session_dag` remain. Unversioned legacy graphs are viewable but cannot resume with guessed counters. Missing, corrupt and unknown-version checkpoints stop resume without deleting data. Explicitly restart the session to run from the beginning. Main and after-pr use separate graphs and counters. This does not add an independently resumable after-pr phase.
 
 ## Parallel Session Execution
 

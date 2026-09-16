@@ -130,7 +130,7 @@ failure, with the usual failure semantics; `if.fail` and retries belong on the
 parent. A child timeout stops that child only. A parent timeout stops unfinished
 children and waits for shutdown before following the failure path. Ctrl+C stops
 all children; resume reruns the whole block, including completed children.
-Step selection and the DAG show the parent as one execution unit. Parallel
+Step selection and the Graph show the parent as one execution unit. Parallel
 blocks work inside groups, after-pr steps, and called workflows.
 
 ## Option step (interactive selection)

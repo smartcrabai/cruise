@@ -5,8 +5,8 @@ use std::collections::HashMap;
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
 pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 
-/// Default global loop-protection ceiling ("G") when neither an explicit CLI
-/// flag nor a workflow config `max_retries` is set.
+/// Default global budgeted graph-transition ceiling ("G") when neither an
+/// explicit CLI flag nor a workflow config `max_retries` is set.
 ///
 /// Lives here (rather than in the CLI-only `cli` module) because this file is
 /// shared by both the `cruise` binary and the `cruise` library crate (used by
@@ -70,8 +70,8 @@ pub struct WorkflowConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<ModelSpec>,
 
-    /// Global loop-protection ceiling; CLI `--max-retries` overrides; defaults to
-    /// [`DEFAULT_MAX_RETRIES`].
+    /// Global budgeted graph-transition ceiling; CLI `--max-retries` overrides;
+    /// defaults to [`DEFAULT_MAX_RETRIES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<usize>,
 
@@ -761,7 +761,6 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
     validate_parallel_steps(config)?;
     validate_groups(config)?;
-    validate_mixed_conditional_cycles(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
@@ -1100,7 +1099,7 @@ fn validate_group_inner_steps(
     Ok(())
 }
 
-/// Resolve the effective global loop-protection ceiling ("G").
+/// Resolve the effective global budgeted graph-transition ceiling ("G").
 ///
 /// Precedence: an explicitly-passed CLI value wins, then the workflow config's
 /// top-level `max_retries`, then [`DEFAULT_MAX_RETRIES`].
@@ -1112,7 +1111,7 @@ pub fn resolve_effective_max_retries(cli_value: Option<usize>, config: &Workflow
 }
 
 /// Validate that every group's `max_retries` ("R") can actually take effect
-/// under the effective global loop-protection ceiling ("G").
+/// under the effective global budgeted graph-transition ceiling ("G").
 ///
 /// The lock-step assumption -- "the group retry counter and the edge counter
 /// advance together, so `R <= G` is always safe" -- only holds for **one** of
@@ -1254,7 +1253,7 @@ pub fn validate_group_retry_budget(
 fn unreachable_group_message(group_name: &str, r: usize, effective_max_retries: usize) -> String {
     format!(
         "group '{group_name}' has max_retries: {r}, which can never take effect under \
-         the effective global loop-protection ceiling of {effective_max_retries} \
+         the effective global budgeted graph-transition ceiling of {effective_max_retries} \
          (a group's max_retries must not exceed the ceiling). Either lower \
          groups.{group_name}.max_retries to at most {effective_max_retries} or raise \
          the ceiling via `--max-retries {r}` / config `max_retries: {r}`"
@@ -1277,254 +1276,9 @@ fn unreachable_group_message_external_target(
          '{target}' is outside the group, so each retry cycle counts one extra sequential \
          edge (the jump from '{target}' back into the group) on top of the group's own \
          internal edges -- effectively requiring a budget of {r} + 1 = {r_plus_1} under the \
-         effective global loop-protection ceiling of {effective_max_retries}. Either lower \
+         effective global budgeted graph-transition ceiling of {effective_max_retries}. Either lower \
          groups.{group_name}.max_retries to at most {g_minus_1} or raise the ceiling via \
          `--max-retries {r_plus_1}` / config `max_retries: {r_plus_1}`"
-    )
-}
-
-/// Validate that no step cycle mixes unsafe conditional edges
-/// (`if.file-changed` jumps and `if.fail` goto targets) with unconditional
-/// sequential edges among the top-level `steps`. After-pr steps run through
-/// the same loop protection, but are deliberately out of scope here: the
-/// built-in config's own after-pr CI-retry loop is such a mixed cycle and
-/// relies on runtime loop protection.
-///
-/// Such a cycle always deadlocks under loop protection: once the conditional
-/// back-edge exhausts its retries (`max_retries`), the unconditional edge needs
-/// `max_retries` + 1 traversals, which always exceeds any ceiling G.
-///
-/// # Errors
-///
-/// Returns an error naming the witness cycle when a mixed
-/// conditional/unconditional cycle exists.
-pub fn validate_mixed_conditional_cycles(config: &WorkflowConfig) -> crate::error::Result<()> {
-    let steps = &config.steps;
-    let groups = &config.groups;
-    let names: Vec<&str> = steps.keys().map(String::as_str).collect();
-    let index_of: HashMap<&str, usize> = names
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, name)| (name, i))
-        .collect();
-    let edges = build_step_edges(steps, &names, &index_of, groups);
-
-    // Strongly connected components via mutual reachability (step counts are
-    // practically small, so this naive computation is sufficient); the
-    // component id is the smallest node index in the component.
-    let n = names.len();
-    let mut reach = vec![vec![false; n]; n];
-    for (u, row) in reach.iter_mut().enumerate() {
-        let mut stack = vec![u];
-        row[u] = true;
-        while let Some(v) = stack.pop() {
-            for &(w, _) in &edges[v] {
-                if !row[w] {
-                    row[w] = true;
-                    stack.push(w);
-                }
-            }
-        }
-    }
-    let mut component = vec![usize::MAX; n];
-    for (u, row) in reach.iter().enumerate() {
-        for (v, &fwd) in row.iter().enumerate().skip(u) {
-            if fwd && reach[v][u] {
-                component[v] = component[v].min(u);
-            }
-        }
-    }
-
-    for root in 0..n {
-        // The component id is the smallest member index, so a root that is not
-        // its own id belongs to an already-visited (smaller) component.
-        if component[root] != root {
-            continue;
-        }
-        let in_component = |v: usize| component[v] == root;
-        let members: Vec<usize> = (root..n).filter(|&v| in_component(v)).collect();
-        if members.len() < 2 {
-            // Single-node components cannot mix edge kinds here by design:
-            // conditional self-edges (if.no-file-changes.retry / if.fail.retry)
-            // are excluded from the graph, and an unconditional self-loop is a
-            // pure unconditional cycle left to runtime loop protection.
-            continue;
-        }
-        let mut has_unconditional = false;
-        let mut cond_edge = None;
-        for &v in &members {
-            for &(w, kind) in &edges[v] {
-                if !in_component(w) {
-                    continue;
-                }
-                match kind {
-                    Some(CycleEdgeKind::Unconditional) => has_unconditional = true,
-                    Some(CycleEdgeKind::Conditional) if cond_edge.is_none() => {
-                        cond_edge = Some((v, w));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let Some(witness) = cond_edge
-            .filter(|_| has_unconditional)
-            .and_then(|(u, w)| mixed_cycle_witness(&edges, &names, in_component, u, w))
-        else {
-            // Not a mixed component (purely unconditional cycles stay under
-            // runtime loop protection); a missing witness is unreachable when
-            // a conditional edge exists, but never reject-silently.
-            continue;
-        };
-        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-            "top-level steps form a cycle that mixes conditional and unconditional edges: \
-             {witness}. Once the conditional back-edge (if.file-changed / if.fail goto) has \
-             fired max_retries times under loop protection, the unconditional sequential edge \
-             needs one more traversal than the ceiling allows and always fails with \
-             LoopProtection, whatever the ceiling is. Confine the cycle inside a group under \
-             `groups:` with a `max_retries` so exhausted retries degrade into a graceful skip \
-             instead -- see the built-in config's groups.verify-review for an example"
-        )));
-    }
-    Ok(())
-}
-
-/// Build the outgoing edge lists for the cycle-detection graph.
-///
-/// Each entry is `(target, kind)`; a `None` kind marks a group-retry back-edge
-/// whose exhaustion degrades into a graceful skip (already budget-checked by
-/// [`validate_group_retry_budget`]), so it counts as neither edge kind below.
-fn build_step_edges(
-    steps: &IndexMap<String, StepConfig>,
-    names: &[&str],
-    index_of: &HashMap<&str, usize>,
-    groups: &HashMap<String, GroupConfig>,
-) -> Vec<StepEdgeList> {
-    let mut edges: Vec<StepEdgeList> = vec![Vec::new(); names.len()];
-    for (i, step) in steps.values().enumerate() {
-        // Unconditional edge: explicit `next`, else the next step in YAML order.
-        // On an option step this edge is reachable at runtime only when some
-        // choice leaves `next` unset (the selected choice takes priority over
-        // the sequential/explicit edge); when every choice carries an explicit
-        // `next`, emitting it would create false positives.
-        let has_open_choice = step
-            .option
-            .as_ref()
-            .is_some_and(|items| items.iter().any(|item| item.next.is_none()));
-        if step.option.is_none() || has_open_choice {
-            let sequential = step
-                .next
-                .as_deref()
-                .or_else(|| names.get(i + 1).copied())
-                .and_then(|target| index_of.get(target).copied());
-            if let Some(target) = sequential {
-                edges[i].push((target, Some(CycleEdgeKind::Unconditional)));
-            }
-        }
-
-        // Option-item `next` edges are user-driven interactive choices,
-        // out of scope for this check; nothing else on option steps is read.
-        if step.option.is_some() {
-            continue;
-        }
-
-        if let Some(group_name) = step.group.as_deref() {
-            // Group call step: its only conditional edge is the group's own
-            // if.file-changed back-edge. With `max_retries` set, exhaustion
-            // degrades into a graceful skip (budget-checked by
-            // [`validate_group_retry_budget`]), so it counts as neither kind;
-            // without it the jump fires unboundedly with no skip -- exactly
-            // like a plain conditional edge.
-            if let Some(group) = groups.get(group_name)
-                && let Some(target) = group
-                    .if_condition
-                    .as_ref()
-                    .and_then(|cond| cond.file_changed.as_deref())
-                    .and_then(|target| index_of.get(target).copied())
-            {
-                edges[i].push((
-                    target,
-                    group
-                        .max_retries
-                        .map_or(Some(CycleEdgeKind::Conditional), |_| None),
-                ));
-            }
-        } else if let Some(cond) = &step.if_condition {
-            if let Some(target) = cond
-                .file_changed
-                .as_deref()
-                .and_then(|target| index_of.get(target).copied())
-            {
-                edges[i].push((target, Some(CycleEdgeKind::Conditional)));
-            }
-            if let Some(FailAction::Goto(target)) = &cond.fail
-                && let Some(&goto_target) = index_of.get(target.as_str())
-            {
-                edges[i].push((goto_target, Some(CycleEdgeKind::Conditional)));
-            }
-            // if.no-file-changes (retry/fail) and if.fail `{retry: true}` are
-            // single-node self-retries or aborts; they never form part of a cycle.
-        }
-    }
-    edges
-}
-
-/// Classification of a top-level step-graph edge used by
-/// [`validate_mixed_conditional_cycles`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CycleEdgeKind {
-    /// Sequential fall-through or explicit `next`: consumed every time it is reached.
-    Unconditional,
-    /// `if.file-changed` jump or `if.fail` goto: only taken while the condition fires,
-    /// so its traversals are bounded by loop protection's retry ceiling.
-    Conditional,
-}
-
-/// Outgoing edges of one step in the cycle-detection graph.
-type StepEdgeList = Vec<(usize, Option<CycleEdgeKind>)>;
-
-/// Name a witness cycle containing a conditional edge: an SCC can also embed
-/// purely unconditional sub-cycles, and naming one would contradict the error
-/// explanation. For the in-component conditional edge `u -> w`, close the
-/// cycle with a shortest in-component path `w -> .. -> u` (BFS parents),
-/// closed back onto `w`. Returns `None` only if `w` cannot reach `u`, which
-/// same-SCC membership makes unreachable.
-fn mixed_cycle_witness(
-    edges: &[StepEdgeList],
-    names: &[&str],
-    in_component: impl Fn(usize) -> bool,
-    u: usize,
-    w: usize,
-) -> Option<String> {
-    // BFS from w to u within the component; u is guaranteed reachable
-    // from w because both sit in the same SCC.
-    let mut prev: HashMap<usize, usize> = HashMap::from([(w, w)]);
-    let mut queue = std::collections::VecDeque::from([w]);
-    while let Some(v) = queue.pop_front() {
-        if v == u {
-            break;
-        }
-        for &(x, _) in &edges[v] {
-            if in_component(x) && !prev.contains_key(&x) {
-                prev.insert(x, v);
-                queue.push_back(x);
-            }
-        }
-    }
-    // Walk parents from u back to w, print forward [w, .., u], and close the
-    // loop onto w.
-    let mut walked = vec![u];
-    while *walked.last()? != w {
-        walked.push(*prev.get(walked.last()?)?);
-    }
-    walked.reverse(); // [u, ..., w] -> [w, ..., u]
-    walked.push(w);
-    Some(
-        walked
-            .iter()
-            .map(|&v| names[v])
-            .collect::<Vec<_>>()
-            .join(" -> "),
     )
 }
 
@@ -5131,29 +4885,21 @@ steps:
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_validate_config_rejects_mixed_cycle() {
-        // Given: a cycle a -> b -> c ->(if.file-changed) a mixing one unsafe
+    fn test_validate_config_allows_mixed_cycle_for_execution_time_analysis() {
+        // Given: a cycle a -> b -> c ->(if.file-changed) a mixing one
         // conditional back-edge with unconditional sequential edges (the
-        // shared fixture reproduces the failed session's flat step cycle)
+        // shared fixture reproduces the failed session's flat step cycle).
+        // Whether the graph has a normal exit is decided after the actual
+        // execution entry point and skipped-step set are known.
         let config = WorkflowConfig::from_yaml(&mixed_conditional_cycle_config())
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: validate_config runs on it
-        let message = err_string(validate_config(&config));
-
-        // Then: it is rejected, naming the witness cycle in order, explaining
-        // the max_retries exhaustion mechanism, and pointing at groups as fix
+        // When/Then: static config validation accepts the shape. Execution-time
+        // graph validation is responsible for rejecting only cycles that have
+        // no proven normal exit.
         assert!(
-            message.contains("a -> b -> c -> a"),
-            "error should name the witness cycle, got: {message}"
-        );
-        assert!(
-            message.contains("max_retries"),
-            "error should explain that the conditional edge exhausts max_retries, got: {message}"
-        );
-        assert!(
-            message.contains("groups"),
-            "error should recommend confining the cycle into groups, got: {message}"
+            validate_config(&config).is_ok(),
+            "mixed conditional cycles must be deferred to execution-time graph validation"
         );
     }
 
@@ -5166,7 +4912,7 @@ steps:
 
         // When/Then: the mixed-cycle validator accepts it
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "the built-in config must not be rejected as a mixed cycle"
         );
     }
@@ -5189,7 +4935,7 @@ steps:
 
         // When/Then: the mixed-cycle validator accepts it
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "a purely unconditional cycle must not be rejected by the mixed-cycle check"
         );
     }
@@ -5221,7 +4967,7 @@ steps:
         // When/Then: the grouped back-edge is treated as safe (already guarded
         // by validate_group_retry_budget) and the cycle is accepted
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "a group-confined retry cycle must not be rejected as a mixed cycle"
         );
     }
@@ -5242,7 +4988,7 @@ steps:
         // When/Then: self-retries fall through sequentially when the condition
         // stops firing, so they are not part of any cycle
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "an if.no-file-changes.retry self-edge must be ignored"
         );
     }
@@ -5265,13 +5011,13 @@ steps:
 
         // When/Then: no SCC contains both kinds of edges, so it is accepted
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "a forward if.file-changed jump without a return edge must be accepted"
         );
     }
 
     #[test]
-    fn test_validate_mixed_conditional_cycles_rejects_if_fail_goto_cycle() {
+    fn test_validate_mixed_conditional_cycles_allows_if_fail_goto_cycle() {
         // Given: a cycle whose back-edge is an if.fail goto target
         let yaml = r"
 command: [claude, -p]
@@ -5285,13 +5031,13 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: the mixed-cycle validator runs on it
-        let message = err_string(validate_mixed_conditional_cycles(&config));
-
-        // Then: it is rejected, naming the witness cycle
+        // Plan 5.3: parsing preserves references but does not reject mixed cycles.
+        assert!(validate_config(&config).is_ok());
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let graph = crate::graph::build_graph(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
-            message.contains("build -> test -> build"),
-            "an if.fail goto back-edge must count as an unsafe conditional edge, got: {message}"
+            crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])
+                .is_ok()
         );
     }
 
@@ -5319,13 +5065,13 @@ steps:
         // When/Then: option-step next edges are user-driven choices, out of
         // scope for this check, so the graph is accepted
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "option-step next edges must be excluded from cycle detection"
         );
     }
 
     #[test]
-    fn test_validate_mixed_conditional_cycles_rejects_group_without_max_retries() {
+    fn test_validate_mixed_conditional_cycles_allows_group_without_max_retries() {
         // Given: a group whose if.file-changed retry target closes a top-level
         // cycle, but which sets no max_retries -- at runtime the jump fires
         // unboundedly and never degrades into a graceful skip (see
@@ -5347,14 +5093,13 @@ steps:
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: the mixed-cycle validator runs on it
-        let message = err_string(validate_mixed_conditional_cycles(&config));
-
-        // Then: it is rejected, naming the witness cycle
+        // Plan 5.3: parsing preserves references but does not reject mixed cycles.
+        assert!(validate_config(&config).is_ok());
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let graph = crate::graph::build_graph(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(
-            message.contains("build -> review -> build"),
-            "a group file-changed back-edge without max_retries must count as an \
-             unsafe conditional edge, got: {message}"
+            crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])
+                .is_ok()
         );
     }
 
@@ -5384,7 +5129,7 @@ steps:
         // When/Then: the unreachable fall-through edge must not create a
         // false-positive mixed cycle
         assert!(
-            validate_mixed_conditional_cycles(&config).is_ok(),
+            validate_config(&config).is_ok(),
             "an option step whose choices all set next has no reachable \
              fall-through edge"
         );

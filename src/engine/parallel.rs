@@ -19,7 +19,7 @@ struct ChildResult {
     skipped: bool,
 }
 
-/// A parallel block owns one DAG checkpoint. Branches only mutate private
+/// A parallel block owns one execution-graph checkpoint. Branches only mutate private
 /// variable stores; the parent publishes their results in declaration order.
 /// All futures are drained, including during timeout/cancellation, so no child
 /// process can keep modifying the workspace after the next step starts.
@@ -134,7 +134,7 @@ async fn run_child(
     name: String,
 ) -> Result<ChildResult> {
     // Only the block calls on_step_start: persisting a child as current_step
-    // would create a resume point that does not exist in the execution DAG.
+    // would create a resume point that does not exist in the execution graph.
     let log = |stream: &str, line: &str| {
         if let Some(log) = ctx.on_step_log {
             log(stream, &format!("[{name}] {line}"));

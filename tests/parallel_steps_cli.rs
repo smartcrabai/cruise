@@ -188,11 +188,5 @@ steps:
             .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(state["phase"], "Suspended");
     assert_eq!(state["current_step_is_node_id"], true);
-    assert!(
-        state["current_step"]
-            .as_str()
-            .is_some_and(|step| step.starts_with('n')),
-        "DAG checkpoint should persist a node id: {}",
-        state["current_step"]
-    );
+    assert_eq!(state["current_step"], "checks");
 }

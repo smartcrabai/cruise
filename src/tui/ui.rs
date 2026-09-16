@@ -289,9 +289,9 @@ fn error_style(app: &TuiApp) -> Style {
 fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(dag) = app.active_dag() else {
         frame.render_widget(
-            Paragraph::new("\n  DAG unavailable. Check the session workflow configuration.")
+            Paragraph::new("\n  Graph unavailable. Check the session workflow configuration.")
                 .style(muted(app))
-                .block(panel(app, " DAG ", false)),
+                .block(panel(app, " Graph ", false)),
             area,
         );
         return;
@@ -329,23 +329,30 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("INCOMING", label(app))));
-        for predecessor in dag.nodes.values().filter(|candidate| {
-            candidate
-                .successors
-                .iter()
-                .any(|edge| edge.target.as_deref() == Some(node.id.as_str()))
-        }) {
-            lines.push(Line::from(format!(
-                "  {}  ←  {}",
-                predecessor.id, predecessor.step_name
-            )));
+        if let Some(predecessors) = dag.predecessors.get(&node.id) {
+            for predecessor_id in predecessors {
+                if let Some(predecessor) = dag.nodes.get(predecessor_id) {
+                    lines.push(Line::from(format!(
+                        "  {}  ←  {}",
+                        predecessor.id, predecessor.step_name
+                    )));
+                }
+            }
         }
         lines.push(Line::from(Span::styled("TRANSITIONS", label(app))));
         for successor in &node.successors {
             lines.push(Line::from(format!(
-                "  {:?}  →  {}",
+                "  {:?}  →  {}{}",
                 successor.reason,
-                successor.target.as_deref().unwrap_or("end")
+                successor.target.as_deref().unwrap_or("end"),
+                successor
+                    .target
+                    .as_ref()
+                    .and_then(|to| dag.state.edge_counts.get(&(node.id.clone(), to.clone())))
+                    .map_or_else(String::new, |count| format!(
+                        "  [{} traversals, {} budgeted]",
+                        count.traversals, count.budgeted_traversals
+                    ))
             )));
         }
         if let Some(visited) = node.runtime.visited_at.as_deref() {

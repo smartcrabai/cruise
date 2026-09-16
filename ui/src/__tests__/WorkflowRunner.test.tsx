@@ -311,21 +311,21 @@ describe("WorkflowRunner - stick-to-bottom scroll behaviour", () => {
   });
 });
 
-// --- Tests: WorkflowRunner DAG tab entrypoint --------------------------------
+// --- Tests: WorkflowRunner Graph tab entrypoint --------------------------------
 
-describe("WorkflowRunner - DAG tab entrypoint", () => {
+describe("WorkflowRunner - Graph tab entrypoint", () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it("shows a tab named 'DAG' between the Info and Plan tabs", async () => {
+  it("shows a tab named 'Graph' between the Info and Plan tabs", async () => {
     // Given / When
     render(<WorkflowRunner {...defaultRunnerProps()} activeTab="plan" />);
     await act(() => Promise.resolve());
 
     // Then
     const tabNames = screen.getAllByRole("tab").map((el) => el.textContent);
-    const dagIndex = tabNames.findIndex((name) => name?.includes("DAG"));
+    const dagIndex = tabNames.findIndex((name) => name?.includes("Graph"));
     const infoIndex = tabNames.findIndex((name) => name?.includes("Info"));
     const planIndex = tabNames.findIndex((name) => name?.includes("Plan"));
 
@@ -333,7 +333,7 @@ describe("WorkflowRunner - DAG tab entrypoint", () => {
     expect(dagIndex).toBeLessThan(planIndex);
   });
 
-  it("calls onActiveTabChange('dag') exactly once when the DAG tab is clicked", async () => {
+  it("calls onActiveTabChange('dag') exactly once when the Graph tab is clicked", async () => {
     // Given
     const onActiveTabChange = vi.fn();
 
@@ -346,7 +346,7 @@ describe("WorkflowRunner - DAG tab entrypoint", () => {
       />,
     );
     await act(() => Promise.resolve());
-    fireEvent.click(screen.getByRole("tab", { name: "DAG" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Graph" }));
 
     // Then
     expect(onActiveTabChange).toHaveBeenCalledTimes(1);
@@ -354,9 +354,9 @@ describe("WorkflowRunner - DAG tab entrypoint", () => {
   });
 });
 
-// --- Tests: WorkflowRunner DAG panel mounting --------------------------------
+// --- Tests: WorkflowRunner Graph panel mounting --------------------------------
 
-describe("WorkflowRunner - DAG panel mounting", () => {
+describe("WorkflowRunner - Graph panel mounting", () => {
   afterEach(() => {
     vi.clearAllMocks();
   });

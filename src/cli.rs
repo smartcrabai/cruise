@@ -180,7 +180,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "N")]
     pub parallelism: Option<usize>,
 
-    /// Maximum number of times a single loop edge may be traversed.
+    /// Maximum number of times a budgeted graph transition may be traversed.
     ///
     /// When omitted, falls back to the workflow config's top-level `max_retries`
     /// if set, otherwise defaults to 3. An explicitly-passed flag always wins
@@ -250,7 +250,7 @@ pub struct ExecArgs {
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
-    /// Maximum number of times a single loop edge may be traversed.
+    /// Maximum number of times a budgeted graph transition may be traversed.
     ///
     /// When omitted, falls back to the workflow config's top-level `max_retries`
     /// if set, otherwise defaults to 3. An explicitly-passed flag always wins

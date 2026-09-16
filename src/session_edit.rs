@@ -10,7 +10,7 @@ pub enum CurrentStepUpdate {
     Unchanged,
     /// Clear `current_step` so execution resumes from the beginning.
     Clear,
-    /// Set `current_step` to the given step ID.
+    /// Set `current_step` to the given workflow step name.
     Set(String),
 }
 
@@ -187,19 +187,22 @@ pub fn update_session_settings(
 
     match current_step_update {
         CurrentStepUpdate::Unchanged => {}
-        CurrentStepUpdate::Clear => session.current_step = None,
-        CurrentStepUpdate::Set(step_name) => session.current_step = Some(step_name),
+        CurrentStepUpdate::Clear => {
+            session.current_step = None;
+            session.current_step_is_node_id = false;
+            session.has_dag = false;
+            session.execution_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        CurrentStepUpdate::Set(step_name) => {
+            session.current_step = Some(step_name);
+            session.current_step_is_node_id = false;
+        }
     }
     if !reuse_repo_snapshot {
         session.config_source = source.display_string();
     }
     let config_changed = old_explicit_config != requested_config_path;
     session.config_path = requested_config_path.as_ref().and(source.path()).cloned();
-    if config_changed {
-        session.has_dag = false;
-        session.current_step = None;
-        session.current_step_is_node_id = false;
-    }
     session.skipped_steps = skipped_steps;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());

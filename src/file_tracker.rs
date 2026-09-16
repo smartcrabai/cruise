@@ -95,8 +95,8 @@ impl FileTracker {
 
     /// Return a clone of every per-step snapshot currently held.
     ///
-    /// Used by the DAG-driven engine to persist file-tracker state alongside
-    /// a DAG checkpoint, so that a resumed session can detect file changes
+    /// Used by the graph-driven engine to persist file-tracker state alongside
+    /// an execution-graph checkpoint, so that a resumed session can detect file changes
     /// exactly as the original run would have.
     #[must_use]
     pub fn snapshots(&self) -> HashMap<String, Snapshot> {

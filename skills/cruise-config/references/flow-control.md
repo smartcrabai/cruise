@@ -67,7 +67,7 @@ steps:
 
 When no files change, the workflow proceeds to the next step normally (or follows `next:` if set).
 
-> A top-level step cycle that mixes this conditional jump back with unconditional sequential edges (the `test → review → test` shape above) is rejected at startup. Confine such retry loops inside a group under `groups:` with `max_retries` (see [groups.md](groups.md)).
+> Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 ## `if.no-file-changes` — detect no-change
 
@@ -140,7 +140,7 @@ steps:
 - Cannot be used in a group-level `if:`.
 - With `if.fail` set, a prompt-step error is caught and routed to the handler instead of aborting the workflow.
 - Without `if.fail`, a failed command step does **not** abort the workflow — it proceeds normally and the next step can branch on `{prev.success}` / `{prev.stderr}`. A `no-file-changes` failure without `if.fail` aborts the workflow.
-- A top-level step cycle whose back-edge is an `if.fail` goto mixed with unconditional sequential edges is rejected at startup (see [Loop protection](#loop-protection)).
+- Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 ## `timeout:` — per-step time limit
 
@@ -171,6 +171,6 @@ steps:
 
 ## Loop protection
 
-Every transition edge (`from → to` pair) is counted. When the same edge is taken more than the effective ceiling — `--max-retries` when provided, otherwise the workflow's top-level `max_retries`, otherwise 3 — the workflow aborts with an error listing the edge counts. This bounds all loops built from `next:` / `if.file-changed` / `if.fail` goto / `retry`.
+Every accepted transition is counted by its `from → to` pair, even when multiple conditions or options share that pair. Ordinary transitions consume the effective `max_retries` ceiling (CLI > YAML > default 3). User/configured skips and group-limit skips are recorded without consuming that budget. Completion does not consume a loop budget. Zero is not unlimited: it refuses the first budgeted transition. A rejected request is reported separately from the accepted counts and never increments them. Counter overflow is an error.
 
-Additionally, a top-level step cycle that mixes conditional edges (`if.file-changed` jumps and `if.fail` goto targets) with unconditional sequential edges is rejected at startup: once the conditional back-edge has fired `max_retries` times, the unconditional edges would always exceed the ceiling, whatever its value. Purely unconditional cycles and group-confined retry loops (a group with `max_retries`) are still accepted -- the latter degrade into a graceful skip when retries are exhausted; a group retry loop without `max_retries` has no such skip and counts as an unsafe conditional edge.
+Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.

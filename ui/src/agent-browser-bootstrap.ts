@@ -1,5 +1,5 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { BUILTIN_CONFIG_PATH as BUILTIN_CONFIG_KEY, type SkippableStepDto } from "./types";
+import { BUILTIN_CONFIG_PATH as BUILTIN_CONFIG_KEY, type DagDto, type SkippableStepDto } from "./types";
 
 type SessionPhase =
   | "Draft"
@@ -222,7 +222,22 @@ mockIPC((cmd, payload?: unknown) => {
     case "get_session_plan":
       return sessionPlans.get(String(getField(payload, "sessionId") ?? "")) ?? "# Mock plan";
     case "get_session_dag":
-      return null;
+      return {
+        startStep: "test",
+        currentStep: "review",
+        steps: [
+          { name: "test", kind: "command", isTerminal: false },
+          { name: "review", kind: "command", isTerminal: false },
+          { name: "finish", kind: "command", isTerminal: true },
+        ],
+        edges: [
+          { from: "test", to: "review", reason: "sequential", selector: null, traversals: 3, budgetedTraversals: 3 },
+          { from: "review", to: "test", reason: "ifFileChanged", selector: "test", traversals: 2, budgetedTraversals: 2 },
+          { from: "review", to: "review", reason: "ifFailRetry", selector: null, traversals: 1, budgetedTraversals: 1 },
+          { from: "review", to: "finish", reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
+          { from: "finish", to: null, reason: "sequential", selector: null, traversals: 0, budgetedTraversals: 0 },
+        ],
+      } satisfies DagDto;
     case "get_session_log":
       return "";
     case "list_configs":
