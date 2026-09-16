@@ -18,7 +18,10 @@
 //! migration stamps there. So every cruise invocation is built by
 //! [`jcode_command`], which points `$JCODE_HOME` at cruise's own directory
 //! ([`jcode_home`]), disables telemetry and suppresses the auto-update check;
-//! the user's `~/.jcode` is never read or written.
+//! the user's `~/.jcode` is never read or written. [`build_command`] also
+//! defaults `JCODE_OPENAI_SERVICE_TIER` to `off` unless the workflow `env:` or
+//! cruise's environment sets it, since jcode's own default is priority
+//! processing.
 //!
 //! The one MCP source outside that home is the run directory: jcode also reads
 //! `.jcode/mcp.json` / `.mcp.json` / `.claude/mcp.json` from it, last-wins over
@@ -64,6 +67,17 @@ const MCP_BRIDGE_SUBCOMMAND: &str = "mcp-bridge";
 /// accepted on either side of the subcommand; cruise must never trigger a
 /// self-update from inside a workflow run.
 const NO_UPDATE_FLAG: &str = "--no-update";
+
+/// jcode's environment override for its `[provider].openai_service_tier`
+/// setting (`priority|flex|off`). jcode v0.84.0 defaults the setting to
+/// `"priority"` -- `OpenAI` priority processing at higher usage -- and cruise
+/// never edits its private home's `config.toml`, so an unattended run would
+/// otherwise always pay for it. Ignored by non-OpenAI providers.
+const OPENAI_SERVICE_TIER_ENV: &str = "JCODE_OPENAI_SERVICE_TIER";
+
+/// Tier cruise requests when neither the workflow `env:` nor cruise's own
+/// environment names one.
+const OPENAI_SERVICE_TIER_DEFAULT: &str = "off";
 
 /// Provider label used for [`LimitError`] when an event names none.
 const PROVIDER_LABEL: &str = "jcode";
@@ -1078,6 +1092,14 @@ fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Co
     // overridden by a workflow into reading the user's jcode home or enabling
     // telemetry.
     command.envs(&config.env);
+    // Workflow `env:` wins, then cruise's own process environment (inherited by
+    // the child as-is); only when neither names a tier does cruise turn priority
+    // processing off. Presence of the key is what counts, not its value.
+    if !config.env.contains_key(OPENAI_SERVICE_TIER_ENV)
+        && std::env::var_os(OPENAI_SERVICE_TIER_ENV).is_none()
+    {
+        command.env(OPENAI_SERVICE_TIER_ENV, OPENAI_SERVICE_TIER_DEFAULT);
+    }
     command.envs(isolation_env(&config.home));
     command.env(TOOL_SOCKET_ENV, &config.tool_socket);
     if let Some(effort) = config.effort {
@@ -1585,6 +1607,45 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let command = build_command(&config(tmp.path()), "p");
             assert_eq!(env_of(&command, "JCODE_OPENAI_REASONING_EFFORT"), None);
+        }
+
+        /// jcode v0.84.0 defaults `OpenAI` to priority processing; an unattended
+        /// cruise run must not pay for that unless asked.
+        #[test]
+        fn openai_service_tier_defaults_to_off() {
+            let _guard = crate::test_support::lock_process();
+            let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
+            let command = build_command(&config(Path::new("/unused/jcode-home")), "p");
+            assert_eq!(
+                env_of(&command, OPENAI_SERVICE_TIER_ENV).as_deref(),
+                Some("off")
+            );
+        }
+
+        #[test]
+        fn workflow_env_service_tier_is_kept() {
+            let _guard = crate::test_support::lock_process();
+            let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
+            let mut cfg = config(Path::new("/unused/jcode-home"));
+            cfg.env
+                .insert(OPENAI_SERVICE_TIER_ENV.to_string(), "priority".to_string());
+            let command = build_command(&cfg, "p");
+            assert_eq!(
+                env_of(&command, OPENAI_SERVICE_TIER_ENV).as_deref(),
+                Some("priority")
+            );
+        }
+
+        /// A tier exported in cruise's own shell is inherited by the child
+        /// untouched.
+        #[test]
+        fn process_env_service_tier_is_inherited_not_overridden() {
+            let _guard = crate::test_support::lock_process();
+            let _set = crate::test_support::EnvGuard::set(OPENAI_SERVICE_TIER_ENV, "flex");
+            let command = build_command(&config(Path::new("/unused/jcode-home")), "p");
+            // Not set explicitly on the command: inheritance carries `flex`
+            // through.
+            assert_eq!(env_of(&command, OPENAI_SERVICE_TIER_ENV), None);
         }
     }
 

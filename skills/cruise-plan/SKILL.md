@@ -3,7 +3,7 @@ name: cruise-plan
 description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`, or as a GitHub issue for the @cruise Actions integration. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately — and how to file the plan as an issue (plan in the issue body, optional `@cruise run` trigger comment). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", "create a cruise session from this plan", or "file this plan as an issue" / "register a plan as an issue". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
 ---
 
-cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the resolved workflow config (built-in default when no config file is found) executes against it. This skill is the contract for doing that well.
+cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the resolved workflow config (built-in default when no config file is found) executes against it. When the target repository's resolved workflow has `force_exec: true`, `--skip-planning` alone does not create a session: the workflow executes directly; pass `--no-force-exec` (also accepted by the root `cruise --plan` form) to retain the normal planning path. This skill is the contract for doing that well.
 
 ## Workflow
 
@@ -23,6 +23,7 @@ This is what cruise demands of its own LLM planner — meet or beat it:
 - **Give the implementer concrete guidance:**
   - Existing implementation patterns to imitate (`file:line`). If similar processing already exists, citing it is required.
   - Anti-patterns specific to this task, if any (e.g. "don't add a fallback here, the value is always present").
+- **Code-volume target.** Give each independently actionable implementation element a rough code-volume target (approximate changed-line count or small/medium/large), as a soft goal that never trades away correctness, error handling, tests, or other required work.
 
 ## plan.md format contract
 
@@ -67,7 +68,7 @@ cruise --plan stdin --skip-planning <<'EOF'
 EOF
 ```
 
-Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step.
+Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step. Exception: if the resolved workflow has `force_exec: true`, add `--no-force-exec`, otherwise the workflow executes directly instead of creating a session.
 
 **Default to this form** — it lets you queue work from any context (GUI, agent, shell). The session lands in `Planned` and `cruise run` (or `cruise run --all`) will pick it up automatically; no human approval step is required.
 
@@ -112,14 +113,14 @@ Rules specific to this path:
 - **Never put the string `@cruise` inside the issue title or body** unless you intend to execute the moment the issue is created — `issues: opened` fires a bare *run* on any body/title mention. Keep the body mention-free and trigger with a separate comment.
 - **Do not post the plan as an issue comment.** The action only trusts `<!-- cruise:plan -->` comments authored by its own bot identities (`cruise-agent[bot]` / `github-actions[bot]`); a hand-posted marker comment is deliberately ignored (plan-spoofing defense). The issue body is the supported channel for pre-authored plans.
 - **Revising the plan = edit the issue body** (`gh issue edit <n> --repo <owner>/<repo> --body-file plan-v2.md`). `@cruise fix` only revises bot-posted plan comments (plans produced by `@cruise plan`), not issue bodies.
-- The trigger comment must come from a user with **write access** (the gate rejects others) and should be exactly `@cruise run` — any extra text in it is appended to the plan as additional instructions.
-- Same quality bar and format contract as above; the plan is consumed verbatim. The issue title duplicating the plan's `#` heading is fine.
+- The trigger comment must come from a user with **write access**, unless the actor is a bot whose login is included in `allowed_bots` (or `allowed_bots` is `*`), because `gate.sh` accepts those bots without checking collaborator permission; it should be exactly `@cruise run` — any extra text in it is appended to the plan as additional instructions.
+- Same quality bar and format contract as above; the plan is consumed as written (no LLM rewrite), except that the action strips HTML comments, `<img>` tags, and invisible Unicode controls from the issue text and cruise trims surrounding whitespace. The issue title duplicating the plan's `#` heading is fine.
 
 Choose by where execution should happen: local session (`cruise run` on this machine, immediate) vs issue (GitHub Actions, async, reviewable thread, draft PR at the end).
 
 ## Gotchas
 
 - **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c <path>` (foreground form only) to pin a specific config, or `-c __builtin__` to pin the embedded default.
-- **A planning worktree is created even with `--skip-planning`** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`); it is reused by `cruise run`. Non-git directories fall back to running in place.
+- **A planning worktree is created even with `--skip-planning` for git sessions** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`) and is reused by `cruise run` for local sessions. For non-git directories, planning falls back to the base directory, but `cruise run` needs a git repository (worktree mode is the non-TTY default) and fails otherwise. For `--repo` sessions, approval removes the planning worktree and temporary clone, so `cruise run` re-clones the repository and creates a fresh execution worktree.
 - **One task = one session.** Don't pack multiple unrelated tasks into one plan; queue several sessions instead (`cruise --plan … --skip-planning` per task).
-- **Plan text is used verbatim** — no LLM cleans it up afterwards. Typos in file paths or step ordering go straight to the implementer.
+- **Plan text is used verbatim** — no LLM cleans it up afterwards (only surrounding whitespace is trimmed; the GitHub Action additionally strips HTML comments, `<img>` tags, and invisible Unicode controls). Typos in file paths or step ordering go straight to the implementer.

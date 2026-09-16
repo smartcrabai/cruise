@@ -14,6 +14,8 @@ pub enum StepKind {
     Command(CommandStep),
     /// Presents an interactive selection menu.
     Option(OptionStep),
+    /// Executes named children concurrently and waits for every child.
+    Parallel(indexmap::IndexMap<String, StepConfig>),
 }
 
 /// Parameters for a prompt step.
@@ -61,6 +63,10 @@ impl TryFrom<StepConfig> for StepKind {
     type Error = CruiseError;
 
     fn try_from(config: StepConfig) -> Result<Self> {
+        crate::config::validate_parallel_step("parallel", &config)?;
+        if let Some(children) = config.parallel {
+            return Ok(StepKind::Parallel(children));
+        }
         if config.prompt_file.is_some() {
             return Err(CruiseError::InvalidStepConfig(
                 "prompt_file must be resolved before execution (internal error)".to_string(),
@@ -107,7 +113,7 @@ impl TryFrom<StepConfig> for StepKind {
         }
 
         Err(CruiseError::InvalidStepConfig(
-            "step must have a prompt, prompt_file, command, or option field".to_string(),
+            "step must have a prompt, prompt_file, command, option, or parallel field".to_string(),
         ))
     }
 }
@@ -254,7 +260,9 @@ mod tests {
                     OptionChoice::TextInput { .. } => panic!("Expected Selector"),
                 }
             }
-            StepKind::Prompt(_) | StepKind::Command(_) => panic!("Expected Option step"),
+            StepKind::Prompt(_) | StepKind::Command(_) | StepKind::Parallel(_) => {
+                panic!("Expected Option step")
+            }
         }
     }
 
@@ -280,7 +288,9 @@ mod tests {
                     OptionChoice::Selector { .. } => panic!("Expected TextInput choice"),
                 }
             }
-            StepKind::Prompt(_) | StepKind::Command(_) => panic!("Expected Option step"),
+            StepKind::Prompt(_) | StepKind::Command(_) | StepKind::Parallel(_) => {
+                panic!("Expected Option step")
+            }
         }
     }
 

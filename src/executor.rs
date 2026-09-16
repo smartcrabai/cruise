@@ -244,8 +244,9 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// by [`stream_claude_agent`] and [`stream_jcode_agent`]) into a
 /// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (the
 /// SDK backends emit token-level deltas; `StreamCallbacks::on_stdout` is
-/// line-oriented like the command backend) and returning `Err(Interrupted)` as
-/// soon as `cancel_token` fires.
+/// line-oriented like the command backend). Cancellation returns
+/// `Err(Interrupted)` only after the backend closes its channel following
+/// subprocess shutdown, so a successor cannot overlap an interrupted attempt.
 async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
@@ -273,7 +274,13 @@ async fn stream_to_outcome(
     let outcome = loop {
         tokio::select! {
             biased;
-            () = maybe_cancelled(cancel_token) => return Err(CruiseError::Interrupted),
+            () = maybe_cancelled(cancel_token) => {
+                // The backend receives the same token. Keep the receiver alive
+                // until its worker finishes cleanup; dropping it or returning
+                // here would let detached CLI processes outlive this request.
+                while rx.recv().await.is_some() {}
+                return Err(CruiseError::Interrupted);
+            },
             maybe = rx.recv() => match maybe {
                 Some(chunk) => {
                     if let StreamChunk::Session(id) = &chunk

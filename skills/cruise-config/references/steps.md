@@ -1,9 +1,15 @@
 # Step types and file-backed prompts
 
 Each step primarily holds one of `prompt` (an inline LLM prompt, or a prompt loaded
-from `prompt_file`), `command` (shell execution), or `option` (interactive
-selection). A step that only holds `group:` (a group call) is the exception — see
-[groups.md](groups.md).
+from `prompt_file`), `command` (shell execution), `option` (interactive
+selection), or `parallel` (concurrent prompt/command children). A step that only
+holds `group:` (a group call) is the exception — see [groups.md](groups.md).
+A pure `workflow_call:` call site (optionally with `skip`,
+`when`, or `next`) is also accepted during config loading and expanded into
+executable steps, including under `after-pr`; it cannot be nested in a group or
+combined with executable step fields.
+
+`parallel:` is a container step for concurrent prompt/command children (see below).
 
 ## Prompt step (LLM call)
 
@@ -82,6 +88,51 @@ steps:
 
 The next step can read this step's stderr and exit status via `{prev.stderr}` and `{prev.success}`.
 
+## Parallel step
+
+```yaml
+steps:
+  checks:
+    parallel:
+      lint:
+        command: cargo clippy -- -D warnings
+      tests:
+        command: cargo test
+      review:
+        prompt_file: prompts/review.md
+        timeout: 10m
+    timeout: 15m
+  summarize:
+    prompt: "Summarize these results: {prev.output}"
+```
+
+All named children run concurrently in the same working directory; the next
+step waits for all of them. Use independent work: file edits and Git state are
+shared, without automatic isolation or merging. Command arrays within a child
+still run sequentially. Command children have no interactive stdin.
+
+Each child gets a private copy of the incoming variables. Environment precedence:
+workflow < parent block < child. Children support `prompt`/`prompt_file` or
+`command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Child names must
+be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
+`plan`, `group`, `workflow_call`, nested `parallel`, and `allow_commit: true`
+are rejected. Parent fields: `parallel`, `env`, `skip`, `when`, `next`, `if`,
+and `timeout`.
+
+After joining, `{prev.output}` contains a JSON object keyed by child name in
+declaration order. Entries have `output` (prompt output; `null` for commands),
+`stderr` (including execution errors), `success`, and `skipped`. Skipped children
+count as successful. `{prev.success}` reports success of the entire block;
+`{prev.stderr}` combines named child errors. Logs use `[parent/child]` prefixes.
+
+Child failures wait for siblings. The parent counts as one step and at most one
+failure, with the usual failure semantics; `if.fail` and retries belong on the
+parent. A child timeout stops that child only. A parent timeout stops unfinished
+children and waits for shutdown before following the failure path. Ctrl+C stops
+all children; resume reruns the whole block, including completed children.
+Step selection and the DAG show the parent as one execution unit. Parallel
+blocks work inside groups, after-pr steps, and called workflows.
+
 ## Option step (interactive selection)
 
 Each option item is either a `selector` (menu entry) or a `text-input` (free-text prompt).
@@ -119,12 +170,13 @@ steps:
 | `plan` | string | Path of a file displayed before an option step menu |
 | `option` | array | Choices for option steps |
 | `command` | string \| array | Shell command(s) |
+| `parallel` | object | Named prompt/command children run concurrently and join as one step |
 | `next` | string | Explicit next step name |
 | `skip` | bool \| string | Skip condition (see [flow-control.md](flow-control.md)) |
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
-| `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours (see [flow-control.md](flow-control.md)) |
+| `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
-| `fail-if-no-file-changes` | bool | Legacy: fail when no files changed (see [flow-control.md](flow-control.md)) |
+| `fail-if-no-file-changes` | — | Rejected as an unknown field; use `if.no-file-changes: failed` instead (see [flow-control.md](flow-control.md)) |

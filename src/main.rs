@@ -46,6 +46,7 @@ mod sdk_tools;
 mod session;
 mod session_edit;
 mod spinner;
+mod ssh_cmd;
 mod step;
 #[cfg(test)]
 mod test_binary_support;
@@ -94,6 +95,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Login(args)) => login_cmd::run(&args),
+        Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(

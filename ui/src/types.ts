@@ -179,7 +179,7 @@ export interface NewSessionDraftPersisted {
 
 export interface DagStepDto {
   name: string;
-  kind: "prompt" | "command" | "option" | "unknown";
+  kind: "prompt" | "command" | "option" | "parallel" | "unknown";
   isTerminal: boolean;
 }
 

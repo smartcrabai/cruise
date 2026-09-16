@@ -165,7 +165,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
 
             match action {
                 "Generate Plan" => {
-                    match crate::plan_cmd::generate_plan_for_draft_session(
+                    match crate::plan_cmd::regenerate_plan_for_session(
                         &manager,
                         &mut session,
                         DEFAULT_RATE_LIMIT_RETRIES,

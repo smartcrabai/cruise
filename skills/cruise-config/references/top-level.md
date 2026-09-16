@@ -115,7 +115,7 @@ description: Full TDD flow with review loop
 
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
-`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first supported locale from `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, then the default is `English`. Unsupported or language-neutral locales use `English`.
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once; if that value is not a supported locale, no other variable is consulted and the default is `English`. Unsupported or language-neutral locales use `English`.
 
 ```yaml
 languages:
@@ -149,7 +149,7 @@ cleanup_after_pr: true   # remove worktree + branch once the PR is open
 
 - Has no effect in **current-branch mode** (no worktree exists to remove).
 - Has no effect for **`--repo` sessions** (the clone is always removed after PR creation regardless of this flag).
-- Errors during cleanup are downgraded to warnings; the session is still marked `Completed`.
+- For `--repo` sessions, post-PR clone/worktree cleanup errors are silently ignored and the removed-clone notice is printed unconditionally; only non-repo worktree cleanup errors are downgraded to warnings. The session is still marked `Completed`.
 - Override per-run with `--cleanup-after-pr` / `--no-cleanup-after-pr` CLI flags (takes precedence over config and session-level setting).
 
 
@@ -173,14 +173,13 @@ runs foreground because no plan worker is needed.
 
 ## Rate-limit retry
 
-When an HTTP 429 is detected, cruise retries the same model with exponential
-backoff while its retry budget and delay permit:
+Without a retry policy, cruise retries the same model with exponential backoff while its retry budget and delay permit. Command mode retries on HTTP 429 / rate-limit text in stderr; SDK backends retry any provider failure classified as a limit — HTTP 429, `rate limit` / `too many requests` text, `usage limit`, `session limit`, or `overloaded`. Both use the same schedule:
 
 - Initial delay: 2 seconds
 - Max delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
 
-The SDK backends additionally accept an optional `retry:` block. Declaring it,
+The `retry:` block is accepted by configuration validation for any backend but affects retry behavior only for SDK backends. In SDK mode, declaring it,
 or using a workflow-level model array with fallback entries, widens rate-limit
 handling into a fallback policy: 5xx and network failures become retryable too,
 the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and those
@@ -196,8 +195,8 @@ block entirely and use scalar or unset model fields to keep the historical
 behavior.
 
 ```yaml
-retry:                    # Optional; SDK backends only. Omitted = same-model 429 retries only
-                          # unless a model array supplies an implicit policy
+retry:                    # Optional; accepted by validation for any backend, honored only by SDK backends
+                          # Command mode ignores this block and keeps the historical rate-limit retry loop
   base_delay_ms: 500      # Backoff base (default 500); delay is min(base * 2^(attempt-1), 8s) with jitter
   max_delay_ms: 300000    # Waiting cap (default 300000). The computed backoff is already capped at 8s,
                           # so this only binds a server Retry-After hint (itself clamped to 60s): a
