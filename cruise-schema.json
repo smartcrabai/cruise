@@ -208,6 +208,10 @@
           "type": ["string", "null"],
           "description": "Path to a file whose contents are used as the prompt. Absolute, ~-prefixed, config-file-relative, or supported GitHub blob/raw URL (a bare file name = same directory). YAML `~` or null denotes the local home directory. Mutually exclusive with prompt."
         },
+        "output_file": {
+          "type": ["string", "null"],
+          "description": "Relative session artifact file receiving the final output of a prompt step. Mutually exclusive with command, option, parallel, group, and workflow_call."
+        },
         "timeout": {
           "type": "string",
           "pattern": "^[1-9][0-9]*[mh]?$",
@@ -233,7 +237,27 @@
               "model": { "type": "null" },
               "instruction": { "type": "null" },
               "plan": { "type": "null" },
+              "output_file": { "type": "null" },
               "allow_commit": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "output_file": { "type": "string" } },
+            "required": ["output_file"]
+          },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
             }
           }
         }
@@ -251,12 +275,30 @@
         "skip": { "$ref": "#/$defs/StepConfig/properties/skip" },
         "when": { "$ref": "#/$defs/StepConfig/properties/when" },
         "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
+        "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
         "allow_commit": { "const": false }
       },
       "oneOf": [
         { "required": ["prompt"] },
         { "required": ["prompt_file"] },
         { "required": ["command"] }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "output_file": { "type": "string" } },
+            "required": ["output_file"]
+          },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" }
+            }
+          }
+        }
       ]
     },
     "WhenCondition": {

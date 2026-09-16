@@ -157,7 +157,6 @@ async fn write_prompt(
                 return Err(CruiseError::Interrupted);
             }
         }
-        drop(stdin);
     }
     Ok(())
 }

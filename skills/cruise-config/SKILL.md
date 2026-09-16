@@ -63,8 +63,8 @@ The full spec is split into the files below. Load only the sections you need.
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
-| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
-| [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{plan.language}`, `{pr.*}` |
+| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
+| [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
@@ -73,6 +73,7 @@ The full spec is split into the files below. Load only the sections you need.
 | [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: jcode` with model references |
 | [examples/claude-flow.yaml](examples/claude-flow.yaml) | SDK-backend example: `sdk: claude` with plain claude model names |
 | [examples/prompt-file.yaml](examples/prompt-file.yaml) | Prompt step example using an external `prompt_file` |
+| [examples/file-artifacts.yaml](../../examples/file-artifacts.yaml) | Save an initial prompt response and compare it in a later prompt with `{file:...}` |
 
 ## Authoring checklist
 

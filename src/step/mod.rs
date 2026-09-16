@@ -24,6 +24,7 @@ pub struct PromptStep {
     pub model: Option<String>,
     pub prompt: String,
     pub instruction: Option<String>,
+    pub output_file: Option<String>,
 }
 
 /// Parameters for a command step.
@@ -64,6 +65,30 @@ impl TryFrom<StepConfig> for StepKind {
 
     fn try_from(config: StepConfig) -> Result<Self> {
         crate::config::validate_parallel_step("parallel", &config)?;
+        if let Some(output_file) = config.output_file.as_deref() {
+            crate::artifacts::validate_name(output_file).map_err(|error| {
+                CruiseError::InvalidStepConfig(format!(
+                    "invalid output_file '{output_file}': {error}"
+                ))
+            })?;
+            if config.parallel.is_none() && config.prompt.is_none() && config.prompt_file.is_none()
+            {
+                let kind = if config.command.is_some() {
+                    "command"
+                } else if config.option.is_some() {
+                    "option"
+                } else if config.group.is_some() {
+                    "group"
+                } else if config.workflow_call.is_some() {
+                    "workflow_call"
+                } else {
+                    "non-prompt"
+                };
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "output_file is only supported on prompt steps (found {kind})"
+                )));
+            }
+        }
         if let Some(children) = config.parallel {
             return Ok(StepKind::Parallel(children));
         }
@@ -79,6 +104,7 @@ impl TryFrom<StepConfig> for StepKind {
                 model: config.model,
                 prompt,
                 instruction: config.instruction,
+                output_file: config.output_file,
             }));
         }
 

@@ -3097,6 +3097,7 @@ fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
     let mut vars = crate::variable::VariableStore::new(setup.state.input_with_attachments());
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+    vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let mut tracker =
         crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
     if let Some(node) = setup.dag.nodes.get(&start) {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::error::{CruiseError, Result};
 
@@ -85,6 +86,9 @@ pub struct VariableStore {
 
     /// Named variables (e.g. plan file path).
     named: HashMap<String, NamedVariable>,
+
+    /// Session-scoped root for `{file:...}` prompt references.
+    artifacts_root: Option<PathBuf>,
 }
 
 /// A named variable value.
@@ -115,6 +119,26 @@ impl VariableStore {
     pub fn set_named_value(&mut self, name: &str, value: String) {
         self.named
             .insert(name.to_string(), NamedVariable::Value(value));
+    }
+
+    /// Set the session-scoped root used by prompt artifact references.
+    pub fn set_artifacts_root(&mut self, root: PathBuf) {
+        self.artifacts_root = Some(root);
+    }
+
+    /// Save a prompt artifact below the configured session root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no artifact root is configured or the artifact
+    /// cannot be written safely and atomically.
+    pub fn write_artifact(&self, name: &str, content: &str) -> Result<()> {
+        let root = self.artifacts_root.as_deref().ok_or_else(|| {
+            CruiseError::Other(format!(
+                "failed to write artifact '{name}': artifact root is not configured"
+            ))
+        })?;
+        crate::artifacts::write(root, name, content)
     }
 
     pub fn set_prev_output(&mut self, output: Option<String>) {
@@ -182,6 +206,38 @@ impl VariableStore {
         resolve_template_with_lookup(template, |name| self.get_variable(name))
     }
 
+    /// Resolve a prompt template, including `{file:relative-name}` references.
+    ///
+    /// File contents are read immediately before the prompt runs and are
+    /// inserted as literal text. They are not passed through this resolver a
+    /// second time, so braces inside an artifact remain data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an undefined ordinary variable, malformed template
+    /// syntax, an unavailable artifact root, or an artifact read failure.
+    pub fn resolve_prompt(&self, template: &str) -> Result<String> {
+        let mut cache: HashMap<String, String> = HashMap::new();
+        resolve_template_with_lookup(template, |name| {
+            let Some(artifact_name) = name.strip_prefix(crate::artifacts::FILE_REFERENCE_PREFIX)
+            else {
+                return self.get_variable(name);
+            };
+
+            if let Some(content) = cache.get(artifact_name) {
+                return Ok(content.clone());
+            }
+            let root = self.artifacts_root.as_deref().ok_or_else(|| {
+                CruiseError::Other(format!(
+                    "failed to read artifact '{artifact_name}': artifact root is not configured"
+                ))
+            })?;
+            let content = crate::artifacts::read(root, artifact_name)?;
+            cache.insert(artifact_name.to_string(), content.clone());
+            Ok(content)
+        })
+    }
+
     /// Look up a variable by name and return its value.
     ///
     /// # Errors
@@ -215,10 +271,24 @@ impl VariableStore {
     }
 }
 
+/// Return artifact names referenced by a template without resolving any other
+/// variables. This is used to reject dependencies between concurrently
+/// running parallel children before any child starts.
+pub(crate) fn artifact_references(template: &str) -> Result<Vec<String>> {
+    let mut references = Vec::new();
+    resolve_template_with_lookup(template, |name| {
+        if let Some(artifact_name) = name.strip_prefix(crate::artifacts::FILE_REFERENCE_PREFIX) {
+            references.push(artifact_name.to_string());
+        }
+        Ok(String::new())
+    })?;
+    Ok(references)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     #[test]
     fn test_resolve_input() {
@@ -291,6 +361,25 @@ mod tests {
             .resolve("Plan: {plan}")
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result, format!("Plan: {path_str}"));
+    }
+
+    #[test]
+    fn prompt_artifact_contents_are_not_resolved_again() {
+        let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::artifacts::write(
+            root.path(),
+            "baseline.md",
+            "{input} {file:other.md} {\"key\":\"value\"}",
+        )
+        .unwrap_or_else(|error| panic!("artifact write failed: {error}"));
+        let mut store = VariableStore::new("input value".to_string());
+        store.set_artifacts_root(root.path().to_path_buf());
+        assert_eq!(
+            store
+                .resolve_prompt("before {file:baseline.md} after")
+                .unwrap_or_else(|error| panic!("prompt resolution failed: {error}")),
+            "before {input} {file:other.md} {\"key\":\"value\"} after"
+        );
     }
 
     #[test]

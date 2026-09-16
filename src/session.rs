@@ -255,6 +255,14 @@ impl SessionState {
         sessions_dir.join(&self.id).join("plan.md")
     }
 
+    /// Absolute path to this session's prompt artifact directory.
+    #[must_use]
+    pub fn artifacts_path(&self, sessions_dir: &Path) -> PathBuf {
+        sessions_dir
+            .join(&self.id)
+            .join(crate::artifacts::ARTIFACTS_DIR)
+    }
+
     #[must_use]
     pub fn title_or_input(&self) -> &str {
         self.title

@@ -523,34 +523,22 @@ impl NewSessionForm {
         if sources.is_empty() {
             return;
         }
-        let values = sources
+        let mut values = sources
             .iter()
             .map(crate::resolver::ConfigCandidate::selection_value)
-            .fold(Vec::<String>::new(), |mut values, value| {
-                if !values.iter().any(|existing| existing == &value) {
+            .fold(Vec::new(), |mut values, value| {
+                if !values.contains(&value) {
                     values.push(value);
                 }
                 values
             });
+        values.insert(0, String::new());
         let current = self.config.text();
         let current = current.trim();
-        let current_index = if current.is_empty() {
-            0
-        } else {
-            values
-                .iter()
-                .position(|value| value == current)
-                .map_or(0, |index| index + 1)
-        };
-        let length = values.len().saturating_add(1).cast_signed();
-        let index = (current_index.cast_signed() + delta)
-            .rem_euclid(length)
-            .cast_unsigned();
-        if index == 0 {
+        if !values.iter().any(|value| value == current) {
             self.config.set_text("");
-        } else {
-            self.config.set_text(&values[index - 1]);
         }
+        self.config.cycle(&values, delta, String::as_str);
         self.mark_changed();
     }
 
@@ -761,6 +749,36 @@ mod tests {
         assert!(
             form.config.text().is_empty(),
             "cycle should wrap back to Auto-detect"
+        );
+    }
+
+    #[test]
+    fn config_cycle_from_an_unknown_path_uses_the_requested_direction() {
+        let mut form = NewSessionForm::default();
+        let sources = [
+            crate::resolver::ConfigCandidate {
+                label: "first.yaml".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("first.yaml")),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "second.yaml".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("second.yaml")),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "Built-in default".to_string(),
+                source: crate::resolver::CandidateKind::Builtin,
+            },
+        ];
+
+        form.config.set_text("custom/workflow.yaml");
+        form.cycle_config(&sources, 1);
+        assert_eq!(form.config.text(), "first.yaml");
+
+        form.config.set_text("custom/workflow.yaml");
+        form.cycle_config(&sources, -1);
+        assert_eq!(
+            form.config.text(),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
         );
     }
 

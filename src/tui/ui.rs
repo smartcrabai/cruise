@@ -615,16 +615,15 @@ fn render_config_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 
     let current = app.form.config.text();
     let current = current.trim();
-    let mut selected = current.is_empty().then_some(0);
-    let mut matched = false;
+    let mut selected = None;
     let mut lines = Vec::with_capacity(app.config_sources.len() + 1);
     lines.push(choice_line(app, "Auto-detect", current.is_empty()));
     for (index, source) in app.config_sources.iter().enumerate() {
-        let source_selected = !matched && source.selection_value() == current;
-        matched |= source_selected;
+        let source_selected = selected.is_none() && source.selection_value() == current;
         selected = selected.or(source_selected.then_some(index + 1));
         lines.push(choice_line(app, source.label(), source_selected));
     }
+    let selected = current.is_empty().then_some(0).or(selected);
     let visible = usize::from(choices_area.height.max(1));
     let offset = selected
         .unwrap_or(0)
