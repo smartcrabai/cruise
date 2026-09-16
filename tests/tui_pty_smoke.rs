@@ -502,7 +502,7 @@ set -eu
 
 case " $* " in
   *" version --json "*)
-    printf '%s\n' '{"semver":"0.81.1"}'
+    printf '%s\n' '{"semver":"0.82.0"}'
     ;;
   *" auth status --json "*)
     printf '%s\n' '{"any_available":true,"providers":[{"id":"fake","status":"available"}]}'

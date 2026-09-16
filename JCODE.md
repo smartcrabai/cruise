@@ -70,7 +70,7 @@
 ### 2.5 jcode の制約（ソース確認済み）
 
 - **custom tools 非対応**: harness API (`crates/jcode-harness-api/src/requests.rs`) にツール登録 request が存在しない。ACP の `mcpServers` も中身無視。→ 代替は **stdio MCP のみ**（http/sse はロード時スキップ）。
-- MCP 設定探索（**後勝ちマージ**）: `$JCODE_HOME/mcp.json` → `~/.claude.json` → `~/.claude/mcp.json` → project-local `.jcode/mcp.json` / `.mcp.json` / `.claude/mcp.json` の順に読み、後のソースが同名 server を上書きする = **project-local が最優先、`$JCODE_HOME/mcp.json` は最弱**。対象 repo の MCP 設定が cruise のセッションに load され得る（§7 リスク）。形式は Claude Code 互換 `{"mcpServers": {"<name>": {"command", "args", "env"}}}`。ツール露出名は `mcp__<server>__<tool>`（`-` は `_` に置換）。
+- MCP 設定探索（**後勝ちマージ**）: `$JCODE_HOME/mcp.json` → `~/.claude.json` → `~/.claude/mcp.json` → project-local `.jcode/mcp.json` / `.mcp.json` / `.claude/mcp.json` の順に読み、後のソースが同名 server を上書きする = **project-local が最優先、`$JCODE_HOME/mcp.json` は最弱**。対象 repo の MCP 設定が cruise のセッションに load され得る（§7 リスク）。形式は Claude Code 互換 `{"mcpServers": {"<name>": {"command", "args", "env", "timeout_secs"}}}`。ツール露出名は `mcp__<server>__<tool>`（`-` は `_` に置換）。 The upstream jcode `timeout_secs` value is the per-server request timeout in seconds.
 - vendor 対象の `jcode-sdk` / `jcode-harness-api` / `jcode-transport` は `publish = false`（crates.io に無い）→ Rust から使うなら **vendor コピー**（cruise には `vendor/asupersync` の前例あり）。
 - **クロスプロバイダ failover は rate-limit 起因では自動実行されない**: `MultiProvider::complete_with_failover` は failover prompt を Err 文字列で返すだけで、パースして実行するのは TUI (`jcode-tui`) のみ（例外: provider が未設定等でスキップされた場合の自動切替は存在）。同一プロバイダ別アカウント切替 (`same_provider_account_failover`) だけ自動。リトライ回数も Anthropic/OpenAI runtime は `MAX_RETRIES = 3` ハードコード。→ **モデルフォールバックは cruise 側の責務**。
 - 非対話実行: `jcode run [--json|--ndjson] <MESSAGE>`（`--model` / `--provider` / `--resume <id>` / `-C` 併用可）。
@@ -166,14 +166,14 @@ pub enum Executor {
 - **effort 指定**: `jcode run` に `--effort` 相当のフラグは**無い**。jcode の reasoning effort は `[provider] {openai,anthropic}_reasoning_effort` config キーで、env override `JCODE_OPENAI_REASONING_EFFORT` / `JCODE_ANTHROPIC_REASONING_EFFORT` が存在する（バイナリのシンボルで確認）。受理値は `none|minimal|low|medium|high|xhigh|max`（cruise の 5 段は真部分集合）。→ **子プロセス env で渡す**（共有 `config.toml` を書き換えないので並行安全）。effort 非対応の provider/model では無視される（不正値でも run は失敗しないことを mock で確認）。
 - **モデル参照**: `--provider <p>` / `--model <m>` / `--provider-profile <name>`。`--model` に effort suffix は付けられないので `provider/model[:effort]` の `:effort` は必ず分離してから渡す。
 - **プロンプト受け渡し**: `<MESSAGE>` は argv。600KB のプロンプトが問題なく通ることを確認。
-- **バージョン**: `jcode version --json` の `semver` フィールドでバージョン floor を判定できる。floor は本スパイクで検証した **0.81.1**。
+- **バージョン**: `jcode version --json` の `semver` フィールドでバージョン floor を判定できる。 This spike was verified against **0.81.1**, and the current floor is **0.82.0**, which supports `timeout_secs`.
 - **対象リポジトリ汚染なし**: `jcode run -C <repo>` 後の `git status -uall` が空（`.jcode/` 等の作業ファイルを残さない）。
 
 実装（案 B' 前提。案 A 採用時も写像は同一）:
 - `jcode_home` は cruise の既存データディレクトリ慣行に従う固定パス（Linux 例: `~/.local/share/cruise/jcode-home`。macOS は既存コードの流儀に合わせる）でセッション永続化 → resume は `--resume <id>`（案 A: `attach_session(id)`）。セッション肥大は jcode の retention 機構があれば設定、なければ初回リリースでは対応しない。
 - イベント → StreamChunk 写像: `text_delta → Delta`、turn 完了 → `Done(text)`、セッション確定 → `Session(id)`、429/limit 系エラー → `Limit`、その他 → `Error`。未知イベントは無視してログのみ（jcode の minor bump 耐性）。
 - モデル/effort: 実行ごとに `--model` / `--provider` 指定（effort suffix は jcode の reasoning effort 指定へ写像。案 A: `set_model` / `set_reasoning_effort`）。
-- 前提バイナリ: ユーザインストール済み `jcode`（PATH または設定でパス指定）。**P3 スパイクで検証した版を最低バージョン（floor）とし、未満は明確なエラーで停止する**（warn で続行しない — NDJSON イベント形の互換を保証できないため）。上限チェックはしない。floor は README に明記。
+- 前提バイナリ: ユーザインストール済み `jcode`（PATH または設定でパス指定）。**The current minimum version (floor) is 0.82.0, and versions below it stop with a clear error** (do not continue with a warning — compatibility with the NDJSON event shape and the `timeout_secs` MCP setting cannot be guaranteed). 上限チェックはしない。floor は README に明記。
 
 ### 3.5 認証分離と `cruise login`（要件）
 
@@ -204,9 +204,9 @@ in-process 状態（`AskHandler` の stdin/チャネル、`plan_persisted: Arc<A
 2. **隠しサブコマンド `cruise mcp-bridge`**: stdio MCP server（JSON-RPC 2.0: `initialize` / `tools/list` / `tools/call`）として振る舞い、全 tool 呼び出しを socket 経由で親へ転送。socket パスは env `CRUISE_TOOL_SOCKET` から取得（`--socket <path>` は override）。
 3. **登録（並行安全が要件）**: `JCODE_HOME` は全 cruise プロセス共有の固定パスのため、mcp.json をターン/プロセスごとに書き換えると並行実行（CLI×GUI・複数 repo）で相互上書きする。第一候補は **mcp.json を固定内容にし、socket パスは env で渡す**:
    ```json
-   {"mcpServers": {"cruise": {"command": "<current_exe>", "args": ["mcp-bridge"]}}}
+   {"mcpServers": {"cruise": {"command": "<current_exe>", "args": ["mcp-bridge"], "timeout_secs": 86400}}}
    ```
-   `jcode run` の env（案 A: launch env）に `CRUISE_TOOL_SOCKET=<path>` を設定し、MCP server は jcode の子プロセスとして env を継承する（スパイク (7) で実証）。mcp.json の書き直しは `current_exe` パスが変わった場合のみ、tmp+rename の原子的更新 + flock で行う。env 継承が不成立の場合の fallback は「mcp.json の `env` フィールドへターンごと書き込み + flock 排他」とし、無排他の書き換えは禁止（PROHIBITED §6 の精神）。
+   `jcode run` の env（案 A: launch env）に `CRUISE_TOOL_SOCKET=<path>` を設定し、MCP server は jcode の子プロセスとして env を継承する（スパイク (7) で実証）。mcp.json の書き直しは `current_exe` パス or a fixed registration field が変わった場合のみ、tmp+rename の原子的更新 + flock で行う。env 継承が不成立の場合の fallback は「mcp.json の `env` フィールドへターンごと書き込み + flock 排他」とし、無排他の書き換えは禁止（PROHIBITED §6 の精神）。
 4. ツール露出名は `mcp__cruise__ask_user` 等になる。claude backend も AgentToolbox（server 名 `cruise`）経由で `mcp__cruise__*` となり現行 seher（server 名 `seher`）と同型なので、プロンプトテンプレートの素名参照（`ask_user` 等）はそのまま機能する（現行実績あり）。
 5. `require_tools` による provider 候補絞り込み（`executor.rs`）は `run_sdk` とともに削除（両バックエンドとも常に tool-capable）。`planning.rs` の `sdk_plan_tools_enabled` は sdk 値非依存（`sdk.is_some() && interactive_planning`）で file-based planning と GUI（src-tauri）が依存するため**削除しない**（doc コメントの seher/pi 言及のみ更新）。`skip_step` の opt-in 登録ロジック（`if.no-file-changes` 限定）は provider 候補絞り込みの意味を失うが、露出ツール最小化のため**現行のまま維持**。
 

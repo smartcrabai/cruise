@@ -7,8 +7,9 @@
 //! Custom tools cannot be registered in-process -- jcode's harness API has no
 //! such request -- so cruise's tools reach the model through a stdio MCP server:
 //! [`ensure_mcp_registration`] writes a fixed `mcp.json` entry pointing at
-//! `cruise mcp-bridge`, and the per-run socket path travels to that child in the
-//! `jcode` process environment (see [`crate::tool_bridge`]).
+//! `cruise mcp-bridge` with a long per-request timeout for interactive prompts,
+//! and the per-run socket path travels to that child in the `jcode` process
+//! environment (see [`crate::tool_bridge`]).
 //!
 //! ## Isolation from the user's jcode
 //!
@@ -49,15 +50,24 @@ const JCODE_BINARY: &str = "jcode";
 /// Directory under cruise's data dir used as `$JCODE_HOME`.
 const JCODE_HOME_DIR: &str = "jcode-home";
 
-/// Lowest `jcode` version whose `run --ndjson` event shape this backend is
-/// verified against (the version the P3 spike in `JCODE.md` was run on).
+/// Lowest `jcode` version whose `run --ndjson` event shape and MCP configuration
+/// this backend are verified against.
 ///
 /// Older versions are rejected outright rather than warned about: the event
 /// names are the entire contract between cruise and jcode, and a silently
 /// mismatching stream would surface as an empty step output rather than an
-/// error. There is no upper bound -- unknown events are ignored, so a newer
-/// jcode that only adds events keeps working.
-const MIN_JCODE_VERSION: (u64, u64, u64) = (0, 81, 1);
+/// error. The floor also ensures the upstream per-server `timeout_secs` MCP
+/// setting is honored. There is no upper bound -- unknown events are ignored,
+/// so a newer jcode that only adds events keeps working.
+const MIN_JCODE_VERSION: (u64, u64, u64) = (0, 82, 0);
+
+/// Per-request deadline cruise asks jcode to apply to the bridge, in seconds.
+/// This is jcode's upstream `McpServerConfig::timeout_secs` field. It bounds
+/// every request on the server (`initialize`, `tools/list`, and `tools/call`),
+/// not only tool calls. `0` means unset and keeps jcode's 30-second default, so
+/// this must be a real value. The long fixed deadline gives `ask_user` time to
+/// wait for a human response.
+const MCP_REQUEST_TIMEOUT_SECS: u64 = 86_400;
 
 /// Argument that makes this binary act as the stdio MCP server.
 const MCP_BRIDGE_SUBCOMMAND: &str = "mcp-bridge";
@@ -288,7 +298,8 @@ fn check_version(binary: &Path, home: &Path) -> Result<()> {
     if parsed < MIN_JCODE_VERSION {
         return Err(CruiseError::Other(format!(
             "jcode {semver} is too old for `sdk: jcode`, which requires {} or newer \
-             (its `run --ndjson` event stream is the compatibility boundary); \
+             (its `run --ndjson` event stream and the per-server `timeout_secs` MCP \
+             setting are compatibility boundaries); \
              upgrade jcode and retry",
             format_version(MIN_JCODE_VERSION)
         )));
@@ -316,30 +327,38 @@ fn format_version((major, minor, patch): (u64, u64, u64)) -> String {
 }
 
 /// The `mcpServers.cruise` entry cruise registers: this binary, run as the
-/// stdio MCP bridge.
+/// stdio MCP bridge with a fixed upstream per-request deadline.
 ///
 /// Deliberately free of the per-run socket path. `$JCODE_HOME` is shared by
 /// every cruise process on the machine, so a per-run rewrite would have
 /// concurrent runs (CLI next to GUI, several repositories) overwrite each
 /// other's registration. The socket travels in the `jcode` child's environment
 /// instead, which jcode passes on to the MCP servers it spawns.
+///
+/// `timeout_secs` is fixed with the shared entry because it applies to every
+/// MCP request, not just `tools/call`, and does not identify a particular run.
+/// The 24-hour value leaves the human-facing `ask_user` tool waiting without
+/// making the registration vary between concurrent cruise processes.
 fn registration_entry(exe: &Path) -> serde_json::Value {
     serde_json::json!({
         "command": exe.to_string_lossy(),
         "args": [MCP_BRIDGE_SUBCOMMAND],
+        "timeout_secs": MCP_REQUEST_TIMEOUT_SECS,
     })
 }
 
 /// Register `cruise mcp-bridge` in `<home>/mcp.json`, rewriting only when the
-/// entry does not already name the running executable.
+/// entry does not exactly match the fixed registration for the running
+/// executable.
 ///
 /// The entry is `current_exe`-derived, so it is rewritten when cruise moves (a
 /// reinstall, a different build) and when the CLI and the GUI take turns -- the
 /// GUI runs prompts in-process, so `current_exe` is then `cruise-gui`, which
-/// serves `mcp-bridge` too. Every rewrite takes an advisory lock and lands
-/// through tmp+rename, so concurrent cruise processes sharing the home can
-/// neither interleave writes nor expose a partial file, and a `jcode` child
-/// reading across a rewrite sees one whole valid entry either way.
+/// serves `mcp-bridge` too. It is also rewritten when a fixed registration
+/// field such as `timeout_secs` changes. Every rewrite takes an advisory lock
+/// and lands through tmp+rename, so concurrent cruise processes sharing the
+/// home can neither interleave writes nor expose a partial file, and a `jcode`
+/// child reading across a rewrite sees one whole valid entry either way.
 ///
 /// # Errors
 ///
@@ -1334,6 +1353,7 @@ mod tests {
             let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}"));
             assert_eq!(entry["command"], exe.to_string_lossy().as_ref());
             assert_eq!(entry["args"], serde_json::json!([MCP_BRIDGE_SUBCOMMAND]));
+            assert_eq!(entry["timeout_secs"], serde_json::json!(86_400));
             // No socket path in the file: it is per-run and travels in the
             // child's environment, so concurrent runs never rewrite each other.
             assert!(
@@ -1366,6 +1386,40 @@ mod tests {
         }
 
         #[test]
+        fn adds_the_timeout_to_a_pre_timeout_entry() {
+            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let path = tmp.path().join("mcp.json");
+            let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}"));
+            let old_document = serde_json::json!({
+                "mcpServers": {
+                    "cruise": {
+                        "command": exe.to_string_lossy(),
+                        "args": [MCP_BRIDGE_SUBCOMMAND],
+                    }
+                }
+            });
+            std::fs::write(
+                &path,
+                serde_json::to_string(&old_document).unwrap_or_else(|e| panic!("{e:?}")),
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
+            let document = read_json(&path);
+            assert_eq!(
+                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
+                serde_json::json!(86_400)
+            );
+
+            let before_second_call =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
+            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
+            let after_second_call =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(before_second_call, after_second_call);
+        }
+
+        #[test]
         fn replaces_a_stale_cruise_entry_and_keeps_other_servers() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let path = tmp.path().join("mcp.json");
@@ -1381,6 +1435,10 @@ mod tests {
             assert_eq!(
                 document["mcpServers"][MCP_SERVER_NAME]["command"],
                 exe.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
+                serde_json::json!(86_400)
             );
             assert_eq!(document["mcpServers"]["other"]["command"], "other-server");
         }
@@ -1930,16 +1988,13 @@ mod tests {
         #[test]
         fn a_version_below_the_floor_is_rejected_with_the_requirement() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(tmp.path(), r#"{"semver":"0.80.9"}"#, "", 0);
+            let binary = install_stub(tmp.path(), r#"{"semver":"0.81.7"}"#, "", 0);
             let err = check_version(&binary, &tmp.path().join("home"))
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
-            assert!(err.contains("0.80.9"), "got {err}");
-            assert!(
-                err.contains(&format_version(MIN_JCODE_VERSION)),
-                "got {err}"
-            );
+            assert!(err.contains("0.81.7"), "got {err}");
+            assert!(err.contains("0.82.0"), "got {err}");
         }
 
         #[test]
@@ -2083,6 +2138,10 @@ mod tests {
             assert_eq!(
                 document["mcpServers"][MCP_SERVER_NAME]["args"],
                 serde_json::json!([MCP_BRIDGE_SUBCOMMAND])
+            );
+            assert_eq!(
+                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
+                serde_json::json!(86_400)
             );
         }
 
