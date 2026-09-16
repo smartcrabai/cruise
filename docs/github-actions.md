@@ -102,7 +102,7 @@ Multiple mentions on the same issue queue rather than race each other: a `plan` 
 
 The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't spin up a runner); the action independently re-checks the trigger phrase with a strict word-boundary match, verifies the commenter's permissions, and rejects PR comments before doing anything, so it is safe even if the pre-filter is removed.
 
-**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`; cruise requires jcode v0.81.1 or newer and enforces that floor at run time). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
+**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`; cruise requires jcode v0.82.0 or newer and enforces that floor at run time). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
 
 ## Providers
 
@@ -280,7 +280,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `token_exchange_url` | *(cruise-agent's hosted exchange)* | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
 | `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) in the body to trigger a run. |
 | `cruise_version` | `latest` | cruise release to install (`latest` or a tag like `v0.2.0`). Requires v0.2.0+; the install step rejects an older binary with a clear error. |
-| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.81.1`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.81.1 or newer regardless. |
+| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.82.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.82.0 or newer regardless. |
 | `config` | *(empty)* | Path to a cruise workflow config YAML in your repo, used by `run`/`plan`/`fix` (sets `CRUISE_CONFIG`). Empty lets cruise's own resolver pick a config from the checkout, or its built-in default. No effect on `exec`. |
 | `model` | *(empty)* | Overrides `CRUISE_MODEL`, in jcode's model-reference format: `provider/model[:effort]` (`provider` is a jcode provider id; `effort` is one of `low|medium|high|xhigh|max`), a bare model id, or empty for the jcode home's configured default. |
 | `plan_model` | *(empty)* | Overrides `CRUISE_PLAN_MODEL` (the `plan`/`fix` commands' planning step), same format as `model`. |

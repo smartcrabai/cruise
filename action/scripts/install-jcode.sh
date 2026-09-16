@@ -18,8 +18,8 @@
 # daemon is not this action's business.
 #
 # jcode's minimum version is enforced by cruise itself at run time (it
-# verifies the `jcode run --ndjson` event shape it was built against), so
-# this step only pins and installs.
+# verifies the `jcode run --ndjson` event shape and the `timeout_secs` MCP
+# setting it was built against), so this step only pins and installs.
 set -euo pipefail
 
 JCODE_VERSION_INPUT="${JCODE_VERSION:-latest}"

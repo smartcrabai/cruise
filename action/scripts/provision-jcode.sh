@@ -91,7 +91,7 @@ EOF
 
 jcode_version_json="$(run_jcode version --json)"
 # cruise itself reads the bare `semver` field for its floor check; the
-# decorated `version` string ("v0.81.2 (<hash)") is for humans.
+# decorated `version` string ("v0.82.0 (<hash)") is for humans.
 jcode_semver="$(printf '%s' "$jcode_version_json" | jq -r '.semver // empty')"
 if [ -z "$jcode_semver" ]; then
   echo "::error::cruise: \`jcode version --json\` reported no 'semver' field: $jcode_version_json" >&2
@@ -103,7 +103,7 @@ echo "cruise: jcode $jcode_semver"
 # entirely when a jcode is already on PATH, so a self-hosted runner's older
 # binary would otherwise fail later as a raw jcode error from
 # `provider add`.
-MIN_JCODE_VERSION="0.81.1"
+MIN_JCODE_VERSION="0.82.0"
 if ! version_at_least "$jcode_semver" "$MIN_JCODE_VERSION"; then
   echo "::error::cruise: jcode $jcode_semver is too old for this version of the action (requires jcode v$MIN_JCODE_VERSION or newer, the version cruise's \`sdk: jcode\` backend is verified against) -- pin a newer 'jcode_version', or update the jcode on this runner" >&2
   exit 1
