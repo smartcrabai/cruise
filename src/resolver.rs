@@ -138,10 +138,10 @@ pub fn resolve_config_in_dir(
 }
 
 /// A candidate config source for the interactive selector.
-#[derive(Debug)]
-struct ConfigCandidate {
-    label: String,
-    source: CandidateKind,
+#[derive(Debug, Clone)]
+pub struct ConfigCandidate {
+    pub(crate) label: String,
+    pub(crate) source: CandidateKind,
 }
 
 impl std::fmt::Display for ConfigCandidate {
@@ -150,8 +150,33 @@ impl std::fmt::Display for ConfigCandidate {
     }
 }
 
-#[derive(Debug)]
-enum CandidateKind {
+impl ConfigCandidate {
+    /// The label shown by the CLI selector and the TUI config list.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The value stored in a new-session form for this candidate.
+    #[must_use]
+    pub fn selection_value(&self) -> String {
+        match &self.source {
+            CandidateKind::EnvVar(path)
+            | CandidateKind::Local(path)
+            | CandidateKind::UserDir(path) => path.to_string_lossy().into_owned(),
+            CandidateKind::Builtin => crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
+        }
+    }
+
+    /// Whether this candidate is a config file in the selected local directory.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        matches!(self.source, CandidateKind::Local(_))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CandidateKind {
     EnvVar(PathBuf),
     Local(PathBuf),
     UserDir(PathBuf),
@@ -193,6 +218,7 @@ fn collect_candidates(
     cwd: &std::path::Path,
     env_val: Option<String>,
 ) -> Result<Vec<ConfigCandidate>> {
+    let cwd = to_absolute(cwd.to_path_buf());
     let mut candidates = Vec::new();
     let home = home::home_dir();
 
@@ -204,7 +230,7 @@ fn collect_candidates(
                 let abs = to_absolute(buf);
                 let label = format!(
                     "CRUISE_CONFIG → {}",
-                    shorten_display_path(&abs, cwd, home.as_deref())
+                    shorten_display_path(&abs, &cwd, home.as_deref())
                 );
                 candidates.push(ConfigCandidate {
                     label,
@@ -228,7 +254,7 @@ fn collect_candidates(
         let path = cwd.join(name);
         if path.is_file() {
             let abs = to_absolute(path.clone());
-            let label = shorten_display_path(&abs, cwd, home.as_deref());
+            let label = shorten_display_path(&abs, &cwd, home.as_deref());
             candidates.push(ConfigCandidate {
                 label,
                 source: CandidateKind::Local(abs),
@@ -245,7 +271,7 @@ fn collect_candidates(
         push_yaml_dir_candidates(
             &mut candidates,
             &local_dir,
-            cwd,
+            &cwd,
             home.as_deref(),
             CandidateKind::Local,
         );
@@ -259,7 +285,7 @@ fn collect_candidates(
         push_yaml_dir_candidates(
             &mut candidates,
             &workflows_dir,
-            cwd,
+            &cwd,
             home.as_deref(),
             CandidateKind::UserDir,
         );
@@ -272,6 +298,15 @@ fn collect_candidates(
     });
 
     Ok(candidates)
+}
+
+/// Collect config candidates using the process environment for `CRUISE_CONFIG`.
+///
+/// This is the shared candidate-discovery entry point for interactive clients.
+/// The CLI resolver and the TUI therefore use the same priority order, labels,
+/// path normalization, and environment-variable error handling.
+pub(crate) fn collect_config_candidates(cwd: &std::path::Path) -> Result<Vec<ConfigCandidate>> {
+    collect_candidates(cwd, std::env::var("CRUISE_CONFIG").ok())
 }
 
 /// Core resolution logic parameterised by `interactive`.
@@ -300,9 +335,8 @@ fn resolve_config_in_dir_with_interactive(
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
     }
 
-    // 2. Collect all candidates (env var read here to keep collect_candidates testable).
-    let env_val = std::env::var("CRUISE_CONFIG").ok();
-    let candidates = collect_candidates(cwd, env_val)?;
+    // 2. Collect all candidates through the shared environment-aware entry point.
+    let candidates = collect_config_candidates(cwd)?;
 
     // 3. Pick a candidate.
     let chosen = if !interactive
@@ -1390,6 +1424,67 @@ mod tests {
             team_idx < user_idx,
             ".cruise/team.yaml (idx {team_idx}) must precede user-dir (idx {user_idx})"
         );
+    }
+
+    #[test]
+    fn test_collect_candidates_returns_cli_labels_and_paths_relative_to_requested_directory() {
+        // Given: every CLI candidate source exists under a directory that is not the process cwd.
+        let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(repo_dir.path().join("env.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(repo_dir.path().join("cruise.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        let local_dir = repo_dir.path().join(".cruise");
+        std::fs::create_dir_all(&local_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(local_dir.join("team.yml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+
+        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let workflows_dir = user_workflows_dir(fake_home.path());
+        std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(workflows_dir.join("zeta.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(workflows_dir.join("alpha.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
+
+        let _dir_guard = DirGuard::new();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let env_path = repo_dir.path().join("env.yaml");
+        let env_path_string = env_path
+            .to_str()
+            .unwrap_or_else(|| panic!("unexpected non-UTF-8 path"))
+            .to_string();
+
+        // When: candidates are collected for the requested repository directory.
+        let candidates = collect_candidates(repo_dir.path(), Some(env_path_string))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: labels use the same CLI shortening and values retain absolute paths.
+        let labels = candidates
+            .iter()
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "CRUISE_CONFIG → ./env.yaml",
+                "./cruise.yaml",
+                "./.cruise/team.yml",
+                "~/.config/cruise/workflows/alpha.yaml",
+                "~/.config/cruise/workflows/zeta.yaml",
+                "Built-in default",
+            ]
+        );
+        assert!(matches!(
+            &candidates[0].source,
+            CandidateKind::EnvVar(path) if path == &env_path
+        ));
+        assert!(matches!(
+            &candidates[1].source,
+            CandidateKind::Local(path) if path == &repo_dir.path().join("cruise.yaml")
+        ));
+        assert!(matches!(
+            candidates
+                .last()
+                .unwrap_or_else(|| panic!("unexpected empty"))
+                .source,
+            CandidateKind::Builtin
+        ));
     }
 
     #[test]

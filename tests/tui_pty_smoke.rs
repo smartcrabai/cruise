@@ -44,7 +44,7 @@ impl Fixture {
     }
 
     fn start(&self, columns: u16, rows: u16, no_color: bool) -> PtySession {
-        self.start_with_options(columns, rows, no_color, None)
+        self.start_with_options_in_directory(columns, rows, no_color, None, None)
     }
 
     fn start_with_options(
@@ -54,6 +54,27 @@ impl Fixture {
         no_color: bool,
         path_prefix: Option<&Path>,
     ) -> PtySession {
+        self.start_with_options_in_directory(columns, rows, no_color, path_prefix, None)
+    }
+
+    fn start_in_directory(
+        &self,
+        columns: u16,
+        rows: u16,
+        no_color: bool,
+        working_dir: &Path,
+    ) -> PtySession {
+        self.start_with_options_in_directory(columns, rows, no_color, None, Some(working_dir))
+    }
+
+    fn start_with_options_in_directory(
+        &self,
+        columns: u16,
+        rows: u16,
+        no_color: bool,
+        path_prefix: Option<&Path>,
+        working_dir: Option<&Path>,
+    ) -> PtySession {
         PtySession::start(
             Path::new(env!("CARGO_BIN_EXE_cruise")),
             self,
@@ -61,6 +82,7 @@ impl Fixture {
             rows,
             no_color,
             path_prefix,
+            working_dir,
         )
     }
 
@@ -242,15 +264,23 @@ impl PtySession {
         rows: u16,
         no_color: bool,
         path_prefix: Option<&Path>,
+        working_dir: Option<&Path>,
     ) -> Self {
         let stdout_path = fixture.root.path().join("tui.stdout");
         let stderr_path = fixture.root.path().join("tui.stderr");
         let stdout = File::create(&stdout_path).unwrap_or_else(|error| panic!("{error}"));
         let stderr = File::create(&stderr_path).unwrap_or_else(|error| panic!("{error}"));
-        let command_line = format!(
-            "stty cols {columns} rows {rows}; exec {}",
-            shell_quote(&binary.to_string_lossy())
-        );
+        let command_line = match working_dir {
+            Some(directory) => format!(
+                "cd {}; stty cols {columns} rows {rows}; exec {}",
+                shell_quote(&directory.to_string_lossy()),
+                shell_quote(&binary.to_string_lossy())
+            ),
+            None => format!(
+                "stty cols {columns} rows {rows}; exec {}",
+                shell_quote(&binary.to_string_lossy())
+            ),
+        };
         let mut command = Command::new("script");
         #[cfg(target_os = "macos")]
         command.args(["-q", "/dev/null", "/bin/sh", "-c", &command_line]);
@@ -387,6 +417,71 @@ fn tui_available() -> bool {
         }
         Err(error) => panic!("failed to probe script: {error}"),
     }
+}
+
+#[test]
+fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_path() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let project = fixture.root.path().join("config-project");
+    let custom_dir = project.join("custom");
+    std::fs::create_dir_all(&custom_dir).unwrap_or_else(|error| panic!("{error}"));
+    write_test_workflow(&project.join("cruise.yaml"), "local_step");
+    write_test_workflow(&custom_dir.join("workflow.yaml"), "custom_step");
+
+    let workflows_dir = fixture.home.join("config/cruise/workflows");
+    std::fs::create_dir_all(&workflows_dir).unwrap_or_else(|error| panic!("{error}"));
+    write_test_workflow(&workflows_dir.join("user.yaml"), "user_step");
+
+    let mut tui = fixture.start_in_directory(120, 30, true, &project);
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"config candidate PTY test");
+    tui.send(b"\t\t\t\t");
+    tui.wait_for_output("Which workflow config?", START_TIMEOUT);
+    tui.wait_for_output("Auto-detect", START_TIMEOUT);
+    tui.wait_for_output("./cruise.yaml", START_TIMEOUT);
+
+    tui.send(b"\x1b[B");
+    tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
+    // Local config -> user workflow -> Built-in -> Auto-detect.
+    tui.send(b"\x1b[B");
+    tui.send(b"\x1b[B");
+    tui.send(b"\x1b[B");
+    tui.wait_for_output("▸ Auto-detect", START_TIMEOUT);
+
+    tui.send(b"custom/workflow.yaml");
+    tui.wait_for_output("custom/workflow.yaml", START_TIMEOUT);
+    tui.send(b"\x13");
+    tui.wait_for_output("Saved draft", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let session = fixture
+        .manager
+        .list()
+        .unwrap_or_else(|error| panic!("{error}"))
+        .into_iter()
+        .find(|session| session.input == "config candidate PTY test")
+        .unwrap_or_else(|| panic!("config PTY session was not persisted"));
+    let expected_config_path = std::fs::canonicalize(custom_dir.join("workflow.yaml"))
+        .unwrap_or_else(|error| panic!("failed to canonicalize expected config path: {error}"));
+    let actual_config_path = session.config_path.map(|path| {
+        std::fs::canonicalize(&path)
+            .unwrap_or_else(|error| panic!("failed to canonicalize persisted config path: {error}"))
+    });
+    assert_eq!(actual_config_path, Some(expected_config_path));
+}
+
+fn write_test_workflow(path: &Path, step: &str) {
+    std::fs::write(
+        path,
+        format!("command: [echo]\nsteps:\n  {step}:\n    command: echo {step}\n"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn assert_palette(tui: &mut PtySession, actions: &[&str]) {

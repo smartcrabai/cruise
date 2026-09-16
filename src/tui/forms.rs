@@ -519,12 +519,38 @@ impl NewSessionForm {
         self.mark_changed();
     }
 
-    pub fn cycle_config(&mut self, sources: &[crate::configs::ConfigEntry], delta: isize) {
+    pub fn cycle_config(&mut self, sources: &[crate::resolver::ConfigCandidate], delta: isize) {
         if sources.is_empty() {
             return;
         }
-        self.config
-            .cycle(sources, delta, |entry| entry.path.as_str());
+        let values = sources
+            .iter()
+            .map(crate::resolver::ConfigCandidate::selection_value)
+            .fold(Vec::<String>::new(), |mut values, value| {
+                if !values.iter().any(|existing| existing == &value) {
+                    values.push(value);
+                }
+                values
+            });
+        let current = self.config.text();
+        let current = current.trim();
+        let current_index = if current.is_empty() {
+            0
+        } else {
+            values
+                .iter()
+                .position(|value| value == current)
+                .map_or(0, |index| index + 1)
+        };
+        let length = values.len().saturating_add(1).cast_signed();
+        let index = (current_index.cast_signed() + delta)
+            .rem_euclid(length)
+            .cast_unsigned();
+        if index == 0 {
+            self.config.set_text("");
+        } else {
+            self.config.set_text(&values[index - 1]);
+        }
         self.mark_changed();
     }
 
@@ -659,15 +685,17 @@ mod tests {
     fn config_cycles_both_ways_and_text_input_marks_form_dirty() {
         let mut form = NewSessionForm::default();
         let sources = [
-            crate::configs::ConfigEntry {
-                name: "A".to_string(),
-                path: "a.yaml".to_string(),
-                description: None,
+            crate::resolver::ConfigCandidate {
+                label: "A".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("a.yaml")),
             },
-            crate::configs::ConfigEntry {
-                name: "B".to_string(),
-                path: "b.yaml".to_string(),
-                description: None,
+            crate::resolver::ConfigCandidate {
+                label: "B".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("b.yaml")),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "Built-in default".to_string(),
+                source: crate::resolver::CandidateKind::Builtin,
             },
         ];
         form.cycle_config(&sources, 1);
@@ -677,13 +705,121 @@ mod tests {
         form.cycle_config(&sources, -1);
         assert_eq!(form.config.text(), "a.yaml");
         form.cycle_config(&sources, -1);
-        assert_eq!(form.config.text(), "b.yaml", "recall wraps at the start");
+        assert!(form.config.text().is_empty(), "recall wraps to Auto-detect");
 
         form.step = Step::SkippedSteps;
         form.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(form.dirty);
         assert!(form.skipped_explicit);
     }
+
+    #[test]
+    fn config_cycle_includes_auto_and_wraps_in_both_directions() {
+        let mut form = NewSessionForm::default();
+        let sources = [
+            crate::resolver::ConfigCandidate {
+                label: "first.yaml".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("first.yaml")),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "second.yaml".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from("second.yaml")),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "Built-in default".to_string(),
+                source: crate::resolver::CandidateKind::Builtin,
+            },
+        ];
+
+        // Down starts at Auto-detect and visits every CLI candidate before wrapping.
+        form.cycle_config(&sources, 1);
+        assert_eq!(form.config.text(), "first.yaml");
+        form.cycle_config(&sources, 1);
+        assert_eq!(form.config.text(), "second.yaml");
+        form.cycle_config(&sources, 1);
+        assert_eq!(
+            form.config.text(),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
+        );
+        form.cycle_config(&sources, 1);
+        assert!(
+            form.config.text().is_empty(),
+            "cycle should wrap to Auto-detect"
+        );
+
+        // Up from Auto-detect wraps in the opposite direction through Built-in.
+        form.cycle_config(&sources, -1);
+        assert_eq!(
+            form.config.text(),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
+        );
+        form.cycle_config(&sources, -1);
+        assert_eq!(form.config.text(), "second.yaml");
+        form.cycle_config(&sources, -1);
+        assert_eq!(form.config.text(), "first.yaml");
+        form.cycle_config(&sources, -1);
+        assert!(
+            form.config.text().is_empty(),
+            "cycle should wrap back to Auto-detect"
+        );
+    }
+
+    #[test]
+    fn config_cycle_skips_duplicate_paths_from_environment_and_local_candidates() {
+        let mut form = NewSessionForm::default();
+        let sources = [
+            crate::resolver::ConfigCandidate {
+                label: "CRUISE_CONFIG → ./cruise.yaml".to_string(),
+                source: crate::resolver::CandidateKind::EnvVar(PathBuf::from(
+                    "/project/cruise.yaml",
+                )),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "./cruise.yaml".to_string(),
+                source: crate::resolver::CandidateKind::Local(PathBuf::from(
+                    "/project/cruise.yaml",
+                )),
+            },
+            crate::resolver::ConfigCandidate {
+                label: "Built-in default".to_string(),
+                source: crate::resolver::CandidateKind::Builtin,
+            },
+        ];
+
+        form.cycle_config(&sources, 1);
+        assert_eq!(form.config.text(), "/project/cruise.yaml");
+        form.cycle_config(&sources, 1);
+        assert_eq!(
+            form.config.text(),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
+        );
+        form.cycle_config(&sources, 1);
+        assert!(form.config.text().is_empty());
+    }
+
+    #[test]
+    fn config_auto_and_builtin_values_round_trip_to_draft_and_request() {
+        let mut form = NewSessionForm::default();
+
+        // Blank is the only value that means Auto-detect.
+        assert_eq!(form.draft().requested_config_path, None);
+        assert_eq!(form.request().config_path, None);
+
+        // Built-in is persisted as the existing sentinel, not as Auto-detect.
+        form.config
+            .set_text(crate::new_session_history::BUILTIN_CONFIG_KEY);
+        assert_eq!(
+            form.draft().requested_config_path.as_deref(),
+            Some(crate::new_session_history::BUILTIN_CONFIG_KEY)
+        );
+        assert_eq!(
+            form.request().config_path,
+            Some(PathBuf::from(
+                crate::new_session_history::BUILTIN_CONFIG_KEY
+            ))
+        );
+    }
+
     #[test]
     fn history_defaults_remain_editable_and_non_explicit() {
         let mut form = NewSessionForm::default();
