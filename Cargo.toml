@@ -58,7 +58,7 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.2"
-reedline = "0.48"
+reedline = "0.51"
 reqwest = { version = "0.13", features = ["json"] }
 seher-claude-agent-sdk = "=0.0.59"
 serde = { version = "1.0.228", features = ["derive"] }
