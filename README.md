@@ -193,19 +193,22 @@ Commands:
   plan         Create an implementation plan for a task
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
-  exec         Execute the workflow config directly in the current directory
   list         List and manage sessions interactively
-  clean        Remove sessions with closed/merged PRs or terminal no-PR sessions
-  config       Show or update application-level configuration
-  login        Sign cruise's default SDK backend (jcode) in to a provider
+  clean        Remove sessions with closed/merged PRs
+  config       Show or update application-level configuration (`~/.config/cruise/config.json`)
+  exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
+  login        Sign in to a model provider for the `jcode` SDK backend
   ssh          Run a cruise command on a remote host through OpenSSH
 
+Arguments:
+  [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
+
 Options:
-      --plan <INPUT>           Create a plan in the background and return immediately
+      --plan <INPUT>           Create a plan in the background and return immediately (pass `stdin` to read piped stdin explicitly)
       --skip-planning          Use the input directly as the plan, skipping LLM-based plan generation
-      --no-force-exec          Ignore force_exec: true and plan as usual
-      --repo <OWNER/REPO>      GitHub repository to clone into a temporary directory for planning and execution
-      --image <PATH>           Attach an image file to the planning input; can be repeated
+      --no-force-exec          Ignore `force_exec: true` in the workflow config and plan as usual
+      --repo <OWNER/REPO>      GitHub repository (owner/repository) to clone into a temporary directory for planning and execution
+      --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
 ```
 
 #### `cruise ssh`
@@ -295,8 +298,8 @@ Arguments:
 
 Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
-      --parallelism <N>            Max number of sessions `--all` executes concurrently (must be >= 1; default: 1)
-      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed [default: 3]
+      --parallelism <N>            Max number of sessions `--all` executes concurrently (no flag default; 1 when omitted, must be >= 1, requires `--all`)
+      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
@@ -321,7 +324,7 @@ Arguments:
 
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
-      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed [default: 3]
+      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
@@ -341,6 +344,8 @@ Adding `--skip-planning` skips the background worker entirely: the input is writ
 
 `--repo <owner>/<repository>` is accepted here too and behaves as described under [`cruise plan`](#cruise-plan): the repository is cloned into a temporary directory and the session targets the clone. `--grill` is not available on this path — background planning has no interactive user to interview.
 
+With no subcommand, no `--plan`, and no positional input, a non-TTY stdin is read to the end and its trimmed contents become the positional input, so `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). Blank piped input is ignored, and with an interactive stdin the argument-free invocation opens the TUI instead. Pass `--plan stdin` to read piped input explicitly on the background planning path.
+
 #### `cruise list`
 
 ```
@@ -359,12 +364,12 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the desktop GUI and TUI run concurrently in `run --all` mode.
+          Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`; the flag's own help text mentions only the desktop GUI, but the TUI reads the same setting for its Run All batches. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise login`
 
@@ -376,7 +381,7 @@ Arguments:
 
 Options:
       --api-key  Store an API key for PROVIDER instead of running the OAuth flow
-                 (also available when all three standard streams are TTYs; key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin)
+                 (also available when all three standard streams are TTYs; key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin; conflicts with `--status`)
       --status   List the providers configured in cruise's jcode home and the models available to them
 ```
 
@@ -528,6 +533,8 @@ after-pr:                # optional: steps that run automatically after PR creat
     # step configuration (same format as `steps`)
 ```
 
+Unknown-key handling differs by level: individual step maps (in `steps`, `after-pr`, a group's `steps`, and parallel children) and the `retry` block reject unknown fields with a parse error, which is what turns a typo or a removed field such as `fail-if-no-file-changes` into an immediate config error. Unknown **top-level** keys are ignored silently, so a misspelled `plan_model` or `max_retries` at the top of the file is accepted and simply has no effect.
+
 ### Dynamic Model Selection
 
 When the `command` array contains a `{model}` placeholder, cruise resolves it at runtime based on the effective model for each step:
@@ -634,6 +641,12 @@ The CLI and desktop GUI also apply these process-level workflow overrides when l
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode's OpenAI service tier. When neither the workflow `env:` nor the parent process environment defines this key, cruise injects `off` into the jcode child; if either defines it, cruise preserves the supplied value. The key's presence, not its value, determines whether cruise injects the default.
 
+`CRUISE_TOOL_SOCKET` names the Unix socket a `cruise mcp-bridge` child dials to reach the parent run's tool server. Cruise sets it on the jcode child, which passes it on to the MCP servers it spawns; it is also the default for `cruise mcp-bridge --socket`.
+
+`CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
+
+Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_HOME` (cruise's own jcode home, which keeps your `~/.jcode` untouched) and `JCODE_NO_TELEMETRY=1`. When a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` are set to that effort as well; jcode ignores them for providers and models without reasoning-effort support.
+
 ```yaml
 env:                        # top-level: applied to all steps
   ANTHROPIC_API_KEY: sk-...
@@ -674,7 +687,13 @@ Later prompt bodies can read it with `{file:initial-state.md}`. File references
 are resolved immediately before a prompt runs, including prompts loaded through
 `prompt_file`; the inserted text is not recursively expanded. Artifact names must
 be relative and stay within the session directory, and saves and reads are limited
-to 1 MiB. See [`examples/file-artifacts.yaml`](examples/file-artifacts.yaml) for a
+to 1 MiB. Names are rejected when empty, absolute, or containing a `.` or `..`
+path component; a subdirectory such as `reports/initial-state.md` is allowed and
+its directories are created on write. Symbolic links are refused rather than
+followed: a symlink anywhere in the artifact path -- including the session's
+`artifacts/` root or its managed parent directories -- fails both reads and
+writes, as does a final path that exists but is not a regular file.
+See [`examples/file-artifacts.yaml`](examples/file-artifacts.yaml) for a
 baseline-and-regression comparison flow. Artifacts belong to the session: deleting
 the session removes them. Terminal `cruise exec` sessions are cleaned up after
 completion, while interrupted exec sessions remain resumable by ID and `cruise run`
@@ -764,6 +783,10 @@ steps:
   set `output_file`, with distinct artifact names within the block. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
+  A child prompt that reads an artifact produced by a sibling in the same block
+  (`{file:...}` pointing at another child's `output_file`) is rejected at config
+  validation time, as are an empty `parallel: {}` block and a child whose
+  `command:` array is empty.
 - After joining, `{prev.output}` is a JSON object keyed by child name in YAML
   declaration order. Each entry has `output` (prompt text, or `null` for commands),
   `stderr` (including execution errors), `success`, and `skipped`.
@@ -775,6 +798,10 @@ steps:
   or `next` on the parent; a retry reruns the entire block. Unhandled prompt or
   execution errors stop the workflow after siblings finish. Nonzero command
   exits and timeouts follow the ordinary step failure path.
+  Two child errors ignore that aggregation: a commit-guard violation is always
+  fatal and stops the workflow even when the parent has `if.fail`, while a child
+  timeout is never fatal on its own and always reports through `{prev.*}` and the
+  ordinary step failure path.
 - A child timeout affects only that child. A parent timeout cancels unfinished
   children and waits for them to stop before taking the failure path. Ctrl+C
   stops all children. Resume restarts the whole interrupted block, including
@@ -894,7 +921,7 @@ steps:
 - The glob is evaluated relative to the workflow's working directory. Absolute patterns are used as-is.
 - Template variables in the pattern are resolved before globbing, so `exists: "{input}/**/*.rs"` works.
 - **No match -> the step is skipped** (shown as `skipping: <step> (no files match when.exists)`). One or more matches -> the step runs normally.
-- An empty or syntactically invalid glob is rejected at config validation time.
+- An empty glob is rejected at config validation time, and so is a syntactically invalid one -- unless the pattern contains `{`, in which case static validation is skipped because the braces may be a template variable. Such a pattern is checked only after substitution, when an invalid glob fails the step at runtime.
 - If some entries cannot be read while scanning (e.g. permission errors), cruise errs on the side of running the step rather than silently skipping it.
 - `when.exists` is independent of `skip`: if `skip` already skips the step, the glob is not evaluated at all.
 
@@ -943,7 +970,7 @@ steps:
 - The value must be either `retry` or `failed`; any other value (including the removed object form `{ fail: true }` / `{ retry: true }`) is a parse error.
 - Cannot be used in `after-pr` steps (rejected at validation time).
 - Cannot be used at the group level (`if` in group definitions).
-- Can be combined with `if: file-changed` on the same step, but when both are present, `no-file-changes` takes priority for change detection.
+- Parses alongside `if: file-changed` on the same step, but `no-file-changes` disables it: no `file-changed` edge is compiled for that step and no jump to its target ever happens.
 - The legacy `fail-if-no-file-changes: true` field is rejected as an unknown field; migrate to `if: { no-file-changes: failed }`.
 
 ##### Declaring intentional no-changes
@@ -982,7 +1009,7 @@ steps:
     command: ./rollback.sh
 ```
 
-`if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`, else top-level `max_retries`, else 3), so a misconfigured retry loop will not run forever.
+`if.fail` is subject to the same loop-protection budget as other flow-control jumps (`--max-retries`, else top-level `max_retries`, else 3). The budget covers every graph edge except the user-skip fallback and the group-retry-exhausted exit, so plain sequential advances and explicit `next`/option jumps are counted too: traversing any single budgeted edge more times than the ceiling stops the run with loop protection rather than letting a misconfigured loop run forever.
 
 Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
@@ -1038,6 +1065,8 @@ steps:
 - When the group's `if: file-changed` condition triggers, execution jumps to the configured target step (`test` above); normal sequencing then re-enters the group and its steps re-run.
 - A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
 - A group call site cannot set `allow_commit: true`; set it on the inner prompt step instead.
+- A group call site cannot set `output_file` either; a dedicated error points you at the inner prompt step.
+- A step inside a group definition cannot use `workflow_call:`; expand the called workflow at the top level instead.
 
 ### Workflow Composition (`workflow_call`)
 
@@ -1074,11 +1103,11 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `nex
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `if`, `timeout`, `env`, etc.) and `allow_commit: true` are rejected at validation time. An explicit `allow_commit: false` is equivalent to omission.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 
-Workflow calls can be nested: a called workflow may itself contain `workflow_call` steps. Step IDs accumulate prefixes (`outer/inner/step`). Circular references (A calls B, B calls A) are detected and rejected. Groups inside called workflows are not supported.
+Workflow calls can be nested: a called workflow may itself contain `workflow_call` steps. Step IDs accumulate prefixes (`outer/inner/step`). Circular references (A calls B, B calls A) are detected and rejected. Groups and `workflow_call` do not mix in either direction: groups inside called workflows are not supported, and a step inside a group definition cannot itself be a `workflow_call`.
 
 ```yaml
 # parent.yaml -> nested/outer.yaml -> inner/leaf.yaml

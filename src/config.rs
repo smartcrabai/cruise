@@ -290,7 +290,10 @@ pub struct OptionItem {
     #[serde(rename = "text-input")]
     pub text_input: Option<String>,
 
-    /// Step to go to when this item is selected (None = end of workflow).
+    /// Step to go to when this item is selected.
+    ///
+    /// `None` falls back to the step's own `next`, then to the following step
+    /// in declaration order; it only ends the workflow when neither exists.
     pub next: Option<String>,
 }
 
@@ -887,7 +890,8 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, and timeout may accompany it"
+                 only model, env, skip, when, timeout, and output_file (prompt children only) \
+                 may accompany it"
             )));
         }
         if matches!(&child.command, Some(StringOrVec::Multiple(commands)) if commands.is_empty()) {

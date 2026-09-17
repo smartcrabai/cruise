@@ -156,7 +156,7 @@ Bare `cruise` opens the official keyboard-only client beside the CLI and desktop
 
 The TUI has exactly three views:
 
-- **Sessions** — Browse the global session list. Each selected session has **Info**, **Graph**, **Plan**, and **Log** detail tabs. The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The TUI uses its own phase-dependent capability set rather than exposing the complete action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions). Depending on phase, its session palette can expose **Answer Prompt**, **Fix Plan**, **Ask About Plan**, **Discard**, **Run in Worktree**, **Run on Current Branch**, **Retry**, **Edit Current Step**, and **Cancel**, with TUI labels such as **Publish Issue** and **Open Pull Request**; **Clean**, prompt handling, workspace selection, and URL actions are separate TUI behavior.
+- **Sessions** — Browse the global session list. Each selected session has **Info**, **Graph**, **Plan**, and **Log** detail tabs. The Graph tab shows its node list plus the selected node's dependency and edge details: each `TRANSITIONS` entry appends `[N traversals, M budgeted]` once that edge has been traversed, and a `LAST VISITED` timestamp is shown for a node that has run; Markdown is parsed and styled. The TUI uses its own phase-dependent capability set rather than exposing the complete action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions). Depending on phase, its session palette can expose **Answer Prompt**, **Fix Plan**, **Ask About Plan**, **Discard**, **Run in Worktree**, **Run on Current Branch**, **Retry**, **Edit Current Step**, and **Cancel**, with TUI labels such as **Publish Issue** and **Open Pull Request**; **Clean**, prompt handling, workspace selection, and URL actions are separate TUI behavior.
 - **New Session** — Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the CLI's prioritized candidates plus **Auto-detect** and **Built-in default**. GitHub sessions omit caller-local candidates and defer Auto-detect until the repository is cloned. The config editor also accepts a typed path instead of a listed candidate. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained.
 - **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. It uses the configured `run_all_parallelism`; the CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
 
@@ -182,8 +182,8 @@ Keys are fixed and cannot be configured:
 | `Ctrl-S` | Save the New Session answers as a draft |
 | `Ctrl-R` | Toggle save / regenerate in the multiline Edit Settings input |
 | `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches, including workflow config paths); move between detail tabs elsewhere |
-| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices |
-| `[` / `]` | Move between detail tabs |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices, and `Left` / `Right` move between detail tabs |
+| `[` / `]` / `Left` / `Right` | Move between detail tabs (`Left` / `Right` only outside text questions, where they edit text instead) |
 | `a` | Open the action palette |
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
@@ -191,6 +191,8 @@ Keys are fixed and cannot be configured:
 | `Ctrl-Enter` | Advance the current New Session question (required in the task and image editors, where `Enter` inserts a newline); in the multiline Edit Settings dialog, save the dialog |
 | `Space` | Toggle the current choice or the highlighted skipped step |
 | `Esc` | Back one question; at the first question, return to Sessions |
+
+`Ctrl-P` / `Ctrl-G` / `Ctrl-U` / `Ctrl-S` are swallowed while a modal or confirmation is open: nothing happens until it is dismissed.
 
 ### TUI layout, logs, and concurrency
 
@@ -233,13 +235,15 @@ When loading a workflow config, these process environment variables override the
 
 The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`) accept only `true`, `false`, `1`, or `0` after trimming; any other non-empty value is an error. The string overrides above are applied only when their trimmed value is non-empty.
 
+These process environment variables are read directly at runtime and are **not** workflow-config overrides: `CRUISE_COMMIT_COAUTHOR_NAME` together with `CRUISE_COMMIT_COAUTHOR_EMAIL` (both required, trimmed) append a `Co-authored-by:` trailer to commits cruise creates; `CRUISE_TOOL_SOCKET` names the Unix socket a `cruise mcp-bridge` child dials, and is the default for its `--socket` flag; `CRUISE_DISABLE_NOTIFICATIONS=1` suppresses desktop notifications for the CLI and the TUI alike (only the exact value `1` disables them).
+
 ## Runtime file layout (XDG)
 
 | Kind | Path (default) |
 |------|----------------|
 | User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` → `~/.config/cruise/workflows/` |
 | App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
-| Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot) |
+| Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the execution graph is persisted as `sessions/<id>/dag.json`) |
 | State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
 > Older versions kept everything under `~/.cruise/`. If migrating, move workflow YAMLs to `~/.config/cruise/workflows/`, `config.json` to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees. Cruise also warns if workflow YAMLs are left directly in `~/.config/cruise/` (legacy location) instead of the `workflows/` subdirectory.
@@ -252,7 +256,7 @@ The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`,
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **desktop GUI and TUI**).
 - In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist).
-- **Retries:** Without an SDK fallback policy, HTTP 429 uses exponential backoff (2s → 60s) with `--rate-limit-retries` retries (default 5, i.e. up to 6 attempts); an SDK `retry:` block or workflow-level model array with fallback entries also makes 5xx/network failures retryable and can switch to fallback models using the same `--rate-limit-retries` budget. Budgeted graph transitions are bounded by `--max-retries` (default 3), including ordinary sequential transitions.
+- **Retries:** Without an SDK fallback policy, HTTP 429 uses exponential backoff (2s → 60s) with `--rate-limit-retries` retries (default 5, i.e. up to 6 attempts); an SDK `retry:` block or workflow-level model array with fallback entries also makes 5xx/network failures retryable and can switch to fallback models using the same `--rate-limit-retries` budget. Budgeted graph transitions — including ordinary sequential transitions — are bounded by `--max-retries`, resolved as: the explicit flag wins, else the workflow config's top-level `max_retries`, else 3.
 - **Stuck session?** `cruise list` → the session → **Reset to Planned** to restart it cleanly, or **Resume** to continue a `Running`/`Suspended` one.
 
 ## Common recipes

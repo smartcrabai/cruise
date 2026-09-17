@@ -46,7 +46,7 @@ steps:
     command: ./run-migrations.sh
 ```
 
-- Usable on regular steps, `after-pr` steps, and steps inside group definitions.
+- Usable on regular steps, `after-pr` steps, steps inside group definitions, and `parallel` children (children are validated by the same rules).
 - An empty glob, or a syntactically invalid glob, is a validation error. Globs containing `{...}` variable references skip static validation and are checked at runtime instead.
 - I/O errors during glob evaluation are treated as "matched" (the step runs) with a warning.
 - `skip:` is evaluated first; `when.exists` glob I/O only happens when the step is not already skipped.
