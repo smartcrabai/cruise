@@ -3,7 +3,11 @@ name: cruise-plan
 description: Use when a coding agent should author an implementation plan itself (instead of letting cruise's LLM planning step write it) and register it as a cruise session via `--skip-planning`, or as a GitHub issue for the @cruise Actions integration. Covers cruise's plan-quality best practices (the same bar as the built-in plan prompt), the required plan.md format, the exact commands to create the session — both background (`cruise --plan … --skip-planning`) and foreground non-TTY (`cruise plan --skip-planning …`) land in `Planned` and are ready for `cruise run` immediately — and how to file the plan as an issue (plan in the issue body, optional `@cruise run` trigger comment). Trigger when asked to "write a plan for cruise", "queue this task as a cruise session", "create a cruise session from this plan", or "file this plan as an issue" / "register a plan as an issue". For *driving* cruise (run/list/clean) see cruise-cli; for authoring workflow YAML see cruise-config.
 ---
 
-cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your text is written verbatim to the session's `plan.md` and the resolved workflow config (built-in default when no config file is found) executes against it. When the target repository's resolved workflow has `force_exec: true`, `--skip-planning` alone does not create a session: the workflow executes directly; pass `--no-force-exec` (also accepted by the root `cruise --plan` form) to retain the normal planning path. This skill is the contract for doing that well.
+cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your input is written directly to the session's `plan.md` after surrounding whitespace is trimmed (attachment references are included when `--image` is used), and no LLM-based planning call runs. In the foreground `cruise plan` form, a TTY still enters the Approve/Fix/Ask/Execute/Publish menu after that write; non-TTY input auto-approves to `Planned`.
+
+`force_exec: true` is evaluated only for a `Local` target. If no explicit opt-out is present, local planning runs the workflow directly in the current directory — no plan, worktree, or PR. `--repo <OWNER/REPO>` resolves to a `PlanTarget::Repo` session, so it follows the session planning path instead of the local `force_exec` shortcut. For foreground `cruise plan`, `--no-force-exec`, `--grill`, `--formal-spec`, or any attached image opts out of `force_exec`; the root `cruise --plan` form supports the `--no-force-exec` and `--image` opt-outs (it has no `--grill`/`--formal-spec` flags).
+
+`--formal-spec` applies only to the initial LLM-generated plan: it injects the formal-specification prompt while resolving the initial planning template (`src/planning.rs:280-286`), while Fix/Ask follow-up turns use the normal context (`src/plan_cmd.rs:1114-1124`). Keep the Markdown plan primary and add both ` ```quint ` and ` ```alloy ` fenced blocks for each representable requirement, following the contract in `prompts/formal-spec.md:1-9`. The flag conflicts with `--skip-planning`, but can be combined with `--grill` or `--no-interactive-planning`; `--grill` and `--no-interactive-planning` conflict with each other, and `--grill` additionally requires an SDK backend, interactive planning, and a TTY.
 
 ## Workflow
 
@@ -66,9 +70,13 @@ cruise --plan stdin --skip-planning <<'EOF'
 # Add retry to the uploader
 ...
 EOF
+cruise --plan stdin --skip-planning --image ./ui-before.png --image ./ui-after.png <<'EOF'
+# Fix the settings dialog layout
+...
+EOF
 ```
 
-Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step. Exception: if the resolved workflow has `force_exec: true`, add `--no-force-exec`, otherwise the workflow executes directly instead of creating a session.
+Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. `--image <PATH>` is repeatable and appends the copied attachment paths to the plan text. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step. Exception: for a local target whose resolved workflow has `force_exec: true`, add `--no-force-exec` (or attach an image), otherwise the workflow executes directly instead of creating a session; a `--repo` target never takes that shortcut.
 
 **Default to this form** — it lets you queue work from any context (GUI, agent, shell). The session lands in `Planned` and `cruise run` (or `cruise run --all`) will pick it up automatically; no human approval step is required.
 
@@ -78,10 +86,11 @@ Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards
 cat plan.md | cruise plan --skip-planning            # plan on stdin
 cruise plan --skip-planning "$(cat plan.md)"         # or as the positional arg
 cruise plan --skip-planning -c path/to/cruise.yaml "$(cat plan.md)"   # explicit config
+cat plan.md | cruise plan --skip-planning --image ./screenshot.png    # repeatable attachment
 # Use -c __builtin__ to pin the embedded built-in default workflow.
 ```
 
-When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). Two caveats: foreground auto-approval in SDK mode invokes the configured agent once more through `generate_title` (falling back to the plan heading on failure), while background `cruise --plan … --skip-planning` derives the title without a model call; and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag), so prefer stdin.
+When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). On a TTY, `cruise plan --skip-planning` writes `plan.md` and then still enters the Approve/Fix/Ask/Execute/Publish menu — only the background `cruise --plan … --skip-planning` form reaches `Planned` without any menu. Two caveats: approval in SDK mode invokes the configured agent once more through `generate_title` (falling back to the plan heading on failure), while background `cruise --plan … --skip-planning` derives the title without a model call; and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag), so prefer stdin.
 
 ### Verify
 
@@ -110,7 +119,7 @@ gh issue comment <issue#> --repo <owner>/<repo> --body "@cruise run"
 
 Rules specific to this path:
 
-- **Never put the string `@cruise` inside the issue title or body** unless you intend to execute the moment the issue is created — `issues: opened` fires a bare *run* on any body/title mention. Keep the body mention-free and trigger with a separate comment.
+- **Never put the string `@cruise` inside the issue title or body** unless you intend to execute the moment the issue is created — `issues: opened` concatenates the title and body and fires on any mention there. The token right after the trigger phrase selects the command: `plan`, `fix`, `exec`, or `run`; with no token or an unknown one, the default *run* fires. Keep title and body mention-free and trigger with a separate comment.
 - **Do not post the plan as an issue comment.** The action only trusts `<!-- cruise:plan -->` comments authored by its own bot identities (`cruise-agent[bot]` / `github-actions[bot]`); a hand-posted marker comment is deliberately ignored (plan-spoofing defense). The issue body is the supported channel for pre-authored plans.
 - **Revising the plan = edit the issue body** (`gh issue edit <n> --repo <owner>/<repo> --body-file plan-v2.md`). `@cruise fix` only revises bot-posted plan comments (plans produced by `@cruise plan`), not issue bodies.
 - The trigger comment must come from a user with **write access**, unless the actor is a bot whose login is included in `allowed_bots` (or `allowed_bots` is `*`), because `gate.sh` accepts those bots without checking collaborator permission; it should be exactly `@cruise run` — any extra text in it is appended to the plan as additional instructions.
@@ -124,3 +133,5 @@ Choose by where execution should happen: local session (`cruise run` on this mac
 - **A planning worktree is created even with `--skip-planning` for git sessions** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`) and is reused by `cruise run` for local sessions. For non-git directories, planning falls back to the base directory, but `cruise run` needs a git repository (worktree mode is the non-TTY default) and fails otherwise. For `--repo` sessions, approval removes the planning worktree and temporary clone, so `cruise run` re-clones the repository and creates a fresh execution worktree.
 - **One task = one session.** Don't pack multiple unrelated tasks into one plan; queue several sessions instead (`cruise --plan … --skip-planning` per task).
 - **Plan text is used verbatim** — no LLM cleans it up afterwards (only surrounding whitespace is trimmed; the GitHub Action additionally strips HTML comments, `<img>` tags, and invisible Unicode controls). Typos in file paths or step ordering go straight to the implementer.
+- **The plan file lives at `$XDG_DATA_HOME/cruise/sessions/<session-id>/plan.md`** (`$HOME/.local/share/cruise/...` when `XDG_DATA_HOME` is unset). Read it to confirm what was registered, and edit it there to correct a registered plan.
+- **A session parked in `AwaitingInput`** (SDK planning stopped on an unanswered `ask_user`) is not stuck: `cruise list` → select the session → **Generate Plan** re-runs planning and moves it to `AwaitingApproval`, where `Approve` is available. The same menu entry appears for `Draft`. `AwaitingApproval` itself offers `Edit Settings` (no `Generate Plan`, no `Replan`); only `Planned` offers `Replan`.

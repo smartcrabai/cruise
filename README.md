@@ -140,6 +140,8 @@ PR and Issue URLs are shown as text; a successful Publish as Issue also opens th
 
 The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
+For `ask_user`, a question containing line breaks is rendered as adjacent prompt lines, and `Enter` submits the answer.
+
 #### Keyboard map
 
 The TUI is keyboard-only. Keys are fixed and cannot be configured:
@@ -161,8 +163,10 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `a` | Open the action palette |
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
+| `c` | On Sessions, ask for confirmation to Clean reclaimable and closed-PR sessions |
+| `Ctrl-R` | In the multiline Edit Settings dialog, toggle between save only and save and regenerate |
 | `Enter` | Accept the answer and move to the next question; on the launch question, start or draft the session; in the task and image editors, insert a newline |
-| `Ctrl-Enter` | Move to the next question from the task or image editor |
+| `Ctrl-Enter` | Advance the current New Session question (required in the task and image editors, where `Enter` inserts a newline); in multiline Edit Settings, save (and regenerate if selected) |
 | `Space` | Toggle the current choice or the highlighted skipped step |
 | `Esc` | Back one question; at the first question, return to Sessions |
 
@@ -198,7 +202,10 @@ Commands:
 
 Options:
       --plan <INPUT>           Create a plan in the background and return immediately
+      --skip-planning          Use the input directly as the plan, skipping LLM-based plan generation
       --no-force-exec          Ignore force_exec: true and plan as usual
+      --repo <OWNER/REPO>      GitHub repository to clone into a temporary directory for planning and execution
+      --image <PATH>           Attach an image file to the planning input; can be repeated
 ```
 
 #### `cruise ssh`
@@ -247,13 +254,14 @@ Options:
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          GitHub repository to clone into a temporary directory for planning and execution
       --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
+      --image <PATH>               Attach an image file to the planning input; can be repeated
 ```
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning (`--repo` sessions drop it on approval and re-clone at run). Non-git directories plan in place with a warning, but `cruise run` still needs a git repository.
 
 Successful plan generation sends a best-effort **Plan ready** desktop notification. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
 
-With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md` and the session goes directly to `Planned`, ready for `cruise run` with no approval step (unless the workflow sets `force_exec: true` -- see below -- in which case pass `--no-force-exec`). Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
+With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead; pass `--no-force-exec`.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
 
 With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal and `interactive_planning: true`; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
 
@@ -324,7 +332,7 @@ When `force_exec: true` is set in the workflow config, the legacy positional for
 #### `cruise --plan`
 
 ```
-cruise --plan <INPUT|stdin> [--skip-planning] [--repo <OWNER/REPO>]
+cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]...
 ```
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
@@ -405,7 +413,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 ### Session Lifecycle
 
-1. **`cruise plan "task"`** -- Runs the built-in plan step in an isolated planning worktree to generate an implementation plan, then presents an approve-plan menu.
+1. **`cruise plan "task"`** -- Runs the built-in plan step in an isolated planning worktree to generate an implementation plan, then presents an approve-plan menu when stdin is an interactive TTY; with non-TTY stdin, the plan is auto-approved instead.
 2. **`cruise --plan "task"`** -- Creates the session immediately and generates the plan in the background. Review it later from `cruise list`.
 3. **`cruise draft "task"`** -- Records the task as a `Draft` session without running the plan step. Use **Generate Plan** from `cruise list` to start planning when you're ready.
 4. **Approve-plan menu** -- Choose one of:
@@ -440,7 +448,7 @@ The interactive session list shows a menu of actions depending on the session's 
 
 \* Open PR is shown only when the session has a PR URL.
 
-`cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. Those states only offer `Delete` and `Back`; `Approve` and `Publish as Issue` appear only after a non-empty `plan.md` is available.
+`cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. These display states are backed by `AwaitingApproval`: `Edit Settings`, `Delete`, and `Back` are always available, while `Approve` and `Publish as Issue` appear only when a non-empty `plan.md` is available and there is no `plan_error`.
 
 - **Generate Plan** -- Generate the plan for a `Draft` or `AwaitingInput` session (transitions it to `AwaitingApproval`).
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
@@ -624,6 +632,8 @@ Environment variables can be set at workflow and step level. Step-level values o
 
 The CLI and desktop GUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
+`JCODE_OPENAI_SERVICE_TIER` controls jcode's OpenAI service tier. When neither the workflow `env:` nor the parent process environment defines this key, cruise injects `off` into the jcode child; if either defines it, cruise preserves the supplied value. The key's presence, not its value, determines whether cruise injects the default.
+
 ```yaml
 env:                        # top-level: applied to all steps
   ANTHROPIC_API_KEY: sk-...
@@ -645,8 +655,8 @@ steps:
 steps:
   planning:
     model: claude-opus-4-5        # model to use (optional; overrides top-level model)
-    instruction: |                # system prompt (optional)
-      You are a senior engineer.
+    instruction: |                # message displayed before the step runs (optional)
+      Before planning, add any constraints or context:
     prompt: |                     # prompt body (use either prompt or prompt_file)
       Create an implementation plan for:
       {input}
@@ -669,6 +679,8 @@ baseline-and-regression comparison flow. Artifacts belong to the session: deleti
 the session removes them. Terminal `cruise exec` sessions are cleaned up after
 completion, while interrupted exec sessions remain resumable by ID and `cruise run`
 sessions retain artifacts for resume.
+
+An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
 Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
@@ -807,7 +819,8 @@ steps:
       - text-input: Other (free text)    # shows a text prompt when selected;
         next: planning                   # entered text is available as {prev.input}
       - selector: Cancel
-        next: ~                          # null next = end of workflow
+        next: ~                          # null/omitted next falls through to the
+                                         # next declared step; the last step ends the workflow
 ```
 
 ### Post-PR Automation (`after-pr`)
@@ -848,6 +861,8 @@ steps:
   step_c:
     command: echo "world"
 ```
+
+When `next` is omitted or set to null (`~`), the workflow falls through to the next step in declaration order and ends only after the final step. An explicit `next` value jumps to the named step.
 
 #### Skipping a step
 

@@ -2,9 +2,18 @@
 
 対象リポジトリ: `smartcrabai/cruise`
 調査日: 2026-08-28
-調査対象: cruise HEAD / seher 0.0.59 (`../seher`) / jcode v0.81.1 (commit `a5f17d2`) / omp docs
+調査対象: cruise HEAD / 当時の seher 0.0.59 (`../seher`) / 当時の jcode v0.81.1 (commit `a5f17d2`) / omp docs
 
 禁止事項は [PROHIBITED.md](PROHIBITED.md) を参照。本計画のすべての作業はそれに従う。
+
+## 0. 現状サマリ（2026-09-17）
+
+移行実装は完了している。§1・§5以下の計画・スパイク記録は当時の文脈を保ち、現行仕様はこのサマリおよび各節の「現行」記述を正とする。
+
+- workspace version は **0.2.5**（0.2.5 としてリリース済み）。GitHub Action は cruise **0.2.0 以上**を要求し、jcode の検証済み floor は **0.82.0**。
+- 実行 backend は `command`、`sdk: jcode`、`sdk: claude`。`sdk`/`command` の両方を省略した workflow も `jcode` 既定として有効であり、`sdk: seher` / `sdk: pi` は拒否される。
+- jcode backend は Rust の jcode SDK daemon ではなく、専用 `JCODE_HOME`・`--no-update`・環境変数経由の socket を使う `jcode run --ndjson` subprocess である。GitHub Action は jcode binary を install/verify し、専用 home に credentials/provider 設定を provision する。
+- workflow `env:` と親プロセス環境のどちらにも `JCODE_OPENAI_SERVICE_TIER` が無い場合、cruise は jcode 子プロセスへ `off` を注入する。キーが明示されていれば、その値を尊重する。
 
 ---
 
@@ -12,17 +21,17 @@
 
 1. `seher-sdk` (crates.io `seher-sdk = "0.0.59"`) への依存を **完全に削除** する。
 2. プロンプト実行の SDK バックエンドを次の 2 つだけにする:
-   - **`sdk: jcode`** — [1jehuang/jcode](https://github.com/1jehuang/jcode) を駆動（新規・**既定**: `sdk`/`command` 両未指定 — 現在は "either `command` or `sdk` must be specified" の validation error になる組合せ — を `jcode` の既定として valid 化する。additive であり、既存の valid な設定の挙動は不変）
+   - **`sdk: jcode`** — [1jehuang/jcode](https://github.com/1jehuang/jcode) を駆動（`sdk`/`command` 両未指定も **`jcode` 既定として有効**。既存の valid な設定の挙動は不変）
    - **`sdk: claude`** — ClaudeSDK（crates.io `seher-claude-agent-sdk = "=0.0.59"` に依存し、repo 内コピーを `[patch.crates-io]` で使用、§3.3）で `claude` CLI を in-process 駆動
 3. jcode SDK は custom tools 非対応のため、**stdio MCP ブリッジ**で cruise のツール群を露出する。
 4. **OMP ライクな 429/5xx 自動モデルフォールバック** を cruise 側に実装する（jcode のクロスプロバイダ failover は TUI 限定で headless/SDK 経路では動かないため）。
 5. 既存の `command:` バックエンド（外部 CLI、例 `claude -p`）は **無変更で維持**（seher 非依存のため削除対象外）。
 6. cruise が使う認証情報はユーザの jcode(TUI) 用 (`~/.jcode`) と**ファイル分離**する（§3.5）。投入 UI として `cruise login` サブコマンドを新設する。
-7. **crates.io publish（`cargo install cruise`、0.1.86 が公開中）を壊さない**: path 依存の workspace member を増やさない。vendor は `[patch.crates-io]` 方式（`vendor/asupersync` の既存前例）に限る。
+7. **crates.io publish（`cargo install cruise`、現行 workspace version は `0.2.5`）を壊さない**: path 依存の workspace member を増やさない。vendor は `[patch.crates-io]` 方式（`vendor/asupersync` の既存前例）に限る。
 
 ---
 
-## 2. 現状アーキテクチャ（調査結果）
+## 2. 移行前アーキテクチャ（2026-08-28 調査時点）
 
 ### 2.1 バックエンド 3 系統
 
@@ -30,11 +39,13 @@
 `Executor::new(config.sdk, config.command)` + `PromptRun{..} -> PromptOutcome` の単一 I/F しか見ない。
 `src-tauri/src/commands.rs` は Executor を直接呼ばず、`cruise::planning` API（`read_sdk_transcript`（commands.rs:1285、内部が `pi_session_path` 依存）・`sdk_plan_tools_enabled`（commands.rs:1102））経由でのみ SDK 層に依存する。
 
+現行（移行完了後）のバックエンド:
+
 | backend | 選択 | 実装 | rate-limit 挙動 |
 |---|---|---|---|
 | Command | `command: [...]` | `run_command` → `step/prompt.rs run_prompt` | `is_rate_limited(stderr)` + `calculate_backoff` (2s 倍々, 60s cap) |
-| Sdk (`sdk: seher`) | seher の `~/.config/seher/config.yaml` で provider 解決 | `run_sdk` → `poll_for_agent`(60s poll) → `spawn_agent_stream` が `resolved.sdk` で 6 実装 (pi/omp/pi-rust/claude/claude-terminal/claude-headless) に二段 dispatch | 別 provider へ再解決してリトライ |
-| Pi (`sdk: pi`) | `pi_agent_rust` in-process | `run_pi_direct` → `PiRunner::stream` | 同一 model に指数バックオフ、fresh session |
+| Jcode | `sdk: jcode`（または省略時の既定） | `run_jcode` → `jcode run --ndjson` subprocess（専用 `JCODE_HOME`、stdio MCP） | cruise 側の fallback/retry |
+| Claude | `sdk: claude` | `run_claude` → Claude CLI を `claude-agent-sdk` 経由で駆動 | cruise 側の fallback/retry |
 
 ### 2.2 seher へのコンパイル依存（全 3 ファイル）
 
@@ -74,8 +85,9 @@
 - vendor 対象の `jcode-sdk` / `jcode-harness-api` / `jcode-transport` は `publish = false`（crates.io に無い）→ Rust から使うなら **vendor コピー**（cruise には `vendor/asupersync` の前例あり）。
 - **クロスプロバイダ failover は rate-limit 起因では自動実行されない**: `MultiProvider::complete_with_failover` は failover prompt を Err 文字列で返すだけで、パースして実行するのは TUI (`jcode-tui`) のみ（例外: provider が未設定等でスキップされた場合の自動切替は存在）。同一プロバイダ別アカウント切替 (`same_provider_account_failover`) だけ自動。リトライ回数も Anthropic/OpenAI runtime は `MAX_RETRIES = 3` ハードコード。→ **モデルフォールバックは cruise 側の責務**。
 - 非対話実行: `jcode run [--json|--ndjson] <MESSAGE>`（`--model` / `--provider` / `--resume <id>` / `-C` 併用可）。
-- Rust SDK `crates/jcode-sdk`（path 依存: `jcode-harness-api`, `jcode-transport`）: 同期 API、NDJSON over Unix socket、`launch(LaunchOptions{jcode_home, inherit_logins(既定 true), binary, env, ..})` で private daemon を spawn。`create_session` / `run(sid, msg, RunOptions{auto_approve})` / `events()` / `set_model` / `set_reasoning_effort` / `list_sessions` / `attach_session` / `peek_session` / `fork_session`。
+- Rust SDK `crates/jcode-sdk`（path 依存: `jcode-harness-api`, `jcode-transport`）: 同期 API、NDJSON over Unix socket、`launch(LaunchOptions{jcode_home, inherit_logins(既定 true), binary, env, ..})` で private daemon を spawn。`create_session` / `run(sid, msg, RunOptions{auto_approve})` / `events()` / `set_model` / `set_reasoning_effort` / `list_sessions` / `attach_session` / `peek_session` / `fork_session`。（調査時に検討した API であり、現行 backend は採用しない。）
 - テレメトリ既定 ON (`JCODE_NO_TELEMETRY=1` で無効化)、自動アップデート既定 ON (`--no-update` 必須)。ライセンス MIT。
+- cruise が起動する jcode subprocess は、workflow `env:` または親プロセス環境に `JCODE_OPENAI_SERVICE_TIER` が無い場合だけ `off` を注入する。キーが存在すれば値を尊重する。
 
 ---
 
@@ -92,8 +104,8 @@ graph TD
         T[ToolBridge<br/>unix socket server] --- J
         ST[sdk_tools.rs<br/>6 tools 変更なし]
     end
-    J -->|jcode-sdk NDJSON/unix socket| JD[jcode daemon<br/>launch: 専用 JCODE_HOME<br/>認証分離: inherit_logins=false]
-    JD -->|stdio MCP| MB[cruise mcp-bridge<br/>隠しサブコマンド]
+    J -->|jcode run --ndjson<br/>subprocess<br/>専用 JCODE_HOME / --no-update| JC[jcode CLI]
+    JC -->|stdio MCP<br/>CRUISE_TOOL_SOCKET env| MB[cruise mcp-bridge<br/>隠しサブコマンド]
     MB -->|unix socket| T
     A -->|AgentToolbox in-process MCP| CC[claude CLI<br/>stream-json subprocess]
     ST --> T
@@ -142,7 +154,7 @@ pub enum Executor {
 | A. jcode-sdk vendor | `crates/jcode-sdk`（+path 依存 `jcode-harness-api`, `jcode-transport`）を vendor（MIT）。`launch(LaunchOptions{jcode_home: <cruise data dir>/jcode-home, inherit_logins: false, env: {JCODE_NO_TELEMETRY=1}, ..})` | **フォールバック**（B' スパイク不成立時のみ）。型付きイベント・`set_api_key`・`peek_session`・`attach_session` が使える。ただし publish=false crate の path 依存は crates.io publish を壊すため、採用する場合は 3 crate を自名義（`cruise-jcode-*`）で publish + `[patch.crates-io]` にする（ゴール 7）。 |
 | C. jcode フォークで in-process | `Registry` に独自 `Arc<dyn Tool>` 注入 | 不採用。82 crates の追随コスト + `Registry` に公開登録 API が無くフォーク改造必須。PROHIBITED（jcode フォーク禁止）。 |
 
-#### P3 冒頭スパイク結果（2026-08-29 実施 / `jcode v0.81.1 (cae6d2a57)` / macOS arm64）
+#### P3 冒頭スパイク結果（2026-08-29 実施 / 当時の実測: `jcode v0.81.1 (cae6d2a57)` / macOS arm64）
 
 **判定: 案 B' 成立 → 採用（vendor なし、ゴール 7 維持）。** 検証項目 (1)–(8) すべて成立。
 検証は使い捨ての `JCODE_HOME`（`/tmp` 配下）+ ローカル mock OpenAI 互換サーバ（`[providers.spike]` プロファイル）で行い、
@@ -308,15 +320,15 @@ retry:
 - `config.rs` / `planning.rs` / `executor.rs` の `"seher"` / `"pi"` を使うテストを新値へ更新（テストの検証意図は不変）。両未指定 → jcode 既定のテストを追加。
 - 受け入れ: `grep -rEn "seher(::|-sdk|_sdk)" src/ Cargo.toml` が 0 件（validation error の文言とテスト内の `"seher"` 文字列は拒否パスとして残る）、`grep -rniE 'seher|"pi"|sdk: *pi' builtin/ cruise-schema.json` が 0 件。`cargo test` 全通過。
 
-### P6a — GitHub Actions 移行
-- action は現在「常に `sdk: pi`・in-process 実行・外部バイナリ不要」前提（action.yml:5,16,57、resolve-config.sh ヘッダ）。「sdk 指定なし = 既定 jcode」へ移行する:
-  - `action/scripts/resolve-config.sh` の生成 config（default / exec 用）から sdk 強制を除去（`sdk:` 行を書かない）。
-  - action.yml に jcode バイナリの install ステップを追加（cruise 本体と同様にバージョン pin 可能な入力を用意）。
-  - `anthropic_api_key` / `openai_api_key` / `provider_api_keys` 入力 → action 管理の `JCODE_HOME` 配下 `<provider>.env` へ投入。`providers` 入力 → 同 `config.toml` の `[providers.<name>]` プロファイル生成（`PI_MODELS_JSON` → models.json パイプラインの全面置換）。
-  - `model` / `plan_model` 入力（`CRUISE_MODEL` / `CRUISE_PLAN_MODEL` env override）は `provider/model[:effort]` 参照としてそのまま機能すること。
-  - `scripts/test_action_*.sh` を検証意図を保って書き換え（models.json 生成の assert → config.toml / `<provider>.env` 生成の assert）。
-  - action.yml の最低 cruise version 要件を更新（現行の「Requires cruise v0.1.68 or later」を v0.2.0 以降必須に。旧 binary + 新 action の組合せを明確なエラーで拒否）。
-- 受け入れ: `scripts/test_action_config_install.sh` / `scripts/test_action_provider_config.sh` 通過。action.yml / `action/scripts/` に seher / `sdk: pi` の言及が残っていない。
+### P6a — GitHub Actions 移行（完了）
+- **移行前の前提**: action は当時「常に `sdk: pi`・in-process 実行・外部バイナリ不要」だった。**現行 action** は `install-jcode.sh` で jcode binary を install/verify し、`provision-jcode.sh` で専用 `JCODE_HOME` に credentials/provider 設定を provision する。
+  - **完了**: `action/scripts/resolve-config.sh` の生成 config（default / exec 用）から sdk 強制を除去（`sdk:` 行を書かない）。
+  - **完了**: action.yml に jcode バイナリの install ステップを追加（cruise 本体と同様にバージョン pin 可能な入力を用意）。
+  - **完了**: `anthropic_api_key` / `openai_api_key` / `provider_api_keys` 入力 → action 管理の `JCODE_HOME` 配下 `<provider>.env` へ投入。`providers` 入力 → 同 `config.toml` の `[providers.<name>]` プロファイル生成（`PI_MODELS_JSON` → models.json パイプラインの全面置換）。
+  - **完了**: `model` / `plan_model` 入力（`CRUISE_MODEL` / `CRUISE_PLAN_MODEL` env override）は `provider/model[:effort]` 参照としてそのまま機能する。
+  - **完了**: `scripts/test_action_*.sh` を検証意図を保って書き換え（models.json 生成の assert → config.toml / `<provider>.env` 生成の assert）。
+  - **完了**: action.yml の最低 cruise version 要件を更新し、**0.2.0 以上**を必須化（旧 binary + 新 action の組合せを明確なエラーで拒否）。
+- **受け入れ済み**: `scripts/test_action_config_install.sh` / `scripts/test_action_provider_config.sh` の検証対象が現行の install/provision 経路に対応し、action.yml / `action/scripts/` に seher / `sdk: pi` の現行言及が残っていない。
 
 ### P6b — ドキュメント
 - `README.md` の seher/pi 言及全箇所（backend 節 :331-441 に加え、:129/:131 の `claude-terminal`、:467、:717 の `skip_step` ツール対象、:1087 の GitHub Actions 例 — grep で列挙して漏れなく）、`docs/github-actions.md`、`skills/cruise-config/references/sdk.md`、`skills/cruise-cli` / `cruise-plan`、`examples/*.yaml`、`prompts/*-sdk.md`（ツール名参照があれば）を更新。`sdk` 省略が既定（jcode）である旨を README / skills に反映。移行案内は validation error が担うため、ドキュメント本文に seher/pi の記述は残さない。
@@ -346,7 +358,7 @@ retry:
 | jcode の protocol/イベント追加（minor bump） | イベント写像に必ず未知イベント許容（無視 + ログ）。検証済み最低 jcode バージョンを README に明記（案 A 時は vendor SHA 固定も） |
 | jcode の MCP 設定リロードタイミング（daemon 起動後の mcp.json 変更が反映されるか） | P3 で実測。反映されなければ「ツールセット変更時は daemon 再起動」で対応（launch は軽量） |
 | `claude` CLI のフラグ互換（`--effort`, `--mcp-config type:sdk`） | claude-agent-sdk の `build_args` が唯一の結合点。P2 スモークで検証、CLI バージョン下限を README に記録 |
-| crates.io publish（`cargo install cruise`、0.1.86 公開中）の維持 | `[patch.crates-io]` 方式で維持（ゴール 7）。上流 `seher-claude-agent-sdk` が yank された場合は `--locked` なしの `cargo install` が解決不能になる → repo 内コピーを自名義（`cruise-claude-agent-sdk`）で publish して依存を差し替える |
+| crates.io publish（`cargo install cruise`、workspace version `0.2.5`／0.2.5 としてリリース済み）の維持 | `[patch.crates-io]` 方式で維持（ゴール 7）。上流 `seher-claude-agent-sdk` が yank された場合は `--locked` なしの `cargo install` が解決不能になる → repo 内コピーを自名義（`cruise-claude-agent-sdk`）で publish して依存を差し替える |
 | jcode `run` の permission 既定挙動（auto-approve なしで止まらないか） | P3 スパイク (2) で確認（案 B': config.toml の permission 設定等、案 A: `RunOptions{auto_approve: true}`） |
 | fallback の `provider/model` 文字列と jcode のモデル id 体系の突合せ | モデル指定エラーを notice 化して次候補へ（案 B': `jcode run --model` の起動時エラー、案 A: `set_model` の `invalid_request`） |
 | claude backend の認証分離（任意）が `CLAUDE_CONFIG_DIR` の claude CLI 側仕様に依存 | P2 で実挙動を検証。機能しない場合、claude 側の分離は「API キーを `ClaudeAgentOptions::env` の `ANTHROPIC_API_KEY` で渡す」運用に切り替え |
@@ -358,7 +370,7 @@ retry:
 
 ## 8. リリース手順（人手。ワークフロー対象外）
 
-1. **バージョン**: breaking（`sdk: seher`/`pi` 拒否、mode key 廃止）のため **0.2.0** に bump（`[workspace.package] version`）。0.1.x 系への backport はしない。
+1. **バージョン（実施済み）**: breaking（`sdk: seher`/`pi` 拒否、mode key 廃止）のため **0.2.5 としてリリース済み**（`[workspace.package] version`）。0.1.x 系への backport はしない。
 2. **同時性**: main へのマージとバイナリリリース（cargo-dist）を同一タイミングで行う。action 定義と cruise binary は同 repo のため、`uses: smartcrabai/cruise@<新タグ>` + `cruise_version: latest` の組合せで整合する。旧 ref の action（`sdk: pi` 生成）× 新 binary は壊れる — Release notes で `uses:` ref の更新を必須事項として告知する。
 3. **移行ガイドは GitHub Release notes のみ**に置く（P6b の grep gate により docs には seher/pi を残せない。validation error の案内文言 + Release notes で完結させる）。記載必須項目:
    - `sdk: seher` / `sdk: pi` → 削除（既定 jcode）または `sdk: claude`

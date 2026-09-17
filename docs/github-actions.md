@@ -14,7 +14,7 @@ Then open an issue, or comment on one, with `@cruise plan <what you want>`. See 
 
 ## Commands
 
-The first word after the `@cruise` mention (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. Anything else -- including no word at all -- is treated as `run`.
+After the trigger phrase, the first token **on the same line as the mention** (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. `plan`, `fix`, `exec`, and `run` select that command; no token or an unknown token defaults to `run`. For the `issues` event, the trigger phrase is matched against the issue title and body concatenated (title first), so a phrase at the end of the title takes its command token from the rest of that title line, not from the body's first line.
 
 | Mention | Command | What happens |
 |---|---|---|
@@ -23,13 +23,13 @@ The first word after the `@cruise` mention (with or without a leading `/`, case-
 | `@cruise plan <request>`, `@cruise /plan` | **plan** | Run an LLM planning call (`cruise plan`) on the issue's title + body and post the result as a new **plan-tracking comment**. Nothing is executed. (The text typed after `plan` in the triggering comment itself is currently not included -- only the issue's title/body feed the plan.) |
 | `@cruise fix <feedback>`, `@cruise /fix <feedback>` | **fix** | Revise the most recent *trusted* plan-tracking comment using `<feedback>`, then **edit that same comment in place** with the revised plan. Fails with a clear message if there is no existing plan comment. |
 
-**Plan resolution** (used by `run` and `exec`): the action looks at every comment on the issue for the last one that both contains the `<!-- cruise:plan -->` marker **and** was posted by this action itself (`cruise-agent[bot]` or `github-actions[bot]`, whichever token this run authenticated with -- see [how authentication works](#how-authentication-works)); comments from anyone else, even if they happen to contain the marker text, are never trusted as a plan source. If a trusted plan comment exists, its plan content is used, otherwise the issue's own title + body is used. Either way, any text typed after the command word in the comment/issue that triggered this run is appended as a "## Additional instructions from the triggering comment" section.
+**Plan resolution** (used by `run` and `exec`): the action looks at every comment on the issue for the last one that contains the `<!-- cruise:plan -->` marker and was posted by a **bot account** (`user.type == "Bot"`) whose login is one of its fixed allowlisted identities (`cruise-agent[bot]` or `github-actions[bot]`); a comment posted under any other identity (including a PAT or custom App token) is not reused, and resolution falls back to the issue's own title + body. If a trusted plan comment exists, its plan content is used, otherwise the issue's own title + body is used. Either way, any text typed after the command word in the comment/issue that triggered this run is appended as a "## Additional instructions from the triggering comment" section.
 
 ### Command grammar
 
 Command parsing is intentionally strict and mechanical, not natural-language understanding:
 
-- Only the **first whitespace-delimited word** right after the mention is checked against `run`/`exec`/`plan`/`fix` (optionally prefixed with `/`, case-insensitive, trailing `.,!?;:` stripped). Everything else in the message -- including further sentences -- has no bearing on which command runs.
+- Only the **first whitespace-delimited word on the mention's own line** is checked against `run`/`exec`/`plan`/`fix` (optionally prefixed with `/`, case-insensitive, trailing `.,!?;:` stripped). Everything else in the message -- including the next line and further sentences -- has no bearing on which command runs.
 - If the body has **multiple `@cruise` mentions** (e.g. a quoted reply that includes an earlier message), the **last** one is used, so replying to an old mention doesn't resurrect its command.
 - Because matching is purely lexical, a plain-English sentence that happens to start with a command word after the mention is parsed as that command -- e.g. `@cruise fix the flaky test` is parsed as the **`fix` command** with feedback `the flaky test`, not as a free-form request to `run`. If there is no existing plan comment yet, this fails with a message telling you to run `@cruise plan` first, rather than silently doing something else.
 - To avoid this kind of ambiguity, prefer the explicit slash form (`@cruise /run <request>`, `@cruise /exec <request>`) for free-form requests, and reserve the bare word form (`@cruise plan ...` / `@cruise fix ...`) for when you actually mean the `plan`/`fix` commands.
@@ -53,9 +53,9 @@ An end-to-end example, planning first:
 5. **Review and ready it**: cruise's pull requests are always opened as **drafts**, regardless of which command created them. Open the PR, review the diff, then mark it "Ready for review" (or `gh pr ready <number>`) before merging like any other PR.
 
 > [!WARNING]
-> If the issue's own title or body already contains the trigger phrase, step 2 never gets a chance to happen on its own -- the `issues: [opened]` trigger fires immediately on creation and defaults to `run`, jumping straight to implementation and a PR (see [command grammar](#command-grammar)). Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
+> If the issue's own title or body already contains the trigger phrase, the `issues: [opened]` event fires immediately. The token immediately after the phrase, on the same line, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run`. Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
 
-That immediate-run behavior is also a shortcut when you *don't* need a review step: `@cruise run <request>` (or just `@cruise <request>`, or an issue whose body already contains `@cruise`) skips the planning call entirely -- the issue's title + body becomes the plan directly, with `<request>` (if any) appended as additional instructions.
+That immediate-run behavior is also a shortcut when you don't need a review step: a trigger phrase in the issue title/body followed by `run` (or by no token or an unknown token, which defaults to `run`) skips the planning call entirely -- the issue's title + body becomes the plan directly, with any text after the trigger phrase appended as additional instructions.
 
 Multiple mentions on the same issue queue rather than race each other: a `plan` comment followed immediately by `fix` and then `run` still runs one at a time, in order (see the `concurrency:` block in [examples/cruise.yml](../examples/cruise.yml)) -- it's safe to keep commenting without waiting for each run to finish first.
 
@@ -186,8 +186,10 @@ This action installs both binaries itself: cruise (`cruise_version`) and the `jc
 
 - **Backend** is cruise's default `sdk: jcode` unless a repository config overrides it (see above).
 - **Authentication** comes from that home plus the environment: the stored dedicated-key and profile credentials, and any provider API key passed through `env` (`KIMI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, ...), which jcode picks up directly. The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, and `env` are all empty -- an all-`no_auth` `providers` config legitimately needs no key.
+- **OpenAI service tier** defaults to `off` for child jcode: if neither the workflow's `env:` nor the parent process environment defines `JCODE_OPENAI_SERVICE_TIER`, cruise injects `JCODE_OPENAI_SERVICE_TIER=off`. An explicitly present key is respected as-is; the key's presence, not a particular value, controls this override.
+- **Cruise MCP registration** uses a fixed `timeout_secs = 86,400` (24 hours) for `initialize`, `tools/list`, and `tools/call` requests. If a step's `timeout:` is shorter, that step timeout wins.
 - **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses jcode's model-reference format:
-  - `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- selects that provider and model explicitly; `provider` is one of the ids `jcode login --help` lists, and `effort` is one of `low|medium|high|xhigh|max` (plus the `minimal`/`min`/`med` aliases and the numeric `1`..`4` spellings; ignored by models without reasoning effort).
+  - `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- selects that provider and model explicitly; `provider` is one of the ids `jcode login --help` lists, and `effort` is one of `low|medium|high|xhigh|max` (plus the `minimal`/`min`/`med` aliases and the numeric `1`..`4` spellings; tierless suffixes `off|none|0|5` are also recognized and stripped from the model id without selecting an effort tier; ignored by models without reasoning effort).
   - `"model"` (no `/`) -- the provider is left to jcode's own resolution.
   - Empty (default) -- whatever provider/model cruise's jcode home has configured as its default is used (see below).
 - **Custom endpoints / providers**: the `providers`/`provider_api_keys` inputs generate jcode `[providers.<name>]` profiles for you -- see [Providers](#providers) above, including a worked example ([`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml)). A profile is reachable only as jcode's startup default (cruise never emits jcode's `--provider-profile`), so set `default: true` on it and leave `model`/`plan_model` empty -- one run can reach only one profile.
@@ -277,8 +279,8 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `anthropic_api_key` | *(empty)* | Anthropic API key -- stored as jcode's `anthropic-api` credential in cruise's jcode home. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
 | `openai_api_key` | *(empty)* | OpenAI API key -- stored as jcode's `openai-api` credential the same way. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
 | `github_token` | *(empty)* | Token for GitHub API calls (permission checks, comments, PRs, pushes). Empty (default) tries the cruise-agent App OIDC token exchange first, falling back to the workflow's `GITHUB_TOKEN`; set explicitly to skip the exchange and use that token instead. See [How authentication works](#how-authentication-works). |
-| `token_exchange_url` | *(cruise-agent's hosted exchange)* | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
-| `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) in the body to trigger a run. |
+| `token_exchange_url` | `https://cruise-token-exchange.smartcrab.ai/token` | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
+| `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) to trigger a run. For the `issues` event, matching uses the issue title and body concatenated, so a phrase in the title is effective. |
 | `cruise_version` | `latest` | cruise release to install (`latest` or a tag like `v0.2.0`). Requires v0.2.0+; the install step rejects an older binary with a clear error. |
 | `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.82.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.82.0 or newer regardless. |
 | `config` | *(empty)* | Path to a cruise workflow config YAML in your repo, used by `run`/`plan`/`fix` (sets `CRUISE_CONFIG`). Empty lets cruise's own resolver pick a config from the checkout, or its built-in default. No effect on `exec`. |
@@ -296,7 +298,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | Output | Description |
 |---|---|
 | `command` | `"run"`, `"exec"`, `"plan"`, or `"fix"` -- the command parsed from the mention (empty if the gate skipped the run). |
-| `session_id` | The cruise session ID that was created. |
+| `session_id` | The cruise session ID the run operated on -- resolved as the most recent session in cruise's session list after the command ran. Empty if the gate skipped the run, if the run aborted before reaching that point, or if no session exists at all. |
 | `pr_url` | URL of the pull request cruise opened (the `run` command only). |
 | `commit_url` | URL of the commit cruise pushed to the default branch (the `exec` command only). |
 | `plan_comment_url` | URL of the plan-tracking comment cruise posted or edited (the `plan`/`fix` commands only). |
@@ -363,7 +365,7 @@ The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named 
 
 ### FAQ
 
-- **Why did my brand-new issue immediately turn into a PR instead of posting a plan first?** Its title or body already contained the trigger phrase, so the `issues: [opened]` event fired the default `run` command right away -- see the warning in [Typical workflow](#typical-workflow). Leave the trigger phrase out of the issue itself and comment `@cruise plan` afterward if you want to review a plan first.
+- **Why did my brand-new issue immediately turn into a PR instead of posting a plan first?** Its title or body already contained the trigger phrase, so the `issues: [opened]` event fired immediately. The token immediately after the phrase, on the same line, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run` -- see the warning in [Typical workflow](#typical-workflow). Leave the trigger phrase out of the issue itself and comment `@cruise plan` afterward if you want to review a plan first.
 - **The pull request cruise opened won't merge / doesn't show up as ready.** All PRs from `run` (and, transitively, `exec`'s equivalent for direct pushes -- though that path has no PR at all) are opened as **drafts**, unconditionally. Mark it "Ready for review" yourself once you've reviewed the diff; see [Typical workflow](#typical-workflow).
 - **My run timed out around 30 minutes.** `write-tests -> implement` (or your own config's equivalent steps) each run a full verification pass (formatting, linting, the whole test suite); on a large repository this measured over 30 minutes end to end during testing. `timeout-minutes: 60` (as used in [`examples/cruise.yml`](../examples/cruise.yml)) is the recommended starting point -- raise it further for slower test suites.
 - **My second `@cruise` comment on the same issue seems stuck, not running.** It's queued, not lost: the `concurrency:` group in the example workflows serializes runs per-issue (no `cancel-in-progress`), so a `plan` -> `fix` -> `run` sequence executes one step at a time in order. Check the Actions run list -- the earlier run is probably still in progress.
