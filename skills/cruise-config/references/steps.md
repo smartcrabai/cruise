@@ -6,8 +6,10 @@ selection), or `parallel` (concurrent prompt/command children). A step that only
 holds `group:` (a group call) is the exception — see [groups.md](groups.md).
 A pure `workflow_call:` call site (optionally with `skip`,
 `when`, or `next`) is also accepted during config loading and expanded into
-executable steps, including under `after-pr`; it cannot be nested in a group or
-combined with executable step fields.
+executable steps, including under `after-pr`; it cannot be nested in a group.
+Every other step field on the call site is rejected: `model`, `prompt`,
+`prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
+`group`, `if`, `timeout`, `env`, `allow_commit`, and `output_file`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
 
@@ -31,7 +33,10 @@ When `output_file` is set, the completed backend `result.output` is written to
 `<cruise data>/sessions/<session-id>/artifacts/<output_file>`. The file is
 created only after the prompt succeeds, written atomically, and kept separate
 from the workspace. Names must be relative and must not contain `.` or `..`
-path components. Empty output, Markdown, JSON, non-ASCII text, and trailing
+path components; a name may include subdirectories (`reports/summary.md`),
+which are created as needed. A symbolic link in any component of the resolved
+path fails the operation, for both saves and reads.
+Empty output, Markdown, JSON, non-ASCII text, and trailing
 newlines are preserved. A write error fails the prompt step; a later workflow
 failure does not remove an artifact from a session that remains retained.
 Artifacts belong to the session: deleting the session removes them. Terminal
@@ -148,7 +153,8 @@ may also set `output_file`, but names must be distinct within the block. Child n
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
 `plan`, `group`, `workflow_call`, nested `parallel`, and `allow_commit: true`
 are rejected. Parent fields: `parallel`, `env`, `skip`, `when`, `next`, `if`,
-and `timeout`.
+and `timeout`. An empty block (`parallel: {}`) is a validation error, and so is
+a child whose `command:` is an empty array.
 
 After joining, `{prev.output}` contains a JSON object keyed by child name in
 declaration order. Entries have `output` (prompt output; `null` for commands),
@@ -215,3 +221,7 @@ steps:
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
 | `fail-if-no-file-changes` | — | Rejected as an unknown field; use `if.no-file-changes: failed` instead (see [flow-control.md](flow-control.md)) |
+
+Step fields are strict: `StepConfig` denies unknown fields, so a misspelled or
+obsolete step key is a load error. The same holds for the `retry:` block. The
+top-level workflow object is *not* strict — see [top-level.md](top-level.md).

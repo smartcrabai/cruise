@@ -52,6 +52,12 @@ force_exec: false         # Optional: execute direct plan entry points in place 
 ```
 `steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); setting neither runs prompts on the default `jcode` backend. When `sdk` is set it must be `jcode` or `claude` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
+Unknown top-level keys are silently ignored, so obsolete fields from older
+configs (for example `worktree:` or `state:`) still load without error. Only
+per-step configuration and the `retry:` block reject unknown fields, so a typo
+at the top level is accepted and has no effect, while the same typo inside a
+step fails the load (see [steps.md](steps.md)).
+
 ## `command` vs `sdk`
 
 There are three prompt-execution backends:

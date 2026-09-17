@@ -67,7 +67,7 @@ confirmation attempts obtained answers. There is no unlimited-mode setting,
 backend/authentication change, per-iteration history or independently resumable
 after-pr phase.
 
-The existing TypeScript 7 pin could build the UI but was outside the linter's
+The TypeScript 7 pin in place before this change could build the UI but was outside the linter's
 published `>=4.8.4 <6.1.0` peer range and crashed before reading source files.
 The development-only compiler pin is 6.0.3 so the required lint and build commands
 can use one supported toolchain. Runtime UI dependencies are unchanged.
@@ -77,12 +77,12 @@ can use one supported toolchain. Runtime UI dependencies are unchanged.
 - `cargo fmt -- --check`: passed.
 - `cargo clippy --offline --locked --all-targets --all-features -- -D warnings -A clippy::large_futures`: passed.
 - `RUST_TEST_THREADS=2 cargo test --offline --locked --all-features`: passed,
-  1,229 library tests, 1,621 CLI unit tests and 58 integration tests.
+  covering the library, CLI unit and integration suites.
   Bounded concurrency avoids an existing five-second commit-guard fixture timeout
   under host contention without changing its assertions or deadline.
 - `cargo check --offline --locked -p cruise-gui` and
-  `cargo test --offline --locked -p cruise-gui`: passed, including all three GUI tests.
-- `pnpm --dir ui test`: 629 tests passed in 42 files.
+  `cargo test --offline --locked -p cruise-gui`: passed, including the GUI tests.
+- `pnpm --dir ui test`: the whole Vitest suite passed.
 - `pnpm --dir ui run lint` and `pnpm --dir ui run build`: passed.
   Vite reports only its non-blocking large-chunk advisory.
 - Real headless Chrome rendered the cyclic browser fixture with four SVG nodes,

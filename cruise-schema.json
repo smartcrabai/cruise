@@ -168,7 +168,7 @@
           "minProperties": 1,
           "propertyNames": { "allOf": [{ "pattern": "^[^/]+$" }, { "pattern": "\\S" }] },
           "additionalProperties": { "$ref": "#/$defs/ParallelChild" },
-          "description": "Named prompt/command children run concurrently in the same workspace. Join all children before advancing; interrupted blocks restart as a whole."
+          "description": "Named prompt/command children run concurrently in the same workspace. Join all children before advancing; interrupted blocks restart as a whole. Two children may not share the same output_file, and a child prompt may not read an artifact produced by a sibling via {file:...}."
         },
         "skip": {
           "oneOf": [
@@ -214,8 +214,8 @@
         },
         "timeout": {
           "type": "string",
-          "pattern": "^0*[1-9][0-9]*[mh]?$",
-          "description": "Step timeout. Plain digits = seconds, suffix 'm' = minutes, 'h' = hours. Example: 30, 5m, 1h."
+          "pattern": "^\\+?0*[1-9][0-9]*[mh]?$",
+          "description": "Step timeout. Plain digits = seconds, suffix 'm' = minutes, 'h' = hours. Example: 30, 5m, 1h. A leading '+' and leading zeros are also accepted; zero, negative, and other suffixes are rejected."
         }
       },
       "allOf": [
@@ -268,6 +268,8 @@
               "prompt": { "type": "null" },
               "prompt_file": { "type": "null" },
               "command": { "type": "null" },
+              "parallel": { "type": "null" },
+              "workflow_call": { "type": "null" },
               "if": { "type": "null" },
               "allow_commit": { "const": false },
               "output_file": { "type": "null" }
@@ -387,7 +389,7 @@
         },
         "next": {
           "type": "string",
-          "description": "Next step to execute when this option is selected"
+          "description": "Next step to execute when this option is selected. Omitted, the step's own next applies; without that, the following step in declaration order runs."
         }
       },
       "oneOf": [
@@ -410,8 +412,7 @@
           "type": "string",
           "description": "Language for planning prompts"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "GroupConfig": {
       "type": "object",
