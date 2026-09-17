@@ -65,7 +65,7 @@ inputs:
   jcode_version:
     description: >-
       jcode release to install, using jcode's own installer. "latest"
-      (default) or a specific tag such as "v0.81.1". cruise drives this
+      (default) or a specific tag such as "v0.82.0". cruise drives this
       binary for `sdk: jcode` and enforces its own verified minimum jcode
       version at run time. Ignored when a `jcode` is already on PATH (e.g. on
       a self-hosted runner that provides one).

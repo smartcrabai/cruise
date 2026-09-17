@@ -837,7 +837,6 @@ mod tests {
             ))
         );
     }
-
     #[test]
     fn history_defaults_remain_editable_and_non_explicit() {
         let mut form = NewSessionForm::default();

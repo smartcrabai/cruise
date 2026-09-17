@@ -633,7 +633,6 @@ fn render_config_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         choices_area,
     );
 }
-
 fn render_skip_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let choices = app.skip_choices();
     if choices.is_empty() {
