@@ -651,10 +651,24 @@ steps:
       Create an implementation plan for:
       {input}
     timeout: 10m                  # per-step timeout (optional; see Step Timeout)
+    output_file: initial-state.md # save the final response as a session artifact (optional)
     allow_commit: false           # default: guard this prompt from moving Git HEAD in this repository
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
+
+When `output_file` is set, cruise saves the completed backend response outside the
+workspace at the session's `artifacts/` directory. The file is written atomically,
+keeps the exact response text, and is not included in workspace change detection.
+Later prompt bodies can read it with `{file:initial-state.md}`. File references
+are resolved immediately before a prompt runs, including prompts loaded through
+`prompt_file`; the inserted text is not recursively expanded. Artifact names must
+be relative and stay within the session directory, and saves and reads are limited
+to 1 MiB. See [`examples/file-artifacts.yaml`](examples/file-artifacts.yaml) for a
+baseline-and-regression comparison flow. Artifacts belong to the session: deleting
+the session removes them. Terminal `cruise exec` sessions are cleaned up after
+completion, while interrupted exec sessions remain resumable by ID and `cruise run`
+sessions retain artifacts for resume.
 
 Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
@@ -734,8 +748,10 @@ steps:
   changes. Concurrent edits to the same files or Git state can conflict.
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
-  can use `model`, `env`, `skip`, `when`, and `timeout`; `prompt_file` resolves
-  relative to its config as usual. Command arrays remain sequential per child.
+  can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
+  set `output_file`, with distinct artifact names within the block. `prompt_file`
+  resolves relative to its config as usual. Command arrays remain sequential per
+  child.
 - After joining, `{prev.output}` is a JSON object keyed by child name in YAML
   declaration order. Each entry has `output` (prompt text, or `null` for commands),
   `stderr` (including execution errors), `success`, and `skipped`.
@@ -1067,6 +1083,7 @@ steps:
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
 | `{prev.success}` | Previous command success, or parallel block success (`true`/`false`; skipped children count as successful) |
 | `{plan}` | Session plan file path (set automatically by `cruise run`) |
+| `{file:name}` | UTF-8 contents of a relative session artifact named `name`; prompt fields only, loaded immediately before execution |
 | `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default) |
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |

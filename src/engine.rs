@@ -1127,7 +1127,7 @@ pub(crate) async fn run_prompt_step(
             crate::status_eprintln!("  {}", style(resolved).dim());
         }
     }
-    let prompt = vars.resolve(&step.prompt)?;
+    let prompt = vars.resolve_prompt(&step.prompt)?;
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode =
@@ -1229,7 +1229,14 @@ pub(crate) async fn run_prompt_step(
     }
     .result;
 
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
+
     let output = result.output;
+    if let Some(output_file) = step.output_file.as_deref() {
+        vars.write_artifact(output_file, &output)?;
+    }
     vars.set_prev_output(Some(output.clone()));
     vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_input(None);

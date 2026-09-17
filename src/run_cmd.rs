@@ -517,6 +517,7 @@ async fn run_single(
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.input_with_attachments());
     vars.set_named_file(PLAN_VAR, plan_path);
+    vars.set_artifacts_root(session.artifacts_path(&manager.sessions_dir()));
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
     restore_dag_runtime_context(
         &manager,

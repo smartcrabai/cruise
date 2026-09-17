@@ -15,6 +15,7 @@ variable is an error.
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
 | `{prev.success}` | Previous command success, or parallel block success (`"true"` / `"false"` string; skipped children count as successful) |
 | `{plan}` | Absolute path of the session's plan file (set automatically by `cruise run`) |
+| `{file:name}` | UTF-8 contents of a relative session artifact named `name`; prompt fields only, loaded immediately before execution |
 | `{plan.language}` | Effective language used for built-in planning prompts (from `CRUISE_LANGUAGE_PLAN`, `languages.plan`, the legacy field, locale inference, or the default); available while resolving planning prompts only |
 | `{pr.number}` | PR number, available after a PR has been created |
 | `{pr.url}` | PR URL, available after a PR has been created |
@@ -30,10 +31,13 @@ The substitution is done by a hand-written parser, with Rust-`format!`-style bra
 - A lone `}` (not part of `}}`) is also an error (`InvalidTemplateSyntax`).
 - `{}` (empty variable name) is an error (`EmptyVariableReference`).
 - Referencing an undefined variable returns `UndefinedVariable`.
+- `{file:name}` reads from the session artifact directory, not the workspace. The name must be relative, must not contain `.` or `..`, and the file must be a regular UTF-8 file no larger than 1 MiB.
+- File contents are inserted as literal text and are not recursively resolved. `{{file:name}}` is the existing escaped literal `{file:name}`.
 
 ## Availability
 
 - `{plan}` is set automatically by `cruise run` to the session's `plan.md` absolute path. It is undefined outside `cruise run`.
+- `{file:name}` is available only while resolving a workflow prompt, including a prompt loaded from `prompt_file`. It is read from the same session's `artifacts/` directory at execution time, so a file may be absent when the YAML is loaded but present when a later prompt runs. The artifact is deleted with its session; terminal `cruise exec` sessions are removed after completion, while interrupted exec sessions and suspended `cruise run` sessions keep artifacts for resume.
 - `{plan.language}` is registered for planning-phase prompts, but normal workflow execution via `cruise run` initializes only `{plan}` (plus runtime `{prev.*}` values), so references to `{plan.language}` in execution-step fields fail with `UndefinedVariable`.
 - `{pr.number}` / `{pr.url}` are defined only after `gh pr create` succeeds — effectively only inside `after-pr`.
 - After a successful prompt step, `{prev.output}` and `{prev.stderr}` are set, `{prev.input}` is cleared, and `{prev.success}` is retained.
