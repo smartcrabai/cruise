@@ -63,6 +63,21 @@
         "seher-claude-agent-sdk",
       ],
       enabled: false,
+    },
+    {
+      // digest / pinDigest updates carry no releaseTimestamp. Applying
+      // minimumReleaseAge to them makes minimumReleaseAgeBehaviour default to
+      // "timestamp-required", which unconditionally sets stabilityStatus=yellow,
+      // so renovate/stability-days stays pending forever and the PR can never
+      // become mergeable - waiting does not help. A digest only tracks the same
+      // tag, so "N days since release" does not apply. Must stay last so it
+      // overrides the github-actions rule above (string options are non-mergeable
+      // and the last matching packageRule wins).
+      matchUpdateTypes: [
+        "digest",
+        "pinDigest"
+      ],
+      minimumReleaseAge: null,
     }
   ]
 }
