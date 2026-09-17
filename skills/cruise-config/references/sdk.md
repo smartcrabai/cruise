@@ -37,7 +37,7 @@ A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode`
 
 ## `sdk: jcode` — the jcode CLI (default)
 
-`sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.81.1 or newer** is required — an older binary is rejected with a clear error, because the NDJSON event shape is the whole contract. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows which ones cruise can already authenticate as. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
+`sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.82.0 or newer** is required — an older binary is rejected with a clear error, because cruise relies on both the NDJSON event shape and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows which ones cruise can already authenticate as. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
 
 OpenAI priority processing is off by default (cruise sets `JCODE_OPENAI_SERVICE_TIER=off`); opt in with `env.JCODE_OPENAI_SERVICE_TIER: "priority"` — see [the configuration example](env-and-llm.md#openai-priority-processing-with-jcode).
 
@@ -55,7 +55,7 @@ Running `sdk: jcode` with no authenticated provider fails with an error pointing
 
 ### Custom tools via MCP
 
-jcode cannot register custom tools in-process, so cruise's tools reach the model through a stdio MCP server (`cruise mcp-bridge`, registered in the home's `mcp.json`) and appear as `mcp__cruise__<tool>`. Caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), last-wins over the home. A project-local server named `cruise` is a **hard error** (it would shadow cruise's tools); servers under other names load but are reported with a warning.
+jcode cannot register custom tools in-process, so cruise's tools reach the model through a stdio MCP server (`cruise mcp-bridge`, registered in the home's `mcp.json`) and appear as `mcp__cruise__<tool>`. Cruise sets jcode's upstream `timeout_secs` to 86,400 seconds (24 hours) for that server, so interactive `ask_user` questions can wait up to 24 hours at the MCP layer, subject to any shorter workflow step timeout. Caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), last-wins over the home. A project-local server named `cruise` is a **hard error** (it would shadow cruise's tools); servers under other names load but are reported with a warning.
 
 ## `sdk: claude` — the claude CLI in-process
 
