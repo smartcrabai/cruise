@@ -42,7 +42,7 @@ This opt-out is limited to that prompt step and bypasses all commit-guard behavi
 
 ## Constraints
 
-- **Errors are downgraded to warnings**: if an `after-pr` step fails, the workflow continues (no fail-fast). The model fits side effects like pushing labels, posting notifications, etc.
+- **Errors are downgraded to warnings, except cancellation**: non-`Interrupted` errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast). `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase. The model fits side effects like pushing labels, posting notifications, etc.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 

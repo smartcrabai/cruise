@@ -156,11 +156,11 @@ Bare `cruise` opens the official keyboard-only client beside the CLI and desktop
 
 The TUI has exactly three views:
 
-- **Sessions** — Browse the global session list. Each selected session has **Info**, **Graph**, **Plan**, and **Log** detail tabs. The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The view exposes the complete phase action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions), including Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **Sessions** — Browse the global session list. Each selected session has **Info**, **Graph**, **Plan**, and **Log** detail tabs. The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. The TUI uses its own phase-dependent capability set rather than exposing the complete action matrix from [`cruise list` — phase → available actions](#cruise-list--phase--available-actions). Depending on phase, its session palette can expose **Answer Prompt**, **Fix Plan**, **Ask About Plan**, **Discard**, **Run in Worktree**, **Run on Current Branch**, **Retry**, **Edit Current Step**, and **Cancel**, with TUI labels such as **Publish Issue** and **Open Pull Request**; **Clean**, prompt handling, workspace selection, and URL actions are separate TUI behavior.
 - **New Session** — Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the CLI's prioritized candidates plus **Auto-detect** and **Built-in default**. GitHub sessions omit caller-local candidates and defer Auto-detect until the repository is cloned. The config editor also accepts a typed path instead of a listed candidate. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained.
 - **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. It uses the configured `run_all_parallelism`; the CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
 
-Ask and Option prompts are handled in the TUI. Required prompts are queued; a single-session prompt opens automatically, while Run All shows a queue badge. PR and Issue URLs are shown as text, except that a successful Publish as Issue also automatically opens the published Issue URL; dedicated PR/Issue URL actions open their URLs, using `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. The CLI-only `login`, `config`, and `exec` operations remain CLI commands rather than TUI screens.
+Ask and Option prompts are handled in the TUI. Required prompts are queued; a single-session prompt opens automatically, while Run All shows a queue badge. Multiline `ask_user` questions are rendered as adjacent prompt lines split at each newline, and Enter submits the answer. PR and Issue URLs are shown as text, except that a successful Publish as Issue also automatically opens the published Issue URL; dedicated PR/Issue URL actions open their URLs, using `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. The CLI-only `login`, `config`, and `exec` operations remain CLI commands rather than TUI screens.
 
 The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral. Only Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting with active work ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. In New Session, a non-blank task or at least one image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
@@ -188,7 +188,7 @@ Keys are fixed and cannot be configured:
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
 | `Enter` | Accept the answer and move to the next question; on the launch question, start or draft the session; in the task and image editors, insert a newline |
-| `Ctrl-Enter` | Move to the next question from the task or image editor |
+| `Ctrl-Enter` | Advance the current New Session question (required in the task and image editors, where `Enter` inserts a newline); in the multiline Edit Settings dialog, save the dialog |
 | `Space` | Toggle the current choice or the highlighted skipped step |
 | `Esc` | Back one question; at the first question, return to Sessions |
 
@@ -200,7 +200,7 @@ Keys are fixed and cannot be configured:
 - `NO_COLOR` is honored, and labels/statuses are never conveyed by color alone.
 - Idle updates are event-driven; external state is polled every 3 seconds; active work uses a 100 ms spinner.
 - In-memory logs are bounded: the session log keeps the latest 10,000 lines and Run All keeps the latest 2,000. Complete per-session output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (default `~/.local/share/cruise/sessions/<session-id>/run.log`).
-- A child process never shares TUI stdin. Interactive child commands therefore cannot prompt through the TUI.
+- A child process never shares TUI stdin. Interactive child commands therefore cannot prompt through the TUI. Set `CRUISE_DISABLE_NOTIFICATIONS=1` in the process environment to suppress desktop notifications (only the exact value `1` disables them).
 - Distinct sessions may run concurrently within one TUI process, but duplicate work for one session is rejected. Concurrent mutation of the same session by separate cruise processes is unsupported.
 
 Use the CLI as the canonical client for automation, JSON, and CI/non-interactive use. `cruise list` and all existing CLI commands remain documented below; `cruise list --json` is the machine-readable session-state interface.
@@ -215,6 +215,23 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
+
+### Process environment overrides
+
+When loading a workflow config, these process environment variables override the corresponding fields. String values are trimmed and empty values are ignored:
+
+| Variable | Overrides |
+|----------|-----------|
+| `CRUISE_MODEL` | The workflow's default `model` for prompt steps. |
+| `CRUISE_PLAN_MODEL` | The workflow's `plan_model` for the built-in plan step (which otherwise falls back to `model`). |
+| `CRUISE_SDK` | The workflow's `sdk` backend; it also clears `command` because the two backends are mutually exclusive. |
+| `CRUISE_LANGUAGE_PR` | `languages.pr`, the language for built-in PR title/body generation. |
+| `CRUISE_LANGUAGE_PLAN` | `languages.plan`, the language for built-in planning prompts. |
+| `CRUISE_CLEANUP_AFTER_PR` | `cleanup_after_pr`, whether to remove a worktree and branch automatically after a successful PR. |
+| `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning`, whether SDK planning uses its interactive planning tools; it has no effect for a `command:` backend. |
+| `CRUISE_FORCE_EXEC` | `force_exec`, whether direct plan entry points execute in the current directory. |
+
+The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`) accept only `true`, `false`, `1`, or `0` after trimming; any other non-empty value is an error. The string overrides above are applied only when their trimmed value is non-empty.
 
 ## Runtime file layout (XDG)
 
