@@ -1,5 +1,6 @@
 mod app_config;
 pub mod application;
+mod artifacts;
 mod ask_handler;
 mod attachments;
 mod backend;

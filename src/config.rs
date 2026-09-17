@@ -265,6 +265,10 @@ pub struct StepConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub prompt_file: Option<String>,
+
+    /// Session artifact file receiving the final output of a prompt step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_file: Option<String>,
 }
 
 fn deserialize_prompt_file<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -759,12 +763,59 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
+    validate_output_file_usage(config)?;
     validate_parallel_steps(config)?;
     validate_groups(config)?;
     validate_if_conditions(config)?;
     validate_timeouts(config)?;
     validate_when(config)?;
     validate_retry(config)?;
+    Ok(())
+}
+
+/// Validate artifact output fields on every ordinary and group-defined step.
+///
+/// `output_file` is intentionally a prompt-only field. Call sites for groups
+/// and workflow calls must not silently discard it, and command/option/control
+/// steps must reject it before execution.
+pub(crate) fn validate_output_file_usage(config: &WorkflowConfig) -> crate::error::Result<()> {
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        let Some(output_file) = step.output_file.as_deref() else {
+            continue;
+        };
+        crate::artifacts::validate_name(output_file).map_err(|error| {
+            crate::error::CruiseError::InvalidStepConfig(format!(
+                "step '{name}' has invalid output_file '{output_file}': {error}"
+            ))
+        })?;
+
+        let kind = if step.parallel.is_some() {
+            Some("parallel")
+        } else if step.group.is_some() {
+            Some("group")
+        } else if step.workflow_call.is_some() {
+            Some("workflow_call")
+        } else if step.command.is_some() {
+            Some("command")
+        } else if step.option.is_some() {
+            Some("option")
+        } else if step.prompt.is_some() || step.prompt_file.is_some() {
+            None
+        } else {
+            Some("non-prompt")
+        };
+
+        if let Some(kind) = kind {
+            return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses output_file, which is only supported on prompt steps (found {kind})"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -782,6 +833,10 @@ pub(crate) fn validate_parallel_steps(config: &WorkflowConfig) -> crate::error::
 
 /// Parallel blocks are a single control-flow/checkpoint unit. Children cannot
 /// choose successors or request interactive input while siblings are running.
+#[expect(
+    clippy::too_many_lines,
+    reason = "parallel validation covers child kinds, paths, collisions, and dependencies"
+)]
 pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
@@ -803,6 +858,7 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.instruction.is_some()
         || step.plan.is_some()
         || step.allow_commit
+        || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
             "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout"
@@ -851,6 +907,49 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' has invalid when.exists glob: '{exists}'"
+            )));
+        }
+    }
+
+    let mut output_files = HashMap::new();
+    for (child_name, child) in children {
+        if let Some(output_file) = child.output_file.as_deref() {
+            let normalized = crate::artifacts::validate_name(output_file).map_err(|error| {
+                CruiseError::InvalidStepConfig(format!(
+                    "parallel child '{name}/{child_name}' has invalid output_file '{output_file}': {error}"
+                ))
+            })?;
+            if let Some(other_child) = output_files.insert(normalized, child_name.as_str()) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "parallel step '{name}' has duplicate output_file '{output_file}' for children '{other_child}' and '{child_name}'"
+                )));
+            }
+        }
+    }
+
+    for (child_name, child) in children {
+        let Some(prompt) = child.prompt.as_deref() else {
+            continue;
+        };
+        for reference in crate::variable::artifact_references(prompt)? {
+            let normalized = crate::artifacts::validate_name(&reference).map_err(|error| {
+                CruiseError::InvalidStepConfig(format!(
+                    "parallel child '{name}/{child_name}' has invalid file reference '{reference}': {error}"
+                ))
+            })?;
+            if let Some(producer) = output_files.get(&normalized)
+                && *producer != child_name
+            {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "parallel step '{name}' child '{child_name}' reads artifact '{reference}' produced by sibling '{producer}'"
+                )));
+            }
+        }
+    }
+    for (child_name, child) in children {
+        if child.output_file.is_some() && child.prompt.is_none() && child.prompt_file.is_none() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{name}/{child_name}' uses output_file, which requires a prompt or prompt_file"
             )));
         }
     }
@@ -1062,6 +1161,11 @@ fn validate_step_groups(
             if step.allow_commit {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses allow_commit on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.output_file.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses output_file on a group call; set it on the inner prompt step"
                 )));
             }
         }
@@ -3276,6 +3380,7 @@ steps:
                 "workflow_call",
                 "timeout",
                 "prompt_file",
+                "output_file",
             ],
             "StepConfig",
         );

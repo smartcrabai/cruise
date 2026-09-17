@@ -22,9 +22,39 @@ steps:
     prompt: |                  # Use either prompt or prompt_file
       Create an implementation plan for: {input}
     timeout: 10m               # Optional: per-step timeout ("30" = seconds, "5m", "1h")
+    output_file: initial-state.md # Optional: save the final prompt response as a session artifact
     env:                       # Optional: per-step environment variables
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
+
+When `output_file` is set, the completed backend `result.output` is written to
+`<cruise data>/sessions/<session-id>/artifacts/<output_file>`. The file is
+created only after the prompt succeeds, written atomically, and kept separate
+from the workspace. Names must be relative and must not contain `.` or `..`
+path components. Empty output, Markdown, JSON, non-ASCII text, and trailing
+newlines are preserved. A write error fails the prompt step; a later workflow
+failure does not remove an artifact from a session that remains retained.
+Artifacts belong to the session: deleting the session removes them. Terminal
+`cruise exec` sessions are removed after completion, while interrupted exec
+sessions and suspended `cruise run` sessions keep their artifacts for resume.
+
+Saved content can be included in a later prompt with `{file:initial-state.md}`:
+
+```yaml
+steps:
+  verify:
+    prompt: |-
+      Compare the current behavior with this baseline:
+      <baseline>
+      {file:initial-state.md}
+      </baseline>
+```
+
+`{file:...}` is resolved immediately before a prompt runs, including inside a
+`prompt_file` body. It is prompt-only, does not affect `{plan}` or ordinary
+`command`/`env` resolution, and the inserted content is not expanded again.
+Missing, unsafe, non-UTF-8, oversized, or non-regular artifacts are errors,
+not empty substitutions. The limit for both saves and reads is 1 MiB.
 
 Prompt steps are commit-guarded by default: cruise prevents the agent from advancing Git `HEAD` while the step runs. Set `allow_commit: true` only when the prompt is intentionally expected to create a commit or otherwise move `HEAD`:
 
@@ -113,7 +143,8 @@ still run sequentially. Command children have no interactive stdin.
 
 Each child gets a private copy of the incoming variables. Environment precedence:
 workflow < parent block < child. Children support `prompt`/`prompt_file` or
-`command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Child names must
+`command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
+may also set `output_file`, but names must be distinct within the block. Child names must
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
 `plan`, `group`, `workflow_call`, nested `parallel`, and `allow_commit: true`
 are rejected. Parent fields: `parallel`, `env`, `skip`, `when`, `next`, `if`,
@@ -131,7 +162,10 @@ parent. A child timeout stops that child only. A parent timeout stops unfinished
 children and waits for shutdown before following the failure path. Ctrl+C stops
 all children; resume reruns the whole block, including completed children.
 Step selection and the Graph show the parent as one execution unit. Parallel
-blocks work inside groups, after-pr steps, and called workflows.
+blocks work inside groups, after-pr steps, and called workflows. A parallel
+block rejects duplicate artifact output names and rejects a child that reads an
+artifact produced by a sibling. Put dependent reads after the block joins;
+artifacts saved before the block may be read by multiple children.
 
 ## Option step (interactive selection)
 
@@ -166,6 +200,7 @@ steps:
 | `allow_commit` | bool | Allow this prompt step to create commits or otherwise advance Git `HEAD` (default `false`; only for prompt steps) |
 | `prompt` | string | Inline prompt body (use with prompt steps) |
 | `prompt_file` | string \| null | File or supported GitHub blob/raw URL whose contents become the prompt; absolute, `~/`, or config-file-relative path (`~`/null means the local home directory) |
+| `output_file` | string \| null | Relative session artifact file receiving the final output of a prompt step |
 | `instruction` | string | Message shown to the user before the step; input prompt when `{input}` is empty (prompt steps) |
 | `plan` | string | Path of a file displayed before an option step menu |
 | `option` | array | Choices for option steps |

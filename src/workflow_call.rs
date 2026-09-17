@@ -217,6 +217,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("timeout", step.timeout.is_some()),
         ("env", !step.env.is_empty()),
         ("allow_commit", step.allow_commit),
+        ("output_file", step.output_file.is_some()),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
