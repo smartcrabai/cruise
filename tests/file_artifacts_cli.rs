@@ -479,13 +479,13 @@ command:
       prompt="$(cat)"
       case "$prompt" in
         initial-state)
-          printf '%s\n' 'BASELINE: 日本語' 'line-2' '{{"key":"value"}}' '{{input}} {{file:other.md}} {{{{literal}}}}'
+          printf '%s\n' 'BASELINE: café 🙂' 'line-2' '{{"key":"value"}}' '{{input}} {{file:other.md}} {{{{literal}}}}'
           printf '%s' 'PROMPT_STDERR' >&2
           ;;
         final-check*)
           expected=$(cat <<'EOF'
       final-check
-      BASELINE: 日本語
+      BASELINE: café 🙂
       line-2
       {{"key":"value"}}
       {{input}} {{file:other.md}} {{{{literal}}}}

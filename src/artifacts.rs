@@ -382,12 +382,12 @@ mod tests {
     #[test]
     fn writes_and_reads_exact_content_atomically() {
         let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
-        write(root.path(), "nested/file.md", "日本語\n{input}")
+        write(root.path(), "nested/file.md", "café 🙂\n{input}")
             .unwrap_or_else(|error| panic!("write failed: {error}"));
         assert_eq!(
             read(root.path(), "nested/file.md")
                 .unwrap_or_else(|error| panic!("read failed: {error}")),
-            "日本語\n{input}"
+            "café 🙂\n{input}"
         );
     }
 
