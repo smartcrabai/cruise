@@ -55,7 +55,7 @@ impl DetailTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Info => "Info",
-            Self::Dag => "DAG",
+            Self::Dag => "Graph",
             Self::Plan => "Plan",
             Self::Log => "Log",
         }
@@ -140,7 +140,7 @@ pub struct TuiApp {
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
-    pub dag_cache: HashMap<String, crate::dag::ExecutionDag>,
+    pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
     pub plan_scroll: usize,
@@ -2341,7 +2341,7 @@ impl TuiApp {
             .map(String::as_str)
     }
     #[must_use]
-    pub fn active_dag(&self) -> Option<&crate::dag::ExecutionDag> {
+    pub fn active_dag(&self) -> Option<&crate::graph::ExecutionGraph> {
         self.active_session()
             .and_then(|s| self.dag_cache.get(&s.id))
     }

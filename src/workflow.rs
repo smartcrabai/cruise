@@ -26,6 +26,20 @@ pub struct InvocationMeta {
     pub step_count: usize,
 }
 
+impl InvocationMeta {
+    #[must_use]
+    pub(crate) fn group_retry_exhaustion_is_reachable(&self, step: &str) -> bool {
+        self.first_step == step
+            && self.max_retries.is_some_and(|max| {
+                max == 0
+                    || self
+                        .if_condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.file_changed.is_some())
+            })
+    }
+}
+
 /// A node in the skippable step tree returned by [`list_skippable_steps`].
 ///
 /// This structure is used by both the CLI and GUI to present a hierarchical

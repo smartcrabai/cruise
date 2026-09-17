@@ -10,7 +10,7 @@ use inquire::InquireError;
 use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
 use crate::config::validate_config;
-use crate::engine::{NodeCheckpoint, execute_steps_with_dag, print_dry_run};
+use crate::engine::{NodeCheckpoint, execute_steps_with_graph, print_dry_run};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
 use crate::option_handler::{CliOptionHandler, OptionHandler};
@@ -419,6 +419,23 @@ async fn run_single(
     crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
     let retry_policy = crate::retry::policy_for_config(config.retry.clone());
 
+    let compiled = crate::workflow::compile(config.clone())?;
+    let mut dag = crate::graph::build_graph(&compiled, effective_max_retries)?;
+    let start_node = crate::graph::persistence::prepare_resume(
+        &mut dag,
+        &manager.dag_path(&session.id),
+        session.has_dag,
+        session.current_step.as_deref(),
+        session.current_step_is_node_id,
+        session.execution_id.as_deref(),
+    )?;
+    crate::graph::validation::validate_workflow(
+        &compiled,
+        &dag,
+        &start_node,
+        &session.skipped_steps,
+    )?;
+
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {session_id}")).dim());
         print_dry_run(&config, session.current_step.as_deref());
@@ -428,7 +445,6 @@ async fn run_single(
     if cancel_token.is_cancelled() {
         return Err(CruiseError::Interrupted);
     }
-    let compiled = crate::workflow::compile(config)?;
     let effective_workspace_mode = if session.repo.is_some() {
         // Repo-backed sessions always execute in a worktree on a fresh clone so
         // a PR is always created; current-branch (no-PR) mode is not available.
@@ -466,29 +482,6 @@ async fn run_single(
     if cancel_token.is_cancelled() {
         return Err(CruiseError::Interrupted);
     }
-    let mut dag = crate::dag::build_dag(&compiled, effective_max_retries)?;
-    let start_node = session.current_step.clone().map_or_else(
-        || Ok(dag.start.clone()),
-        |step| {
-            if session.current_step_is_node_id {
-                if dag.nodes.contains_key(&step) {
-                    Ok(step)
-                } else {
-                    crate::status_eprintln!(
-                        "{} saved node id '{}' not found in DAG; falling back to start node '{}'",
-                        style("!").yellow().bold(),
-                        step,
-                        dag.start
-                    );
-                    Ok(dag.start.clone())
-                }
-            } else {
-                dag.first_node_for_step(&step)
-                    .cloned()
-                    .ok_or(CruiseError::StepNotFound(step))
-            }
-        },
-    )?;
     log_resume_message(&session);
     if cancel_token.is_cancelled() {
         return Err(CruiseError::Interrupted);
@@ -519,14 +512,6 @@ async fn run_single(
     vars.set_named_file(PLAN_VAR, plan_path);
     vars.set_artifacts_root(session.artifacts_path(&manager.sessions_dir()));
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
-    restore_dag_runtime_context(
-        &manager,
-        &session,
-        &mut dag,
-        &start_node,
-        &mut vars,
-        &mut tracker,
-    );
     let config_reloader: Option<
         Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>,
     > = session.config_path.as_deref().map(|path| {
@@ -569,6 +554,7 @@ async fn run_single(
     let on_node_start = |cp: &NodeCheckpoint<'_>, dag: &crate::dag::ExecutionDag| {
         logger_for_start.write(cp.step_name);
         let mut s = lock_unpoisoned(&session_cell);
+        crate::graph::persistence::save_graph(dag, &manager.dag_path(&s.id))?;
         s.current_step = Some(cp.node_id.clone());
         s.current_step_is_node_id = true;
         s.has_dag = true;
@@ -576,17 +562,6 @@ async fn run_single(
         let fingerprint =
             save_session_state_with_conflict_resolution(&manager, &s, *fingerprint_guard)?;
         *fingerprint_guard = fingerprint;
-        // Persist the DAG (including the runtime context just snapshotted
-        // onto this node) alongside the session state. Best-effort: a save
-        // failure must not abort the run, since the DAG is a resumption
-        // optimization, not a correctness requirement.
-        if let Err(e) = crate::dag::save_dag(dag, &manager.dag_path(&s.id)) {
-            crate::status_eprintln!(
-                "{} warning: failed to persist DAG checkpoint: {}",
-                style("!").yellow(),
-                e
-            );
-        }
         Ok(())
     };
     let on_step_log = |stream: &str, line: &str| {
@@ -605,14 +580,8 @@ async fn run_single(
         skipped_steps: &skipped_steps,
     };
     let exec_result = crate::retry::with_active_policy(retry_policy.clone(), async {
-        let execution = execute_steps_with_dag(
-            &ctx,
-            &mut vars,
-            &mut tracker,
-            &mut dag,
-            &start_node,
-            &on_node_start,
-        );
+        let execution =
+            execute_steps_with_graph(&ctx, &mut vars, &mut tracker, &mut dag, &on_node_start);
         tokio::pin!(execution);
         tokio::select! {
             result = &mut execution => result,
@@ -627,18 +596,10 @@ async fn run_single(
     })
     .await;
 
-    // Best-effort final flush so the persisted DAG reflects the last executed
-    // node's `visited_at` timestamp even when it was the final step in the
-    // workflow: the per-node checkpoint in `on_node_start` only flushes
-    // *before* a node runs, so the very last node's post-execution state
-    // would otherwise never reach disk.
-    if let Err(e) = crate::dag::save_dag(&dag, &manager.dag_path(&session_id)) {
-        crate::status_eprintln!(
-            "{} warning: failed to persist final DAG checkpoint: {}",
-            style("!").yellow(),
-            e
-        );
-    }
+    let exec_result = exec_result.and_then(|result| {
+        crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
+        Ok(result)
+    });
     let session = session_cell
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -801,74 +762,6 @@ fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) 
             session.completed_at = Some(current_iso8601());
         }
     }
-}
-
-/// Restore the DAG-driven runtime context (`{prev.*}` variables and file
-/// tracker snapshots) so that resuming `session` at `start_node` continues
-/// with exactly the state that was in effect when the session was last
-/// interrupted.
-///
-/// Best-effort: if `session.has_dag` is false (fresh session, or a session
-/// created before DAG persistence existed and never checkpointed), or the
-/// persisted DAG file is missing, unreadable, or fails to deserialize, this
-/// silently falls back to the freshly built `dag` with no restored runtime
-/// context -- exactly the pre-persistence behavior. A warning is printed only
-/// when a file exists but fails to load, since a missing file is the expected
-/// case for old sessions.
-fn restore_dag_runtime_context(
-    manager: &SessionManager,
-    session: &SessionState,
-    dag: &mut crate::dag::ExecutionDag,
-    start_node: &crate::dag::NodeId,
-    vars: &mut VariableStore,
-    tracker: &mut FileTracker,
-) {
-    if !session.has_dag {
-        return;
-    }
-    let dag_path = manager.dag_path(&session.id);
-    if !dag_path.exists() {
-        return;
-    }
-    let loaded = match crate::dag::load_dag(&dag_path) {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            crate::status_eprintln!(
-                "{} warning: failed to load persisted DAG at {}: {} -- resuming without restored runtime context",
-                style("!").yellow(),
-                dag_path.display(),
-                e
-            );
-            return;
-        }
-    };
-    dag.adopt_runtime_from(&loaded);
-
-    let Some(node) = dag.nodes.get(start_node) else {
-        return;
-    };
-    let runtime = node.runtime.clone();
-    let has_prev_vars = runtime.prev_output.is_some()
-        || runtime.prev_input.is_some()
-        || runtime.prev_stderr.is_some()
-        || runtime.prev_success.is_some();
-    let has_snapshots = !runtime.file_snapshots.is_empty();
-    if !has_prev_vars && !has_snapshots {
-        return;
-    }
-    vars.set_prev_output(runtime.prev_output);
-    vars.set_prev_input(runtime.prev_input);
-    vars.set_prev_stderr(runtime.prev_stderr);
-    vars.set_prev_success(runtime.prev_success);
-    if has_snapshots {
-        tracker.restore_snapshots(runtime.file_snapshots);
-    }
-    let step_label = dag.step_name_for_node(start_node).unwrap_or(start_node);
-    crate::status_eprintln!(
-        "{} restored runtime context for step '{}' from saved DAG",
-        style("->").cyan(),
-        step_label
-    );
 }
 
 /// Log a resume message if the session is being restarted.
@@ -2466,7 +2359,7 @@ Previously, emojis were used as user icons."#;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_run_dry_run_also_fails_fast_on_mixed_conditional_cycle() {
+    async fn test_run_dry_run_allows_exit_capable_conditional_cycle() {
         // Given: a session whose config has a flat cycle mixing a conditional
         // back-edge (c --if.file-changed--> a) with unconditional sequential
         // edges; this shape always deadlocks under loop protection
@@ -2488,17 +2381,8 @@ Previously, emojis were used as user icons."#;
         args.dry_run = true;
         let result = run(args).await;
 
-        // Then: --dry-run does not bypass the fail-fast validation and the
-        // error names the offending cycle steps
-        assert!(
-            result.is_err(),
-            "dry-run should still surface the mixed conditional cycle error: {result:?}"
-        );
-        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
-        assert!(
-            message.contains("a -> b -> c -> a"),
-            "error should name the witness cycle, got: {message}"
-        );
+        // Plan 5.3: an available normal exit allows conditional cycles.
+        assert!(result.is_ok(), "{result:?}");
         assert!(
             !repo.join("out.txt").exists(),
             "dry-run must not execute any step"
@@ -2510,7 +2394,7 @@ Previously, emojis were used as user icons."#;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_run_fails_fast_on_mixed_conditional_cycle() {
+    async fn test_run_fails_fast_on_closed_cycle() {
         // Given: a session whose config has a flat cycle mixing a conditional
         // back-edge (c --if.file-changed--> a) with unconditional sequential
         // edges; this shape always deadlocks under loop protection
@@ -2524,22 +2408,20 @@ Previously, emojis were used as user icons."#;
         let session_id = "20260826090002";
         let session = make_current_branch_session(session_id, &repo, "mixed cycle check", "main");
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-        write_config(&manager, session_id, &mixed_conditional_cycle_config());
+        write_config(
+            &manager,
+            session_id,
+            "command: [cat]\nsteps:\n  loop:\n    command: touch out.txt\n    next: loop\n",
+        );
 
         // When: run() is called WITHOUT --dry-run
         let args = run_args(session_id);
         let result = run(args).await;
 
-        // Then: it fails fast before any step executes and the error names
-        // the offending cycle steps
+        // Plan 5: a provably exitless cycle is rejected before side effects.
         assert!(
-            result.is_err(),
-            "expected the mixed conditional cycle to fail fast: {result:?}"
-        );
-        let message = result.map_or_else(|e| e.to_string(), |()| String::new());
-        assert!(
-            message.contains("a -> b -> c -> a"),
-            "error should name the witness cycle, got: {message}"
+            matches!(result, Err(crate::error::CruiseError::InvalidStepConfig(_))),
+            "{result:?}"
         );
         assert!(
             !repo.join("out.txt").exists(),
@@ -2922,17 +2804,14 @@ steps:
             dag_path.display()
         );
 
-        // And: 'second' node's runtime -- snapshotted right before it ran --
-        // records that 'first' succeeded.
-        let dag = crate::dag::load_dag(&dag_path)
-            .unwrap_or_else(|e| panic!("failed to load persisted dag: {e:?}"));
-        let second_id = dag
-            .first_node_for_step("second")
-            .unwrap_or_else(|| panic!("second step not found in persisted dag"));
+        // Plan 4.1: the final shared checkpoint, not a node copy, owns context.
+        let dag = crate::dag::load_dag(&dag_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(dag.state.runtime.prev_success, Some(true));
+        assert!(dag.state.completed);
+        assert_eq!(dag.state.current, None);
         assert_eq!(
-            dag.nodes[second_id].runtime.prev_success,
-            Some(true),
-            "second node's pre-execution runtime should record that 'first' succeeded"
+            dag.state.edge_counts[&("first".into(), "second".into())].traversals,
+            1
         );
 
         // And: the session itself records that it has a persisted DAG.
@@ -3024,11 +2903,9 @@ steps:
             .first_node_for_step("second")
             .unwrap_or_else(|| panic!("missing second step"))
             .clone();
-        dag.nodes
-            .get_mut(&second_id)
-            .unwrap_or_else(|| panic!("missing node"))
-            .runtime
-            .prev_success = Some(true);
+        dag.state.current = Some(second_id.clone());
+        dag.state.runtime.prev_success = Some(true);
+        dag.state.execution_id.clone_from(&session.execution_id);
 
         session.current_step = Some(second_id.clone());
         session.current_step_is_node_id = true;
@@ -3057,7 +2934,7 @@ steps:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_run_falls_back_gracefully_when_has_dag_true_but_file_missing() {
+    async fn test_run_rejects_missing_checkpoint_without_side_effects() {
         // Given: a session that claims has_dag=true (as an old, pre-fix
         // session that never persisted a DAG file would) but no dag.json
         // exists on disk. This must not error; it must fall back to the
@@ -3100,20 +2977,12 @@ steps:
             "sanity check: no DAG file should exist yet"
         );
 
-        // When: the session resumes
+        // Plan 4.4: missing counters cannot be guessed or reset by resume.
         let result = run(run_args(session_id)).await;
-
-        // Then: it succeeds via the legacy resume path (node id lookup on a
-        // freshly built DAG), skipping the already-completed 'first' step.
-        assert!(result.is_ok(), "expected graceful fallback: {result:?}");
-        assert!(
-            !repo.join("first.txt").exists(),
-            "resume should skip already-completed 'first' step"
-        );
-        assert!(
-            repo.join("second.txt").exists(),
-            "resume should still execute 'second' step via legacy node-id resume"
-        );
+        assert!(result.is_err());
+        assert!(!repo.join("first.txt").exists());
+        assert!(!repo.join("second.txt").exists());
+        assert!(!manager.dag_path(session_id).exists());
     }
 
     #[tokio::test(flavor = "current_thread")]

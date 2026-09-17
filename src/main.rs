@@ -16,15 +16,27 @@ mod config;
 mod config_cmd;
 mod configs;
 mod console_mode;
+#[expect(
+    unused_imports,
+    reason = "library compatibility exports are unused in the CLI module copy"
+)]
 mod dag;
 mod desktop_notifications;
 mod display;
 mod draft_cmd;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the CLI module copy includes a public library compatibility API"
+    )
+)]
 mod engine;
 mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
+mod graph;
 mod issue_publish;
 mod list_cmd;
 mod login_cmd;

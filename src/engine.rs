@@ -9,6 +9,7 @@ use crate::condition::{should_skip, should_skip_due_to_when};
 use crate::config::{FailAction, NoFileChangesAction, SkipCondition, WorkflowConfig};
 use crate::error::{CruiseError, Result};
 use crate::file_tracker::FileTracker;
+use crate::graph::{ExecutionGraph, Transition, TransitionReason};
 use crate::option_handler::OptionHandler;
 use crate::step::prompt::StreamCallbacks;
 use crate::step::{CommandStep, OptionStep, PromptStep, StepKind};
@@ -65,14 +66,13 @@ pub struct ReloadedWorkflow {
     pub retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
 }
 
-/// A snapshot of the DAG node that is about to be executed.
+/// Display metadata for the current checkpoint position.
 ///
-/// Passed to the `on_node_start` callback in [`execute_steps_with_dag`] so
-/// that callers can persist the node id before the step runs, enabling exact
-/// resumption via the saved node id rather than a plain step name.
+/// Passed with the authoritative graph state before execution and after
+/// transitions. At completion this identifies the last executed node.
 pub struct NodeCheckpoint<'a> {
-    /// Stable DAG node identifier (e.g. `"n0007"`).
-    pub node_id: &'a crate::dag::NodeId,
+    /// Stable compiled-step identifier.
+    pub node_id: &'a crate::graph::NodeId,
     /// Human-readable step name (unchanged from the compiled workflow).
     pub step_name: &'a str,
 }
@@ -84,12 +84,14 @@ struct LoopCounters {
     failed: usize,
 }
 
-/// Outcome of processing one step iteration.
-enum StepOutcome {
-    /// Advance to the named step.
-    Next(String),
-    /// The workflow is complete.
-    Done,
+type StepOutcome = Transition;
+fn transition(target: Option<String>, reason: TransitionReason, budgeted: bool) -> Transition {
+    Transition {
+        target,
+        reason,
+        budgeted,
+        group_retry: None,
+    }
 }
 
 /// Outcome of executing a single step kind.
@@ -145,7 +147,11 @@ fn check_group_retry_skip(
     let count = meta.step_count;
     counters.skipped += count;
     let next = get_next_step(&compiled.steps, &meta.last_step, None);
-    Some(next.map_or(StepOutcome::Done, StepOutcome::Next))
+    Some(transition(
+        next,
+        TransitionReason::GroupRetryExhausted,
+        false,
+    ))
 }
 
 /// Take pre-execution snapshots (per-step, per-group, and per-attempt NFC) as needed.
@@ -190,8 +196,7 @@ fn resolve_if_next(
     current_step: &str,
     step_call_site: Option<&str>,
     step_if_file_changed: Option<&str>,
-    group_retry_counts: &mut HashMap<String, usize>,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, bool)>> {
     // Per-step file-changed check.
     if let Some(target) = step_if_file_changed {
         if tracker.has_files_changed(current_step)? {
@@ -200,7 +205,7 @@ fn resolve_if_next(
                 style("R").cyan(),
                 target
             );
-            return Ok(Some(target.to_string()));
+            return Ok(Some((target.to_string(), false)));
         }
         crate::status_eprintln!(
             "  {} no file changes (if.file-changed check)",
@@ -224,14 +229,13 @@ fn resolve_if_next(
         return Ok(None);
     };
     if tracker.has_files_changed(&group_snapshot_key(call_site))? {
-        *group_retry_counts.entry(call_site.to_string()).or_insert(0) += 1;
         crate::status_eprintln!(
             "  {} files changed in group '{}', jumping to: {}",
             style("R").cyan(),
             call_site,
             target
         );
-        Ok(Some(target.clone()))
+        Ok(Some((target.clone(), true)))
     } else {
         crate::status_eprintln!(
             "  {} no file changes in group '{}'",
@@ -242,184 +246,195 @@ fn resolve_if_next(
     }
 }
 
-/// Execute a workflow driven by a pre-built [`ExecutionDag`].
-///
-/// Unlike the legacy step-name execution path, which maintained in-memory retry counters, this
-/// function navigates the graph encoded in `dag` so that execution can be
-/// resumed exactly — the node id recorded in `current_step` is sufficient to
-/// restore the full loop-counter context.
-///
-/// Right before a node runs, its [`DagNode`]'s `runtime` fields
-/// (`prev_output`/`prev_input`/`prev_stderr`/`prev_success`/`file_snapshots`)
-/// are overwritten with the current `vars`/`tracker` state -- i.e. the exact
-/// context produced by whatever ran immediately before it. That makes the
-/// about-to-run node's `runtime` sufficient on its own to resume execution:
-/// after each step the corresponding node's `runtime.visited_at` field is
-/// also updated so the caller can persist the DAG for resumption diagnostics.
-///
-/// `on_node_start` is called before each step (after its `runtime` has been
-/// refreshed) with a [`NodeCheckpoint`] describing the node about to run. The
-/// callback is the right place for the caller to flush `current_step` and the
-/// DAG itself to stable storage before the step executes.
+/// Compatibility entry point for library clients using the former DAG API.
 ///
 /// # Errors
-///
-/// Propagates any execution error encountered during the run.
-#[expect(
-    clippy::too_many_lines,
-    reason = "DAG-driven execution loop is inherently long"
-)]
+/// Propagates checkpoint, execution and loop-protection errors.
 pub async fn execute_steps_with_dag(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
-    dag: &mut crate::dag::ExecutionDag,
-    start_node: &crate::dag::NodeId,
-    on_node_start: &(
-         dyn Fn(&NodeCheckpoint<'_>, &crate::dag::ExecutionDag) -> Result<()> + Send + Sync
-     ),
+    graph: &mut ExecutionGraph,
+    start: &crate::graph::NodeId,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
 ) -> Result<ExecutionResult> {
-    let mut current_node_id = start_node.clone();
+    if graph.state.current.is_none() && !graph.state.completed {
+        graph.state.runtime = capture_runtime(vars, tracker);
+        graph.state.current = Some(start.clone());
+    }
+    execute_steps_with_graph(ctx, vars, tracker, graph, checkpoint).await
+}
+
+fn capture_runtime(vars: &VariableStore, tracker: &FileTracker) -> crate::graph::NodeRuntime {
+    crate::graph::NodeRuntime {
+        prev_output: vars.prev_output().map(str::to_owned),
+        prev_input: vars.prev_input().map(str::to_owned),
+        prev_stderr: vars.prev_stderr().map(str::to_owned),
+        prev_success: vars.prev_success(),
+        file_snapshots: tracker.snapshots(),
+        visited_at: None,
+    }
+}
+
+fn save_checkpoint(
+    graph: &ExecutionGraph,
+    last: &str,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+) -> Result<()> {
+    let id = graph.state.current.as_deref().unwrap_or(last);
+    let node = graph
+        .nodes
+        .get(id)
+        .ok_or_else(|| CruiseError::StepNotFound(id.into()))?;
+    checkpoint(
+        &NodeCheckpoint {
+            node_id: &node.id,
+            step_name: &node.step_name,
+        },
+        graph,
+    )
+}
+
+/// Execute a fixed graph using its authoritative, resumable runtime state.
+/// Checkpoints precede side effects and follow accepted or rejected transitions.
+///
+/// # Errors
+/// Propagates checkpoint failures, invalid transitions and step errors.
+#[expect(clippy::too_many_lines, reason = "checkpointed execution loop")]
+pub async fn execute_steps_with_graph(
+    ctx: &ExecutionContext<'_>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    graph: &mut ExecutionGraph,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+) -> Result<ExecutionResult> {
+    if graph.version != crate::graph::CHECKPOINT_VERSION {
+        return Err(CruiseError::Other(
+            "legacy graph cannot resume safely; explicitly restart the session".into(),
+        ));
+    }
     let workflow_start = Instant::now();
     let mut reloaded: Option<ReloadedWorkflow> = None;
     let mut state = LoopState {
-        group_retry_counts: HashMap::new(),
         counters: LoopCounters {
             run: 0,
             skipped: 0,
             failed: 0,
         },
-        edge_counts: HashMap::new(),
     };
-
-    loop {
-        let step_name = dag
-            .nodes
-            .get(&current_node_id)
-            .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
-            .step_name
-            .clone();
-
-        // Reload config between steps if a reloader is provided.  When the
-        // reloaded workflow still contains the current step we rebuild the DAG
-        // and continue from the first node for that step, resetting in-memory
-        // retry counters just like the legacy path did.
-        //
-        // `ctx.max_retries` (resolved once at run start) keeps governing the DAG
-        // rebuild below; a reloaded config's own top-level `max_retries` is
-        // intentionally ignored mid-run.
+    if graph.state.current.is_some() || graph.state.completed {
+        let runtime = &graph.state.runtime;
+        vars.set_prev_output(runtime.prev_output.clone());
+        vars.set_prev_input(runtime.prev_input.clone());
+        vars.set_prev_stderr(runtime.prev_stderr.clone());
+        vars.set_prev_success(runtime.prev_success);
+        tracker.restore_snapshots(runtime.file_snapshots.clone());
+    } else {
+        graph.state.current = Some(graph.start.clone());
+    }
+    let mut checkpointed = false;
+    while !graph.state.completed {
+        let current = graph.state.current.clone().ok_or_else(|| {
+            CruiseError::Other("graph checkpoint has no execution position".into())
+        })?;
         if let Some(reloader) = ctx.config_reloader
             && let Some(new_workflow) = reloader()?
-            && new_workflow.compiled.steps.contains_key(&step_name)
         {
-            let new_dag = crate::dag::build_dag(&new_workflow.compiled, ctx.max_retries)?;
-            if let Some(new_node_id) = new_dag.first_node_for_step(&step_name) {
-                let new_node_id = new_node_id.clone();
-                state.group_retry_counts.clear();
-                state.edge_counts.clear();
+            if new_workflow.compiled.steps.contains_key(&current) {
+                if graph.state.pending.is_none() {
+                    graph.state.runtime = capture_runtime(vars, tracker);
+                }
+                let mut replacement =
+                    crate::graph::build_graph(&new_workflow.compiled, ctx.max_retries)?;
+                replacement.restore_for_reload(graph)?;
+                crate::graph::validation::validate_workflow(
+                    &new_workflow.compiled,
+                    &replacement,
+                    &current,
+                    ctx.skipped_steps,
+                )?;
+                *graph = replacement;
+                tracker.restore_snapshots(graph.state.runtime.file_snapshots.clone());
                 reloaded = Some(new_workflow);
-                *dag = new_dag;
-                current_node_id = new_node_id;
+                checkpointed = false;
+            } else {
+                crate::status_eprintln!(
+                    "config reload ignored: current step '{current}' was removed; continuing the existing graph"
+                );
             }
         }
-
-        let active_compiled = reloaded
+        let compiled = reloaded
             .as_ref()
             .map_or(ctx.compiled, |workflow| &workflow.compiled);
         let active_ctx = ExecutionContext {
-            compiled: active_compiled,
+            compiled,
             config_reloader: None,
             ..*ctx
         };
-
-        // Snapshot the runtime context in effect right before this node runs:
-        // the `{prev.*}` variables and file-tracker snapshots produced by
-        // whatever ran immediately before it. This is exactly what a caller
-        // needs to restore in order to resume execution at this node, so it
-        // is written before `on_node_start` -- the hook callers use to
-        // persist a checkpoint -- runs.
-        {
-            let node = dag
-                .nodes
-                .get_mut(&current_node_id)
-                .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?;
-            node.runtime.prev_output = vars.prev_output().map(str::to_string);
-            node.runtime.prev_input = vars.prev_input().map(str::to_string);
-            node.runtime.prev_stderr = vars.prev_stderr().map(str::to_string);
-            node.runtime.prev_success = vars.prev_success();
-            node.runtime.file_snapshots = tracker.snapshots();
+        if graph.state.pending.is_none() {
+            graph.state.runtime = capture_runtime(vars, tracker);
         }
-
-        on_node_start(
-            &NodeCheckpoint {
-                node_id: &current_node_id,
-                step_name: &step_name,
-            },
-            &*dag,
-        )?;
-
+        if !checkpointed {
+            save_checkpoint(graph, &current, checkpoint)?;
+        }
         if ctx
             .cancel_token
             .is_some_and(CancellationToken::is_cancelled)
         {
             return Err(CruiseError::Interrupted);
         }
-
-        let outcome = if let Some(workflow) = reloaded.as_ref() {
-            crate::retry::with_active_policy(
-                workflow.retry_policy.clone(),
-                step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state),
-            )
-            .await?
+        let outcome = if let Some(pending) = graph.state.pending.clone() {
+            pending
         } else {
-            step_loop_iteration(&active_ctx, vars, tracker, &step_name, &mut state).await?
-        };
-        if ctx
-            .cancel_token
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            return Err(CruiseError::Interrupted);
-        }
-        dag.nodes
-            .get_mut(&current_node_id)
-            .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
-            .runtime
-            .visited_at = Some(crate::session::current_iso8601());
-
-        match outcome {
-            StepOutcome::Done => break,
-            StepOutcome::Next(next_step) => {
-                let next_id = dag
-                    .nodes
-                    .get(&current_node_id)
-                    .ok_or_else(|| CruiseError::StepNotFound(current_node_id.clone()))?
-                    .successors
-                    .iter()
-                    .find_map(|s| {
-                        let target_id = s.target.as_ref()?;
-                        let target_node = dag.nodes.get(target_id)?;
-                        if target_node.step_name == next_step {
-                            Some(target_id.clone())
-                        } else {
-                            None
-                        }
-                    });
-                if let Some(id) = next_id {
-                    current_node_id = id;
-                } else {
-                    crate::status_eprintln!(
-                        "  {} DAG has no successor for '{}' -> '{}'; stopping early",
-                        style("!").yellow(),
-                        current_node_id,
-                        next_step
-                    );
-                    break;
-                }
+            let result = if let Some(workflow) = &reloaded {
+                crate::retry::with_active_policy(
+                    workflow.retry_policy.clone(),
+                    step_loop_iteration(
+                        &active_ctx,
+                        vars,
+                        tracker,
+                        &current,
+                        &graph.state.group_counts,
+                        &mut state,
+                    ),
+                )
+                .await
+            } else {
+                step_loop_iteration(
+                    &active_ctx,
+                    vars,
+                    tracker,
+                    &current,
+                    &graph.state.group_counts,
+                    &mut state,
+                )
+                .await
+            };
+            let outcome = result?;
+            if ctx
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(CruiseError::Interrupted);
             }
+            graph.state.runtime = capture_runtime(vars, tracker);
+            graph
+                .nodes
+                .get_mut(&current)
+                .ok_or_else(|| CruiseError::StepNotFound(current.clone()))?
+                .runtime
+                .visited_at = Some(crate::session::current_iso8601());
+            graph.state.pending = Some(outcome.clone());
+            outcome
+        };
+        if let Err(error) = accept_transition(&active_ctx, graph, &current, &outcome) {
+            save_checkpoint(graph, &current, checkpoint)?;
+            return Err(error);
         }
+        // Commit before reload, cancellation, or any further side effect.
+        save_checkpoint(graph, &current, checkpoint)?;
+        checkpointed = true;
     }
-
-    let total_elapsed = workflow_start.elapsed();
     let c = &state.counters;
     crate::status_eprintln!(
         "\n{} ({} run, {} skipped, {} failed) [{}]",
@@ -427,7 +442,7 @@ pub async fn execute_steps_with_dag(
         c.run,
         c.skipped,
         c.failed,
-        format_duration(total_elapsed)
+        format_duration(workflow_start.elapsed())
     );
     Ok(ExecutionResult {
         run: c.run,
@@ -436,11 +451,108 @@ pub async fn execute_steps_with_dag(
     })
 }
 
-/// Shared mutable state for the execution loop.
+fn accept_transition(
+    ctx: &ExecutionContext<'_>,
+    graph: &mut ExecutionGraph,
+    from: &str,
+    transition: &Transition,
+) -> Result<()> {
+    let node = graph
+        .nodes
+        .get(from)
+        .ok_or_else(|| CruiseError::StepNotFound(from.into()))?;
+    if !node.successors.iter().any(|edge| {
+        edge.target == transition.target && edge.reason.matches_execution(&transition.reason)
+    }) {
+        return Err(CruiseError::Other(format!(
+            "graph has no transition from '{from}' to {:?} for {:?}",
+            transition.target, transition.reason
+        )));
+    }
+    if let Some(to) = &transition.target {
+        let key = (from.to_string(), to.clone());
+        let count = graph
+            .state
+            .edge_counts
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if transition.budgeted && count.budgeted_traversals >= ctx.max_retries {
+            let mut edges: Vec<_> = graph
+                .state
+                .edge_counts
+                .iter()
+                .map(|((from, to), count)| (from.clone(), to.clone(), count.budgeted_traversals))
+                .collect();
+            edges.sort_by_key(|edge| std::cmp::Reverse(edge.2));
+            let skipped_steps = ctx
+                .skipped_steps
+                .iter()
+                .filter(|step| {
+                    step.as_str() == from
+                        || *step == to
+                        || edges.iter().any(|(f, t, _)| f == *step || t == *step)
+                })
+                .cloned()
+                .collect();
+            return Err(CruiseError::LoopProtection {
+                from: from.into(),
+                to: to.clone(),
+                max_retries: ctx.max_retries,
+                edge_counts: edges,
+                skipped_steps,
+            });
+        }
+        let traversals = count
+            .traversals
+            .checked_add(1)
+            .ok_or_else(|| CruiseError::Other("edge traversal counter overflow".into()))?;
+        let budgeted_traversals = count
+            .budgeted_traversals
+            .checked_add(usize::from(transition.budgeted))
+            .ok_or_else(|| CruiseError::Other("edge budget counter overflow".into()))?;
+        let group_count = transition
+            .group_retry
+            .as_ref()
+            .map(|site| {
+                graph
+                    .state
+                    .group_counts
+                    .get(site)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| CruiseError::Other("group retry counter overflow".into()))
+            })
+            .transpose()?;
+        graph.state.edge_counts.insert(
+            key,
+            crate::graph::EdgeCounter {
+                traversals,
+                budgeted_traversals,
+            },
+        );
+        if let Some((site, count)) = transition.group_retry.as_ref().zip(group_count) {
+            graph.state.group_counts.insert(site.clone(), count);
+        }
+        let line = format!(
+            "-> {from} -> {to} [{}] (edge {budgeted_traversals}/{})",
+            transition.reason.label(),
+            ctx.max_retries
+        );
+        crate::status_eprintln!("  {line}");
+        if let Some(log) = ctx.on_step_log {
+            log("info", &line);
+        }
+    }
+    graph.state.current.clone_from(&transition.target);
+    graph.state.completed = transition.target.is_none();
+    graph.state.pending = None;
+    Ok(())
+}
+
 struct LoopState {
-    group_retry_counts: HashMap<String, usize>,
     counters: LoopCounters,
-    edge_counts: HashMap<(String, String), usize>,
 }
 
 /// Execute one iteration of the step loop, returning the next step or Done.
@@ -453,6 +565,7 @@ async fn step_loop_iteration(
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     current_step: &str,
+    group_retry_counts: &HashMap<String, usize>,
     state: &mut LoopState,
 ) -> Result<StepOutcome> {
     let step_config = ctx
@@ -470,7 +583,7 @@ async fn step_loop_iteration(
         ctx.compiled,
         current_step,
         step_call_site,
-        &state.group_retry_counts,
+        group_retry_counts,
         &mut state.counters,
     ) {
         return Ok(outcome);
@@ -508,8 +621,11 @@ async fn step_loop_iteration(
         {
             tracker.take_snapshot(&group_snapshot_key(call_site))?;
         }
-        return Ok(get_next_step(&ctx.compiled.steps, current_step, None)
-            .map_or(StepOutcome::Done, StepOutcome::Next));
+        return Ok(transition(
+            get_next_step(&ctx.compiled.steps, current_step, None),
+            TransitionReason::SkipFallback,
+            false,
+        ));
     }
 
     crate::status_eprintln!(
@@ -524,7 +640,7 @@ async fn step_loop_iteration(
     if let Some(token) = ctx.cancel_token
         && token.is_cancelled()
     {
-        return Ok(StepOutcome::Done);
+        return Err(CruiseError::Interrupted);
     }
 
     let step_start = Instant::now();
@@ -551,8 +667,6 @@ async fn step_loop_iteration(
         nfc_cond.is_some(),
     )?;
 
-    let has_if_fail = if_fail.is_some();
-    let has_nfc_condition = nfc_cond.is_some();
     let outcome = execute_step_kind(
         ctx,
         &kind,
@@ -561,8 +675,8 @@ async fn step_loop_iteration(
         step_start,
         &mut state.counters.failed,
         timeout_duration,
-        has_if_fail,
-        has_nfc_condition,
+        if_fail.is_some(),
+        nfc_cond.is_some(),
         current_step,
         step_config.allow_commit,
     )
@@ -659,89 +773,56 @@ async fn step_loop_iteration(
             } else {
                 None
             },
-            &mut state.group_retry_counts,
         )?
     } else {
         None
     };
 
-    let transition_reason = if if_fail_next.is_some() {
-        "if.fail"
-    } else if if_fail_retry {
-        "if.fail.retry"
-    } else if if_next.is_some() {
-        "if.file-changed"
-    } else if nfc_retry {
-        "if.no-file-changes: retry"
-    } else if outcome.option_next.is_some() {
-        "option"
-    } else if step_next.is_some() {
-        "next"
+    let group_retry = if if_next.as_ref().is_some_and(|(_, group)| *group) {
+        step_call_site.map(str::to_owned)
     } else {
-        "sequential"
+        None
+    };
+    let reason = if let Some(target) = &if_fail_next {
+        TransitionReason::IfFailGoto {
+            target: crate::graph::resolve_target(ctx.compiled, target)?,
+        }
+    } else if if_fail_retry {
+        TransitionReason::IfFailRetry
+    } else if let Some((target, group)) = &if_next {
+        let target = crate::graph::resolve_target(ctx.compiled, target)?;
+        if *group {
+            TransitionReason::GroupRetry { target }
+        } else {
+            TransitionReason::IfFileChanged { target }
+        }
+    } else if nfc_retry {
+        TransitionReason::IfNoFileChangesRetry
+    } else if step_config.option.is_some() {
+        TransitionReason::OptionChoice {
+            selector: String::new(),
+        }
+    } else if step_next.is_some() {
+        TransitionReason::Next
+    } else {
+        TransitionReason::Sequential
     };
     let effective_next = if_fail_next
         .or(if_fail_retry.then(|| current_step.to_string()))
-        .or(if_next)
+        .or(if_next.map(|(target, _)| target))
         .or(nfc_retry.then(|| current_step.to_string()))
         .or(outcome.option_next)
         .or(step_next);
-    let next_step = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
-
-    if let Some(ref next) = next_step {
-        let edge = (current_step.to_string(), next.clone());
-        let count = state.edge_counts.entry(edge).or_insert(0);
-        *count += 1;
-        crate::status_eprintln!(
-            "  {} {} -> {} [{}] (edge {}/{})",
-            style("->").dim(),
-            current_step,
-            next,
-            transition_reason,
-            count,
-            ctx.max_retries
-        );
-        if let Some(log) = ctx.on_step_log {
-            log(
-                "info",
-                &format!(
-                    "-> {current_step} -> {next} [{transition_reason}] (edge {count}/{})",
-                    ctx.max_retries
-                ),
-            );
-        }
-        if *count > ctx.max_retries {
-            let mut all_edges: Vec<(String, String, usize)> = state
-                .edge_counts
-                .iter()
-                .map(|((f, t), &c)| (f.clone(), t.clone(), c))
-                .collect();
-            all_edges.sort_by_key(|b| std::cmp::Reverse(b.2));
-            let referenced_steps: std::collections::HashSet<&str> = std::iter::once(current_step)
-                .chain(std::iter::once(next.as_str()))
-                .chain(
-                    all_edges
-                        .iter()
-                        .flat_map(|(f, t, _)| [f.as_str(), t.as_str()]),
-                )
-                .collect();
-            let skipped_steps: Vec<String> = ctx
-                .skipped_steps
-                .iter()
-                .filter(|s| referenced_steps.contains(s.as_str()))
-                .cloned()
-                .collect();
-            return Err(CruiseError::LoopProtection {
-                from: current_step.to_string(),
-                to: next.clone(),
-                max_retries: ctx.max_retries,
-                edge_counts: all_edges,
-                skipped_steps,
-            });
-        }
-    }
-
-    Ok(next_step.map_or(StepOutcome::Done, StepOutcome::Next))
+    let next = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
+    let target = next
+        .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
+        .transpose()?;
+    Ok(Transition {
+        target,
+        reason,
+        budgeted: true,
+        group_retry,
+    })
 }
 
 /// Execute a single step kind and return execution outcome.
@@ -1324,17 +1405,8 @@ pub(crate) fn get_next_step(
         return Some(next.to_string());
     }
 
-    let mut found = false;
-    for key in steps.keys() {
-        if found {
-            return Some(key.clone());
-        }
-        if key == current {
-            found = true;
-        }
-    }
-
-    None
+    let index = steps.get_index_of(current)?;
+    steps.get_index(index + 1).map(|(name, _)| name.clone())
 }
 
 fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
@@ -1831,6 +1903,7 @@ steps:
             on_step_log: None,
         };
 
+        let before_second = std::sync::Mutex::new(None);
         // When: the whole workflow runs to completion
         execute_steps_with_dag(
             &ctx,
@@ -1838,28 +1911,31 @@ steps:
             &mut tracker,
             &mut dag,
             &start,
-            &|_cp, _dag| Ok(()),
+            &|cp, graph| {
+                if cp.step_name == "step2" && !graph.state.completed {
+                    *before_second
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        graph.state.runtime.prev_success;
+                }
+                Ok(())
+            },
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: step2's node -- which had not yet run when its runtime was
-        // written -- records step1's produced prev.success, because runtime
-        // is snapshotted right *before* a node executes, not after.
-        let step2_id = dag
-            .first_node_for_step("step2")
-            .unwrap_or_else(|| panic!("step2 not found in dag"))
-            .clone();
+        // The checkpoint before step2 contains step1's output without node copies.
         assert_eq!(
-            dag.nodes[&step2_id].runtime.prev_success,
-            Some(true),
-            "step2's pre-execution runtime snapshot should reflect step1's success"
+            *before_second
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(true)
         );
-
-        // And: step1's own node has visited_at set (it already ran) while
-        // step2's node -- whose step2 command doesn't touch prev.success --
-        // still records step1's outcome unchanged, since nothing overwrote it
-        // after step2 ran.
+        assert!(
+            dag.nodes
+                .values()
+                .all(|node| node.runtime.prev_success.is_none())
+        );
         assert!(
             dag.nodes[&start].runtime.visited_at.is_some(),
             "step1 should be marked visited after it completes"
@@ -1940,7 +2016,7 @@ steps:
             .first_node_for_step("second")
             .unwrap_or_else(|| panic!("second not found in dag"))
             .clone();
-        let runtime = dag2.nodes[&second_id].runtime.clone();
+        let runtime = dag2.state.runtime.clone();
         let mut vars2 = VariableStore::new(String::new());
         vars2.set_prev_output(runtime.prev_output);
         vars2.set_prev_input(runtime.prev_input);
@@ -2370,6 +2446,27 @@ steps:
 "#;
         let result = run_config_with_retries(yaml, "", None, 2, 0).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_zero_max_retries_rejects_first_budgeted_transition() {
+        // Given: a linear workflow with no loop edge.
+        let yaml = r"
+command: [echo]
+steps:
+  first:
+    command: echo first
+  second:
+    command: echo second
+";
+
+        // When: the global loop ceiling is explicitly zero.
+        let result = run_config_with_retries(yaml, "", None, 0, 0).await;
+
+        // Plan 3.2 preserves ordinary-edge accounting. Only skip paths are exempt.
+        assert!(
+            matches!(result, Err(CruiseError::LoopProtection { from, to, max_retries: 0, edge_counts, .. }) if from == "first" && to == "second" && edge_counts.is_empty())
+        );
     }
 
     #[tokio::test]
@@ -2941,7 +3038,10 @@ steps:
             &mut tracker,
             &mut dag,
             &start,
-            &|cp, _dag| {
+            &|cp, graph| {
+                if graph.state.completed {
+                    return Ok(());
+                }
                 called_ref
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3717,7 +3817,7 @@ steps:
 
     #[tokio::test]
     async fn test_execute_steps_config_reloader_updates_compiled_when_changed() {
-        // Given: initial config with only step1, reloader returns step1+step2
+        // Given: initial config with only step1, reloader returns step1+step2.
         let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
         let updated_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo updated\n  step2:\n    command: echo extra\n";
         let updated_config = make_config(updated_yaml);
@@ -3753,7 +3853,8 @@ steps:
         )
         .await;
         // Then: completes successfully (steps executed with the updated config)
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+        let result = result.unwrap_or_else(|e| panic!("expected Ok, got: {e:?}"));
+        assert_eq!(result.run, 2);
     }
 
     #[tokio::test]
@@ -4883,7 +4984,10 @@ steps:
             &mut tracker,
             &mut dag,
             &start,
-            &|cp, _dag| {
+            &|cp, graph| {
+                if graph.state.completed {
+                    return Ok(());
+                }
                 checkpoints_ref
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4897,12 +5001,12 @@ steps:
         // Then: the callback was called twice with the correct node id / step name pairs
         assert_eq!(checkpoints.len(), 2);
         assert_eq!(
-            checkpoints[0].0, "n0000",
+            checkpoints[0].0, "step1",
             "first call must receive start node id"
         );
         assert_eq!(checkpoints[0].1, "step1");
         assert_eq!(
-            checkpoints[1].0, "n0001",
+            checkpoints[1].0, "step2",
             "second call must receive second node id"
         );
         assert_eq!(checkpoints[1].1, "step2");
@@ -4956,7 +5060,10 @@ steps:
             &mut tracker,
             &mut dag,
             &step2_node,
-            &|cp, _dag| {
+            &|cp, graph| {
+                if graph.state.completed {
+                    return Ok(());
+                }
                 visited_ref
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5073,16 +5180,33 @@ steps:
         )
         .await;
 
-        // Then: execution terminates without an unbounded loop
-        // (exact outcome — error or graceful stop — depends on implementation;
-        // what matters is that it does not run forever)
-        let _ = result; // accept both Ok and Err
+        // Then: the accepted retry traversals are preserved and the next retry
+        // request is reported as loop protection rather than successful exit.
+        let Err(CruiseError::LoopProtection {
+            from,
+            to,
+            max_retries,
+            edge_counts,
+            ..
+        }) = result
+        else {
+            panic!("expected LoopProtection after the retry budget was exhausted");
+        };
+        assert_eq!(from, "step1");
+        assert_eq!(to, "step1");
+        assert_eq!(max_retries, 2);
+        assert!(
+            edge_counts.iter().any(|(edge_from, edge_to, count)| {
+                edge_from == "step1" && edge_to == "step1" && *count == 2
+            }),
+            "the diagnostic must report the two accepted self-edge traversals: {edge_counts:?}"
+        );
     }
 
-    #[tokio::test]
-    async fn test_execute_steps_with_dag_loop_resumes_from_later_iteration_node() {
-        // Given: a workflow with a retry loop (max_retries=3) where step1 always fails
-        // and we start execution from the second retry node (simulating a resume).
+    #[test]
+    fn test_execute_steps_with_dag_resume_uses_one_stable_step_node() {
+        // Given: a workflow with a retry loop where the same compiled step is
+        // visited repeatedly before a checkpoint is persisted.
         let yaml = r#"
 command: [sh, -c, "exit 1"]
 steps:
@@ -5094,82 +5218,65 @@ steps:
   step2:
     command: "echo done"
 "#;
-        let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
         let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
-        let mut dag = crate::dag::build_dag(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Find the second node for step1 (first retry, not the DAG start).
-        // The DAG for this workflow looks like:
-        //   n0000 (step1, 0 retries) -> n0001 (step1, 1 retry) -> n0002 (step1, 2 retries)
-        //     -> n0003 (step1, 3 retries) -> terminal
-        // Starting from n0001 simulates resuming after 1 retry has already happened.
-        let step1_nodes: Vec<_> = dag
+        let mut checkpoint =
+            crate::dag::build_dag(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
+        let step1_id = checkpoint
+            .first_node_for_step("step1")
+            .unwrap_or_else(|| panic!("expected step1 in graph"))
+            .clone();
+        let step1_nodes = checkpoint
             .nodes
             .values()
-            .filter(|n| n.step_name == "step1")
-            .collect();
-        // There should be at least two step1 nodes (original + at least one retry node).
-        assert!(
-            step1_nodes.len() >= 2,
-            "expected multiple step1 nodes for retry loop but got {}",
-            step1_nodes.len()
-        );
-        // Pick the second step1 node (first retry) — it is NOT the DAG start.
-        let second_step1_id = dag
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.step_name == "step1" && n.id != dag.start)
-            .map(|(id, _)| id.clone())
-            .next()
-            .unwrap_or_else(|| panic!("expected a non-start step1 node"));
-
-        let mut vars = VariableStore::new(String::new());
-        let mut tracker =
-            FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        let mut visited_nodes: Vec<String> = Vec::new();
-        let visited_ref = std::sync::Mutex::new(&mut visited_nodes);
-
-        let ctx = ExecutionContext {
-            compiled: &compiled,
-            max_retries: 3,
-            rate_limit_retries: 0,
-            on_step_start: &|_| Ok(()),
-            cancel_token: None,
-            option_handler: &NoOpOptionHandler,
-            config_reloader: None,
-            working_dir: None,
-            skipped_steps: &[],
-            on_step_log: None,
-        };
-
-        // When: we resume from the second step1 node (as if one retry already happened)
-        let _ = execute_steps_with_dag(
-            &ctx,
-            &mut vars,
-            &mut tracker,
-            &mut dag,
-            &second_step1_id,
-            &|cp, _dag| {
-                visited_ref
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(cp.node_id.clone());
-                Ok(())
-            },
-        )
-        .await;
-
-        // Then: the number of node visits from this point must be <= 3 (n0001 + 2 retries),
-        // not 4 (the full budget from n0000).  With max_retries=3 and 1 retry already consumed,
-        // 2 retries remain, giving at most 3 step1 visits from n0001.
-        let step1_visit_count = visited_nodes
-            .iter()
-            .filter(|id| dag.nodes[*id].step_name == "step1")
+            .filter(|node| node.step_name == "step1")
             .count();
         assert!(
-            step1_visit_count <= 3,
-            "resuming from the 2nd step1 node should see at most 3 more step1 visits, got {step1_visit_count}"
+            step1_nodes == 1,
+            "revisiting step1 must not create per-iteration graph nodes"
+        );
+
+        checkpoint
+            .nodes
+            .get_mut(&step1_id)
+            .unwrap_or_else(|| panic!("step1 node disappeared before checkpoint"))
+            .runtime
+            .prev_success = Some(false);
+        checkpoint
+            .nodes
+            .get_mut(&step1_id)
+            .unwrap_or_else(|| panic!("step1 node disappeared before checkpoint"))
+            .runtime
+            .prev_output = Some("failed attempt".to_string());
+
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = temp.path().join(crate::dag::DAG_FILE_NAME);
+        crate::dag::save_dag(&checkpoint, &path).unwrap_or_else(|e| panic!("{e:?}"));
+        let persisted = crate::dag::load_dag(&path).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: the session is rebuilt with a different retry ceiling and the
+        // persisted checkpoint is adopted.
+        let mut resumed =
+            crate::dag::build_dag(&compiled, 1_000_000).unwrap_or_else(|e| panic!("{e:?}"));
+        let resumed_step1_id = resumed
+            .first_node_for_step("step1")
+            .unwrap_or_else(|| panic!("expected step1 in resumed graph"))
+            .clone();
+        assert_eq!(resumed_step1_id, step1_id);
+        resumed.adopt_runtime_from(&persisted);
+
+        // Then: the same stable node carries the saved execution context into
+        // the resumed run instead of inferring it from an iteration node.
+        assert_eq!(
+            resumed.nodes[&resumed_step1_id].runtime.prev_success,
+            Some(false)
+        );
+        assert_eq!(
+            resumed.nodes[&resumed_step1_id]
+                .runtime
+                .prev_output
+                .as_deref(),
+            Some("failed attempt")
         );
     }
 }

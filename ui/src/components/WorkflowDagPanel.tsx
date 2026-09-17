@@ -17,13 +17,16 @@ interface WorkflowDagPanelProps {
   className?: string;
 }
 
-export function WorkflowDagPanel({ sessionId, panelId, tabId, className = "" }: WorkflowDagPanelProps) {
+export function WorkflowDagPanel(props: WorkflowDagPanelProps) {
+  return <WorkflowGraph key={props.sessionId} {...props} />;
+}
+
+function WorkflowGraph({ sessionId, panelId, tabId, className = "" }: WorkflowDagPanelProps) {
   const [state, setState] = useState<DagPanelState>({ kind: "loading" });
 
   useEffect(() => {
     let active = true;
     const renderId = crypto.randomUUID();
-    setState({ kind: "loading" });
     void (async () => {
       try {
         const data = await getSessionDag(sessionId);
@@ -40,7 +43,7 @@ export function WorkflowDagPanel({ sessionId, panelId, tabId, className = "" }: 
         const { svg } = await mermaid.render(`dag-${renderId}`, buildMermaidSource(data));
         if (active) setState({ kind: "svg", svg });
       } catch (e) {
-        if (active) setState({ kind: "error", message: `Failed to render DAG: ${String(e)}` });
+        if (active) setState({ kind: "error", message: `Failed to render Graph: ${String(e)}` });
       }
     })();
     return () => { active = false; };
@@ -49,8 +52,8 @@ export function WorkflowDagPanel({ sessionId, panelId, tabId, className = "" }: 
   return (
     <div id={panelId} role="tabpanel" aria-labelledby={tabId} className={`h-full overflow-auto ${className}`}>
       {state.kind === "error" && <p className="p-4 text-sm text-red-600 dark:text-red-400">{state.message}</p>}
-      {state.kind === "loading" && <p className="p-4 text-sm text-gray-500 dark:text-gray-400">Loading DAG…</p>}
-      {state.kind === "empty" && <p className="p-4 text-sm text-gray-500 dark:text-gray-400">No DAG available.</p>}
+      {state.kind === "loading" && <p className="p-4 text-sm text-gray-500 dark:text-gray-400">Loading Graph…</p>}
+      {state.kind === "empty" && <p className="p-4 text-sm text-gray-500 dark:text-gray-400">No Graph available.</p>}
       {state.kind === "svg" && <div className="dag-svg p-4" dangerouslySetInnerHTML={{ __html: state.svg }} />}
     </div>
   );
@@ -65,13 +68,17 @@ function buildMermaidSource(dag: DagDto): string {
     const from = nodeId.get(edge.from);
     if (!from) continue;
     if (!edge.to) {
-      lines.push(`  ${from} --> end_terminal[/END/]`);
+      lines.push(edge.reason === "ifNoFileChangesFail"
+        ? `  ${from} --> error_terminal[/ERROR/]`
+        : `  ${from} --> end_terminal[/END/]`);
       continue;
     }
     const to = nodeId.get(edge.to);
     if (!to) continue;
     const reason = edge.selector ? { [edge.reason]: edge.selector } : edge.reason;
-    const label = edgeLabel(reason);
+    const reasonLabel = edgeLabel(reason);
+    const countLabel = edge.traversals > 0 ? `${edge.traversals} traversals, ${edge.budgetedTraversals} budgeted` : null;
+    const label = [reasonLabel, countLabel].filter(Boolean).join(" · ");
     lines.push(label ? `  ${from} -->|"${escapeMermaidLabel(label)}"| ${to}` : `  ${from} --> ${to}`);
   }
   const start = nodeId.get(dag.startStep);

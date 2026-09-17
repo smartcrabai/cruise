@@ -146,15 +146,18 @@ pub struct SessionState {
     /// stay clean; the augmented prompt is rebuilt on demand for the LLM.
     #[serde(default)]
     pub attachments: Vec<PathBuf>,
-    /// True once the execution DAG has been built and persisted for this
-    /// session.  When `false`, the session predates DAG support (or the DAG has
-    /// not yet been created on first `cruise run`) and the engine falls back to
-    /// legacy step-name resumption.
+    /// Display copy indicating a persisted execution graph. A matching checkpoint
+    /// remains authoritative even if saving this flag was interrupted.
     #[serde(default)]
     pub has_dag: bool,
-    /// True when `current_step` holds a DAG node id (e.g. `"n0007"`) rather
-    /// than a plain step name.  Always `false` for sessions created before DAG
-    /// support was added.
+    /// Identifies an explicitly requested execution, independently of display state.
+    #[serde(default)]
+    pub execution_id: Option<String>,
+    /// True when `current_step` should be resolved as a graph node id rather
+    /// than a legacy step name. New fixed-topology checkpoints use the
+    /// compiled step name as the stable node id; older expanded graphs may use
+    /// generated ids such as `"n0007"`. Always `false` for sessions created
+    /// before graph support was added.
     #[serde(default)]
     pub current_step_is_node_id: bool,
     /// URL of the GitHub issue created by a "Publish as Issue" attempt that
@@ -235,6 +238,7 @@ impl SessionState {
             cleanup_after_pr_override: None,
             attachments: vec![],
             has_dag: false,
+            execution_id: Some(uuid::Uuid::new_v4().to_string()),
             current_step_is_node_id: false,
             published_issue_url: None,
             exec: false,
@@ -352,6 +356,7 @@ impl SessionState {
         self.runner_pid = None;
         self.runner_started_at = None;
         self.has_dag = false;
+        self.execution_id = Some(uuid::Uuid::new_v4().to_string());
         self.current_step_is_node_id = false;
     }
 
@@ -441,14 +446,11 @@ impl SessionManager {
         self.sessions_dir().join(session_id).join("run.log")
     }
 
-    /// Path to the persisted execution DAG for a session.
+    /// Path to the authoritative graph checkpoint, retaining the legacy filename.
     ///
-    /// See [`crate::dag::save_dag`] and [`crate::dag::load_dag`]. The file
-    /// only exists once at least one step has run under the DAG-driven
-    /// execution path (see `SessionState::has_dag`); sessions created before
-    /// DAG persistence was wired up may have `has_dag` set without this file
-    /// ever existing, in which case callers should fall back to a freshly
-    /// built DAG with no restored runtime context.
+    /// See [`crate::graph::persistence::save_graph`] and
+    /// [`crate::graph::persistence::load_graph`]. Saved before the first step.
+    /// Missing or invalid checkpoints must not silently reset resume counters.
     #[must_use]
     pub fn dag_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir()
@@ -561,6 +563,18 @@ impl SessionManager {
         state: &SessionState,
     ) -> Result<SessionStateFingerprint> {
         let path = self.state_path(&state.id);
+        if !state.has_dag
+            && state.execution_id.is_some()
+            && path.is_file()
+            && self.load(&state.id)?.execution_id != state.execution_id
+        {
+            let checkpoint = self.dag_path(&state.id);
+            if checkpoint.exists() {
+                let archive = checkpoint
+                    .with_file_name(format!("dag.previous.{}.json", Uuid::new_v4().simple()));
+                std::fs::rename(&checkpoint, archive)?;
+            }
+        }
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| CruiseError::SessionError(format!("serialize error: {e}")))?;
         let fingerprint = SessionStateFingerprint::from_bytes(&json);

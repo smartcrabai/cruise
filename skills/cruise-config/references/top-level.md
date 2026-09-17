@@ -20,7 +20,7 @@ model: sonnet             # Optional: default model for prompt steps
 plan_model: opus          # Optional: model for the built-in plan step
                           # (in SDK mode, a "provider/model[:effort]" reference)
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
-max_retries: 4           # Optional: global DAG edge traversal ceiling (default: 3)
+max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
@@ -210,4 +210,4 @@ retry:                    # Optional; accepted by validation for any backend, ho
       - openai-api/gpt-5.5
 ```
 
-Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a retryable failure remains skipped for 30 minutes in this process (in-memory, not persisted across processes). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the DAG loop-protection ceiling, not a retry budget for prompts.
+Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a retryable failure remains skipped for 30 minutes in this process (in-memory, not persisted across processes). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the graph loop-protection ceiling, not a retry budget for prompts.

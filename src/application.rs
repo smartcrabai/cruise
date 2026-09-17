@@ -1999,26 +1999,25 @@ impl CruiseApplication {
         config.save()
     }
 
-    /// Load or rebuild a session execution DAG.
+    /// Load or rebuild a session execution graph through the legacy
+    /// `session_dag` API name.
     ///
     /// # Errors
     ///
     /// Returns an error when the session, configuration, or workflow cannot be loaded or compiled.
-    pub fn session_dag(&self, id: &str) -> Result<Option<crate::dag::ExecutionDag>> {
+    pub fn session_dag(&self, id: &str) -> Result<Option<crate::graph::ExecutionGraph>> {
         let state = self.manager.load(id)?;
         let path = self.manager.dag_path(id);
-        if state.has_dag && path.is_file() {
-            match crate::dag::load_dag(&path) {
-                Ok(dag) => return Ok(Some(dag)),
-                Err(_) => {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
+        // The checkpoint is authoritative even when state.json was not updated
+        // after the graph save.  This also keeps corrupt and legacy files
+        // observable instead of silently rebuilding or deleting them.
+        if state.has_dag || path.exists() {
+            return crate::graph::persistence::load_graph(&path).map(Some);
         }
         let config = self.manager.load_config(&state)?;
         let max_retries = crate::config::resolve_effective_max_retries(None, &config);
         crate::workflow::compile(config)
-            .and_then(|compiled| crate::dag::build_dag(&compiled, max_retries))
+            .and_then(|compiled| crate::graph::build_graph(&compiled, max_retries))
             .map(Some)
     }
 
@@ -2916,7 +2915,7 @@ struct RunSetup {
     max_retries: usize,
     rate_limit_retries: usize,
     retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
-    dag: crate::dag::ExecutionDag,
+    dag: crate::graph::ExecutionGraph,
 }
 
 fn prepare_run_workspace(
@@ -2947,30 +2946,6 @@ fn prepare_run_workspace(
             }
         };
     Ok((workspace, repo_clone_created))
-}
-
-fn restore_runtime_dag(
-    manager: &SessionManager,
-    state: &mut SessionState,
-    dag: &mut crate::dag::ExecutionDag,
-    id: &str,
-) {
-    let dag_path = manager.dag_path(id);
-    if state.has_dag && dag_path.is_file() {
-        if let Ok(persisted) = crate::dag::load_dag(&dag_path) {
-            dag.adopt_runtime_from(&persisted);
-        } else {
-            state.has_dag = false;
-            let _ = std::fs::remove_file(&dag_path);
-            if state.current_step_is_node_id {
-                state.current_step = None;
-                state.current_step_is_node_id = false;
-            }
-        }
-    } else if state.current_step_is_node_id {
-        state.current_step = None;
-        state.current_step_is_node_id = false;
-    }
 }
 
 fn setup_run_blocking(
@@ -3004,6 +2979,16 @@ fn setup_run_blocking(
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let retry_policy = crate::retry::policy_for_config(config.retry.clone());
     let compiled = crate::workflow::compile(config)?;
+    let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
+    let entry = crate::graph::persistence::prepare_resume(
+        &mut dag,
+        &manager.dag_path(id),
+        state.has_dag,
+        state.current_step.as_deref(),
+        state.current_step_is_node_id,
+        state.execution_id.as_deref(),
+    )?;
+    crate::graph::validation::validate_workflow(&compiled, &dag, &entry, &state.skipped_steps)?;
     let workspace_mode = if state.exec {
         WorkspaceMode::CurrentBranch
     } else if state.repo.is_some() {
@@ -3018,19 +3003,6 @@ fn setup_run_blocking(
         prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;
     crate::workspace::update_session_workspace(&mut state, &workspace);
     state.workspace_mode = workspace_mode;
-    let mut dag = match crate::dag::build_dag(&compiled, max_retries) {
-        Ok(dag) => dag,
-        Err(error) => {
-            let _ = cleanup_new_execution_workspace(
-                manager,
-                &mut state,
-                &workspace,
-                repo_clone_created,
-            );
-            return Err(error);
-        }
-    };
-    restore_runtime_dag(manager, &mut state, &mut dag, id);
     Ok(RunSetup {
         state,
         compiled,
@@ -3071,47 +3043,21 @@ async fn prepare_run_setup(
     .map_err(|error| CruiseError::Other(format!("run setup worker failed: {error}")))?
 }
 struct RunInputs {
-    start: String,
     vars: crate::variable::VariableStore,
     tracker: crate::file_tracker::FileTracker,
     skipped_steps: Vec<String>,
 }
 
 fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
-    let start = match setup.state.current_step.as_deref() {
-        Some(step) if setup.state.current_step_is_node_id && setup.dag.nodes.contains_key(step) => {
-            step.to_string()
-        }
-        Some(_) if setup.state.current_step_is_node_id => {
-            setup.state.current_step = None;
-            setup.state.current_step_is_node_id = false;
-            setup.dag.start.clone()
-        }
-        Some(step) => setup
-            .dag
-            .first_node_for_step(step)
-            .cloned()
-            .unwrap_or_else(|| setup.dag.start.clone()),
-        None => setup.dag.start.clone(),
-    };
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
     let mut vars = crate::variable::VariableStore::new(setup.state.input_with_attachments());
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
-    let mut tracker =
-        crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
-    if let Some(node) = setup.dag.nodes.get(&start) {
-        vars.set_prev_output(node.runtime.prev_output.clone());
-        vars.set_prev_input(node.runtime.prev_input.clone());
-        vars.set_prev_stderr(node.runtime.prev_stderr.clone());
-        vars.set_prev_success(node.runtime.prev_success);
-        tracker.restore_snapshots(node.runtime.file_snapshots.clone());
-    }
+    let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
     setup.state.phase = SessionPhase::Running;
     setup.state.set_runner_to_current_process();
     manager.save(&setup.state)?;
     Ok(RunInputs {
-        start,
         vars,
         tracker,
         skipped_steps: setup.state.skipped_steps.clone(),
@@ -3170,16 +3116,49 @@ fn run_log_callback(
     }
 }
 
+fn config_reloader_for_path(
+    path: Option<&std::path::Path>,
+    effective_max_retries: usize,
+) -> Option<Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>> {
+    let path = path?.to_path_buf();
+    let last_mtime = Mutex::new(
+        std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok(),
+    );
+    Some(Box::new(move || {
+        let current_mtime = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let mut last = last_mtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current_mtime == *last {
+            return Ok(None);
+        }
+        let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
+        crate::config::validate_config(&config)?;
+        crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
+        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+        let compiled = crate::workflow::compile(config)?;
+        *last = current_mtime;
+        Ok(Some(crate::engine::ReloadedWorkflow {
+            compiled,
+            retry_policy,
+        }))
+    }))
+}
+
 fn node_checkpoint_callback(
     manager: SessionManager,
     id: String,
     path: PathBuf,
-) -> impl for<'a> Fn(&crate::engine::NodeCheckpoint<'a>, &crate::dag::ExecutionDag) -> Result<()>
+) -> impl for<'a> Fn(&crate::engine::NodeCheckpoint<'a>, &crate::graph::ExecutionGraph) -> Result<()>
 + Send
 + Sync
 + 'static {
     move |checkpoint, checkpoint_dag| {
-        crate::dag::save_dag(checkpoint_dag, &path)?;
+        crate::graph::persistence::save_graph(checkpoint_dag, &path)?;
         let mut state = manager.load(&id)?;
         state.current_step = Some(checkpoint.node_id.clone());
         state.current_step_is_node_id = true;
@@ -3193,17 +3172,16 @@ async fn run_engine_steps(
     retry_policy: Option<&Arc<crate::retry::RetryPolicy>>,
     vars: &mut crate::variable::VariableStore,
     tracker: &mut crate::file_tracker::FileTracker,
-    dag: &mut crate::dag::ExecutionDag,
-    start: &crate::dag::NodeId,
+    dag: &mut crate::graph::ExecutionGraph,
     on_node_start: &(
-         dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::dag::ExecutionDag) -> Result<()>
+         dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::graph::ExecutionGraph) -> Result<()>
              + Send
              + Sync
      ),
 ) -> Result<()> {
     crate::retry::with_active_policy(
         retry_policy.cloned(),
-        crate::engine::execute_steps_with_dag(ctx, vars, tracker, dag, start, on_node_start),
+        crate::engine::execute_steps_with_graph(ctx, vars, tracker, dag, on_node_start),
     )
     .await
     .map(|_| ())
@@ -3288,6 +3266,8 @@ async fn execute_run(
     let on_log = run_log_callback(logger, id.to_string(), log_sink, batch_started);
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
+    let config_reloader =
+        config_reloader_for_path(setup.state.config_path.as_deref(), setup.max_retries);
     let execution = {
         let ctx = crate::engine::ExecutionContext {
             compiled: &setup.compiled,
@@ -3295,7 +3275,7 @@ async fn execute_run(
             rate_limit_retries: setup.rate_limit_retries,
             cancel_token: Some(&claim.token),
             option_handler: &option,
-            config_reloader: None,
+            config_reloader: config_reloader.as_deref(),
             working_dir: Some(setup.workspace.path()),
             skipped_steps: &inputs.skipped_steps,
             on_step_log: Some(&on_log),
@@ -3307,7 +3287,6 @@ async fn execute_run(
             &mut inputs.vars,
             &mut inputs.tracker,
             &mut setup.dag,
-            &inputs.start,
             &on_node_start,
         )
         .await
@@ -3836,6 +3815,31 @@ impl OptionHandler for RuntimeOptionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_reloader_rejects_invalid_updated_config() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        let path = dir.path().join("workflow.yaml");
+        std::fs::write(
+            &path,
+            "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
+        )
+        .unwrap_or_else(|e| panic!("write initial config failed: {e}"));
+        let reloader = config_reloader_for_path(Some(&path), 3)
+            .unwrap_or_else(|| panic!("expected a config reloader"));
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(
+            &path,
+            "command: [echo]\nsteps:\n  first:\n    command: 'true'\n    timeout: invalid\n",
+        )
+        .unwrap_or_else(|e| panic!("write updated config failed: {e}"));
+
+        let error = reloader()
+            .err()
+            .unwrap_or_else(|| panic!("invalid updated config was accepted"));
+        assert!(error.to_string().contains("invalid timeout"), "{error}");
+    }
 
     #[test]
     fn same_session_claim_is_busy_and_raii_release_is_identity_safe() {

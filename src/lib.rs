@@ -16,6 +16,7 @@ pub mod engine;
 pub mod error;
 pub mod executor;
 pub mod file_tracker;
+pub mod graph;
 pub mod issue_publish;
 pub mod mcp_bridge;
 pub mod metadata;

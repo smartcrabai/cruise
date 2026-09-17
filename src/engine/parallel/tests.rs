@@ -16,6 +16,7 @@ struct Fixture {
     starts: Mutex<Vec<String>>,
     logs: Mutex<Vec<String>>,
     checkpoint: Mutex<Option<(String, String)>>,
+    before_steps: Mutex<std::collections::HashMap<String, crate::graph::NodeRuntime>>,
 }
 
 impl Fixture {
@@ -33,6 +34,7 @@ impl Fixture {
             starts: Mutex::new(Vec::new()),
             logs: Mutex::new(Vec::new()),
             checkpoint: Mutex::new(None),
+            before_steps: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -73,6 +75,12 @@ impl Fixture {
             &mut self.dag,
             &start,
             &|checkpoint, dag| {
+                if !dag.state.completed {
+                    self.before_steps
+                        .lock()
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .insert(checkpoint.step_name.to_string(), dag.state.runtime.clone());
+                }
                 *self.checkpoint.lock().unwrap_or_else(|e| panic!("{e}")) =
                     Some((checkpoint.node_id.clone(), serde_json::to_string(dag)?));
                 Ok(())
@@ -112,11 +120,11 @@ steps:
     assert_eq!(result.failed, 0);
     assert_eq!(result.run, 2);
     assert!(fixture.root.path().join("joined").exists());
-    let joined_node = fixture
-        .dag
-        .first_node_for_step("joined")
-        .unwrap_or_else(|| panic!("missing joined node"));
-    let runtime = &fixture.dag.nodes[joined_node].runtime;
+    let before = fixture
+        .before_steps
+        .lock()
+        .unwrap_or_else(|e| panic!("{e}"));
+    let runtime = &before["joined"];
     let saved_outputs: serde_json::Value =
         serde_json::from_str(runtime.prev_output.as_deref().unwrap_or_default())
             .unwrap_or_else(|e| panic!("{e}"));

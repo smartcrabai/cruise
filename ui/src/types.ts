@@ -184,6 +184,8 @@ export interface DagStepDto {
 }
 
 export interface DagEdgeDto {
+  traversals: number;
+  budgetedTraversals: number;
   from: string;
   to: string | null;
   reason: string;

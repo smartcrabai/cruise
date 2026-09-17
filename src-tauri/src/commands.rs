@@ -5,6 +5,7 @@ use cruise::application::{
     ApplicationEvent, ApplicationEventSink, CruiseApplication, CurrentStepUpdateDto, LogEvent,
     LogSink, NewSessionRequest, OperationKind, PlanRequest, RunRequest, SessionSettingsRequest,
 };
+use cruise::config::SkipCondition;
 use cruise::error::{CruiseError, Result as CruiseResult};
 use cruise::new_session_draft::NewSessionDraft;
 use cruise::session::{SessionPhase, SessionState, WorkspaceMode};
@@ -137,7 +138,7 @@ pub struct DagDto {
     pub current_step: Option<String>,
 }
 
-/// Load the session's already-resolved workflow config only for selected DAG detail.
+/// Load the session's already-resolved workflow config only for selected Graph detail.
 fn session_config(state: &SessionState) -> CruiseResult<cruise::config::WorkflowConfig> {
     let data_dir = cruise::paths::data_dir()?;
     let sessions_dir = data_dir.join("sessions");
@@ -170,8 +171,8 @@ fn step_kind(config: &cruise::config::StepConfig) -> String {
     }
 }
 
-fn transition_reason(reason: &cruise::dag::TransitionReason) -> (String, Option<String>) {
-    use cruise::dag::TransitionReason;
+fn transition_reason(reason: &cruise::graph::TransitionReason) -> (String, Option<String>) {
+    use cruise::graph::TransitionReason;
     match reason {
         TransitionReason::Sequential => ("sequential".to_string(), None),
         TransitionReason::Next => ("next".to_string(), None),
@@ -193,9 +194,10 @@ fn transition_reason(reason: &cruise::dag::TransitionReason) -> (String, Option<
 
 fn build_dag_dto(
     compiled: &cruise::workflow::CompiledWorkflow,
-    dag: &cruise::dag::ExecutionDag,
+    dag: &cruise::graph::ExecutionGraph,
     current_step: Option<&str>,
     current_step_is_node_id: bool,
+    skipped_steps: &[String],
 ) -> std::result::Result<DagDto, String> {
     let start_step = dag
         .step_name_for_node(&dag.start)
@@ -206,39 +208,53 @@ fn build_dag_dto(
             )
         })?
         .to_string();
-    let current_step = current_step.and_then(|step| {
-        if current_step_is_node_id {
-            dag.step_name_for_node(step).map(str::to_owned)
-        } else {
-            Some(step.to_string())
-        }
-    });
-    let dag_step_names: std::collections::HashSet<String> = dag
-        .nodes
-        .values()
-        .map(|node| node.step_name.clone())
-        .collect();
+    let current_step = dag
+        .state
+        .current
+        .as_deref()
+        .or(current_step.filter(|_| !dag.state.completed))
+        .and_then(|step| {
+            if current_step_is_node_id {
+                dag.step_name_for_node(step).map(str::to_owned)
+            } else {
+                Some(step.to_string())
+            }
+        });
+    let mut terminals = std::collections::HashMap::new();
+    for node in dag.nodes.values() {
+        let is_terminal = node.successors.iter().any(|edge| {
+            edge.target.is_none()
+                && match edge.reason {
+                    cruise::graph::TransitionReason::IfNoFileChangesFail => false,
+                    cruise::graph::TransitionReason::SkipFallback => {
+                        compiled.steps.get(&node.step_name).is_some_and(|step| {
+                            step.when.is_some()
+                                || matches!(
+                                    step.skip,
+                                    Some(SkipCondition::Static(true) | SkipCondition::Variable(_))
+                                )
+                                || skipped_steps.contains(&node.step_name)
+                        })
+                    }
+                    _ => true,
+                }
+        });
+        terminals
+            .entry(node.step_name.as_str())
+            .and_modify(|terminal| *terminal |= is_terminal)
+            .or_insert(is_terminal);
+    }
     let mut steps = Vec::new();
     for (name, config) in &compiled.steps {
-        if !dag_step_names.contains(name) {
+        let Some(&is_terminal) = terminals.get(name.as_str()) else {
             continue;
-        }
-        let is_terminal = dag
-            .nodes
-            .values()
-            .filter(|node| node.step_name == *name)
-            .any(|node| {
-                node.successors
-                    .iter()
-                    .any(|successor| successor.target.is_none())
-            });
+        };
         steps.push(DagStepDto {
             name: name.clone(),
             kind: step_kind(config),
             is_terminal,
         });
     }
-    let mut seen_edges = std::collections::HashSet::new();
     let mut edges = Vec::new();
     for node in dag.nodes.values() {
         for successor in &node.successors {
@@ -248,20 +264,19 @@ fn build_dag_dto(
                 .and_then(|id| dag.step_name_for_node(id))
                 .map(str::to_owned);
             let (reason, selector) = transition_reason(&successor.reason);
-            let key = (
-                node.step_name.clone(),
-                to.clone(),
-                reason.clone(),
-                selector.clone(),
-            );
-            if seen_edges.insert(key) {
-                edges.push(DagEdgeDto {
-                    from: node.step_name.clone(),
-                    to,
-                    reason,
-                    selector,
-                });
-            }
+            let counts = to.as_ref().and_then(|to| {
+                dag.state
+                    .edge_counts
+                    .get(&(node.step_name.clone(), to.clone()))
+            });
+            edges.push(DagEdgeDto {
+                from: node.step_name.clone(),
+                to,
+                reason,
+                selector,
+                traversals: counts.map_or(0, |count| count.traversals),
+                budgeted_traversals: counts.map_or(0, |count| count.budgeted_traversals),
+            });
         }
     }
     Ok(DagDto {
@@ -287,6 +302,8 @@ pub struct DagEdgeDto {
     pub to: Option<String>,
     pub reason: String,
     pub selector: Option<String>,
+    pub traversals: usize,
+    pub budgeted_traversals: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,6 +462,7 @@ pub fn get_session_dag(
             &dag,
             session.current_step.as_deref(),
             session.current_step_is_node_id,
+            &session.skipped_steps,
         )
     })
     .transpose()
@@ -933,6 +951,86 @@ pub fn check_update_readiness_for_path(exe_path: &Path) -> UpdateReadinessDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_dto_preserves_cycles_and_accepted_counts() {
+        let config = cruise::config::WorkflowConfig::from_yaml(
+            "steps:\n  test:\n    command: echo test\n  review:\n    command: echo review\n    if:\n      file-changed: test\n",
+        )
+        .unwrap_or_else(|error| panic!("valid graph fixture: {error}"));
+        let compiled = cruise::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
+        let mut graph = cruise::graph::build_graph(&compiled, 1_000_000)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+        graph.state.current = Some("review".into());
+        graph.state.edge_counts.insert(
+            ("review".into(), "test".into()),
+            cruise::graph::EdgeCounter {
+                traversals: 3,
+                budgeted_traversals: 2,
+            },
+        );
+        let dto = build_dag_dto(&compiled, &graph, Some("test"), true, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
+        assert_eq!(dto.steps.len(), 2);
+        assert_eq!(dto.current_step.as_deref(), Some("review"));
+        let edge = dto
+            .edges
+            .iter()
+            .find(|edge| edge.from == "review" && edge.to.as_deref() == Some("test"))
+            .unwrap_or_else(|| panic!("back edge"));
+        assert_eq!((edge.traversals, edge.budgeted_traversals), (3, 2));
+        let value =
+            serde_json::to_value(edge).unwrap_or_else(|error| panic!("edge serializes: {error}"));
+        assert_eq!(value["budgetedTraversals"], 2);
+        assert_eq!(value["traversals"], 3);
+    }
+
+    #[test]
+    fn graph_dto_does_not_mark_error_only_exit_as_normal_terminal() {
+        let config = cruise::config::WorkflowConfig::from_yaml(
+            "steps:\n  loop:\n    command: 'true'\n    next: loop\n    if:\n      no-file-changes: failed\n",
+        )
+        .unwrap_or_else(|error| panic!("valid graph fixture: {error}"));
+        let compiled = cruise::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
+        let graph = cruise::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+
+        let dto = build_dag_dto(&compiled, &graph, None, false, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
+
+        assert_eq!(dto.steps.len(), 1);
+        assert!(!dto.steps[0].is_terminal);
+        assert!(
+            dto.edges
+                .iter()
+                .any(|edge| { edge.reason == "ifNoFileChangesFail" && edge.to.is_none() })
+        );
+    }
+
+    #[test]
+    fn graph_dto_does_not_mark_skip_false_fallback_as_normal_terminal() {
+        let config = cruise::config::WorkflowConfig::from_yaml(
+            "steps:\n  loop:\n    command: 'true'\n    next: loop\n    skip: false\n",
+        )
+        .unwrap_or_else(|error| panic!("valid graph fixture: {error}"));
+        let compiled = cruise::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
+        let graph = cruise::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+
+        let dto = build_dag_dto(&compiled, &graph, None, false, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
+
+        assert_eq!(dto.steps.len(), 1);
+        assert!(!dto.steps[0].is_terminal);
+        assert!(
+            dto.edges
+                .iter()
+                .any(|edge| { edge.reason == "skipFallback" && edge.to.is_none() })
+        );
+    }
 
     #[test]
     fn session_dto_serializes_nullable_fields_and_camel_case() {

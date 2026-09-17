@@ -1047,7 +1047,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
                   : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
               }`}
             >
-              DAG
+              Graph
             </button>
             <button
               type="button"
@@ -2138,6 +2138,8 @@ export default function App() {
 
   const emitNotification = useCallback((kind: ToastKind, sessionInput: string, detail?: string) => {
     addToast({ kind, sessionInput, detail: detail?.slice(0, 80) });
+    // Control characters are deliberately stripped from desktop notifications.
+    // eslint-disable-next-line no-control-regex
     const safeText = (detail ?? sessionInput).replace(/[\x00-\x1F\x7F]/g, " ").slice(0, 60);
     void notifyDesktop("Cruise", `${TOAST_LABEL[kind]} -- ${safeText}`);
   }, [addToast]);
