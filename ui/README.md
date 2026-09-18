@@ -1,6 +1,6 @@
 # React + TypeScript + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This template provides a minimal setup to get React working in Vite with HMR and some lint rules.
 
 Currently, two official plugins are available:
 
@@ -11,63 +11,21 @@ Currently, two official plugins are available:
 
 The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-## Expanding the ESLint configuration
+## Linting
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Linting uses [oxlint](https://oxc.rs/docs/guide/usage/linter.html); the rule set lives in `.oxlintrc.json`.
+ESLint and `typescript-eslint` were removed because `typescript-eslint` cannot run against
+TypeScript 7 (it has no stable JS API); oxlint is a native binary with no `typescript` dependency.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+pnpm lint       # oxlint .
+pnpm lint:fix   # oxlint . --fix
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+`.oxlintrc.json` was generated with `npx @oxlint/migrate` from the former `eslint.config.js`, so it
+mirrors `@eslint/js` recommended, `typescript-eslint` recommended, `eslint-plugin-react-hooks`
+(including the React Compiler rules) and `eslint-plugin-react-refresh`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Type-aware rules are not enabled. They require the extra `oxlint-tsgolint` binary and are the
+equivalent of `tseslint.configs.recommendedTypeChecked`; `tsc -b` (run by `pnpm build`) already
+covers type checking.
