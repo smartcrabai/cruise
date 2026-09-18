@@ -118,6 +118,9 @@ jobs:
       - name: Install pnpm and frontend deps
         run: corepack enable && corepack prepare pnpm@latest --activate && pnpm --dir ui install --frozen-lockfile
 
+      - name: Lint frontend
+        run: pnpm --dir ui run lint
+
       - name: Build frontend
         run: pnpm --dir ui run build
 

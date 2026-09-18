@@ -403,31 +403,12 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
     }
   }, [session.id]);
 
-  // Reset transient state when the selected session changes.
-  // activeTab is intentionally NOT reset here -- it is owned by App and persists
-  // per session across navigation. Lazy-load is triggered by the effect below.
-  useEffect(() => {
-    setStatus("idle");
-    setCurrentStep(null);
-    setLiveLog([]);
-    setSavedLog("");
-    stickToBottomRef.current = true;
-    setPlanContent("");
-    setPendingOption(null);
-    setPendingAskRequestId(null);
-    setReplanFeedback("");
-    setReplanPhase("idle");
-    setReplanError("");
-    setPlanProgress([]);
-    setAskQuestion("");
-    setAskPhase("idle");
-    setAskResponse("");
-    setAskError("");
-    setShowDeleteConfirm(false);
-    setShowDiscardConfirm(false);
-    setIsConfigBusy(false);
-    cancelRequestedRef.current = false;
-  }, [session.id]);
+  // Transient state is reset by remounting: the single callsite passes
+  // key={selectedSession.id}, so switching sessions gives this component a fresh
+  // instance with all state back at its useState initializers and both refs at
+  // their useRef defaults. activeTab is deliberately excluded -- it is owned by
+  // App and persists per session across navigation. Lazy-load is triggered by
+  // the effect below.
 
   // Rehydrate prompt IDs when revisiting a session while its operation is still active.
   // The persisted question alone is not enough to safely answer the runtime request.
@@ -451,6 +432,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
 
   useEffect(() => {
     if (activeTab !== "log" || status === "running") return;
+    // oxlint-disable-next-line react/set-state-in-effect -- loadSavedLog only setStates after awaiting the getSessionLog IPC; this effect syncs with an external system (the on-disk log) and must keep polling it.
     void loadSavedLog();
     const id = setInterval(() => {
       void loadSavedLog();
@@ -461,6 +443,7 @@ export function WorkflowRunner({ session, activeTab, onActiveTabChange, onSessio
   useEffect(() => {
     if (!planContent && session.planAvailable) {
       if (activeTab === "plan" || session.phase === "Awaiting Approval") {
+        // oxlint-disable-next-line react/set-state-in-effect -- loadPlan's synchronous setPlanLoading(true) is the loading flag for the getSessionPlan IPC; the plan is only knowable after that external fetch.
         void loadPlan();
       }
     }
@@ -1433,6 +1416,7 @@ function NewSessionForm({ draft, onDraftChange, onRefreshSidebar }: NewSessionFo
   // Load history-backed defaults on mount.
   useEffect(() => {
     let active = true;
+    // oxlint-disable-next-line react/set-state-in-effect -- refreshHistorySummary only setStates after awaiting the getNewSessionHistorySummary IPC; mount-time load from an external system.
     void refreshHistorySummary()
       .then((summary) => {
         if (!active || !summary) return;
