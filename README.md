@@ -434,6 +434,35 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
+### Model and Fallback Notices
+
+When a visible status or info channel is available, each prompt execution
+reports the Cruise-selected model there; every notice is also written to
+the session's `run.log`:
+
+```text
+Model: provider/model:free:xhigh
+```
+
+When retry policy switches models, Cruise reports the transition and then the
+replacement model:
+
+```text
+Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
+Model: provider/fallback
+```
+
+The complete model reference is retained, including its provider, path, and
+effort suffixes. When no model is configured, the notice identifies the
+backend instead, for example `Model: default model (jcode)`. Notices are sent
+to foreground CLI stderr when status output is enabled, the TUI's existing
+info log, and the session's `run.log`. Detached `cruise --plan` workers and
+the CLI's interactive `cruise run --all` dashboard suppress terminal notices,
+so those notices must be read from the session's `run.log`. They are not
+mixed into stdout or plan/Ask response content. The existing session
+lifecycle and log retention rules remain unchanged. In particular, transient
+`cruise exec` sessions are still removed after completion.
+
 > **`cruise exec`** is a separate path with a transient lifecycle: it executes in the current directory without planning, worktree creation, or PR creation, and removes its session after terminal completion. Paused or interrupted exec sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
 
 ### `cruise list` Actions

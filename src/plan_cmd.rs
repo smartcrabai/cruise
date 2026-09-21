@@ -40,6 +40,7 @@ fn cli_plan_ctx<'a>(
     grill: bool,
     formal_spec: bool,
     cancel_token: Option<&'a CancellationToken>,
+    on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
     // a handler that errors rather than blocking on stdin (ask_user is not
@@ -59,9 +60,19 @@ fn cli_plan_ctx<'a>(
         grill,
         formal_spec,
         on_session_id: None,
+        on_notice,
         cancel_token,
     }
 }
+
+fn cli_notice_callback(
+    manager: &SessionManager,
+    session_id: &str,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    let logger = crate::session::SessionLogger::new(manager.run_log_path(session_id));
+    move |message: &str| logger.write(&format!("[info] {message}"))
+}
+
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
 #[expect(
     clippy::fn_params_excessive_bools,
@@ -290,6 +301,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     } else {
         let work_dir = plan_working_dir(&session).to_path_buf();
         let cancel_token = CancellationToken::new();
+        let on_notice = cli_notice_callback(&manager, &session.id);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -299,6 +311,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             args.grill,
             args.formal_spec,
             Some(&cancel_token),
+            Some(&on_notice),
         );
         let plan_result = tokio::select! {
             result = generate_plan_markdown(&ctx, &mut vars, &mut resume) => result,
@@ -532,7 +545,20 @@ async fn approve_with_title(
     // The `generate_title` tool needs an SDK backend, which includes the default
     // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
     if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
-        match generate_title_via_sdk(config, &session.input, plan_content, cancel_token).await {
+        let log_notice = cli_notice_callback(manager, &session.id);
+        let on_notice = |message: &str| {
+            crate::status_eprintln!("{}", style(message).dim());
+            log_notice(message);
+        };
+        match generate_title_via_sdk(
+            config,
+            &session.input,
+            plan_content,
+            cancel_token,
+            Some(&on_notice),
+        )
+        .await
+        {
             Ok(title) => session.title = Some(title),
             Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
             Err(e) => {
@@ -553,6 +579,7 @@ async fn generate_title_via_sdk(
     input: &str,
     plan_content: &str,
     cancel_token: Option<&CancellationToken>,
+    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<String> {
     let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
@@ -580,7 +607,7 @@ async fn generate_title_via_sdk(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: 1,
             env: &env,
-            on_notice: None,
+            on_notice,
             cancel_token,
             working_dir: None,
             stream: None,
@@ -893,6 +920,7 @@ async fn generate_plan_for_session(
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
     // Background worker is non-interactive, so grill mode is never used here.
+    let on_notice = cli_notice_callback(manager, &session.id);
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
@@ -902,6 +930,7 @@ async fn generate_plan_for_session(
         false,
         false,
         None,
+        Some(&on_notice),
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
 }
@@ -1113,6 +1142,7 @@ async fn run_approve_loop(
     // interactive path — the noninteractive branch auto-approves below.
     // Grill affects only the initial plan template; fix/ask turns are standard.
     let cancel_token = CancellationToken::new();
+    let on_notice = cli_notice_callback(manager, &session.id);
     let ctx = cli_plan_ctx(
         config,
         plan_path,
@@ -1122,6 +1152,7 @@ async fn run_approve_loop(
         false,
         false,
         Some(&cancel_token),
+        Some(&on_notice),
     );
 
     // Read the plan once up front; re-read only after Fix modifies it.
@@ -1334,6 +1365,7 @@ pub async fn replan_session(
             .clone()
             .unwrap_or_else(|| session.base_dir.clone());
         let mut resume: Option<String> = None;
+        let on_notice = cli_notice_callback(manager, &session.id);
         // Fix-plan reuses the standard template regardless of grill.
         let ctx = cli_plan_ctx(
             &config,
@@ -1344,6 +1376,7 @@ pub async fn replan_session(
             false,
             false,
             None,
+            Some(&on_notice),
         );
         run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
@@ -1493,6 +1526,7 @@ pub async fn regenerate_plan_for_session(
 
         let work_dir = plan_working_dir(session).to_path_buf();
         let mut resume: Option<String> = None;
+        let on_notice = cli_notice_callback(manager, &session.id);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -1502,6 +1536,7 @@ pub async fn regenerate_plan_for_session(
             false,
             false,
             None,
+            Some(&on_notice),
         );
         generate_plan_markdown(&ctx, &mut vars, &mut resume)
             .await
@@ -1990,7 +2025,7 @@ steps:
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token)),
+            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token), None),
         )
         .await;
 
@@ -2024,7 +2059,7 @@ steps:
 
         // cat echoes the prompt; the generate_title tool is never called.
         // With no token, the function should complete (with an Err: None from the store).
-        let result = generate_title_via_sdk(&config, "task", "# Plan", None).await;
+        let result = generate_title_via_sdk(&config, "task", "# Plan", None, None).await;
 
         // The title store remains empty because cat doesn't call the tool,
         // so the function returns Err with "title store returned None".

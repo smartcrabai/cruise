@@ -388,7 +388,7 @@ fn has_status_code(lower: &str, code: &str) -> bool {
 }
 
 /// Notice detail for a model switch: the HTTP status code the failure text
-/// names (the `429` of `fallback: a -> b (429, attempt 2/5)`), or the class
+/// names (the `429` of `Warning: Fallback: a -> b (429, attempt 2/5)`), or the class
 /// label when it names none.
 fn failure_detail(class: RetryClass, text: &str) -> String {
     let lower = text.to_lowercase();
