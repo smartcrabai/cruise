@@ -97,6 +97,15 @@ impl PromptQueue {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// The question the user is being asked, if any: the open prompt first,
+    /// otherwise the next one in the queue.
+    #[must_use]
+    pub fn front_question(&self) -> Option<&str> {
+        self.active
+            .as_ref()
+            .map(|item| item.question.as_str())
+            .or_else(|| self.items.first().map(|item| item.question.as_str()))
+    }
     pub fn open_next(&mut self) {
         if self.active.is_some() || self.items.is_empty() {
             return;

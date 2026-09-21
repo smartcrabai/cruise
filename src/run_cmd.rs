@@ -57,13 +57,19 @@ struct NotificationOptionHandler<'a> {
 }
 
 impl NotificationOptionHandler<'_> {
-    fn notify(&self) {
+    /// Announce a menu the user must answer: desktop notification plus a
+    /// `blocked` herdr report for as long as the returned guard lives.
+    fn announce(&self, showing_menu: bool) -> Option<crate::herdr::BlockedGuard> {
+        if !showing_menu {
+            return None;
+        }
         crate::desktop_notifications::send_best_effort(
             crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
             Some(&self.subject),
             Some(OPTION_NOTIFICATION_DETAIL),
             &self.session_id,
         );
+        Some(crate::herdr::blocked(OPTION_NOTIFICATION_DETAIL))
     }
 }
 
@@ -73,9 +79,7 @@ impl OptionHandler for NotificationOptionHandler<'_> {
         choices: &[crate::step::OptionChoice],
         plan: Option<&str>,
     ) -> Result<crate::step::option::OptionResult> {
-        if !choices.is_empty() {
-            self.notify();
-        }
+        let _blocked = self.announce(!choices.is_empty());
         self.inner.select_option(choices, plan)
     }
 
@@ -85,9 +89,9 @@ impl OptionHandler for NotificationOptionHandler<'_> {
         plan: Option<&str>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<crate::step::option::OptionResult> {
-        if !choices.is_empty() && !cancel_token.is_some_and(CancellationToken::is_cancelled) {
-            self.notify();
-        }
+        let _blocked = self.announce(
+            !choices.is_empty() && !cancel_token.is_some_and(CancellationToken::is_cancelled),
+        );
         self.inner
             .select_option_with_cancellation(choices, plan, cancel_token)
     }
@@ -198,6 +202,7 @@ fn prompt_for_session_state_conflict(message: &str) -> Result<SessionStateConfli
     // Serialize against option-step prompts so parallel batch workers
     // never draw overlapping terminal menus.
     let _guard = crate::option_handler::prompt_lock_guard();
+    let _blocked = crate::herdr::blocked("How should cruise proceed?");
 
     eprintln!("{} {}", style("!").yellow().bold(), message);
     let options = vec![
@@ -239,6 +244,7 @@ fn prompt_workspace_mode() -> Result<WorkspaceMode> {
     // Serialize against option-step prompts so parallel batch workers
     // never draw overlapping terminal menus.
     let _guard = crate::option_handler::prompt_lock_guard();
+    let _blocked = crate::herdr::blocked("Where should cruise execute?");
 
     let options = vec![WORKSPACE_WORKTREE_LABEL, WORKSPACE_CURRENT_BRANCH_LABEL];
     crate::platform::reclaim_terminal_foreground();
@@ -316,6 +322,7 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    let _herdr = crate::herdr::start();
     // Validate --parallelism before any session is selected or executed.
     if let Some(parallelism) = args.parallelism {
         if parallelism == 0 {
@@ -947,6 +954,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
 
+    let _blocked = crate::herdr::blocked("Select a session to run");
     let selected = match inquire::Select::new("Select a session to run:", label_refs).prompt() {
         Ok(s) => s,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {

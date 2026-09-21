@@ -235,6 +235,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         return Ok(());
     }
 
+    let _herdr = crate::herdr::start();
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
@@ -1189,6 +1190,8 @@ async fn run_approve_loop(
             return Ok(());
         }
 
+        let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
+
         let options = vec!["Approve", "Fix", "Ask", "Execute now", "Publish as Issue"];
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
@@ -1210,6 +1213,7 @@ async fn run_approve_loop(
                     continue;
                 };
                 session.skipped_steps = skipped_steps;
+                drop(review);
                 tokio::select! {
                     result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
                     _ = tokio::signal::ctrl_c() => {
@@ -1257,6 +1261,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
+                drop(review);
                 let fix_result = tokio::select! {
                     result = run_fix_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
@@ -1283,6 +1288,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
+                drop(review);
                 let ask_result = tokio::select! {
                     result = run_ask_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
