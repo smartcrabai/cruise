@@ -634,16 +634,14 @@ impl TuiApp {
                         .unwrap_or(self.selected);
                     self.evict_inactive_caches();
                     self.start_plan(state.id, plan);
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
             },
             UiEvent::DraftCreated { result } => match result {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                     self.view = View::Sessions;
                     self.refresh();
                     self.selected = self
@@ -1033,8 +1031,22 @@ impl TuiApp {
             self.modal = Some(Modal::Prompt);
         }
     }
+    fn new_session_creation_pending(&self) -> bool {
+        self.view == View::NewSession && self.registry.busy("__create")
+    }
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.operation_state.quit_requested {
+            return false;
+        }
+        let action = input::action_for(key);
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            if matches!(action, Action::Quit) && !self.is_form_editor_key(key) {
+                let should_quit = self.handle_action(action);
+                if should_quit {
+                    self.operation_state.quit_requested = true;
+                }
+                return should_quit;
+            }
             return false;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
@@ -1078,7 +1090,6 @@ impl TuiApp {
                 }
             }
         }
-        let action = input::action_for(key);
         if self.is_form_editor_key(key) {
             self.form.input(key);
             return false;
@@ -1183,6 +1194,9 @@ impl TuiApp {
     pub fn handle_action(&mut self, action: Action) -> bool {
         if matches!(action, Action::Quit) {
             return self.request_quit();
+        }
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            return false;
         }
         if let Some(modal) = self.modal.take() {
             return self.handle_modal_action(modal, action);
@@ -2512,14 +2526,18 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn app_for(application: CruiseApplication) -> TuiApp {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new(application, events, logs_sender)
+    }
+
     fn app_with_lock(test_process_lock: Option<crate::test_support::ProcessLock>) -> TuiApp {
         let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = CruiseApplication::new(crate::session::SessionManager::new(
             temp.path().to_path_buf(),
         ));
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
-        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
-        let mut app = TuiApp::new(application, events, logs_sender);
+        let mut app = app_for(application);
         app.test_process_lock = test_process_lock;
         app
     }
@@ -2581,6 +2599,397 @@ mod tests {
     fn write_workflow(path: &std::path::Path, step: &str) {
         let yaml = format!("command: [echo]\nsteps:\n  {step}:\n    command: echo {step}\n");
         std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn populate_creation_form(app: &mut TuiApp) {
+        app.view = View::NewSession;
+        app.form.input.set_text("old task");
+        app.form.attachments.set_text("old-image.png");
+        app.form.working_dir.set_text("/tmp/project");
+        app.form.repository.set_text("acme/cruise");
+        app.form.config.set_text("workflow.yaml");
+        app.form.skipped.set_text("build, test");
+        app.form.step = Step::Launch;
+        app.form.source = SourceKind::GitHub;
+        app.form.workspace_mode = WorkspaceMode::CurrentBranch;
+        app.form.launch = Launch::SaveDraft;
+        app.form.options.allow_dirty_working_tree = true;
+        app.form.options.planning.grill = true;
+        app.form.options.planning.formal_spec = true;
+        app.form.options.planning.skip_planning = true;
+        app.form.skipped_explicit = true;
+        app.form.dirty = true;
+    }
+
+    fn stored_draft(manager: &crate::session::SessionManager, input: &str) -> SessionState {
+        let mut state = SessionState::new_draft(
+            crate::session::SessionManager::new_session_id(),
+            PathBuf::from("."),
+            crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
+            input.to_string(),
+        );
+        state.attachments = vec![PathBuf::from("/tmp/persisted-image.png")];
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to store test session: {error}"));
+        state
+    }
+
+    fn no_planning_request() -> PlanRequest {
+        PlanRequest {
+            skip_planning: true,
+            ..PlanRequest::default()
+        }
+    }
+
+    fn assert_creation_form_reset(app: &TuiApp) {
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(app.form.attachment_paths().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+    }
+
+    fn assert_creation_error(app: &TuiApp, expected_error: &str, last_change: Instant) {
+        assert_eq!(app.form.input.text(), "old task");
+        assert_eq!(app.form.attachments.text(), "old-image.png");
+        assert_eq!(app.form.working_dir.text(), "/tmp/project");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.step, Step::Launch);
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert_eq!(app.form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(app.form.launch, Launch::SaveDraft);
+        assert!(app.form.options.allow_dirty_working_tree);
+        assert!(app.form.options.planning.grill);
+        assert!(app.form.options.planning.formal_spec);
+        assert!(app.form.options.planning.skip_planning);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.dirty);
+        assert_eq!(app.form.last_change, last_change);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message)) if message.contains(expected_error)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_creation_ignores_new_session_input_and_navigation() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new(application, events, logs_sender);
+
+        app.view = View::NewSession;
+        app.form.input.set_text("first task");
+        app.form.dirty = true;
+        let last_change = app.form.last_change;
+        let state = stored_draft(&manager, "created while blocked");
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        assert!(app.registry.block_creation_for_test(
+            release_receiver,
+            app.events.clone(),
+            Ok(state),
+        ));
+        assert!(app.registry.busy("__create"));
+        type_text(&mut app, " newer input");
+        assert_eq!(app.form.input.text(), "first task");
+        assert_eq!(app.form.last_change, last_change);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+        assert_eq!(app.form.input.text(), "first task");
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm {
+                command: PendingCommand::Quit,
+                ..
+            })
+        ));
+        app.modal = None;
+
+        release_sender
+            .send(())
+            .unwrap_or_else(|()| panic!("failed to release blocked creation"));
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("timed out waiting for creation: {error}"))
+            .unwrap_or_else(|| panic!("creation event channel closed"));
+        let UiEvent::DraftCreated { result } = &event else {
+            panic!("unexpected creation event: {event:?}");
+        };
+        assert!(result.is_ok(), "creation failed: {result:?}");
+        app.apply_event(event);
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+        app.registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_created_success_clears_new_session_input_but_keeps_persisted_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "created task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Ok(state),
+            plan: no_planning_request(),
+        });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load created session: {error}"));
+        assert_eq!(persisted.input, "created task");
+        assert_eq!(persisted.attachments, attachments);
+
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+
+        app.registry.shutdown().await;
+    }
+
+    #[test]
+    fn draft_created_success_clears_new_session_input_but_keeps_draft_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "saved draft task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load saved draft: {error}"));
+        assert_eq!(persisted.input, "saved draft task");
+        assert_eq!(persisted.attachments, attachments);
+    }
+
+    #[test]
+    fn successful_draft_creation_does_not_recreate_the_cleared_autosave() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "old autosave".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/project".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to seed autosave: {error}"));
+        let mut app = app_for(application.clone());
+        app.form.attachments.set_text("old-image.png");
+        app.form.dirty = true;
+        let state = stored_draft(&manager, "saved session");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read cleared autosave: {error}"))
+                .is_none()
+        );
+        app.autosave_draft(Instant::now() + Duration::from_secs(1));
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read autosave after success: {error}"))
+                .is_none()
+        );
+
+        let restarted = app_for(application);
+        assert!(restarted.form.input.text().is_empty());
+        assert!(restarted.form.attachments.text().is_empty());
+    }
+
+    #[test]
+    fn session_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-session draft: {error}"));
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Err("session creation failed".to_string()),
+            plan: no_planning_request(),
+        });
+
+        assert_eq!(app.view, View::NewSession);
+        assert_creation_error(&app, "session creation failed", last_change);
+        let draft = application
+            .draft()
+            .unwrap_or_else(|error| panic!("failed to read failed-session draft: {error}"))
+            .unwrap_or_else(|| panic!("failed-session draft was cleared"));
+        assert_eq!(draft.input, "old task");
+        assert_eq!(draft.working_dir, "/tmp/project");
+        assert_eq!(draft.repo.as_deref(), Some("acme/cruise"));
+    }
+
+    #[test]
+    fn draft_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-draft draft: {error}"));
+
+        app.apply_event(UiEvent::DraftCreated {
+            result: Err("draft creation failed".to_string()),
+        });
+
+        assert_creation_error(&app, "draft creation failed", last_change);
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read failed-draft draft: {error}"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unsent_new_session_round_trip_preserves_task_and_attachments() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let mut app = app_without_lock();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("unsent task");
+        app.form.attachments.set_text("unsent-image.png");
+        app.form.step = Step::Attachments;
+        app.form.dirty = true;
+
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+    }
+
+    #[test]
+    fn restarting_tui_restores_an_unsent_new_session_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "restored task".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/restored".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string(), "test".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to save restart draft: {error}"));
+
+        let app = app_for(application);
+
+        assert_eq!(app.form.input.text(), "restored task");
+        assert_eq!(app.form.working_dir.text(), "/tmp/restored");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.form.dirty);
+    }
+
+    #[tokio::test]
+    async fn successful_creation_rejects_an_empty_next_submission() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        app.form.options.planning.grill = false;
+        app.form.options.planning.formal_spec = false;
+        let state = stored_draft(&manager, "created task");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+        app.handle_action(Action::NewSession);
+        app.create_session();
+        let rejected = matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message.contains("Task description or an image attachment is required")
+        );
+        app.registry.shutdown().await;
+        assert!(rejected, "the next empty submission was not rejected");
     }
 
     #[test]
