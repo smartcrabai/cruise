@@ -709,7 +709,8 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     tui.wait_for_output("even with uncommitted changes?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\x15");
-    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output("planned through terminal e2e", START_TIMEOUT);
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -740,7 +741,9 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     let mut tui = fixture.start(120, 30, false);
 
     tui.wait_for_output("E2E terminal session", START_TIMEOUT);
-    tui.send(b"]");
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output("E2E Plan", START_TIMEOUT);
+    tui.send(b"[");
     tui.wait_for_output("Selected node", START_TIMEOUT);
     tui.send(b"]");
     tui.wait_for_output("E2E Plan", START_TIMEOUT);
@@ -773,6 +776,36 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     let log = std::fs::read_to_string(fixture.manager.run_log_path(&id))
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(log.contains("e2e-run-complete"), "run log: {log}");
+}
+
+#[test]
+fn planning_phase_without_a_plan_opens_plan_and_manual_info_survives_refresh() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.seed_display_session(
+        1,
+        "awaiting input without a plan",
+        SessionPhase::AwaitingInput,
+        false,
+        None,
+    );
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output(
+        "No plan has been generated for this session.",
+        START_TIMEOUT,
+    );
+    tui.send(b"[[");
+    tui.wait_for_output("Phase    Awaiting Input", START_TIMEOUT);
+    tui.send(b"r");
+    tui.wait_for_output("Phase    Awaiting Input", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
 }
 
 #[test]
@@ -879,8 +912,10 @@ fn phase_specific_action_palettes_expose_the_supported_operations() {
     assert_palette(&mut tui, &["Generate Plan", "Delete"]);
     tui.send(b"j");
     assert_palette(&mut tui, &["Approve", "Ask About Plan"]);
+    tui.send(b"[[");
     tui.send(b"j");
     assert_palette(&mut tui, &["Run in Worktree", "Replan"]);
+    tui.send(b"[[");
     tui.send(b"j");
     assert_palette(&mut tui, &["Retry", "Edit Current Step"]);
     tui.send(b"j");
@@ -927,7 +962,10 @@ fn destructive_actions_cancel_cleanly_then_apply_after_confirmation() {
     tui.send(b"\r");
     tui.wait_for_output(&format!("Reset to Planned {completed_id}?"), START_TIMEOUT);
     tui.send(b"\r");
-    tui.wait_for_output("Planned", START_TIMEOUT);
+    tui.wait_for_output(
+        "No plan has been generated for this session.",
+        START_TIMEOUT,
+    );
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();

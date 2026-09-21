@@ -10,9 +10,9 @@ use super::prompts::PromptQueue;
 use super::registry::{OperationRegistry, UiEvent};
 use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
-    PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
+    OperationKind, PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
 };
-use crate::session::{SessionState, WorkspaceMode};
+use crate::session::{SessionPhase, SessionState, WorkspaceMode};
 use std::path::{Path, PathBuf};
 const SESSION_LOG_LIMIT: usize = 10_000;
 const BATCH_LOG_LIMIT: usize = 2_000;
@@ -59,6 +59,20 @@ impl DetailTab {
             Self::Plan => "Plan",
             Self::Log => "Log",
         }
+    }
+}
+
+fn default_detail_tab(phase: &SessionPhase, operation: Option<OperationKind>) -> DetailTab {
+    if matches!(
+        operation,
+        Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan)
+    ) || matches!(
+        phase,
+        SessionPhase::AwaitingInput | SessionPhase::AwaitingApproval | SessionPhase::Planned
+    ) {
+        DetailTab::Plan
+    } else {
+        DetailTab::Info
     }
 }
 
@@ -133,6 +147,8 @@ pub struct TuiApp {
     pub tab: DetailTab,
     pub sessions: Vec<SessionState>,
     pub selected: usize,
+    manual_detail_tabs: HashMap<String, DetailTab>,
+    detail_session_id: Option<String>,
     pub dag_selected: usize,
     pub form: NewSessionForm,
     pub modal: Option<Modal>,
@@ -191,6 +207,8 @@ impl TuiApp {
             tab: DetailTab::Info,
             sessions: Vec::new(),
             selected: 0,
+            manual_detail_tabs: HashMap::new(),
+            detail_session_id: None,
             dag_selected: 0,
             form,
             modal: None,
@@ -403,7 +421,14 @@ impl TuiApp {
                 }
                 self.sessions = sessions;
                 self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
-                self.evict_inactive_caches();
+                let session_ids = self
+                    .sessions
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                self.manual_detail_tabs
+                    .retain(|id, _| session_ids.contains(id.as_str()));
+                self.sync_selected_detail();
                 if self.status.is_none() || !self.is_busy() {
                     self.status = Some(format!(
                         "{} session{}",
@@ -461,6 +486,11 @@ impl TuiApp {
         self.sessions.get(self.selected)
     }
 
+    fn is_selected_session(&self, id: &str) -> bool {
+        self.active_session()
+            .is_some_and(|session| session.id.as_str() == id)
+    }
+
     pub fn select_move(&mut self, delta: isize) {
         if self.sessions.is_empty() {
             return;
@@ -472,22 +502,75 @@ impl TuiApp {
         self.log_scroll = 0;
         self.display.follow_log = true;
         self.dag_selected = 0;
-        self.evict_inactive_caches();
+        self.sync_selected_detail();
         self.load_tab_data();
     }
     pub fn select_home(&mut self) {
         if !self.sessions.is_empty() {
             self.selected = 0;
-            self.evict_inactive_caches();
+            self.sync_selected_detail();
             self.load_tab_data();
         }
     }
     pub fn select_end(&mut self) {
         if !self.sessions.is_empty() {
             self.selected = self.sessions.len() - 1;
-            self.evict_inactive_caches();
+            self.sync_selected_detail();
             self.load_tab_data();
         }
+    }
+
+    fn sync_detail_tab(&mut self) {
+        let operation = self
+            .active_session()
+            .and_then(|session| self.application.runtime().active_operation(&session.id));
+        self.sync_detail_tab_for_operation(operation);
+    }
+
+    fn sync_detail_tab_for_operation(&mut self, operation: Option<OperationKind>) {
+        let Some(session) = self.active_session() else {
+            self.detail_session_id = None;
+            self.tab = DetailTab::Info;
+            return;
+        };
+        let id = session.id.clone();
+        let phase = session.phase.clone();
+        let session_changed = self.detail_session_id.as_deref() != Some(id.as_str());
+        let manual_tab = self.manual_detail_tabs.get(&id).copied();
+        let tab = manual_tab.unwrap_or_else(|| default_detail_tab(&phase, operation));
+        let enters_plan_automatically =
+            manual_tab.is_none() && tab == DetailTab::Plan && self.tab != DetailTab::Plan;
+
+        self.tab = tab;
+        self.detail_session_id = Some(id);
+        if session_changed || enters_plan_automatically {
+            self.plan_scroll = 0;
+        }
+    }
+
+    fn sync_selected_detail(&mut self) {
+        self.evict_inactive_caches();
+        self.sync_detail_tab();
+    }
+
+    fn sync_terminal_detail_tab(&mut self, session_id: &str) {
+        if self.is_selected_session(session_id) {
+            self.sync_detail_tab_for_operation(None);
+        }
+    }
+
+    fn set_detail_tab(&mut self, tab: DetailTab) {
+        if self.view == View::Sessions && self.active_session().is_none() {
+            self.tab = DetailTab::Info;
+            return;
+        }
+        self.tab = tab;
+        if self.view == View::Sessions
+            && let Some(id) = self.active_session().map(|session| session.id.clone())
+        {
+            self.manual_detail_tabs.insert(id, tab);
+        }
+        self.load_tab_data();
     }
     pub fn move_detail(&mut self, delta: isize) {
         let Some(id) = self.active_session().map(|s| s.id.clone()) else {
@@ -632,7 +715,7 @@ impl TuiApp {
                         .iter()
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
-                    self.evict_inactive_caches();
+                    self.sync_selected_detail();
                     self.start_plan(state.id, plan);
                     self.form.mark_saved();
                     self.form.rewind();
@@ -651,7 +734,7 @@ impl TuiApp {
                         .iter()
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
-                    self.evict_inactive_caches();
+                    self.sync_selected_detail();
                     self.status = Some(format!("Saved draft {}", state.id));
                 }
                 Err(error) => self.set_error(error),
@@ -725,9 +808,12 @@ impl TuiApp {
                         | crate::application::OperationKind::Fix
                         | crate::application::OperationKind::Replan
                 ) {
-                    self.active_planning.insert(session_id);
+                    self.active_planning.insert(session_id.clone());
                 } else if operation == crate::application::OperationKind::Ask {
                     self.active_planning.remove(&session_id);
+                }
+                if self.is_selected_session(&session_id) {
+                    self.sync_detail_tab();
                 }
                 self.status = Some(format!("{} started", operation_label(operation)));
             }
@@ -858,12 +944,14 @@ impl TuiApp {
         self.status = Some("Planning failed".to_string());
         self.set_error(error);
         self.refresh();
+        self.sync_terminal_detail_tab(session_id);
     }
 
     fn cancel_plan(&mut self, session_id: &str) {
         self.ask_active.remove(session_id);
         self.status = Some("Planning cancelled".to_string());
         self.refresh();
+        self.sync_terminal_detail_tab(session_id);
     }
 
     fn finish_run(&mut self, session_id: &str, phase: &str) {
@@ -1228,13 +1316,11 @@ impl TuiApp {
             Action::Home => self.navigate_home(),
             Action::End => self.navigate_end(),
             Action::DetailPrevious | Action::Left => {
-                self.tab = self.tab.previous();
-                self.load_tab_data();
+                self.set_detail_tab(self.tab.previous());
                 false
             }
             Action::DetailNext | Action::Right => {
-                self.tab = self.tab.next();
-                self.load_tab_data();
+                self.set_detail_tab(self.tab.next());
                 false
             }
             Action::Palette => {
@@ -1294,12 +1380,12 @@ impl TuiApp {
                 self.advance_step();
             }
         } else {
-            self.tab = if next {
+            let tab = if next {
                 self.tab.next()
             } else {
                 self.tab.previous()
             };
-            self.load_tab_data();
+            self.set_detail_tab(tab);
         }
         false
     }
@@ -2543,6 +2629,59 @@ mod tests {
         app.sessions.push(state);
     }
 
+    struct PersistedTuiFixture {
+        _temp: TempDir,
+        manager: crate::session::SessionManager,
+        app: TuiApp,
+    }
+
+    fn test_session_id(index: u8) -> String {
+        format!("2026092100000000{index}_{index:032x}")
+    }
+
+    fn persisted_state(
+        manager: &crate::session::SessionManager,
+        index: u8,
+        phase: crate::session::SessionPhase,
+    ) -> SessionState {
+        let state = {
+            let mut state = SessionState::new(
+                test_session_id(index),
+                manager.sessions_dir(),
+                "__builtin__".to_string(),
+                format!("task {index}"),
+            );
+            state.phase = phase;
+            state
+        };
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to persist test session: {error}"));
+        state
+    }
+
+    fn persisted_fixture(sessions: &[(u8, crate::session::SessionPhase)]) -> PersistedTuiFixture {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("cruise"));
+        for (index, phase) in sessions {
+            persisted_state(&manager, *index, phase.clone());
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        PersistedTuiFixture {
+            _temp: temp,
+            manager,
+            app,
+        }
+    }
+
     fn pending_ask(request_id: &str) -> crate::application::PendingPrompt {
         crate::application::PendingPrompt {
             request_id: request_id.to_string(),
@@ -2557,6 +2696,618 @@ mod tests {
     fn detail_tabs_cycle_in_both_directions() {
         assert_eq!(DetailTab::Info.next(), DetailTab::Dag);
         assert_eq!(DetailTab::Info.previous(), DetailTab::Log);
+    }
+
+    #[test]
+    fn planning_phases_default_to_the_plan_tab_on_startup() {
+        for phase in [
+            crate::session::SessionPhase::AwaitingInput,
+            crate::session::SessionPhase::AwaitingApproval,
+            crate::session::SessionPhase::Planned,
+        ] {
+            let fixture = persisted_fixture(&[(1, phase.clone())]);
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Plan,
+                "{phase:?} should open on Plan"
+            );
+        }
+    }
+
+    #[test]
+    fn non_planning_phases_default_to_the_info_tab_on_startup() {
+        for phase in [
+            crate::session::SessionPhase::Draft,
+            crate::session::SessionPhase::Completed,
+            crate::session::SessionPhase::Failed("failed".to_string()),
+            crate::session::SessionPhase::Suspended,
+        ] {
+            let fixture = persisted_fixture(&[(1, phase.clone())]);
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Info,
+                "{phase:?} should open on Info"
+            );
+        }
+    }
+
+    #[test]
+    fn awaiting_input_flag_does_not_promote_a_draft_to_the_plan_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.awaiting_input = true;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+
+        fixture.app.refresh();
+
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn an_empty_session_list_keeps_the_info_tab_and_existing_empty_view() {
+        for key_code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+        ] {
+            let mut fixture = persisted_fixture(&[]);
+
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert!(fixture.app.sessions.is_empty());
+            assert_eq!(fixture.app.view, View::Sessions);
+            assert_eq!(fixture.app.tab, DetailTab::Info, "key {key_code:?}");
+            assert!(fixture.app.manual_detail_tabs.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_running_session_with_an_active_run_claim_defaults_to_info() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("cruise"));
+        let state = persisted_state(&manager, 1, crate::session::SessionPhase::Running);
+        let application = CruiseApplication::new(manager);
+        let _claim = application
+            .runtime()
+            .try_begin(state.id.clone(), crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+
+        assert_eq!(app.tab, DetailTab::Info);
+        assert_eq!(
+            app.active_session().map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::Running)
+        );
+    }
+
+    #[test]
+    fn planning_operation_events_select_plan_for_a_draft_without_running_an_llm() {
+        for operation in [
+            crate::application::OperationKind::Generate,
+            crate::application::OperationKind::Fix,
+            crate::application::OperationKind::Replan,
+        ] {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+            let id = test_session_id(1);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), operation)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id,
+                    operation,
+                }));
+
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Plan,
+                "{operation:?} should open a draft on Plan"
+            );
+        }
+    }
+
+    #[test]
+    fn ask_on_a_planning_phase_keeps_the_default_on_plan_without_becoming_active_planning() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::AwaitingApproval)]);
+        let id = test_session_id(1);
+
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Ask,
+            }));
+
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+    }
+
+    #[test]
+    fn every_detail_navigation_key_registers_manual_selection_across_refresh() {
+        let cases = [
+            (KeyCode::Tab, DetailTab::Log),
+            (KeyCode::BackTab, DetailTab::Dag),
+            (KeyCode::Left, DetailTab::Dag),
+            (KeyCode::Right, DetailTab::Log),
+            (KeyCode::Char('['), DetailTab::Dag),
+            (KeyCode::Char(']'), DetailTab::Log),
+        ];
+
+        for (key_code, expected) in cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert_eq!(fixture.app.tab, expected, "key {key_code:?}");
+
+            fixture.app.refresh();
+
+            assert_eq!(
+                fixture.app.tab, expected,
+                "manual tab selected with {key_code:?} was lost on refresh"
+            );
+        }
+    }
+
+    #[test]
+    fn manually_selected_info_survives_refresh_plan_start_and_plan_completion() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+        fixture.app.last_refresh = Instant::now()
+            .checked_sub(Duration::from_secs(4))
+            .unwrap_or_else(Instant::now);
+        fixture.app.refresh_if_due();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id.clone(), crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Generate,
+            }));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let mut completed = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        completed.phase = crate::session::SessionPhase::Completed;
+        fixture
+            .manager
+            .save(&completed)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+                session_id: id,
+                phase: crate::session::SessionPhase::Completed.label().to_string(),
+            }));
+
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn selection_move_home_and_end_use_each_session_id_default_and_restore_manual_tabs() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+            (3, crate::session::SessionPhase::AwaitingApproval),
+        ]);
+        let first_id = test_session_id(1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        fixture.app.select_move(1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        fixture.app.select_move(-1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        fixture.app.select_end();
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(3).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        fixture.app.select_home();
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+    }
+
+    #[test]
+    fn external_phase_updates_choose_plan_only_for_unmodified_sessions() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.phase = crate::session::SessionPhase::AwaitingApproval;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        state.phase = crate::session::SessionPhase::Planned;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn draft_created_does_not_inherit_the_previous_sessions_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let state = persisted_state(&fixture.manager, 2, crate::session::SessionPhase::Draft);
+        fixture
+            .app
+            .apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[tokio::test]
+    async fn session_created_does_not_inherit_the_previous_sessions_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let state = persisted_state(
+            &fixture.manager,
+            2,
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+        let id = state.id.clone();
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture.app.apply_event(UiEvent::SessionCreated {
+            result: Ok(state),
+            plan: PlanRequest::default(),
+        });
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        fixture.app.registry.shutdown().await;
+    }
+
+    #[test]
+    fn a_non_selected_session_plan_start_does_not_change_the_current_tab_or_selection() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+        ]);
+        let selected_id = test_session_id(1);
+        let other_id = test_session_id(2);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(
+                other_id.clone(),
+                crate::application::OperationKind::Generate,
+            )
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: other_id,
+                operation: crate::application::OperationKind::Generate,
+            }));
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(selected_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+    }
+
+    #[test]
+    fn repeated_refresh_preserves_scroll_and_removed_session_tabs_are_not_reused() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+        ]);
+        let first_id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        fixture.app.plan_scroll = 7;
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert_eq!(fixture.app.plan_scroll, 7);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.plan_scroll, 7);
+
+        fixture
+            .manager
+            .delete(&first_id)
+            .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+        assert_eq!(fixture.app.sessions.len(), 1);
+
+        fixture
+            .manager
+            .delete(&test_session_id(2))
+            .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
+        fixture.app.refresh();
+        assert!(fixture.app.sessions.is_empty());
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        persisted_state(&fixture.manager, 1, crate::session::SessionPhase::Draft);
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn refreshing_a_failed_session_list_keeps_the_current_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let sessions_dir = fixture.manager.sessions_dir();
+        std::fs::remove_dir_all(&sessions_dir)
+            .unwrap_or_else(|error| panic!("failed to remove test sessions directory: {error}"));
+        std::fs::write(&sessions_dir, "not a directory")
+            .unwrap_or_else(|error| panic!("failed to corrupt test sessions directory: {error}"));
+        fixture.app.refresh();
+
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn tab_in_new_session_advances_the_form_without_registering_a_detail_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_action(Action::NewSession));
+        assert!(!fixture.app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(fixture.app.view, View::NewSession);
+        assert_eq!(fixture.app.form.step, Step::Attachments);
+
+        assert!(!fixture.app.handle_action(Action::ViewSessions));
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+    }
+
+    #[test]
+    fn terminal_plan_events_return_to_the_latest_phase_default_and_ignore_stale_planning_state() {
+        let cases = [
+            (
+                crate::session::SessionPhase::Planned,
+                ApplicationEvent::PlanFinished {
+                    session_id: test_session_id(1),
+                    phase: crate::session::SessionPhase::Planned.label().to_string(),
+                },
+                DetailTab::Plan,
+            ),
+            (
+                crate::session::SessionPhase::Failed("failed".to_string()),
+                ApplicationEvent::PlanFailed {
+                    session_id: test_session_id(1),
+                    error: "failed".to_string(),
+                },
+                DetailTab::Info,
+            ),
+            (
+                crate::session::SessionPhase::Draft,
+                ApplicationEvent::PlanCancelled {
+                    session_id: test_session_id(1),
+                },
+                DetailTab::Info,
+            ),
+        ];
+
+        for (phase, event, expected) in cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+            let id = test_session_id(1);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), crate::application::OperationKind::Generate)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id.clone(),
+                    operation: crate::application::OperationKind::Generate,
+                }));
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+            let mut state = fixture
+                .manager
+                .load(&id)
+                .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+            state.phase = phase;
+            fixture
+                .manager
+                .save(&state)
+                .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+            fixture.app.apply_event(UiEvent::Control(event));
+
+            assert_eq!(fixture.app.tab, expected);
+        }
+
+        let manual_cases = [
+            (
+                crate::session::SessionPhase::Failed("failed".to_string()),
+                ApplicationEvent::PlanFailed {
+                    session_id: test_session_id(1),
+                    error: "failed".to_string(),
+                },
+            ),
+            (
+                crate::session::SessionPhase::Draft,
+                ApplicationEvent::PlanCancelled {
+                    session_id: test_session_id(1),
+                },
+            ),
+        ];
+        for (phase, event) in manual_cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            let id = test_session_id(1);
+            assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), crate::application::OperationKind::Generate)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id.clone(),
+                    operation: crate::application::OperationKind::Generate,
+                }));
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+
+            let mut state = fixture
+                .manager
+                .load(&id)
+                .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+            state.phase = phase;
+            fixture
+                .manager
+                .save(&state)
+                .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+            fixture.app.apply_event(UiEvent::Control(event));
+
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+        }
+
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        let claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id.clone(), crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Generate,
+            }));
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.phase = crate::session::SessionPhase::Completed;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        drop(claim);
+        fixture
+            .app
+            .apply_event(UiEvent::Error("worker stopped unexpectedly".to_string()));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
     }
 
     #[test]
