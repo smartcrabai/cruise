@@ -710,6 +710,63 @@ fn new_session_form_saves_a_draft_without_planning() {
     assert_eq!(draft.phase, SessionPhase::Draft);
 }
 
+fn assert_two_sessions(
+    manager: &SessionManager,
+    first_input: &str,
+    second_input: &str,
+    expected_phase: &SessionPhase,
+) {
+    let sessions = manager.list().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(sessions.len(), 2, "unexpected saved sessions: {sessions:?}");
+    let first = sessions
+        .iter()
+        .find(|session| session.input == first_input)
+        .unwrap_or_else(|| panic!("first session missing: {sessions:?}"));
+    let second = sessions
+        .iter()
+        .find(|session| session.input == second_input)
+        .unwrap_or_else(|| panic!("second session missing: {sessions:?}"));
+    assert_eq!(&first.phase, expected_phase);
+    assert_eq!(&second.phase, expected_phase);
+}
+
+#[test]
+fn new_session_ctrl_s_clears_input_before_the_next_saved_draft() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"first draft from terminal");
+    tui.send(b"\x13");
+    tui.wait_for_output("Saved draft", START_TIMEOUT);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"\x13");
+    tui.wait_for_output(
+        "Task description or an image attachment is required",
+        START_TIMEOUT,
+    );
+    tui.send(b"\x1b");
+    tui.send(b"second draft from terminal");
+    tui.send(b"\x13");
+    tui.wait_for_output("Saved draft", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    assert_two_sessions(
+        &fixture.manager,
+        "first draft from terminal",
+        "second draft from terminal",
+        &SessionPhase::Draft,
+    );
+}
+
 #[test]
 fn new_session_ctrl_p_validates_before_starting_planning() {
     if !tui_available() {
@@ -782,6 +839,43 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     let plan = std::fs::read_to_string(planned.plan_path(&fixture.manager.sessions_dir()))
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(plan.contains("planned through terminal e2e"));
+}
+
+#[test]
+fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"first planned through terminal");
+    tui.send(b"\x15");
+    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+
+    tui.send(b"n");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"\x15");
+    tui.wait_for_output(
+        "Task description or an image attachment is required",
+        START_TIMEOUT,
+    );
+    tui.send(b"\x1b");
+    tui.send(b"second planned through terminal");
+    tui.send(b"\x15");
+    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    assert_two_sessions(
+        &fixture.manager,
+        "first planned through terminal",
+        "second planned through terminal",
+        &SessionPhase::Planned,
+    );
 }
 
 #[test]
@@ -893,9 +987,32 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(80, 24, true);
 
-    tui.wait_for_output("No sessions yet", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet") && screen.contains("c clean")
+    });
+
+    tui.send(b"c");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Clean")
+            && screen.contains("Enter confirm")
+            && screen.contains("Esc cancel")
+    });
+    tui.send(b"\x1b");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet")
+            && screen.contains("c clean")
+            && !screen.contains("Enter confirm")
+    });
+
     tui.send(b"?");
-    tui.wait_for_output("Keyboard-only; no mouse or child-owned TTY.", START_TIMEOUT);
+    let help_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Sessions only")
+            && screen.contains("Keyboard-only; no mouse or child-owned TTY.")
+    });
+    assert!(help_screen.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("clean") && line.contains("sessions only") && line.contains("confirmation")
+    }));
     tui.send(b"\x1b");
     thread::sleep(Duration::from_millis(100));
     tui.send(b"2");
