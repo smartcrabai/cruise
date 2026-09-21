@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,6 +151,16 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
     }
 }
 
+/// Where a plan-related prompt is allowed to render transient terminal
+/// progress. CLI callers opt in; event-driven GUI/TUI callers keep it hidden.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanProgress {
+    /// Render the planning loader when stderr is an interactive terminal.
+    Console,
+    /// Do not render a terminal loader.
+    Hidden,
+}
+
 /// Backend-stable context for a plan-related prompt.
 ///
 /// Bundles the workflow config, the interactive UI handler (used by the SDK
@@ -166,6 +177,8 @@ pub struct PlanPromptCtx<'a> {
     /// Whether the user can be reached interactively (controls which SDK tools
     /// are registered). Non-TTY runs pass `false`.
     pub interactive: bool,
+    /// Explicit policy for transient planning progress output.
+    pub progress: PlanProgress,
     /// Maximum rate-limit retries.
     pub rate_limit_retries: usize,
     /// Working directory for the command / agent.
@@ -187,6 +200,49 @@ impl PlanPromptCtx<'_> {
     #[must_use]
     fn executor(&self) -> Executor {
         Executor::new(self.config.sdk.as_deref(), &self.config.command)
+    }
+}
+
+/// Ask-handler decorator used only while a planning loader is active.
+///
+/// The loader's control handle is shared without owning the render thread. A
+/// pause therefore covers the blocking input operation without holding the
+/// terminal lock, and both successful and failing handler results resume the
+/// loader before returning to the SDK tool dispatcher.
+struct PlanningAskHandler {
+    inner: Arc<dyn AskHandler>,
+    control: crate::spinner::SpinnerControl,
+}
+
+impl PlanningAskHandler {
+    fn new(inner: Arc<dyn AskHandler>, control: crate::spinner::SpinnerControl) -> Self {
+        Self { inner, control }
+    }
+
+    fn run<F>(&self, operation: F) -> Result<String>
+    where
+        F: FnOnce(&dyn AskHandler) -> Result<String>,
+    {
+        let pause = self.control.pause();
+        let result = operation(self.inner.as_ref());
+        drop(pause);
+        self.control
+            .flush_deferred(|notice| crate::status_eprintln!("{}", style(notice).dim()));
+        result
+    }
+}
+
+impl AskHandler for PlanningAskHandler {
+    fn ask_user(&self, question: &str) -> Result<String> {
+        self.run(|inner| inner.ask_user(question))
+    }
+
+    fn ask_user_with_cancellation(
+        &self,
+        question: &str,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<String> {
+        self.run(|inner| inner.ask_user_with_cancellation(question, cancel_token))
     }
 }
 
@@ -251,24 +307,48 @@ pub async fn run_plan_prompt_template(
     // plan is written to `{plan}` directly via the file-writing templates and no
     // custom tools are registered.
     let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
+    let env = crate::engine::resolve_env(&ctx.config.env, &HashMap::new(), vars)?;
+    crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
+    let spinner = if ctx.progress == PlanProgress::Console
+        && std::io::stderr().is_terminal()
+        && !crate::console_mode::is_quiet()
+    {
+        Some(crate::spinner::Spinner::start("Planning..."))
+    } else {
+        None
+    };
+    let spinner_control = spinner
+        .as_ref()
+        .filter(|spinner| spinner.is_running())
+        .map(crate::spinner::Spinner::control);
+    let planning_ask: Arc<dyn AskHandler> = spinner_control.as_ref().map_or_else(
+        || Arc::clone(&ctx.ask),
+        |control| {
+            Arc::new(PlanningAskHandler::new(
+                Arc::clone(&ctx.ask),
+                control.clone(),
+            ))
+        },
+    );
     let (tools, plan_persisted) = if plan_tools_enabled && register_plan_tools {
         let set = crate::sdk_tools::planning_tools(
             ctx.plan_path.to_path_buf(),
-            Arc::clone(&ctx.ask),
+            planning_ask,
             ctx.interactive,
         );
         (set.tools, Some(set.plan_persisted))
     } else {
         (Vec::new(), None)
     };
-
-    let env = crate::engine::resolve_env(&ctx.config.env, &HashMap::new(), vars)?;
-    crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
-    // The SDK backend surfaces progress through streamed deltas and `ask_user`
-    // prompts, so a spinner would clobber interactive input; only spin for the
-    // command backend.
-    let spinner = (!executor.is_sdk()).then(|| crate::spinner::Spinner::start("Cruising..."));
-    let on_notice = move |msg: &str| crate::status_eprintln!("{}", style(msg).dim());
+    let on_notice = |msg: &str| {
+        if let Some(control) = &spinner_control {
+            control.notify_or_defer(msg.to_string(), |notice| {
+                crate::status_eprintln!("{}", style(notice).dim());
+            });
+        } else {
+            crate::status_eprintln!("{}", style(msg).dim());
+        }
+    };
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
@@ -775,6 +855,7 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
@@ -813,6 +894,7 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
@@ -874,6 +956,7 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
