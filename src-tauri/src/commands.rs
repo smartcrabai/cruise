@@ -79,14 +79,7 @@ fn session_dto(
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
     };
-    let config_path = state
-        .config_path
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| {
-            cruise::resolver::ConfigSource::is_builtin_source(&state.config_source)
-                .then(|| BUILTIN_CONFIG_PATH.to_string())
-        });
+    let config_path = state.config.selection_value();
     let current_step = if resolve_current_step && state.current_step_is_node_id {
         state.current_step.as_deref().and_then(|node| {
             application
@@ -106,7 +99,7 @@ fn session_dto(
         id: state.id,
         phase,
         phase_error,
-        config_source: state.config_source,
+        config_source: state.config.display_label(),
         config_path,
         base_dir: state.base_dir.to_string_lossy().into_owned(),
         repo: state.repo,
@@ -136,25 +129,6 @@ pub struct DagDto {
     pub steps: Vec<DagStepDto>,
     pub edges: Vec<DagEdgeDto>,
     pub current_step: Option<String>,
-}
-
-/// Load the session's already-resolved workflow config only for selected Graph detail.
-fn session_config(state: &SessionState) -> CruiseResult<cruise::config::WorkflowConfig> {
-    let data_dir = cruise::paths::data_dir()?;
-    let sessions_dir = data_dir.join("sessions");
-    let config_path = state
-        .config_path
-        .clone()
-        .unwrap_or_else(|| sessions_dir.join(&state.id).join("config.yaml"));
-    if config_path.is_file() {
-        return cruise::workflow_call::resolve_workflow_calls_from_path(config_path);
-    }
-    if cruise::resolver::ConfigSource::is_builtin_source(&state.config_source) {
-        let (yaml, source) =
-            cruise::resolver::resolve_config_in_dir(Some(BUILTIN_CONFIG_PATH), &state.base_dir)?;
-        return cruise::resolver::resolve_workflow_config(&yaml, &source, &state.base_dir);
-    }
-    cruise::workflow_call::resolve_workflow_calls_from_path(config_path)
 }
 
 fn step_kind(config: &cruise::config::StepConfig) -> String {
@@ -453,8 +427,13 @@ pub fn get_session_dag(
     state: tauri::State<'_, AppState>,
 ) -> std::result::Result<Option<DagDto>, String> {
     let session = state.application.read_session(&session_id).map_err(error)?;
-    let compiled =
-        cruise::workflow::compile(session_config(&session).map_err(error)?).map_err(error)?;
+    let compiled = cruise::workflow::compile(
+        state
+            .application
+            .session_config(&session_id)
+            .map_err(error)?,
+    )
+    .map_err(error)?;
     let dag = state.application.session_dag(&session_id).map_err(error)?;
     dag.map(|dag| {
         build_dag_dto(

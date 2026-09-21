@@ -58,6 +58,7 @@ mod run_cmd;
 mod run_observer;
 mod sdk_tools;
 mod session;
+mod session_config;
 mod session_edit;
 mod spinner;
 mod ssh_cmd;

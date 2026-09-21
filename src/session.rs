@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{CruiseError, Result};
+use crate::session_config::{
+    SessionConfigRef, serialize_resolved_config, snapshot_path, write_snapshot_atomically,
+};
 
 /// Name of the variable that holds the plan file path in the variable store.
 pub const PLAN_VAR: &str = "plan";
@@ -72,8 +75,8 @@ pub struct SessionState {
     pub base_dir: PathBuf,
     /// Current phase of the session.
     pub phase: SessionPhase,
-    /// Name of the config file used (display string).
-    pub config_source: String,
+    /// The single durable reference used to load this session's workflow.
+    pub config: SessionConfigRef,
     /// User input that initiated the session.
     pub input: String,
     /// Generated session title shown in session lists when available.
@@ -101,9 +104,6 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
-    /// Absolute path to the original config file (None for builtin or old sessions).
-    #[serde(default)]
-    pub config_path: Option<PathBuf>,
     /// ISO 8601 last-updated time (auto-set on every save).
     #[serde(default)]
     pub updated_at: Option<String>,
@@ -207,12 +207,12 @@ impl SessionFileContents {
 
 impl SessionState {
     #[must_use]
-    pub fn new(id: String, base_dir: PathBuf, config_source: String, input: String) -> Self {
+    pub fn new(id: String, base_dir: PathBuf, config: SessionConfigRef, input: String) -> Self {
         Self {
             id,
             base_dir,
             phase: SessionPhase::AwaitingApproval,
-            config_source,
+            config,
             input,
             title: None,
             current_step: None,
@@ -224,7 +224,6 @@ impl SessionState {
             target_branch: None,
             allow_dirty_working_tree: false,
             pr_url: None,
-            config_path: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
@@ -295,8 +294,13 @@ impl SessionState {
 
     /// Construct a new session that is still being edited by the user.
     #[must_use]
-    pub fn new_draft(id: String, base_dir: PathBuf, config_source: String, input: String) -> Self {
-        let mut state = Self::new(id, base_dir, config_source, input);
+    pub fn new_draft(
+        id: String,
+        base_dir: PathBuf,
+        config: SessionConfigRef,
+        input: String,
+    ) -> Self {
+        let mut state = Self::new(id, base_dir, config, input);
         state.phase = SessionPhase::Draft;
         state
     }
@@ -477,6 +481,40 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Create a session and, when required, persist its resolved config before
+    /// publishing the state file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without leaving a newly created session directory when
+    /// snapshot serialization or either write fails.
+    pub fn create_with_config(
+        &self,
+        state: &SessionState,
+        config: &crate::config::WorkflowConfig,
+    ) -> Result<()> {
+        validate_session_id(&state.id)?;
+        let session_dir = self.sessions_dir().join(&state.id);
+        std::fs::create_dir_all(&session_dir)?;
+        let result = (|| {
+            if state.config.is_snapshot() {
+                let yaml = serialize_resolved_config(config)?;
+                write_snapshot_atomically(
+                    &snapshot_path(&self.sessions_dir(), &state.id),
+                    yaml.as_bytes(),
+                )
+                .map_err(|error| {
+                    CruiseError::Other(format!("failed to save session config snapshot: {error}"))
+                })?;
+            }
+            self.save(state)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&session_dir);
+        }
+        result
+    }
+
     /// Load a session by ID.
     ///
     /// # Errors
@@ -498,6 +536,56 @@ impl SessionManager {
         let mut state = state.clone();
         state.updated_at = Some(current_iso8601());
         self.save_with_fingerprint(&state)?;
+        Ok(())
+    }
+
+    /// Persist a config change and its state as one ordered update.
+    ///
+    /// The previous snapshot is restored when state persistence fails. Normal
+    /// progress saves must continue to use [`Self::save`] and therefore do not
+    /// rewrite snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot or state cannot be serialized, written,
+    /// or atomically replaced.
+    pub fn save_config(
+        &self,
+        state: &SessionState,
+        config: &crate::config::WorkflowConfig,
+    ) -> Result<()> {
+        let path = snapshot_path(&self.sessions_dir(), &state.id);
+        let previous = std::fs::read(&path).ok();
+        let result = if state.config.is_snapshot() {
+            let yaml = serialize_resolved_config(config)?;
+            write_snapshot_atomically(&path, yaml.as_bytes()).map_err(|error| {
+                CruiseError::Other(format!("failed to save session config snapshot: {error}"))
+            })?;
+            self.save(state)
+        } else {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(CruiseError::Other(format!(
+                        "failed to remove obsolete session config snapshot {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            self.save(state)
+        };
+        if let Err(error) = result {
+            match previous {
+                Some(bytes) => {
+                    let _ = write_snapshot_atomically(&path, &bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -689,21 +777,38 @@ impl SessionManager {
     ///
     /// Returns an error if the config file cannot be read or parsed.
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
-        let config_path = state
-            .config_path
-            .clone()
-            .unwrap_or_else(|| self.sessions_dir().join(&state.id).join("config.yaml"));
-        if config_path.is_file() {
-            return crate::workflow_call::resolve_workflow_calls_from_path(config_path);
+        match &state.config {
+            crate::session_config::SessionConfigRef::File { path } => {
+                crate::workflow_call::resolve_workflow_calls_from_path(path.clone()).map_err(
+                    |error| match error {
+                        CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
+                            format!("failed to parse file config {}: {message}", path.display()),
+                        ),
+                        error => CruiseError::Other(format!(
+                            "failed to load file config {}: {error}",
+                            path.display()
+                        )),
+                    },
+                )
+            }
+            reference => {
+                let path = snapshot_path(&self.sessions_dir(), &state.id);
+                let yaml = std::fs::read_to_string(&path).map_err(|error| {
+                    CruiseError::Other(format!(
+                        "failed to load {} at {}: {error}",
+                        reference.kind_label(),
+                        path.display()
+                    ))
+                })?;
+                crate::config::WorkflowConfig::from_yaml(&yaml).map_err(|error| {
+                    CruiseError::ConfigParseError(format!(
+                        "failed to parse {} at {}: {error}",
+                        reference.kind_label(),
+                        path.display()
+                    ))
+                })
+            }
         }
-        if crate::resolver::ConfigSource::is_builtin_source(&state.config_source) {
-            let (yaml, source) = crate::resolver::resolve_config_in_dir(
-                Some(crate::new_session_history::BUILTIN_CONFIG_KEY),
-                &state.base_dir,
-            )?;
-            return crate::resolver::resolve_workflow_config(&yaml, &source, &state.base_dir);
-        }
-        crate::workflow_call::resolve_workflow_calls_from_path(config_path)
     }
 
     /// If `state` is in `Running` phase but the runner process is no longer
@@ -1099,7 +1204,6 @@ fn months_in_year(year: u16) -> [u8; 12] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::CruiseError;
     use tempfile::TempDir;
 
     /// Guard that saves an environment variable's current value, removes it for
@@ -1184,7 +1288,9 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "add hello world".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1208,7 +1314,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1228,7 +1336,9 @@ mod tests {
         let state = SessionState::new(
             "20260310130002".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
 
@@ -1245,7 +1355,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.plan_error = Some("planner exited 1".to_string());
@@ -1267,7 +1379,9 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1305,7 +1419,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260310130001".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Running;
@@ -1385,7 +1501,9 @@ mod tests {
             let state = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1413,7 +1531,9 @@ mod tests {
         let mut planned = SessionState::new(
             "20260306100000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task1".to_string(),
         );
         planned.phase = SessionPhase::Planned;
@@ -1422,7 +1542,9 @@ mod tests {
         let mut completed = SessionState::new(
             "20260306110000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task2".to_string(),
         );
         completed.phase = SessionPhase::Completed;
@@ -1433,7 +1555,9 @@ mod tests {
         let mut failed = SessionState::new(
             "20260306120000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task3".to_string(),
         );
         failed.phase = SessionPhase::Failed("some error".to_string());
@@ -1442,7 +1566,9 @@ mod tests {
         let mut running = SessionState::new(
             "20260306130000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task4".to_string(),
         );
         running.phase = SessionPhase::Running;
@@ -1468,7 +1594,9 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1489,7 +1617,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Completed;
@@ -1511,7 +1641,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.title = Some("Readable generated title".to_string());
@@ -1529,7 +1661,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/clones/20260607120000"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.repo = Some("owner/repo".to_string());
@@ -1547,7 +1681,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.cleanup_after_pr_override = Some(true);
@@ -1566,7 +1702,9 @@ mod tests {
         let state = SessionState::new(
             "20260622000001".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
 
@@ -1586,7 +1724,7 @@ mod tests {
             "id": id,
             "base_dir": "/repo",
             "phase": "Planned",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "old task",
             "current_step": null,
             "created_at": "2026-03-06T17:00:00Z",
@@ -1623,7 +1761,7 @@ mod tests {
             "id": id,
             "base_dir": "/repo",
             "phase": "Planned",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "old task",
             "current_step": null,
             "created_at": "2026-03-06T17:00:00Z",
@@ -1652,7 +1790,9 @@ mod tests {
         let state = SessionState::new(
             "20260622000000000".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "test task".to_string(),
         );
 
@@ -1677,7 +1817,7 @@ mod tests {
             "id": id,
             "base_dir": "/repo",
             "phase": "Suspended",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "old task",
             "current_step": "implement",
             "created_at": "2026-06-22T00:00:00Z",
@@ -1719,7 +1859,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "dag task".to_string(),
         );
         state.has_dag = true;
@@ -1751,7 +1893,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.workspace_mode = WorkspaceMode::CurrentBranch;
@@ -1772,7 +1916,9 @@ mod tests {
         let mut planned = SessionState::new(
             "20260308100000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "planned-task".to_string(),
         );
         planned.phase = SessionPhase::Planned;
@@ -1781,7 +1927,9 @@ mod tests {
         let mut completed = SessionState::new(
             "20260308110000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "completed-task".to_string(),
         );
         completed.phase = SessionPhase::Completed;
@@ -1792,7 +1940,9 @@ mod tests {
         let mut failed = SessionState::new(
             "20260308120000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "failed-task".to_string(),
         );
         failed.phase = SessionPhase::Failed("error".to_string());
@@ -1801,7 +1951,9 @@ mod tests {
         let mut running = SessionState::new(
             "20260308130000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "running-task".to_string(),
         );
         running.phase = SessionPhase::Running;
@@ -1825,7 +1977,9 @@ mod tests {
         let mut completed = SessionState::new(
             "20260308200000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "done".to_string(),
         );
         completed.phase = SessionPhase::Completed;
@@ -1854,7 +2008,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 input.to_string(),
             );
             s.phase = SessionPhase::Planned;
@@ -1882,7 +2038,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1907,7 +2063,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1922,7 +2078,7 @@ mod tests {
             .load_config(&state)
             .map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));
 
-        assert!(matches!(err, CruiseError::ConfigParseError(_)));
+        assert!(err.to_string().contains("config.yaml"));
     }
 
     // -----------------------------------------------------------------------
@@ -1933,7 +2089,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260309100000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "some task".to_string(),
         );
         s.phase = SessionPhase::Completed;
@@ -1953,7 +2111,7 @@ mod tests {
         let orig_input = s.input.clone();
         let orig_created_at = s.created_at.clone();
         let orig_base_dir = s.base_dir.clone();
-        let orig_config_source = s.config_source.clone();
+        let orig_config = s.config.clone();
 
         // When
         s.reset_to_planned();
@@ -1972,7 +2130,7 @@ mod tests {
         assert_eq!(s.input, orig_input);
         assert_eq!(s.created_at, orig_created_at);
         assert_eq!(s.base_dir, orig_base_dir);
-        assert_eq!(s.config_source, orig_config_source);
+        assert_eq!(s.config, orig_config);
     }
 
     #[test]
@@ -1981,7 +2139,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260309110000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "running task".to_string(),
         );
         s.phase = SessionPhase::Running;
@@ -2040,7 +2200,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Suspended;
@@ -2067,7 +2229,9 @@ mod tests {
         let mut suspended = SessionState::new(
             "20260310110000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "suspended-task".to_string(),
         );
         suspended.phase = SessionPhase::Suspended;
@@ -2078,7 +2242,9 @@ mod tests {
         let mut completed = SessionState::new(
             "20260310120000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "completed-task".to_string(),
         );
         completed.phase = SessionPhase::Completed;
@@ -2121,7 +2287,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = phase;
@@ -2171,7 +2339,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260310210000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "done".to_string(),
         );
         s.phase = SessionPhase::Completed;
@@ -2203,7 +2373,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = SessionPhase::Planned;
@@ -2239,7 +2411,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = phase;
@@ -2276,7 +2450,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260403320000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         s.phase = SessionPhase::Planned;
@@ -2306,7 +2482,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = SessionPhase::Planned;
@@ -2344,7 +2522,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = phase;
@@ -2369,7 +2549,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260310120000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "direct mode task".to_string(),
         );
         s.phase = SessionPhase::Running;
@@ -2397,7 +2579,9 @@ mod tests {
         let s = SessionState::new(
             "20260311100000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "some task".to_string(),
         );
 
@@ -2444,7 +2628,9 @@ mod tests {
         let awaiting = SessionState::new(
             "20260311200000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "unapproved".to_string(),
         );
         // SessionState::new creates in AwaitingApproval phase
@@ -2455,7 +2641,9 @@ mod tests {
         let mut planned = SessionState::new(
             "20260311200001".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "approved".to_string(),
         );
         planned.phase = SessionPhase::Planned;
@@ -2464,7 +2652,9 @@ mod tests {
         let mut running = SessionState::new(
             "20260311200002".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "running".to_string(),
         );
         running.phase = SessionPhase::Running;
@@ -2499,7 +2689,9 @@ mod tests {
         let awaiting = SessionState::new(
             "20260311300000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "not yet approved".to_string(),
         );
         manager
@@ -2509,7 +2701,9 @@ mod tests {
         let mut approved = SessionState::new(
             "20260311300001".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "approved task".to_string(),
         );
         approved.phase = SessionPhase::Planned;
@@ -2538,7 +2732,9 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "pending approval".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2560,7 +2756,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260311500000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         assert!(matches!(s.phase, SessionPhase::AwaitingApproval));
@@ -2576,140 +2774,93 @@ mod tests {
         );
     }
 
-    // --- tests for the config_path field & load_config changes ---
+    // --- tests for explicit config references and load_config ---
 
     #[test]
-    fn test_session_state_config_path_defaults_to_none_on_new() {
-        // Given/When: creating a SessionState::new() without arguments
+    fn test_session_state_stores_the_explicit_config_reference() {
+        let path = PathBuf::from("/repo/cruise.yaml");
         let state = SessionState::new(
             "20260314120000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            SessionConfigRef::File { path: path.clone() },
             "task".to_string(),
         );
-        // Then: config_path is None
-        assert!(state.config_path.is_none());
+        assert_eq!(state.config, SessionConfigRef::File { path });
     }
 
     #[test]
-    fn test_session_state_backward_compat_config_path_none() {
-        // Given: legacy JSON format that does not contain the config_path field
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(tmp.path().to_path_buf());
-        let id = "20260314120002".to_string();
-        let session_dir = manager.sessions_dir().join(&id);
-        std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        // legacy format without config_path field
-        let json = serde_json::json!({
-            "id": id,
-            "base_dir": "/repo",
-            "phase": "Planned",
-            "config_source": "cruise.yaml",
-            "input": "old task",
-            "current_step": null,
-            "created_at": "2026-03-14T12:00:00Z",
-            "completed_at": null,
-            "worktree_path": null,
-            "worktree_branch": null
-        });
-        std::fs::write(session_dir.join("state.json"), json.to_string())
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: loading the legacy JSON format
-        let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: config_path defaults to None
-        assert!(
-            loaded.config_path.is_none(),
-            "config_path should default to None for old sessions"
-        );
-    }
-
-    #[test]
-    fn test_session_load_config_reads_from_config_path_when_set() {
+    fn test_session_load_config_reads_from_file_reference() {
         let _sdk_guard = EnvVarGuard::new("CRUISE_SDK");
 
-        // Given: a session with a config_path pointing to an external file
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120003".to_string();
 
-        // create an external YAML file
         let config_file = tmp.path().join("external_cruise.yaml");
         let yaml = "command:\n  - cat\nsteps:\n  check:\n    command: \"true\"\n";
         std::fs::write(&config_file, yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
-        let mut state = SessionState::new(
+        let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            config_file.display().to_string(),
+            SessionConfigRef::File {
+                path: config_file.clone(),
+            },
             "task".to_string(),
         );
-        state.config_path = Some(config_file);
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: loading from config_path
         let config = manager
             .load_config(&state)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: the contents of the external file are loaded
         assert_eq!(config.command, vec!["cat".to_string()]);
         assert!(config.steps.contains_key("check"));
     }
 
     #[test]
-    fn test_session_load_config_falls_back_to_session_dir_when_config_path_none() {
+    fn test_session_load_config_reads_session_snapshot_without_fallback() {
         let _sdk_guard = EnvVarGuard::new("CRUISE_SDK");
 
-        // Given: a session with config_path as None (backward-compatible fallback)
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120004".to_string();
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
-        // config_path remains None
-        assert!(state.config_path.is_none());
-        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // write to config.yaml in the session directory as a fallback
-        let yaml = "command:\n  - bash\nsteps:\n  fallback_step:\n    command: \"true\"\n";
-        std::fs::write(manager.sessions_dir().join(&id).join("config.yaml"), yaml)
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "command:\n  - bash\nsteps:\n  snapshot_step:\n    command: \"true\"\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create_with_config(&state, &config)
             .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: calling load_config
         let config = manager
             .load_config(&state)
             .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: the fallback session directory config.yaml is read
         assert_eq!(config.command, vec!["bash".to_string()]);
-        assert!(config.steps.contains_key("fallback_step"));
+        assert!(config.steps.contains_key("snapshot_step"));
     }
 
     #[test]
-    fn test_session_load_config_config_path_not_found_returns_error() {
-        // Given: a session whose config_path points to a non-existent file
+    fn test_session_load_config_missing_file_reference_returns_error() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260314120005".to_string();
-        let mut state = SessionState::new(
+        let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            SessionConfigRef::File {
+                path: PathBuf::from("/nonexistent/cruise.yaml"),
+            },
             "task".to_string(),
         );
-        state.config_path = Some(PathBuf::from("/nonexistent/cruise.yaml"));
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: load_config referencing a non-existent file
         let result = manager.load_config(&state);
-
-        // Then: an error is returned
         assert!(result.is_err());
     }
 
@@ -2796,7 +2947,9 @@ mod tests {
             let state = SessionState::new(
                 id.clone(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 input.to_string(),
             );
             manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2824,7 +2977,9 @@ mod tests {
         let state = SessionState::new(
             "20260407000000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "add feature".to_string(),
         );
         // When: checking skipped_steps
@@ -2842,7 +2997,7 @@ mod tests {
             "id": "20260407000001",
             "base_dir": "/repo",
             "phase": "AwaitingApproval",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "add feature",
             "current_step": null,
             "created_at": "2026-04-07T03:02:37Z",
@@ -2869,7 +3024,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "add feature".to_string(),
         );
         state.skipped_steps = vec!["plan".to_string(), "write-test".to_string()];
@@ -2896,7 +3053,9 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2921,7 +3080,9 @@ mod tests {
         let state = SessionState::new(
             "20260511000000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         // Then: runner_pid is None
@@ -2936,7 +3097,7 @@ mod tests {
             "id": "20260511000001",
             "base_dir": "/repo",
             "phase": "Running",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "old task",
             "current_step": null,
             "created_at": "2026-05-11T00:00:00Z",
@@ -2961,7 +3122,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.runner_pid = Some(12345);
@@ -2986,7 +3149,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000003".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.runner_pid = Some(42);
@@ -3006,7 +3171,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000004".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         assert!(state.runner_pid.is_none());
@@ -3029,7 +3196,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000005".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
 
@@ -3047,7 +3216,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000006".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.set_runner_to_current_process();
@@ -3066,7 +3237,9 @@ mod tests {
         let state = SessionState::new(
             "20260511000007".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
 
@@ -3080,7 +3253,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000008".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.runner_pid = Some(std::process::id());
@@ -3095,7 +3270,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000009".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.runner_started_at = Some(1_700_000_000);
@@ -3110,7 +3287,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000010".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         // Use a very large PID that won't exist on any reasonable system
@@ -3133,7 +3312,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000011".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Completed;
@@ -3155,7 +3336,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000012".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Running;
@@ -3179,7 +3362,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000013".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Running;
@@ -3218,7 +3403,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000014".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Running;
@@ -3246,7 +3433,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260511000015".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.phase = SessionPhase::Running;
@@ -3271,7 +3460,9 @@ mod tests {
         let mut s = SessionState::new(
             "20260511000016".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         s.phase = SessionPhase::Running;
@@ -3324,7 +3515,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "my draft task".to_string(),
         );
         state.phase = SessionPhase::Draft;
@@ -3351,7 +3544,9 @@ mod tests {
         let mut draft = SessionState::new(
             "20260523110000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "draft-task".to_string(),
         );
         draft.phase = SessionPhase::Draft;
@@ -3360,7 +3555,9 @@ mod tests {
         let mut planned = SessionState::new(
             "20260523110001".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "planned-task".to_string(),
         );
         planned.phase = SessionPhase::Planned;
@@ -3369,7 +3566,9 @@ mod tests {
         let mut completed = SessionState::new(
             "20260523110002".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "completed-task".to_string(),
         );
         completed.phase = SessionPhase::Completed;
@@ -3414,7 +3613,9 @@ mod tests {
             let mut session = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             session.phase = phase;
@@ -3447,7 +3648,9 @@ mod tests {
             let mut session = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             session.phase = phase;
@@ -3474,7 +3677,9 @@ mod tests {
         let session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -3498,7 +3703,7 @@ mod tests {
             "id": "20260523117001",
             "base_dir": "/repo",
             "phase": "Planned",
-            "config_source": "cruise.yaml",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
             "input": "old task",
             "current_step": null,
             "created_at": "2026-05-23T00:00:00Z",
@@ -3529,7 +3734,9 @@ mod tests {
             let mut s = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             s.phase = phase;
@@ -3600,7 +3807,9 @@ mod tests {
             let mut session = SessionState::new(
                 id.to_string(),
                 PathBuf::from("/repo"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             session.phase = phase;
@@ -3766,7 +3975,9 @@ mod tests {
         let mut terminal = SessionState::new(
             "cleanup-worktree".to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         terminal.phase = SessionPhase::Completed;
@@ -3780,7 +3991,9 @@ mod tests {
         let mut reset_exec = SessionState::new(
             "cleanup-reset-exec".to_string(),
             repo,
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "task".to_string(),
         );
         reset_exec.phase = SessionPhase::Planned;
@@ -3813,7 +4026,7 @@ mod tests {
         let mut state = SessionState::new_draft(
             "20260830000001".to_string(),
             PathBuf::from("/tmp/repo"),
-            "config: (builtin default)".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             String::new(),
         );
         state.attachments.push(PathBuf::from("image.png"));

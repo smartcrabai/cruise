@@ -410,7 +410,21 @@ Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is
 
 ## Session Management
 
-Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Sessions whose workflow has no filesystem config path—including an explicit `-c __builtin__` selection—store the resolved YAML in `sessions/<session-id>/config.yaml` so they remain runnable without rediscovery.
+Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Each `state.json` has one tagged `config` reference:
+
+```json
+{"config":{"kind":"file","path":"/absolute/path/cruise.yaml"}}
+```
+
+The other supported kinds are `builtin_snapshot`, `repo_snapshot` (with a
+clone-relative `relative_path`), and `inline_snapshot`. A `file` reference is
+live: edits to the file are picked up on the next load or execution reload.
+Snapshot references read only the session-owned `sessions/<session-id>/config.yaml`
+and never rediscover or silently fall back to another config. Built-in, inline,
+and temporary-clone workflows are serialized there as resolved YAML so they
+remain runnable after their source or clone disappears. Older `state.json`
+files containing `config_source` and `config_path` are not migrated or loaded;
+create a new session when using this format.
 
 ### Runtime File Layout
 

@@ -1,8 +1,7 @@
 use crate::error::{CruiseError, Result};
-use crate::new_session_history::{
-    BUILTIN_CONFIG_KEY, NewSessionHistory, NewSessionHistoryEntry, resolved_config_key_for_session,
-};
+use crate::new_session_history::{NewSessionHistory, NewSessionHistoryEntry};
 use crate::session::{SessionManager, SessionPhase, SessionState, current_iso8601};
+use crate::session_config::SessionConfigRef;
 
 /// How the session's `current_step` field should be modified.
 pub enum CurrentStepUpdate {
@@ -22,19 +21,16 @@ pub struct SessionSettingsUpdate {
 
 struct PreparedSettings {
     requested_config_path: Option<String>,
-    old_explicit_config: Option<String>,
     skipped_steps: Vec<String>,
     current_step_update: CurrentStepUpdate,
     is_failed_or_suspended: bool,
-    snapshot_path: std::path::PathBuf,
-    reuse_repo_snapshot: bool,
+    config_ref: SessionConfigRef,
     config: crate::config::WorkflowConfig,
-    source: crate::resolver::ConfigSource,
+    config_changed: bool,
 }
 
 fn prepare_settings(
     manager: &SessionManager,
-    session_id: &str,
     session: &SessionState,
     update: SessionSettingsUpdate,
 ) -> Result<PreparedSettings> {
@@ -61,22 +57,27 @@ fn prepare_settings(
         skipped_steps,
         current_step_update,
     } = update;
-    let session_uses_builtin = session.config_path.is_none()
-        && crate::resolver::ConfigSource::is_builtin_source(&session.config_source);
-    let config_selection_provided = requested_config_path.is_some();
-    let requested_config_path = requested_config_path
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| crate::new_session_history::expand_tilde(&path))
-        .or_else(|| {
-            (!config_selection_provided && session_uses_builtin)
-                .then(|| BUILTIN_CONFIG_KEY.to_string())
-        });
-    let old_explicit_config = session
-        .config_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| session_uses_builtin.then(|| BUILTIN_CONFIG_KEY.to_string()));
-    if is_failed_or_suspended && old_explicit_config != requested_config_path {
+
+    let (requested_config_path, config_ref, config) = match requested_config_path {
+        None => (None, session.config.clone(), manager.load_config(session)?),
+        Some(raw) => {
+            let requested_config_path =
+                (!raw.trim().is_empty()).then(|| crate::new_session_history::expand_tilde(&raw));
+            let (yaml, source) = crate::resolver::resolve_config_in_dir(
+                requested_config_path.as_deref(),
+                &session.base_dir,
+            )?;
+            let config =
+                crate::resolver::resolve_workflow_config(&yaml, &source, &session.base_dir)?;
+            let config_ref = SessionConfigRef::from_source(
+                &source,
+                session.repo.as_ref().map(|_| session.base_dir.as_path()),
+            )?;
+            (requested_config_path, config_ref, config)
+        }
+    };
+    let config_changed = config_ref != session.config;
+    if is_failed_or_suspended && config_changed {
         return Err(CruiseError::Other(
             "Cannot change config for a Failed or Suspended session. Only skip steps and current step can be edited.".to_string(),
         ));
@@ -87,75 +88,19 @@ fn prepare_settings(
         ));
     }
 
-    let snapshot_path = manager.sessions_dir().join(session_id).join("config.yaml");
-    let reuse_repo_snapshot = session.repo.is_some()
-        && requested_config_path.is_none()
-        && session.config_path.is_none()
-        && snapshot_path.is_file();
-    let (yaml, source) = if reuse_repo_snapshot {
-        (
-            std::fs::read_to_string(&snapshot_path)
-                .map_err(|e| CruiseError::Other(format!("failed to read session config: {e}")))?,
-            crate::resolver::ConfigSource::Builtin,
-        )
-    } else {
-        crate::resolver::resolve_config_in_dir(requested_config_path.as_deref(), &session.base_dir)?
-    };
-    let config = crate::resolver::resolve_workflow_config(&yaml, &source, &session.base_dir)?;
     crate::config::validate_config(&config)?;
     if let CurrentStepUpdate::Set(step_name) = &current_step_update {
         validate_current_step_name(&config, step_name, &skipped_steps)?;
     }
     Ok(PreparedSettings {
         requested_config_path,
-        old_explicit_config,
         skipped_steps,
         current_step_update,
         is_failed_or_suspended,
-        snapshot_path,
-        reuse_repo_snapshot,
+        config_ref,
         config,
-        source,
+        config_changed,
     })
-}
-
-fn save_session_with_snapshot(
-    manager: &SessionManager,
-    session: &SessionState,
-    config: &crate::config::WorkflowConfig,
-    snapshot_path: &std::path::Path,
-) -> Result<()> {
-    let prior_snapshot = match std::fs::read(snapshot_path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(CruiseError::Other(format!(
-                "failed to snapshot session config: {error}"
-            )));
-        }
-    };
-    if session.config_path.is_none() {
-        let snapshot = crate::repo_clone::serialize_resolved_config(config)?;
-        crate::planning::write_plan_atomically(snapshot_path, snapshot.as_bytes())
-            .map_err(|e| CruiseError::Other(format!("failed to write session config: {e}")))?;
-    }
-    if let Err(error) = manager.save(session) {
-        let restore = match prior_snapshot.as_deref() {
-            Some(bytes) => crate::planning::write_plan_atomically(snapshot_path, bytes),
-            None => match std::fs::remove_file(snapshot_path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            },
-        };
-        if let Err(restore_error) = restore {
-            return Err(CruiseError::Other(format!(
-                "failed to save session settings ({error}) and restore session config ({restore_error})"
-            )));
-        }
-        return Err(error);
-    }
-    Ok(())
 }
 /// Update config and skip-step settings for an editable session.
 ///
@@ -175,15 +120,13 @@ pub fn update_session_settings(
     let mut session = manager.load(session_id)?;
     let PreparedSettings {
         requested_config_path,
-        old_explicit_config,
         skipped_steps,
         current_step_update,
         is_failed_or_suspended,
-        snapshot_path,
-        reuse_repo_snapshot,
+        config_ref,
         config,
-        source,
-    } = prepare_settings(manager, session_id, &session, update)?;
+        config_changed,
+    } = prepare_settings(manager, &session, update)?;
 
     match current_step_update {
         CurrentStepUpdate::Unchanged => {}
@@ -198,31 +141,26 @@ pub fn update_session_settings(
             session.current_step_is_node_id = false;
         }
     }
-    if !reuse_repo_snapshot {
-        session.config_source = source.display_string();
-    }
-    let config_changed = old_explicit_config != requested_config_path;
-    session.config_path = requested_config_path.as_ref().and(source.path()).cloned();
+    session.config = config_ref;
     session.skipped_steps = skipped_steps;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());
 
-    save_session_with_snapshot(manager, &session, &config, &snapshot_path)?;
+    if config_changed {
+        manager.save_config(&session, &config)?;
+    } else {
+        manager.save(&session)?;
+    }
     if !is_failed_or_suspended {
-        record_history(&session, requested_config_path.as_ref(), &source);
+        record_history(&session, requested_config_path.as_ref());
     }
     Ok((session, config_changed))
 }
 
-fn record_history(
-    session: &SessionState,
-    requested_config_path: Option<&String>,
-    source: &crate::resolver::ConfigSource,
-) {
-    let resolved_config_key = source.path().map_or_else(
-        || BUILTIN_CONFIG_KEY.to_string(),
-        |p| resolved_config_key_for_session(p),
-    );
+fn record_history(session: &SessionState, requested_config_path: Option<&String>) {
+    let resolved_config_key = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(NewSessionHistoryEntry {
         selected_at: current_iso8601(),
@@ -275,7 +213,9 @@ mod tests {
         let mut s = SessionState::new(
             id.to_string(),
             base_dir.to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: base_dir.join("cruise.yaml"),
+            },
             "test task".to_string(),
         );
         s.phase = SessionPhase::Planned;
@@ -510,8 +450,7 @@ mod tests {
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619000009", &repo);
-        session.config_path = None;
+        let session = make_session("20260619000009", &repo);
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: only skipped_steps change, config_path stays None (same auto-resolved result)
@@ -552,8 +491,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619000010", &repo);
-        session.config_path = None;
+        let session = make_session("20260619000010", &repo);
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: an explicit config path is provided (different from the previously resolved one)
@@ -590,9 +528,16 @@ mod tests {
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000012", &repo);
-        session.config_source = crate::resolver::ConfigSource::Builtin.display_string();
-        session.config_path = None;
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        session.config = crate::session_config::SessionConfigRef::BuiltinSnapshot;
+        let builtin_config = crate::resolver::resolve_workflow_config(
+            crate::config::BUILTIN_CONFIG_YAML,
+            &crate::resolver::ConfigSource::Builtin,
+            &repo,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create_with_config(&session, &builtin_config)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: the CLI edits only skipped steps (it omits config_path)
         let (_, config_changed) = update_session_settings(
@@ -611,10 +556,9 @@ mod tests {
             .load("20260619000012")
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
-            reloaded.config_source,
-            crate::resolver::ConfigSource::Builtin.display_string()
+            reloaded.config,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot
         );
-        assert!(reloaded.config_path.is_none());
         assert!(!config_changed);
         let saved_config = fs::read_to_string(
             manager
@@ -628,7 +572,7 @@ mod tests {
             &crate::resolver::ConfigSource::Builtin,
             &repo,
         )
-        .and_then(|config| crate::repo_clone::serialize_resolved_config(&config))
+        .and_then(|config| crate::session_config::serialize_resolved_config(&config))
         .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(saved_config, expected_config);
     }
@@ -644,16 +588,15 @@ mod tests {
         write_minimal_config(&repo);
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619000011", &repo);
-        session.config_path = None;
+        let session = make_session("20260619000011", &repo);
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: update with config_path = None (stays builtin / auto-resolved)
+        // When: explicitly select the builtin snapshot
         let result = update_session_settings(
             &manager,
             "20260619000011",
             SessionSettingsUpdate {
-                config_path: None,
+                config_path: Some(crate::new_session_history::BUILTIN_CONFIG_KEY.to_string()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
             },
@@ -676,7 +619,9 @@ mod tests {
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000013", &repo);
         session.repo = Some("owner/repository".to_string());
-        session.config_path = None;
+        session.config = crate::session_config::SessionConfigRef::RepoSnapshot {
+            relative_path: std::path::PathBuf::from(".cruise/review.yaml"),
+        };
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             manager
@@ -709,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_auto_selected_config_inlines_prompt_file_in_snapshot() {
+    fn test_update_auto_selected_config_keeps_live_file_reference() {
         // Given: an auto-selected config whose prompt_file is relative to it.
         let _lock = crate::test_support::lock_process();
         let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -728,31 +673,43 @@ mod tests {
         let session = make_session("20260619000019", &repo);
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: the CLI settings flow keeps the auto-selected config.
-        update_session_settings(
+        // When: Auto is explicitly selected again.
+        let (_, config_changed) = update_session_settings(
             &manager,
             "20260619000019",
             SessionSettingsUpdate {
-                config_path: None,
+                config_path: Some(String::new()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: the session snapshot is self-contained for later execution.
-        let snapshot = fs::read_to_string(
-            manager
+        // Then: Auto resolves to the ordinary file and does not create a snapshot.
+        assert!(!config_changed);
+        let reloaded = manager
+            .load("20260619000019")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            reloaded.config,
+            crate::session_config::SessionConfigRef::File {
+                path: repo.join("cruise.yaml"),
+            }
+        );
+        assert!(
+            !manager
                 .sessions_dir()
                 .join("20260619000019")
-                .join("config.yaml"),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            snapshot.contains("Implement from a file"),
-            "snapshot: {snapshot}"
+                .join("config.yaml")
+                .exists()
         );
-        assert!(!snapshot.contains("prompt_file"));
+        let config = manager
+            .load_config(&reloaded)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            config.steps["s"].prompt.as_deref(),
+            Some("Implement from a file\n")
+        );
     }
 
     #[test]
@@ -767,7 +724,9 @@ mod tests {
         let mut session = make_session("20260619000018", &repo);
         session.phase = SessionPhase::AwaitingApproval;
         session.repo = Some("owner/repository".to_string());
-        session.config_path = None;
+        session.config = crate::session_config::SessionConfigRef::RepoSnapshot {
+            relative_path: std::path::PathBuf::from(".cruise/review.yaml"),
+        };
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         fs::write(
             manager

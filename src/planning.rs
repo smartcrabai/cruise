@@ -420,18 +420,6 @@ pub fn plan_conversation_key(config: &WorkflowConfig, config_identity: &str) -> 
     key
 }
 
-/// Resolve a config identity from a path and compute its conversation key.
-/// The path is part of the key even if two files happen to have identical
-/// bytes, preventing accidental cross-config conversation reuse.
-#[must_use]
-pub fn plan_conversation_key_for_path(config: &WorkflowConfig, path: Option<&Path>) -> String {
-    let identity = path.map_or_else(
-        || "__builtin__".to_string(),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    plan_conversation_key(config, &identity)
-}
-
 /// Write bytes to a path by replacing it atomically.
 ///
 /// The parent directory is created when necessary, and a temporary file is

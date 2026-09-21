@@ -250,7 +250,9 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             base_dir.to_path_buf(),
-            "test.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("test.yaml"),
+            },
             format!("task for {id}"),
         );
         state.phase = SessionPhase::Planned;

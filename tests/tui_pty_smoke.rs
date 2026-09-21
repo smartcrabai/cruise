@@ -160,13 +160,14 @@ impl Fixture {
         let mut state = SessionState::new(
             id.to_string(),
             repo,
-            "e2e.yaml".to_string(),
+            cruise::session_config::SessionConfigRef::File {
+                path: config.clone(),
+            },
             input.to_string(),
         );
         state.phase = SessionPhase::Planned;
         state.workspace_mode = WorkspaceMode::CurrentBranch;
         state.target_branch = Some("main".to_string());
-        state.config_path = Some(config);
         state.has_dag = true;
         self.manager
             .create(&state)
@@ -221,13 +222,14 @@ impl Fixture {
         let mut state = SessionState::new(
             id.to_string(),
             repo,
-            "tui-model.yaml".to_string(),
+            cruise::session_config::SessionConfigRef::File {
+                path: config.clone(),
+            },
             "TUI model logging session".to_string(),
         );
         state.phase = SessionPhase::Planned;
         state.workspace_mode = WorkspaceMode::CurrentBranch;
         state.target_branch = Some("main".to_string());
-        state.config_path = Some(config);
         state.has_dag = true;
         self.manager
             .create(&state)
@@ -269,7 +271,7 @@ impl Fixture {
         let mut state = SessionState::new(
             id.clone(),
             self.root.path().to_path_buf(),
-            "__builtin__".to_string(),
+            cruise::session_config::SessionConfigRef::BuiltinSnapshot,
             input.to_string(),
         );
         state.phase = phase;
@@ -524,10 +526,14 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
         .unwrap_or_else(|| panic!("config PTY session was not persisted"));
     let expected_config_path = std::fs::canonicalize(custom_dir.join("workflow.yaml"))
         .unwrap_or_else(|error| panic!("failed to canonicalize expected config path: {error}"));
-    let actual_config_path = session.config_path.map(|path| {
-        std::fs::canonicalize(&path)
-            .unwrap_or_else(|error| panic!("failed to canonicalize persisted config path: {error}"))
-    });
+    let actual_config_path = match session.config {
+        cruise::session_config::SessionConfigRef::File { path } => {
+            Some(std::fs::canonicalize(&path).unwrap_or_else(|error| {
+                panic!("failed to canonicalize persisted config path: {error}")
+            }))
+        }
+        reference => panic!("expected a live file reference, got {reference:?}"),
+    };
     assert_eq!(actual_config_path, Some(expected_config_path));
 }
 

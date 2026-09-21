@@ -318,7 +318,9 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             PathBuf::from("/tmp/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             input.to_string(),
         );
         state.title = title.map(str::to_string);
