@@ -2586,6 +2586,54 @@ mod tests {
         assert_eq!(app.form.step, Step::Task);
     }
 
+    #[test]
+    fn sessions_clean_shortcut_opens_confirmation_without_starting_cleanup() {
+        for sessions_present in [false, true] {
+            let mut app = app();
+            if sessions_present {
+                add_session(
+                    &mut app,
+                    "session-1",
+                    crate::session::SessionPhase::AwaitingApproval,
+                );
+            }
+
+            assert!(!app.handle_key(key(KeyCode::Char('c'))));
+            assert!(matches!(
+                app.modal,
+                Some(Modal::Confirm {
+                    command: PendingCommand::Clean,
+                    ..
+                })
+            ));
+            assert!(app.registry.tasks_empty());
+        }
+    }
+
+    #[test]
+    fn clean_confirmation_can_be_cancelled_without_starting_cleanup() {
+        let mut app = app();
+        assert!(!app.handle_key(key(KeyCode::Char('c'))));
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(app.modal.is_none());
+        assert!(app.registry.tasks_empty());
+    }
+
+    #[test]
+    fn c_is_scoped_to_sessions_and_remains_text_or_noop_elsewhere() {
+        let mut new_session = app();
+        assert!(!new_session.handle_action(Action::NewSession));
+        assert!(!new_session.handle_key(key(KeyCode::Char('c'))));
+        assert_eq!(new_session.form.input.text(), "c");
+        assert!(new_session.modal.is_none());
+        drop(new_session);
+
+        let mut run_all = app();
+        run_all.view = View::RunAll;
+        assert!(!run_all.handle_key(key(KeyCode::Char('c'))));
+        assert!(run_all.modal.is_none());
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }

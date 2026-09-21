@@ -893,9 +893,32 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(80, 24, true);
 
-    tui.wait_for_output("No sessions yet", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet") && screen.contains("c clean")
+    });
+
+    tui.send(b"c");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Clean")
+            && screen.contains("Enter confirm")
+            && screen.contains("Esc cancel")
+    });
+    tui.send(b"\x1b");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet")
+            && screen.contains("c clean")
+            && !screen.contains("Enter confirm")
+    });
+
     tui.send(b"?");
-    tui.wait_for_output("Keyboard-only; no mouse or child-owned TTY.", START_TIMEOUT);
+    let help_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Sessions only")
+            && screen.contains("Keyboard-only; no mouse or child-owned TTY.")
+    });
+    assert!(help_screen.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("clean") && line.contains("sessions only") && line.contains("confirmation")
+    }));
     tui.send(b"\x1b");
     thread::sleep(Duration::from_millis(100));
     tui.send(b"2");
