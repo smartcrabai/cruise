@@ -5,7 +5,7 @@
 //! default when a workflow names neither `sdk` nor `command`), or the
 //! **`claude` CLI** (`sdk: claude`). [`Executor`] hides that choice behind a
 //! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
-//! GUI command layer don't need to branch on the backend.
+//! `WebUI` command layer don't need to branch on the backend.
 //!
 //! Every backend reads the cruise `model` / `plan_model` / per-step `model`
 //! fields as a plain model reference:

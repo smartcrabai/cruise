@@ -137,7 +137,7 @@ pub struct SessionState {
     /// execution and removed after the PR is created.
     #[serde(default)]
     pub repo: Option<String>,
-    /// GUI or CLI override for `cleanup_after_pr`. When `Some`, takes
+    /// `WebUI` or CLI override for `cleanup_after_pr`. When `Some`, takes
     /// precedence over the workflow config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_after_pr_override: Option<bool>,
@@ -814,7 +814,7 @@ impl SessionManager {
     /// If `state` is in `Running` phase but the runner process is no longer
     /// alive, transition it to `Suspended` and persist the change.
     ///
-    /// `in_memory_active` should be `true` when the current Tauri process
+    /// `in_memory_active` should be `true` when the current `WebUI` process
     /// itself is executing this session (via `AppState::is_session_active`).
     /// In that case the session is considered alive regardless of PID checks.
     ///
@@ -1674,7 +1674,7 @@ mod tests {
     }
     #[test]
     fn test_session_state_cleanup_after_pr_override_roundtrip() {
-        // Given: a session with a GUI/CLI cleanup override set
+        // Given: a WebUI/CLI cleanup override set
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260622000000".to_string();

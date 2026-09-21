@@ -1,4 +1,4 @@
-//! Client-neutral application facade shared by the CLI, TUI, and Tauri.
+//! Client-neutral application facade shared by the CLI, TUI, and `WebUI`.
 //!
 //! This module deliberately owns operation claims, prompt request identity, and
 //! the neutral event vocabulary. Presentation adapters only translate these
@@ -69,7 +69,7 @@ pub struct OptionChoicePayload {
     pub next_step: Option<String>,
 }
 
-/// A single client-neutral event vocabulary shared by the TUI and Tauri.
+/// A single client-neutral event vocabulary shared by the TUI and `WebUI`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "event",
@@ -152,6 +152,9 @@ pub enum ApplicationEvent {
     },
     BatchFinished {
         cancelled: bool,
+    },
+    BatchFailed {
+        error: String,
     },
     LogChunk {
         session_id: Option<String>,
@@ -640,6 +643,15 @@ impl ApplicationRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
             .map(|record| record.operation)
+    }
+
+    /// Whether a Run All batch is currently in flight.
+    #[must_use]
+    pub fn batch_active(&self) -> bool {
+        self.batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     /// Begin the process-wide Run All operation.
@@ -1686,7 +1698,7 @@ async fn run_plan_prompt(
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,
         // Formal specifications are limited to Generate operations. CLI and
-        // official GUI/TUI callers only set the flag for new-session planning,
+        // official WebUI/TUI callers only set the flag for new-session planning,
         // while direct API Generate callers may use it for any eligible phase.
         // Replan, Fix, and Ask callers cannot opt in through this field.
         formal_spec: request.formal_spec && operation == OperationKind::Generate,
@@ -1832,7 +1844,7 @@ async fn execute_plan(
 /// Run one planning operation with the policy belonging to its resolved config.
 ///
 /// Scoping an explicit `None` is important: config resolution also publishes a
-/// process-wide fallback policy for non-task callers, but GUI planning requests
+/// process-wide fallback policy for non-task callers, but `WebUI` planning requests
 /// for different sessions may run concurrently.
 async fn with_plan_retry_policy<F, T>(config: &crate::config::WorkflowConfig, future: F) -> T
 where
@@ -1943,18 +1955,13 @@ impl CruiseApplication {
     pub fn read_session(&self, id: &str) -> Result<SessionState> {
         self.manager.load(id)
     }
-
-    /// Load a session's workflow through the application-owned session manager.
-    /// GUI and other presentation adapters must use this boundary instead of
-    /// resolving a process-global data directory independently.
+    /// Load the workflow config resolved for one persisted session.
     ///
     /// # Errors
     ///
-    /// Returns an error when the session state or its referenced workflow cannot
-    /// be loaded.
-    pub fn session_config(&self, id: &str) -> Result<crate::config::WorkflowConfig> {
-        let state = self.manager.load(id)?;
-        self.manager.load_config(&state)
+    /// Returns an error when the config cannot be read or parsed.
+    pub fn session_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
+        self.manager.load_config(state)
     }
     #[must_use]
     pub fn discover_configs(&self) -> Vec<crate::configs::ConfigEntry> {

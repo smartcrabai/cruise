@@ -12,6 +12,7 @@ use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
     PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
 };
+use crate::platform::open_url;
 use crate::session::{SessionState, WorkspaceMode};
 use std::path::{Path, PathBuf};
 const SESSION_LOG_LIMIT: usize = 10_000;
@@ -851,6 +852,7 @@ impl TuiApp {
                 self.finish_batch_session(id, phase, error);
             }
             ApplicationEvent::BatchFinished { cancelled } => self.finish_batch(cancelled),
+            ApplicationEvent::BatchFailed { error } => self.set_error_and_refresh(error),
             ApplicationEvent::LogChunk {
                 session_id,
                 stream,
@@ -2514,20 +2516,6 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Resume => "Resume",
         SessionAction::OpenPr => "Open Pull Request",
     }
-}
-
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let command = "open";
-    #[cfg(not(target_os = "macos"))]
-    let command = "xdg-open";
-    std::process::Command::new(command)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
 }
 
 #[cfg(test)]

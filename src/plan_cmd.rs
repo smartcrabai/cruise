@@ -1471,8 +1471,8 @@ fn prompt_for_plan_input() -> Result<String> {
 ///
 /// Accepts sessions in `Draft | AwaitingInput | AwaitingApproval | Planned`
 /// phases; this is the path behind `cruise list` → Generate Plan / Replan. The
-/// phase transition after successful regeneration matches the GUI's
-/// `regenerate_plan` command (`src-tauri/src/commands.rs:1422-1427`):
+/// phase transition after successful regeneration matches the `WebUI`'s
+/// regenerate-plan flow:
 ///
 /// - `Draft | AwaitingInput` → `AwaitingApproval`
 /// - `AwaitingApproval` → `AwaitingApproval` (no-op)
@@ -1548,7 +1548,7 @@ pub async fn regenerate_plan_for_session(
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
 
         session.plan_error = None;
-        // Phase transition matching GUI's regenerate_plan (src-tauri/src/commands.rs:1422-1427):
+        // Phase transition matching the WebUI's regenerate-plan behavior:
         // - Draft | AwaitingInput → AwaitingApproval
         // - AwaitingApproval → AwaitingApproval (no-op)
         // - Planned → Planned (preserve approval; do NOT silently un-approve)

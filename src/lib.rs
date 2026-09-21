@@ -1,4 +1,4 @@
-// Core modules exported for the Tauri GUI (src-tauri) and other library consumers.
+// Core modules exported for library consumers.
 pub mod app_config;
 pub mod application;
 pub mod artifacts;
@@ -49,7 +49,7 @@ pub mod console_mode;
 pub mod display;
 pub mod herdr;
 pub(crate) mod multiline_input;
-pub(crate) mod platform;
+pub mod platform;
 pub mod run_observer;
 mod spinner;
 

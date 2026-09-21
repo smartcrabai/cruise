@@ -3,7 +3,7 @@
 //!
 //! Mirrors [`crate::option_handler::OptionHandler`]:
 //! - CLI: [`CliAskHandler`] using the reedline multiline prompt.
-//! - GUI: a Tauri-backed handler (see `src-tauri`) using events + a channel.
+//! - `WebUI`: a server-rendered browser handler using events + a channel.
 //!
 //! The handler is invoked from inside a [`crate::sdk_tools`] tool closure, which
 //! runs on a backend worker thread: the `claude-agent-sdk` MCP tool dispatcher,
@@ -44,7 +44,7 @@ pub trait AskHandler: Send + Sync {
 
 /// Handler for non-interactive contexts where the user cannot be reached.
 ///
-/// Used when `ask_user` should never be registered (e.g. the GUI "Ask about the
+/// Used when `ask_user` should never be registered (e.g. the `WebUI` "Ask about the
 /// plan" flow, which has no streaming channel to surface a question on). If it is
 /// invoked anyway it returns an error rather than blocking.
 pub struct NoninteractiveAskHandler;

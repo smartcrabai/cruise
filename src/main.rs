@@ -71,6 +71,7 @@ mod timeout;
 mod tool_bridge;
 mod tui;
 mod variable;
+mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
@@ -111,6 +112,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Login(args)) => login_cmd::run(&args),
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
+        Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(

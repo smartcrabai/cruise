@@ -4,7 +4,7 @@ use crate::config::WorkflowConfig;
 
 /// Extract the `description` field from a YAML string and normalize it to a single line.
 ///
-/// Prefers parsing the full [`WorkflowConfig`] so config selectors (CLI and GUI) surface
+/// Prefers parsing the full [`WorkflowConfig`] so config selectors (CLI and `WebUI`) surface
 /// the same `description` that round-trips through session persistence (`WorkflowConfig`
 /// is re-serialized into `sessions/{id}/config.yaml`, including resolved prompt files; see
 /// `src/plan_cmd.rs`).

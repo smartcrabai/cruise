@@ -42,7 +42,7 @@ impl InvocationMeta {
 
 /// A node in the skippable step tree returned by [`list_skippable_steps`].
 ///
-/// This structure is used by both the CLI and GUI to present a hierarchical
+/// This structure is used by both the CLI and `WebUI` to present a hierarchical
 /// view of steps, where group call sites appear as parent nodes with their
 /// sub-steps as children. The `expanded_step_ids` field contains the actual
 /// executable step IDs that should be stored in `session.skipped_steps`.
