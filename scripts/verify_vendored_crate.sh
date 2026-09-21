@@ -3,10 +3,10 @@
 # .crate, and prove that [patch.crates-io] is what local/dist builds resolve
 # while `cargo publish` still resolves crates.io.
 #
-# PROHIBITED.md §5 requires the vendored tree to stay source-identical to the
-# published crate; JCODE.md goal 7 requires `cargo install cruise` to keep
-# working. Neither was machine-checked: the Cargo.lock `checksum` that pinned
-# the registry tarball disappears from the root lockfile once the patch applies.
+# The vendored tree must stay source-identical to the published crate, and
+# `cargo install cruise` must keep working. Neither was machine-checked: the
+# Cargo.lock `checksum` that pinned the registry tarball disappears from the
+# root lockfile once the patch applies.
 #
 # Checks:
 #   1. the [dependencies] pin, the [patch.crates-io] path and the vendored
