@@ -6,7 +6,12 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
 };
 
+#[cfg(test)]
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use crate::application::{OptionChoiceKind, SessionAction};
+#[cfg(test)]
+use crate::session::SessionState;
 use crate::session::{SessionPhase, WorkspaceMode};
 
 use super::app::{DetailTab, Modal, TuiApp, View, action_label};
@@ -82,9 +87,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ),
         Span::raw(status),
     ];
-    if !app.prompts.is_empty() {
+    let prompt_count = app.prompts.len() + app.plan_prompts.len();
+    if prompt_count > 0 {
         spans.push(Span::styled(
-            format!("  {} prompt(s)", app.prompts.len()),
+            format!("  {prompt_count} prompt(s)"),
             warning(app),
         ));
     }
@@ -142,14 +148,19 @@ fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
 
 fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let items = app.sessions.iter().map(|session| {
-        let phase = session.phase.label();
+        let phase = app.display_phase(session);
+        let phase_style = if phase == "Planning" {
+            accent(app, false)
+        } else {
+            phase_style(app, &session.phase)
+        };
         let title_width = usize::from(area.width)
             .saturating_sub(phase.chars().count())
             .saturating_sub(7);
         ListItem::new(Line::from(vec![
-            Span::styled("● ", phase_style(app, &session.phase)),
+            Span::styled("● ", phase_style),
             Span::raw(truncate(session.title_or_input(), title_width)),
-            Span::styled(format!(" · {phase}"), phase_style(app, &session.phase)),
+            Span::styled(format!(" · {phase}"), phase_style),
         ]))
     });
     let mut state =
@@ -220,7 +231,14 @@ fn render_info(
         labeled_line(
             app,
             "Phase    ",
-            Span::styled(session.phase.label(), phase_style(app, &session.phase)),
+            Span::styled(
+                app.display_phase(session),
+                if app.display_phase(session) == "Planning" {
+                    accent(app, false)
+                } else {
+                    phase_style(app, &session.phase)
+                },
+            ),
         ),
         labeled_line(app, "Source   ", Span::raw(session.config_source.as_str())),
         labeled_line(
@@ -371,6 +389,17 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 fn render_plan(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    if let Some(prompt) = app.active_plan_prompt() {
+        render_plan_prompt(frame, app, area, prompt);
+        return;
+    }
+    if let Some(question) = app
+        .active_external_plan_input()
+        .map(|session| session.pending_ask_question.clone())
+    {
+        render_external_plan_input(frame, app, area, question.as_deref());
+        return;
+    }
     let text = app
         .active_plan()
         .unwrap_or("No plan has been generated for this session.");
@@ -386,6 +415,151 @@ fn render_plan(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn render_external_plan_input(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    question: Option<&str>,
+) {
+    let block = panel(app, " Plan  Awaiting Input ", false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let question = question.unwrap_or("No question was persisted by the owning process.");
+    let question = question
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .map(|line| Line::from(Span::styled(line, accent(app, true))))
+        .collect::<Vec<_>>();
+    let question_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border(app, false))
+        .title(" Question  read-only ");
+    frame.render_widget(
+        Paragraph::new(question)
+            .block(question_block)
+            .wrap(Wrap { trim: false }),
+        areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Read-only: answer this request in the process that owns it.")
+            .style(muted(app))
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+}
+
+fn render_plan_prompt(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    prompt: &super::prompts::PlanPromptItem,
+) {
+    let block = panel(app, " Plan  Awaiting Input ", false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let constraints = if prompt.error.is_some() {
+        vec![
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ]
+    };
+    let areas = Layout::vertical(constraints).split(inner);
+    let question = prompt
+        .question
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .map(|line| Line::from(Span::styled(line, accent(app, true))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(question)
+            .scroll((u16::try_from(prompt.question_scroll).unwrap_or(u16::MAX), 0))
+            .wrap(Wrap { trim: false }),
+        areas[0],
+    );
+    collapse_wide_placeholders(frame, areas[0]);
+
+    let answer_title = if prompt.editing {
+        " Answer  editing "
+    } else {
+        " Answer  press Enter to edit "
+    };
+    let answer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if prompt.editing {
+            accent(app, true)
+        } else {
+            border(app, false)
+        })
+        .title(answer_title);
+    let answer_inner = answer_block.inner(areas[1]);
+    frame.render_widget(answer_block, areas[1]);
+    frame.render_widget(prompt.answer.widget(), answer_inner);
+
+    let mut guide = if prompt.editing {
+        "Enter submit   Esc leave editing"
+    } else {
+        "Enter edit   scroll ↑↓ PgUp/PgDn Home/End   Esc leave"
+    };
+    if prompt.error.is_some() {
+        guide = "Enter edit/submit   Esc leave editing";
+    }
+    let guide_area = areas[areas.len() - 1];
+    if let Some(error) = prompt.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(error, error_style(app))))
+                .wrap(Wrap { trim: false }),
+            areas[areas.len() - 2],
+        );
+    }
+    frame.render_widget(Paragraph::new(guide).style(muted(app)), guide_area);
+}
+
+fn collapse_wide_placeholders(frame: &mut Frame<'_>, area: Rect) {
+    let mut y = area.y;
+    while y < area.bottom() {
+        let mut x = area.x;
+        while x < area.right() {
+            let symbol = frame
+                .buffer_mut()
+                .cell((x, y))
+                .map(|cell| cell.symbol().to_string())
+                .unwrap_or_default();
+            let width = u16::try_from(Line::from(symbol.as_str()).width()).unwrap_or(u16::MAX);
+            if width > 1 {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+                        std::num::NonZeroU16::new(1).unwrap_or_else(|| unreachable!()),
+                    ));
+                }
+                for offset in 1..width {
+                    if let Some(cell) = frame.buffer_mut().cell_mut((x + offset, y)) {
+                        cell.set_symbol("");
+                    }
+                }
+                x = x.saturating_add(width);
+            } else {
+                x = x.saturating_add(1);
+            }
+        }
+        y = y.saturating_add(1);
+    }
 }
 
 fn strip_text_styles(text: Text<'_>) -> Text<'_> {
@@ -816,9 +990,10 @@ Ctrl+Enter  next question from a multiline editor
 ↑↓ / j/k  choose, recall history, or navigate
 Space  toggle the current choice     PgUp/PgDn/Home/End  jump
 ←→ / [ ]  detail tabs
-a / Enter  actions   o  prompt/link   f  follow log   r  refresh
+a / Enter  actions   o  selected Ask → Plan; Option modal or URL
 Ctrl+Enter  save multiline input in action dialogs
 Ctrl+R  toggle save/regenerate
+Plan Ask: Enter edit/submit   Esc leave editing; Option stays modal
 Esc  close, or back one question   ?  help   q/Ctrl-C  quit
 
 Fast path: n → type the task → Ctrl+P/G/U.
@@ -1136,6 +1311,83 @@ mod tests {
         rendered_lines_with(width, height, no_color, view, configure).join("\n")
     }
 
+    fn configure_ask_sessions(app: &mut TuiApp, tab: DetailTab, selected: usize) {
+        configure_ask_sessions_with_question(app, tab, selected, "Which provider should be used?");
+    }
+
+    fn configure_ask_sessions_with_question(
+        app: &mut TuiApp,
+        tab: DetailTab,
+        selected: usize,
+        question: &str,
+    ) {
+        let mut target = SessionState::new(
+            "session-a".to_string(),
+            std::path::PathBuf::from("."),
+            "cruise.yaml".to_string(),
+            "task session-a".to_string(),
+        );
+        target.phase = SessionPhase::AwaitingInput;
+        let other = SessionState::new(
+            "session-b".to_string(),
+            std::path::PathBuf::from("."),
+            "cruise.yaml".to_string(),
+            "task session-b".to_string(),
+        );
+        app.sessions = vec![target, other];
+        app.selected = selected;
+        app.tab = tab;
+        app.plan_cache.insert(
+            "session-a".to_string(),
+            "# Existing plan\n\n- keep the generated markdown\n".to_string(),
+        );
+        app.plan_cache
+            .insert("session-b".to_string(), "# Other plan\n".to_string());
+        app.plan_prompts.enqueue(
+            "session-a".to_string(),
+            "ask-a".to_string(),
+            question.to_string(),
+        );
+    }
+
+    fn ask_plan_app() -> (tempfile::TempDir, TuiApp) {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = crate::application::CruiseApplication::new(
+            crate::session::SessionManager::new(temp.path().to_path_buf()),
+        );
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (log_tx, _) = tokio::sync::mpsc::channel(4);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            event_tx,
+            log_tx,
+            Some(crate::test_support::lock_process()),
+        );
+        configure_ask_sessions(&mut app, DetailTab::Plan, 0);
+        (temp, app)
+    }
+
+    fn screen_for_app(width: u16, height: u16, app: &mut TuiApp) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| draw(frame, app))
+            .unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn config_step_shows_auto_and_cli_candidates_at_minimum_and_wide_sizes() {
         for width in [80, 120] {
@@ -1362,6 +1614,13 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing help text: {expected}");
         }
+        let help_lower = help.to_ascii_lowercase();
+        for expected in ["ask", "plan", "option"] {
+            assert!(
+                help_lower.contains(expected),
+                "help does not distinguish Ask and Option behavior: {help}"
+            );
+        }
     }
 
     #[test]
@@ -1382,30 +1641,145 @@ mod tests {
     }
 
     #[test]
-    fn prompt_modal_preserves_multiline_questions_and_bottom_controls_at_minimum_size() {
-        let lines = rendered_lines_with(80, 24, true, View::Sessions, |app| {
-            app.prompts.active = Some(crate::tui::prompts::PromptItem {
-                request_id: "ask-1".to_string(),
-                session_id: "session-1".to_string(),
-                kind: crate::application::PendingPromptKind::Ask,
-                question: "first line\nsecond line".to_string(),
-                choices: Vec::new(),
-            });
-            app.modal = Some(Modal::Prompt);
+    fn plan_ask_panel_is_only_visible_for_the_selected_session_plan() {
+        let info = rendered_view_with(80, 24, true, View::Sessions, |app| {
+            configure_ask_sessions(app, DetailTab::Info, 0);
         });
-        let first_row = lines
-            .iter()
-            .position(|line| line.contains("first line"))
-            .unwrap_or_else(|| panic!("missing first question line: {lines:?}"));
-        let second_row = lines
-            .iter()
-            .position(|line| line.contains("second line"))
-            .unwrap_or_else(|| panic!("missing second question line: {lines:?}"));
-        assert_eq!(second_row, first_row + 1, "question lines must be adjacent");
-        assert!(!lines[first_row].contains("second line"));
-        let screen = lines.join("\n");
-        assert!(screen.contains("Answer:"));
-        assert!(screen.contains("Enter submit   Esc dismiss (request remains queued)"));
+        assert!(info.contains("Awaiting Input"), "info screen:\n{info}");
+        assert!(!info.contains("Which provider should be used?"));
+        assert!(!info.contains("Prompt"));
+
+        let selected_plan = rendered_view_with(120, 24, true, View::Sessions, |app| {
+            configure_ask_sessions(app, DetailTab::Plan, 0);
+        });
+        assert!(selected_plan.contains("Which provider should be used?"));
+        assert!(selected_plan.contains("Answer"));
+        assert!(!selected_plan.contains("Prompt"));
+
+        let other_plan = rendered_view_with(120, 24, true, View::Sessions, |app| {
+            configure_ask_sessions(app, DetailTab::Plan, 1);
+        });
+        assert!(!other_plan.contains("Which provider should be used?"));
+        assert!(!other_plan.contains("Answer"));
+        assert!(!other_plan.contains("Prompt"));
+    }
+
+    #[test]
+    fn persisted_external_ask_renders_read_only_plan_guidance() {
+        let view = rendered_view_with(120, 24, true, View::Sessions, |app| {
+            let mut target = SessionState::new(
+                "session-a".to_string(),
+                std::path::PathBuf::from("."),
+                "cruise.yaml".to_string(),
+                "task session-a".to_string(),
+            );
+            target.phase = SessionPhase::AwaitingInput;
+            target.awaiting_input = true;
+            target.pending_ask_question = Some("Question owned by another process".to_string());
+            app.sessions = vec![target];
+            app.selected = 0;
+            app.tab = DetailTab::Plan;
+        });
+
+        assert!(view.contains("Question owned by another process"));
+        assert!(view.contains("read-only"));
+        assert!(view.contains("process that owns it"));
+        assert!(!view.contains("Answer  press Enter to edit"));
+        assert!(!view.contains("Enter edit"));
+    }
+
+    #[test]
+    fn plan_ask_panel_handles_multiline_crlf_japanese_and_bottom_controls_at_all_sizes() {
+        for (width, no_color) in [(80, false), (80, true), (120, false), (120, true)] {
+            let lines = rendered_lines_with(width, 24, no_color, View::Sessions, |app| {
+                configure_ask_sessions_with_question(
+                    app,
+                    DetailTab::Plan,
+                    0,
+                    "first line\r\nsecond line\n日本語の質問と長い説明を折り返す",
+                );
+            });
+            let first_row = lines
+                .iter()
+                .position(|line| line.contains("first line"))
+                .unwrap_or_else(|| {
+                    panic!("missing first question line at width {width}: {lines:?}")
+                });
+            let second_row = lines
+                .iter()
+                .position(|line| line.contains("second line"))
+                .unwrap_or_else(|| {
+                    panic!("missing second question line at width {width}: {lines:?}")
+                });
+            assert_eq!(second_row, first_row + 1, "question lines must be adjacent");
+            assert!(lines.join("\n").contains("日本語の質問"));
+            assert!(lines.join("\n").contains("Answer"));
+            assert!(lines.join("\n").contains("Enter"));
+            assert!(lines.join("\n").contains("Esc"));
+            assert!(!lines.join("\n").contains("Prompt"));
+        }
+    }
+
+    #[test]
+    fn plan_ask_editor_keeps_shortcut_characters_and_draft_when_focus_leaves() {
+        let (_temp, mut app) = ask_plan_app();
+        assert!(app.modal.is_none());
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.modal.is_none());
+
+        for character in "q1n[]jk".chars() {
+            assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE,)));
+        }
+        assert!(!app.operation_state.quit_requested);
+        let draft_screen = screen_for_app(120, 24, &mut app);
+        assert!(
+            draft_screen.contains("q1n[]jk"),
+            "draft was not rendered: {draft_screen}"
+        );
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.modal.is_none());
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.tab, DetailTab::Log);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert_eq!(app.tab, DetailTab::Plan);
+        let restored_screen = screen_for_app(120, 24, &mut app);
+        assert!(restored_screen.contains("q1n[]jk"));
+    }
+
+    #[test]
+    fn plan_ask_empty_submission_is_an_inline_error_without_a_modal() {
+        let (_temp, mut app) = ask_plan_app();
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+        let screen = screen_for_app(120, 24, &mut app);
+        assert!(!matches!(app.modal, Some(Modal::Prompt | Modal::Error(_))));
+        assert!(screen.to_ascii_lowercase().contains("empty"));
+        assert!(screen.contains("Which provider should be used?"));
+    }
+
+    #[test]
+    fn active_plan_with_no_valid_ask_is_displayed_as_planning() {
+        let screen = rendered_view_with(120, 24, true, View::Sessions, |app| {
+            let mut session = SessionState::new(
+                "session-a".to_string(),
+                std::path::PathBuf::from("."),
+                "cruise.yaml".to_string(),
+                "task session-a".to_string(),
+            );
+            session.phase = SessionPhase::AwaitingInput;
+            app.sessions.push(session);
+            app.apply_event(crate::tui::registry::UiEvent::Control(
+                crate::application::ApplicationEvent::PlanStarted {
+                    session_id: "session-a".to_string(),
+                    operation: crate::application::OperationKind::Generate,
+                },
+            ));
+        });
+
+        assert!(screen.contains("Planning"));
+        assert!(!screen.contains("Awaiting Input"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use super::forms::{Editor, Launch, NewSessionForm, SourceKind, Step};
 use super::input::{self, Action};
-use super::prompts::PromptQueue;
+use super::prompts::{PlanPromptStore, PromptQueue};
 use super::registry::{OperationRegistry, UiEvent};
 use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
@@ -137,6 +137,7 @@ pub struct TuiApp {
     pub form: NewSessionForm,
     pub modal: Option<Modal>,
     pub prompts: PromptQueue,
+    pub plan_prompts: PlanPromptStore,
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
@@ -154,6 +155,7 @@ pub struct TuiApp {
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
     active_planning: std::collections::HashSet<String>,
+    plan_ready_eligible: std::collections::HashSet<String>,
     pending_notifications: VecDeque<crate::desktop_notifications::NotificationPayload>,
     pub skip_cursor: usize,
     pub spinner_frame: usize,
@@ -195,6 +197,7 @@ impl TuiApp {
             form,
             modal: None,
             prompts: PromptQueue::default(),
+            plan_prompts: PlanPromptStore::default(),
             logs: HashMap::new(),
             batch_logs: VecDeque::new(),
             ask_responses: HashMap::new(),
@@ -212,6 +215,7 @@ impl TuiApp {
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
             active_planning: std::collections::HashSet::new(),
+            plan_ready_eligible: std::collections::HashSet::new(),
             pending_notifications: VecDeque::new(),
             skip_cursor: 0,
             spinner_frame: 0,
@@ -382,6 +386,7 @@ impl TuiApp {
         self.history_summary = self.application.new_session_history_summary().ok();
         match self.application.list_sessions() {
             Ok(mut sessions) => {
+                let selected_id = self.active_session().map(|session| session.id.clone());
                 for state in &mut sessions {
                     if let Ok(reconciled) = self.application.reconcile_session(&state.id) {
                         *state = reconciled;
@@ -402,7 +407,24 @@ impl TuiApp {
                     }
                 }
                 self.sessions = sessions;
-                self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+                if let Some(selected_id) = selected_id {
+                    if let Some(index) = self
+                        .sessions
+                        .iter()
+                        .position(|session| session.id == selected_id)
+                    {
+                        self.selected = index;
+                    } else {
+                        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+                        self.tab = DetailTab::Info;
+                        self.plan_prompts.clear_focus();
+                        self.plan_scroll = 0;
+                        self.log_scroll = 0;
+                        self.dag_selected = 0;
+                    }
+                } else {
+                    self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+                }
                 self.evict_inactive_caches();
                 if self.status.is_none() || !self.is_busy() {
                     self.status = Some(format!(
@@ -417,6 +439,25 @@ impl TuiApp {
             Err(error) => self.set_error(error.to_string()),
         }
         self.registry.reap();
+    }
+
+    fn refresh_session_row(&mut self, session_id: &str) {
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let Ok(state) = self.application.reconcile_session(session_id) else {
+            return;
+        };
+        if self.sessions[index] != state {
+            self.plan_cache.remove(session_id);
+            self.dag_cache.remove(session_id);
+            self.logs.remove(session_id);
+            self.sessions[index] = state;
+        }
     }
 
     fn evict_inactive_caches(&mut self) {
@@ -461,10 +502,60 @@ impl TuiApp {
         self.sessions.get(self.selected)
     }
 
+    fn plan_prompt_session_id(&self) -> Option<String> {
+        if self.view != View::Sessions || self.tab != DetailTab::Plan {
+            return None;
+        }
+        let session_id = self.active_session()?.id.clone();
+        self.plan_prompts
+            .has_session(&session_id)
+            .then_some(session_id)
+    }
+
+    fn selected_session_has_external_plan_input(&self) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        matches!(session.phase, crate::session::SessionPhase::AwaitingInput)
+            && !self.plan_prompts.has_session(&session.id)
+            && self.application.pending_prompts(&session.id).is_empty()
+    }
+
+    pub(crate) fn active_external_plan_input(&self) -> Option<&SessionState> {
+        if self.selected_session_has_external_plan_input() {
+            self.active_session()
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn active_plan_prompt(&self) -> Option<&super::prompts::PlanPromptItem> {
+        let session_id = self.plan_prompt_session_id()?;
+        self.plan_prompts.for_session(&session_id)
+    }
+
+    fn plan_prompt_is_editing(&self) -> bool {
+        self.plan_prompt_session_id()
+            .is_some_and(|session_id| self.plan_prompts.is_editing(&session_id))
+    }
+
+    pub(crate) fn display_phase<'a>(&self, session: &'a SessionState) -> &'a str {
+        if matches!(session.phase, crate::session::SessionPhase::AwaitingInput)
+            && self.active_planning.contains(&session.id)
+            && !self.plan_prompts.has_session(&session.id)
+        {
+            "Planning"
+        } else {
+            session.phase.label()
+        }
+    }
+
     pub fn select_move(&mut self, delta: isize) {
         if self.sessions.is_empty() {
             return;
         }
+        self.plan_prompts.clear_focus();
         let len = self.sessions.len().cast_signed();
         self.selected = (self.selected.cast_signed() + delta)
             .rem_euclid(len)
@@ -477,6 +568,7 @@ impl TuiApp {
     }
     pub fn select_home(&mut self) {
         if !self.sessions.is_empty() {
+            self.plan_prompts.clear_focus();
             self.selected = 0;
             self.evict_inactive_caches();
             self.load_tab_data();
@@ -484,6 +576,7 @@ impl TuiApp {
     }
     pub fn select_end(&mut self) {
         if !self.sessions.is_empty() {
+            self.plan_prompts.clear_focus();
             self.selected = self.sessions.len() - 1;
             self.evict_inactive_caches();
             self.load_tab_data();
@@ -607,6 +700,10 @@ impl TuiApp {
         self.refresh();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central event routing keeps TUI lifecycle handling together"
+    )]
     pub fn apply_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::Control(event) => self.apply_control(event),
@@ -626,6 +723,8 @@ impl TuiApp {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
                     self.view = View::Sessions;
+                    self.tab = DetailTab::Info;
+                    self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
                         .sessions
@@ -645,6 +744,8 @@ impl TuiApp {
                     self.form.mark_saved();
                     self.form.rewind();
                     self.view = View::Sessions;
+                    self.tab = DetailTab::Info;
+                    self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
                         .sessions
@@ -725,9 +826,11 @@ impl TuiApp {
                         | crate::application::OperationKind::Fix
                         | crate::application::OperationKind::Replan
                 ) {
-                    self.active_planning.insert(session_id);
+                    self.active_planning.insert(session_id.clone());
+                    self.plan_ready_eligible.insert(session_id);
                 } else if operation == crate::application::OperationKind::Ask {
-                    self.active_planning.remove(&session_id);
+                    self.active_planning.insert(session_id.clone());
+                    self.plan_ready_eligible.remove(&session_id);
                 }
                 self.status = Some(format!("{} started", operation_label(operation)));
             }
@@ -741,20 +844,24 @@ impl TuiApp {
                 request_id,
                 question,
             } => {
+                self.refresh_session_row(&session_id);
+                let pending = self.application.pending_prompts(&session_id);
+                let request_is_pending = pending.iter().any(|prompt| {
+                    prompt.request_id == request_id
+                        && matches!(&prompt.kind, PendingPromptKind::Ask)
+                });
                 self.enqueue_action_required(&session_id, &question);
-                self.queue_prompt(
-                    request_id,
-                    session_id,
-                    PendingPromptKind::Ask,
-                    question,
-                    Vec::new(),
-                );
+                if request_is_pending {
+                    self.plan_prompts.enqueue(session_id, request_id, question);
+                }
             }
             ApplicationEvent::PlanFinished { session_id, phase } => {
                 let was_planning = self.active_planning.remove(&session_id);
+                let plan_ready_eligible = self.plan_ready_eligible.remove(&session_id);
                 if (phase == crate::session::SessionPhase::AwaitingApproval.label()
                     || phase == crate::session::SessionPhase::Planned.label())
                     && was_planning
+                    && plan_ready_eligible
                 {
                     self.enqueue_notification(
                         crate::desktop_notifications::WorkflowNotificationKind::PlanReady,
@@ -766,6 +873,7 @@ impl TuiApp {
             }
             ApplicationEvent::PlanFailed { session_id, error } => {
                 self.active_planning.remove(&session_id);
+                self.plan_ready_eligible.remove(&session_id);
                 self.enqueue_notification(
                     crate::desktop_notifications::WorkflowNotificationKind::Failed,
                     &session_id,
@@ -775,6 +883,7 @@ impl TuiApp {
             }
             ApplicationEvent::PlanCancelled { session_id } => {
                 self.active_planning.remove(&session_id);
+                self.plan_ready_eligible.remove(&session_id);
                 self.cancel_plan(&session_id);
             }
             ApplicationEvent::RunStarted { session_id } => {
@@ -794,13 +903,7 @@ impl TuiApp {
                 choices,
             } => {
                 self.enqueue_action_required(&session_id, &prompt);
-                self.queue_prompt(
-                    request_id,
-                    session_id,
-                    PendingPromptKind::Option,
-                    prompt,
-                    choices,
-                );
+                self.queue_option(request_id, session_id, prompt, choices);
             }
             ApplicationEvent::PrCreated { url, .. } => {
                 self.status = Some(format!("Pull request created: {url}"));
@@ -884,18 +987,16 @@ impl TuiApp {
         self.refresh();
     }
 
-    fn queue_prompt(
+    fn queue_option(
         &mut self,
         request_id: String,
         session_id: String,
-        kind: PendingPromptKind,
         question: String,
         choices: Vec<crate::application::OptionChoicePayload>,
     ) {
         self.prompts.enqueue(super::prompts::PromptItem {
             request_id,
             session_id,
-            kind,
             question,
             choices,
         });
@@ -994,6 +1095,17 @@ impl TuiApp {
     }
 
     fn sync_prompts(&mut self) {
+        self.sync_prompt_state();
+        if self.prompts.active.is_none() && matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
+            self.modal = None;
+        }
+        if self.prompts.active.is_none() {
+            self.modal_state.prompt_modal_pending = false;
+        }
+        self.open_prompt_if_allowed();
+    }
+
+    fn sync_prompt_state(&mut self) {
         let ids = self
             .sessions
             .iter()
@@ -1004,17 +1116,21 @@ impl TuiApp {
             .cloned()
             .collect::<std::collections::HashSet<_>>();
         self.prompts.retain_sessions(&known);
+        self.plan_prompts.retain_sessions(&known);
         for id in ids {
-            self.prompts
-                .sync_session(&id, self.application.pending_prompts(&id));
+            let pending = self.application.pending_prompts(&id);
+            let mut options = Vec::new();
+            let mut asks = Vec::new();
+            for prompt in pending {
+                if matches!(&prompt.kind, PendingPromptKind::Ask) {
+                    asks.push(prompt);
+                } else {
+                    options.push(prompt);
+                }
+            }
+            self.prompts.sync_session(&id, options);
+            self.plan_prompts.sync_session(&id, asks);
         }
-        if self.prompts.active.is_none() && matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
-            self.modal = None;
-        }
-        if self.prompts.active.is_none() {
-            self.modal_state.prompt_modal_pending = false;
-        }
-        self.open_prompt_if_allowed();
     }
 
     fn open_prompt_if_allowed(&mut self) {
@@ -1033,12 +1149,77 @@ impl TuiApp {
             self.modal = Some(Modal::Prompt);
         }
     }
+
+    fn handle_plan_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if self.modal.is_some() {
+            return None;
+        }
+        let session_id = self.plan_prompt_session_id()?;
+        if self.plan_prompt_is_editing() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.submit_plan_prompt();
+                    Some(false)
+                }
+                KeyCode::Esc => {
+                    self.plan_prompts.end_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::PageUp | KeyCode::PageDown => Some(false),
+                _ if PlanPromptStore::is_editor_key(key) => {
+                    self.plan_prompts.input(&session_id, key);
+                    Some(false)
+                }
+                _ => None,
+            }
+        } else {
+            match key.code {
+                KeyCode::Enter => {
+                    self.plan_prompts.begin_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::Esc => {
+                    self.plan_prompts.end_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.plan_prompts.scroll(&session_id, -1);
+                    Some(false)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.plan_prompts.scroll(&session_id, 1);
+                    Some(false)
+                }
+                KeyCode::PageUp => {
+                    self.plan_prompts.scroll(&session_id, -8);
+                    Some(false)
+                }
+                KeyCode::PageDown => {
+                    self.plan_prompts.scroll(&session_id, 8);
+                    Some(false)
+                }
+                KeyCode::Home => {
+                    self.plan_prompts.scroll_home(&session_id);
+                    Some(false)
+                }
+                KeyCode::End => {
+                    self.plan_prompts.scroll_end(&session_id);
+                    Some(false)
+                }
+                _ => None,
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.operation_state.quit_requested {
             return false;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
             return false;
+        }
+        if let Some(handled) = self.handle_plan_prompt_key(key) {
+            return handled;
         }
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             if matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
@@ -1187,26 +1368,84 @@ impl TuiApp {
         if let Some(modal) = self.modal.take() {
             return self.handle_modal_action(modal, action);
         }
+        if self.handle_plan_prompt_action(action) {
+            return false;
+        }
         self.handle_primary_action(action)
     }
 
+    fn handle_plan_prompt_action(&mut self, action: Action) -> bool {
+        let Some(session_id) = self.plan_prompt_session_id() else {
+            return false;
+        };
+        if self.plan_prompt_is_editing() {
+            match action {
+                Action::Enter => self.submit_plan_prompt(),
+                Action::Escape => self.plan_prompts.end_editing(&session_id),
+                Action::Character(c) => self.plan_prompts.input(
+                    &session_id,
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                ),
+                Action::Backspace => self.plan_prompts.input(
+                    &session_id,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                ),
+                Action::Left | Action::Right | Action::Home | Action::End => {
+                    let code = match action {
+                        Action::Left => KeyCode::Left,
+                        Action::Right => KeyCode::Right,
+                        Action::Home => KeyCode::Home,
+                        Action::End => KeyCode::End,
+                        _ => unreachable!(),
+                    };
+                    self.plan_prompts
+                        .input(&session_id, KeyEvent::new(code, KeyModifiers::NONE));
+                }
+                Action::Up | Action::Down | Action::PageUp | Action::PageDown => return true,
+                _ => return false,
+            }
+            true
+        } else {
+            match action {
+                Action::Enter => self.plan_prompts.begin_editing(&session_id),
+                Action::Escape => self.plan_prompts.end_editing(&session_id),
+                Action::Up => self.plan_prompts.scroll(&session_id, -1),
+                Action::Down => self.plan_prompts.scroll(&session_id, 1),
+                Action::PageUp => self.plan_prompts.scroll(&session_id, -8),
+                Action::PageDown => self.plan_prompts.scroll(&session_id, 8),
+                Action::Home => self.plan_prompts.scroll_home(&session_id),
+                Action::End => self.plan_prompts.scroll_end(&session_id),
+                _ => return false,
+            }
+            true
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central action routing keeps view and navigation behavior together"
+    )]
     fn handle_primary_action(&mut self, action: Action) -> bool {
         match action {
             Action::ViewSessions => {
+                self.plan_prompts.clear_focus();
                 self.view = View::Sessions;
                 self.refresh();
                 false
             }
             Action::ViewNewSession => {
+                self.plan_prompts.clear_focus();
                 self.view = View::NewSession;
                 false
             }
             Action::NewSession => {
+                self.plan_prompts.clear_focus();
                 self.view = View::NewSession;
                 self.form.rewind();
                 false
             }
             Action::ViewRunAll => {
+                self.plan_prompts.clear_focus();
                 self.view = View::RunAll;
                 self.refresh();
                 false
@@ -1228,11 +1467,13 @@ impl TuiApp {
             Action::Home => self.navigate_home(),
             Action::End => self.navigate_end(),
             Action::DetailPrevious | Action::Left => {
+                self.plan_prompts.clear_focus();
                 self.tab = self.tab.previous();
                 self.load_tab_data();
                 false
             }
             Action::DetailNext | Action::Right => {
+                self.plan_prompts.clear_focus();
                 self.tab = self.tab.next();
                 self.load_tab_data();
                 false
@@ -1242,7 +1483,17 @@ impl TuiApp {
                 false
             }
             Action::Open => {
-                if self.prompts.active.is_none() && !self.prompts.is_empty() {
+                let selected_has_ask = self.view == View::Sessions
+                    && self
+                        .active_session()
+                        .is_some_and(|session| self.plan_prompts.has_session(&session.id));
+                let selected_has_external_plan_input =
+                    self.view == View::Sessions && self.selected_session_has_external_plan_input();
+                if selected_has_ask || selected_has_external_plan_input {
+                    self.plan_prompts.clear_focus();
+                    self.tab = DetailTab::Plan;
+                    self.load_tab_data();
+                } else if self.prompts.active.is_none() && !self.prompts.is_empty() {
                     self.open_queued_prompt();
                 } else {
                     self.open_context_url();
@@ -1294,6 +1545,7 @@ impl TuiApp {
                 self.advance_step();
             }
         } else {
+            self.plan_prompts.clear_focus();
             self.tab = if next {
                 self.tab.next()
             } else {
@@ -2066,8 +2318,18 @@ impl TuiApp {
                 self.start_plan(id, request);
             }
             SessionAction::Answer => {
-                self.sync_prompts();
-                self.open_queued_prompt();
+                self.sync_prompt_state();
+                let selected_has_plan_input = self
+                    .active_session()
+                    .is_some_and(|session| self.plan_prompts.has_session(&session.id))
+                    || self.selected_session_has_external_plan_input();
+                if selected_has_plan_input {
+                    self.plan_prompts.clear_focus();
+                    self.tab = DetailTab::Plan;
+                    self.load_tab_data();
+                } else {
+                    self.open_queued_prompt();
+                }
             }
             SessionAction::Cancel => {
                 if !self.application.cancel_session(&id) {
@@ -2200,33 +2462,17 @@ impl TuiApp {
             self.modal = None;
             return;
         };
-        let result = match prompt.kind {
-            PendingPromptKind::Ask => self.prompts.answer_text().map_or_else(
-                || {
-                    Err(crate::error::CruiseError::Other(
-                        "answer must not be empty".to_string(),
-                    ))
-                },
-                |answer| {
-                    self.application
-                        .respond_to_ask(&prompt.session_id, &prompt.request_id, answer)
-                },
-            ),
-            PendingPromptKind::Option => self.prompts.selected_option().map_or_else(
-                || {
-                    Err(crate::error::CruiseError::Other(
-                        "select a non-empty option".to_string(),
-                    ))
-                },
-                |result| {
-                    self.application.respond_to_option(
-                        &prompt.session_id,
-                        &prompt.request_id,
-                        result,
-                    )
-                },
-            ),
-        };
+        let result = self.prompts.selected_option().map_or_else(
+            || {
+                Err(crate::error::CruiseError::Other(
+                    "select a non-empty option".to_string(),
+                ))
+            },
+            |result| {
+                self.application
+                    .respond_to_option(&prompt.session_id, &prompt.request_id, result)
+            },
+        );
         match result {
             Ok(()) => {
                 self.prompts.close_active();
@@ -2237,6 +2483,36 @@ impl TuiApp {
             Err(error) => {
                 self.modal_state.prompt_modal_pending = true;
                 self.set_error(error.to_string());
+            }
+        }
+    }
+
+    fn submit_plan_prompt(&mut self) {
+        let Some(session_id) = self.plan_prompt_session_id() else {
+            return;
+        };
+        let Some((_, request_id)) = self.plan_prompts.request_for_session(&session_id) else {
+            return;
+        };
+        let Some(answer) = self.plan_prompts.answer_text(&session_id) else {
+            self.plan_prompts
+                .set_error(&session_id, "Answer must not be empty".to_string());
+            return;
+        };
+        match self
+            .application
+            .respond_to_ask(&session_id, &request_id, answer)
+        {
+            Ok(()) => {
+                self.plan_prompts.remove(&session_id, &request_id);
+                self.sync_prompt_state();
+                self.refresh_session_row(&session_id);
+            }
+            Err(error) => {
+                self.sync_prompt_state();
+                if self.plan_prompts.has_session(&session_id) {
+                    self.plan_prompts.set_error(&session_id, error.to_string());
+                }
             }
         }
     }
@@ -2543,13 +2819,31 @@ mod tests {
         app.sessions.push(state);
     }
 
-    fn pending_ask(request_id: &str) -> crate::application::PendingPrompt {
+    fn pending_option(request_id: &str) -> crate::application::PendingPrompt {
         crate::application::PendingPrompt {
             request_id: request_id.to_string(),
             session_id: "session".to_string(),
-            kind: PendingPromptKind::Ask,
-            question: Some("What should happen next?".to_string()),
-            choices: vec![],
+            kind: PendingPromptKind::Option,
+            question: Some("Choose a deployment target".to_string()),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "staging".to_string(),
+                kind: crate::application::OptionChoiceKind::Selector,
+                next_step: None,
+            }],
+        }
+    }
+
+    fn pending_text_option(request_id: &str) -> crate::application::PendingPrompt {
+        crate::application::PendingPrompt {
+            request_id: request_id.to_string(),
+            session_id: "session".to_string(),
+            kind: PendingPromptKind::Option,
+            question: Some("Choose a deployment target".to_string()),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "Other".to_string(),
+                kind: crate::application::OptionChoiceKind::TextInput,
+                next_step: None,
+            }],
         }
     }
 
@@ -3018,9 +3312,9 @@ mod tests {
     }
 
     #[test]
-    fn planning_and_draft_shortcuts_do_not_edit_open_prompts() {
+    fn planning_and_draft_shortcuts_do_not_edit_open_options() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         for key in ['p', 'g', 'u', 's'] {
             assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
@@ -3042,16 +3336,16 @@ mod tests {
     }
 
     #[test]
-    fn open_key_opens_next_queued_prompt() {
+    fn open_key_opens_next_queued_option() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         assert!(!app.handle_action(Action::Open));
         assert_eq!(
             app.prompts
                 .active
                 .as_ref()
                 .map(|prompt| prompt.request_id.as_str()),
-            Some("ask-1")
+            Some("option-1")
         );
         assert!(matches!(app.modal, Some(Modal::Prompt)));
     }
@@ -3090,9 +3384,446 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_answer_stays_queued_and_reopens_after_error() {
+    fn ask_user_event_does_not_interrupt_the_current_tui_context() {
+        let contexts = [
+            (View::Sessions, DetailTab::Info, 0),
+            (View::Sessions, DetailTab::Dag, 0),
+            (View::Sessions, DetailTab::Log, 0),
+            (View::NewSession, DetailTab::Info, 0),
+            (View::RunAll, DetailTab::Info, 0),
+            (View::Sessions, DetailTab::Plan, 1),
+        ];
+
+        for (index, (view, tab, selected)) in contexts.into_iter().enumerate() {
+            let mut app = app();
+            add_session(
+                &mut app,
+                "session",
+                crate::session::SessionPhase::AwaitingInput,
+            );
+            add_session(&mut app, "other", crate::session::SessionPhase::Planned);
+            app.view = view;
+            app.tab = tab;
+            app.selected = selected;
+            app.form.input.set_text("unfinished new-session input");
+
+            app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+                session_id: "session".to_string(),
+                request_id: format!("ask-{index}"),
+                question: "Which provider should be used?".to_string(),
+            }));
+
+            assert_eq!(app.view, view, "Ask changed the active view for {view:?}");
+            assert_eq!(app.tab, tab, "Ask changed the detail tab for {tab:?}");
+            assert_eq!(app.selected, selected, "Ask changed the selected session");
+            assert_eq!(app.form.input.text(), "unfinished new-session input");
+            assert!(
+                app.modal.is_none(),
+                "Ask opened a modal in {view:?}/{tab:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ask_user_event_preserves_an_existing_modal() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.modal = Some(Modal::Help);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-help".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+
+        assert!(matches!(app.modal, Some(Modal::Help)));
+    }
+
+    #[test]
+    fn delayed_ask_event_after_request_removal_does_not_restore_plan_prompt() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-cancelled".to_string(),
+            "Old question".to_string(),
+        );
+        app.plan_prompts.remove("session", "ask-cancelled");
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-cancelled".to_string(),
+            question: "Delayed question".to_string(),
+        }));
+
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+        assert!(app.active_plan_prompt().is_none());
+        assert!(!app.plan_prompts.has_session("session"));
+        assert!(app.application.pending_prompts("session").is_empty());
+        assert!(app.handle_plan_prompt_key(key(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn ask_user_event_refreshes_only_the_target_session_immediately() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let target_id = "20260921000000000_00000000000000000000000000000001";
+        let other_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [target_id, other_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                "__builtin__".to_string(),
+                format!("task {id}"),
+            );
+            state.phase = crate::session::SessionPhase::Planned;
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Log;
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == other_id)
+            .unwrap_or_else(|| panic!("target session was not loaded"));
+        let selected_id = app.active_session().map_or_else(
+            || panic!("no selected session"),
+            |session| session.id.clone(),
+        );
+
+        let mut target = manager
+            .load(target_id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        target.phase = crate::session::SessionPhase::AwaitingInput;
+        target.awaiting_input = true;
+        target.pending_ask_question = Some("Which provider should be used?".to_string());
+        manager
+            .save(&target)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: target_id.to_string(),
+            request_id: "ask-immediate".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|session| session.id == target_id)
+                .map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::AwaitingInput)
+        );
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|session| session.id == other_id)
+                .map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::Planned)
+        );
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(selected_id.as_str())
+        );
+        assert_eq!(app.tab, DetailTab::Log);
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_session_open_routes_ask_to_its_plan_not_global_fifo() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        add_session(
+            &mut app,
+            "session-b",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Info;
+        app.selected = 1;
+        let application = app.application.clone();
+        let events = app.events.clone();
+        let logs_sender = app.logs_sender.clone();
+        assert!(app.registry.run_all(application, 1, events, logs_sender));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-a".to_string(),
+            request_id: "ask-a".to_string(),
+            question: "Question for A".to_string(),
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-b".to_string(),
+            request_id: "ask-b".to_string(),
+            question: "Question for B".to_string(),
+        }));
+        app.registry.shutdown().await;
+
+        app.handle_action(Action::Open);
+
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+        assert!(app.prompts.active.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_session_open_keeps_option_modal_scoped_when_another_session_has_ask() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        add_session(&mut app, "session-b", crate::session::SessionPhase::Running);
+        app.view = View::Sessions;
+        app.selected = 1;
+        let application = app.application.clone();
+        let events = app.events.clone();
+        let logs_sender = app.logs_sender.clone();
+        assert!(app.registry.run_all(application, 1, events, logs_sender));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-a".to_string(),
+            request_id: "ask-a".to_string(),
+            question: "Question for A".to_string(),
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::OptionRequired {
+            session_id: "session-b".to_string(),
+            request_id: "option-b".to_string(),
+            prompt: "Choose for B".to_string(),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "staging".to_string(),
+                kind: crate::application::OptionChoiceKind::Selector,
+                next_step: None,
+            }],
+        }));
+        app.registry.shutdown().await;
+
+        app.handle_action(Action::Open);
+
+        assert!(matches!(app.modal, Some(Modal::Prompt)));
+        assert_eq!(
+            app.prompts
+                .active
+                .as_ref()
+                .map(|prompt| prompt.request_id.as_str()),
+            Some("option-b")
+        );
+    }
+
+    #[test]
+    fn persisted_awaiting_input_without_local_prompt_routes_open_and_answer_to_plan() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.sessions[0].awaiting_input = true;
+        app.sessions[0].pending_ask_question = Some("Question owned elsewhere".to_string());
+        app.view = View::Sessions;
+        app.tab = DetailTab::Info;
+
+        app.handle_action(Action::Open);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+
+        app.tab = DetailTab::Info;
+        app.apply_action(SessionAction::Answer);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+        assert!(app.active_plan_prompt().is_none());
+        assert!(app.application.pending_prompts("session").is_empty());
+        assert!(app.plan_prompts.answer_text("session").is_none());
+    }
+
+    #[test]
+    fn ask_user_is_not_restored_as_a_modal_after_resize() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.tab = DetailTab::Plan;
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-resize".to_string(),
+            question: "Question".to_string(),
+        }));
+
+        app.on_resize(79, 24);
+        assert!(matches!(app.modal, Some(Modal::Resize)));
+        app.on_resize(80, 24);
+
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn ask_user_is_not_restored_after_an_error_modal_closes() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-error".to_string(),
+            question: "Question".to_string(),
+        }));
+
+        app.set_error("transient error".to_string());
+        app.handle_action(Action::Enter);
+
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn newly_created_session_does_not_inherit_the_previous_plan_tab() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "old-session",
+            crate::session::SessionPhase::Planned,
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+
+        let new_state = SessionState::new(
+            "new-session".to_string(),
+            PathBuf::from("."),
+            "cruise.yaml".to_string(),
+            "new task".to_string(),
+        );
+        app.apply_event(UiEvent::DraftCreated {
+            result: Ok(new_state),
+        });
+
+        assert_eq!(app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn refresh_preserves_the_selected_session_id_when_rows_are_inserted_before_it() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let first_id = "20260921000000000_00000000000000000000000000000001";
+        let selected_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [first_id, selected_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                "__builtin__".to_string(),
+                format!("task {id}"),
+            );
+            state.phase = crate::session::SessionPhase::Planned;
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == selected_id)
+            .unwrap_or_else(|| panic!("selected session was not loaded"));
+
+        let inserted_id = "20260921000000000_00000000000000000000000000000000";
+        let mut inserted = SessionState::new(
+            inserted_id.to_string(),
+            temp.path().to_path_buf(),
+            "__builtin__".to_string(),
+            "inserted task".to_string(),
+        );
+        inserted.phase = crate::session::SessionPhase::Planned;
+        manager
+            .create(&inserted)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.refresh();
+
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(selected_id)
+        );
+    }
+
+    #[test]
+    fn refresh_returns_to_info_when_the_selected_session_disappears() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let selected_id = "20260921000000000_00000000000000000000000000000001";
+        let other_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [selected_id, other_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                "__builtin__".to_string(),
+                format!("task {id}"),
+            );
+            state.phase = crate::session::SessionPhase::Planned;
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == selected_id)
+            .unwrap_or_else(|| panic!("selected session was not loaded"));
+        app.tab = DetailTab::Plan;
+        manager
+            .delete(selected_id)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.refresh();
+
+        assert_eq!(app.tab, DetailTab::Info);
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(other_id)
+        );
+    }
+
+    #[test]
+    fn empty_option_answer_stays_queued_and_reopens_after_error() {
+        let mut app = app();
+        app.prompts.enqueue(pending_text_option("option-1").into());
         app.handle_action(Action::Open);
 
         assert!(!app.handle_action(Action::Enter));
@@ -3105,9 +3836,9 @@ mod tests {
     }
 
     #[test]
-    fn resize_replaces_but_then_restores_prompt_modal() {
+    fn resize_replaces_but_then_restores_option_prompt_modal() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         app.prompts.answer.set_text("keep this answer");
         app.on_resize(79, 24);
@@ -3119,14 +3850,14 @@ mod tests {
     }
 
     #[test]
-    fn syncing_a_resolved_active_prompt_closes_every_prompt_ui_state() {
+    fn syncing_a_resolved_active_option_closes_every_option_ui_state() {
         let mut app = app();
         add_session(
             &mut app,
             "session",
             crate::session::SessionPhase::AwaitingInput,
         );
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         app.modal_state.prompt_modal_pending = true;
 
@@ -3509,6 +4240,37 @@ mod tests {
         app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
             session_id: "session".to_string(),
             phase: "Awaiting Approval".to_string(),
+        }));
+
+        assert!(app.take_notifications().next().is_none());
+    }
+
+    #[test]
+    fn answered_ask_stays_in_planning_until_plan_finished() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-1".to_string(),
+            "Which provider should be used?".to_string(),
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Ask,
+        }));
+        app.plan_prompts.remove("session", "ask-1");
+
+        assert_eq!(app.display_phase(&app.sessions[0]), "Planning");
+        assert!(app.take_notifications().next().is_none());
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Input".to_string(),
         }));
 
         assert!(app.take_notifications().next().is_none());
