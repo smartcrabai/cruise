@@ -110,6 +110,10 @@ pub enum Modal {
         multiline: bool,
         regenerate: bool,
     },
+    RunAllParallelism {
+        editor: Box<Editor>,
+        error: Option<String>,
+    },
     Publish {
         trigger_cruise: bool,
     },
@@ -151,6 +155,7 @@ pub struct TuiApp {
     pub batch_total: usize,
     pub batch_finished: usize,
     pub batch_parallelism: usize,
+    pub batch_parallelism_error: Option<String>,
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
     active_planning: std::collections::HashSet<String>,
@@ -177,7 +182,6 @@ impl TuiApp {
     ) -> Self {
         let draft = application.draft().ok().flatten();
         let mut form = NewSessionForm::from_draft(draft.as_ref());
-        let app_config = application.app_config().unwrap_or_default();
         let history_summary = application.new_session_history_summary().ok();
         if let Some(summary) = history_summary.as_ref() {
             form.apply_history_defaults(summary);
@@ -208,7 +212,8 @@ impl TuiApp {
             dropped_logs: 0,
             batch_total: 0,
             batch_finished: 0,
-            batch_parallelism: app_config.run_all_parallelism,
+            batch_parallelism: 0,
+            batch_parallelism_error: None,
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
             active_planning: std::collections::HashSet::new(),
@@ -377,7 +382,39 @@ impl TuiApp {
         }
     }
 
+    fn sync_batch_parallelism(&mut self, notify: bool) -> bool {
+        match self.application.app_config() {
+            Ok(config) => {
+                self.batch_parallelism = config.run_all_parallelism;
+                self.batch_parallelism_error = None;
+                true
+            }
+            Err(error) => {
+                let error = error.to_string();
+                self.batch_parallelism = 0;
+                self.batch_parallelism_error = Some(error.clone());
+                self.last_error = Some(error.clone());
+                let editing = if let Some(Modal::RunAllParallelism {
+                    error: modal_error, ..
+                }) = self.modal.as_mut()
+                {
+                    *modal_error = Some(error.clone());
+                    true
+                } else {
+                    false
+                };
+                if notify {
+                    self.modal = Some(Modal::Error(error));
+                } else if !editing {
+                    self.status = Some("Run All parallelism configuration unavailable".to_string());
+                }
+                false
+            }
+        }
+    }
+
     pub fn refresh(&mut self) {
+        self.sync_batch_parallelism(false);
         self.refresh_config_context();
         self.history_summary = self.application.new_session_history_summary().ok();
         match self.application.list_sessions() {
@@ -825,8 +862,8 @@ impl TuiApp {
                 self.fail_run(&session_id, error);
             }
             ApplicationEvent::RunCancelled { .. } => self.cancel_run(),
-            ApplicationEvent::BatchStarted { total, parallelism } => {
-                self.start_batch(total, parallelism);
+            ApplicationEvent::BatchStarted { total, .. } => {
+                self.start_batch(total);
             }
             ApplicationEvent::BatchTotalChanged { total } => {
                 self.batch_total = total.max(self.batch_rows.len());
@@ -902,7 +939,7 @@ impl TuiApp {
         self.open_prompt_if_allowed();
     }
 
-    fn start_batch(&mut self, total: usize, parallelism: usize) {
+    fn start_batch(&mut self, total: usize) {
         self.batch_rows = self
             .application
             .run_all_candidates()
@@ -922,7 +959,6 @@ impl TuiApp {
         self.batch_total = total.max(self.batch_rows.len());
         self.batch_finished = 0;
         self.batch_finished_ids.clear();
-        self.batch_parallelism = parallelism;
         self.operation_state.batch_cancelled = false;
         self.status = Some(format!(
             "Run All: {} session{}",
@@ -1050,6 +1086,21 @@ impl TuiApp {
                     | KeyCode::Home
                     | KeyCode::End => {
                         self.prompts.answer.input(key);
+                        return false;
+                    }
+                    _ => {}
+                }
+            } else if let Some(Modal::RunAllParallelism { editor, error }) = self.modal.as_mut() {
+                match key.code {
+                    KeyCode::Char(_)
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End => {
+                        editor.input(key);
+                        *error = None;
                         return false;
                     }
                     _ => {}
@@ -1279,6 +1330,10 @@ impl TuiApp {
                     command: PendingCommand::Clean,
                     message: "Clean reclaimable sessions and closed PR sessions?".to_string(),
                 });
+                false
+            }
+            Action::Character('p') if self.view == View::RunAll => {
+                self.open_run_all_parallelism_editor();
                 false
             }
             Action::Character(_) | Action::Backspace | Action::None => false,
@@ -1604,6 +1659,9 @@ impl TuiApp {
                 multiline,
                 regenerate,
             } => self.handle_input_modal(title, command, editor, multiline, regenerate, action),
+            Modal::RunAllParallelism { editor, error } => {
+                self.handle_run_all_parallelism_modal(editor, error, action)
+            }
             Modal::Publish { trigger_cruise } => self.handle_publish_modal(trigger_cruise, action),
         }
     }
@@ -1753,6 +1811,35 @@ impl TuiApp {
         false
     }
 
+    fn handle_run_all_parallelism_modal(
+        &mut self,
+        editor: Box<Editor>,
+        error: Option<String>,
+        action: Action,
+    ) -> bool {
+        match action {
+            Action::Enter => self.save_run_all_parallelism(editor),
+            Action::Escape => {}
+            action @ (Action::Character(_) | Action::Backspace) => {
+                let key_code = match action {
+                    Action::Character(c) => KeyCode::Char(c),
+                    Action::Backspace => KeyCode::Backspace,
+                    _ => unreachable!(),
+                };
+                let mut editor = editor;
+                editor.input(KeyEvent::new(key_code, KeyModifiers::NONE));
+                self.modal = Some(Modal::RunAllParallelism {
+                    editor,
+                    error: None,
+                });
+            }
+            _ => {
+                self.modal = Some(Modal::RunAllParallelism { editor, error });
+            }
+        }
+        false
+    }
+
     fn handle_publish_modal(&mut self, mut trigger_cruise: bool, action: Action) -> bool {
         match action {
             Action::Up | Action::Down | Action::Character(' ') => {
@@ -1801,20 +1888,24 @@ impl TuiApp {
 
     fn open_palette(&mut self) {
         if self.view == View::RunAll {
-            let command = if self.registry.batch_busy() {
-                PendingCommand::CancelRunAll
+            let busy = self.registry.batch_busy();
+            if !busy && !self.sync_batch_parallelism(true) {
+                return;
+            }
+            if busy {
+                self.modal = Some(Modal::Confirm {
+                    command: PendingCommand::CancelRunAll,
+                    message: "Cancel Run All and suspend active sessions?".to_string(),
+                });
             } else {
-                PendingCommand::RunAll
-            };
-            self.modal = Some(Modal::Confirm {
-                command,
-                message: if self.registry.batch_busy() {
-                    "Cancel Run All and suspend active sessions?"
-                } else {
-                    "Run all Planned and Suspended sessions?"
-                }
-                .to_string(),
-            });
+                self.modal = Some(Modal::Confirm {
+                    command: PendingCommand::RunAll,
+                    message: format!(
+                        "Run all Planned and Suspended sessions? (parallelism limit: {})",
+                        self.batch_parallelism
+                    ),
+                });
+            }
             return;
         }
         let Some(state) = self.active_session() else {
@@ -1846,6 +1937,65 @@ impl TuiApp {
                 selected: 0,
             });
         }
+    }
+
+    fn open_run_all_parallelism_editor(&mut self) {
+        if !self.sync_batch_parallelism(true) {
+            return;
+        }
+        let mut editor = Editor::new(&self.batch_parallelism.to_string());
+        editor.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        self.modal = Some(Modal::RunAllParallelism {
+            editor: Box::new(editor),
+            error: None,
+        });
+    }
+
+    fn save_run_all_parallelism(&mut self, editor: Box<Editor>) {
+        let input = editor.text();
+        let value = match parse_run_all_parallelism(&input) {
+            Ok(value) => value,
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                self.modal = Some(Modal::RunAllParallelism {
+                    editor,
+                    error: Some(error),
+                });
+                return;
+            }
+        };
+
+        let mut config = match self.application.app_config() {
+            Ok(config) => config,
+            Err(error) => {
+                let error = error.to_string();
+                self.batch_parallelism_error = Some(error.clone());
+                self.last_error = Some(error.clone());
+                self.modal = Some(Modal::RunAllParallelism {
+                    editor,
+                    error: Some(error),
+                });
+                return;
+            }
+        };
+        config.run_all_parallelism = value;
+        if let Err(error) = self.application.save_app_config(&config) {
+            let error = error.to_string();
+            self.last_error = Some(error.clone());
+            self.modal = Some(Modal::RunAllParallelism {
+                editor,
+                error: Some(error),
+            });
+            return;
+        }
+
+        self.batch_parallelism = value;
+        self.batch_parallelism_error = None;
+        self.last_error = None;
+        self.modal = None;
+        self.status = Some(format!(
+            "Saved shared GUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
+        ));
     }
 
     fn apply_action(&mut self, action: SessionAction) {
@@ -2022,9 +2172,11 @@ impl TuiApp {
         match command {
             PendingCommand::Quit => self.cancel_and_quit(),
             PendingCommand::RunAll => {
+                if !self.sync_batch_parallelism(true) {
+                    return;
+                }
                 if self.registry.run_all(
                     self.application.clone(),
-                    self.batch_parallelism.max(1),
                     self.events.clone(),
                     self.logs_sender.clone(),
                 ) {
@@ -2456,6 +2608,21 @@ fn push_bounded(buffer: &mut VecDeque<String>, line: &str, limit: usize) {
         }
     }
 }
+
+fn parse_run_all_parallelism(input: &str) -> Result<usize, String> {
+    let input = input.trim();
+    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Run All parallelism must be a whole number".to_string());
+    }
+    let value = input
+        .parse::<usize>()
+        .map_err(|_| "Run All parallelism is too large".to_string())?;
+    if value == 0 {
+        return Err("Run All parallelism must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
 fn operation_label(operation: crate::application::OperationKind) -> &'static str {
     match operation {
         crate::application::OperationKind::Generate => "Generate",
@@ -2510,6 +2677,8 @@ fn open_url(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppConfig;
+    use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
 
     fn app_with_lock(test_process_lock: Option<crate::test_support::ProcessLock>) -> TuiApp {
@@ -2530,6 +2699,72 @@ mod tests {
 
     fn app_without_lock() -> TuiApp {
         app_with_lock(None)
+    }
+
+    struct ConfiguredTestApp {
+        config_home: TempDir,
+        _session_dir: TempDir,
+        _xdg_config_home: EnvGuard,
+        app: TuiApp,
+    }
+
+    impl ConfiguredTestApp {
+        fn config_path(&self) -> std::path::PathBuf {
+            self.config_home.path().join("cruise/config.json")
+        }
+    }
+
+    fn configured_app_with_content(content: &str) -> ConfiguredTestApp {
+        let process_lock = lock_process();
+        let config_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_home.path().join("cruise/config.json");
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|error| panic!("{error}"));
+        }
+        std::fs::write(&config_path, content).unwrap_or_else(|error| panic!("{error}"));
+        let xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let session_dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            session_dir.path().to_path_buf(),
+        ));
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let app =
+            TuiApp::new_for_test_with_lock(application, events, logs_sender, Some(process_lock));
+        ConfiguredTestApp {
+            config_home,
+            _session_dir: session_dir,
+            _xdg_config_home: xdg_config_home,
+            app,
+        }
+    }
+
+    fn configured_app(parallelism: usize) -> ConfiguredTestApp {
+        let content = format!(r#"{{"runAllParallelism": {parallelism}}}"#);
+        configured_app_with_content(&content)
+    }
+
+    fn open_parallelism_editor(app: &mut TuiApp) {
+        app.view = View::RunAll;
+        assert!(!app.handle_key(key(KeyCode::Char('p'))));
+        assert!(
+            app.modal.is_some(),
+            "Run All parallelism editing must open a modal without a selected session"
+        );
+    }
+
+    fn replace_parallelism_input(app: &mut TuiApp, value: &str) {
+        assert!(!app.handle_key(key(KeyCode::End)));
+        for _ in 0..32 {
+            assert!(!app.handle_key(key(KeyCode::Backspace)));
+        }
+        type_text(app, value);
+    }
+
+    fn configured_parallelism(app: &ConfiguredTestApp) -> usize {
+        AppConfig::load_from(&app.config_path())
+            .unwrap_or_else(|error| panic!("failed to load test config: {error}"))
+            .run_all_parallelism
     }
 
     fn add_session(app: &mut TuiApp, id: &str, phase: crate::session::SessionPhase) {
@@ -3061,7 +3296,7 @@ mod tests {
         let application = app.application.clone();
         let events = app.events.clone();
         let logs_sender = app.logs_sender.clone();
-        assert!(app.registry.run_all(application, 1, events, logs_sender));
+        assert!(app.registry.run_all(application, events, logs_sender));
         app.apply_event(UiEvent::Control(ApplicationEvent::OptionRequired {
             session_id: "session".to_string(),
             request_id: "option-1".to_string(),
@@ -3175,6 +3410,213 @@ mod tests {
         ));
         app.handle_action(Action::Escape);
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn run_all_parallelism_shortcut_opens_without_sessions_and_preserves_saved_value() {
+        let mut fixture = configured_app(4);
+        assert!(fixture.app.sessions.is_empty());
+
+        open_parallelism_editor(&mut fixture.app);
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+
+        assert_eq!(configured_parallelism(&fixture), 4);
+        assert_eq!(fixture.app.batch_parallelism, 4);
+        assert!(fixture.app.modal.is_none());
+    }
+
+    #[test]
+    fn parallelism_shortcut_is_scoped_to_run_all_view() {
+        let mut app = app();
+        app.view = View::NewSession;
+        app.form.step = Step::Task;
+        assert!(!app.handle_key(key(KeyCode::Char('p'))));
+        assert_eq!(app.form.input.text(), "p");
+        assert!(app.modal.is_none());
+
+        app.view = View::Sessions;
+        assert!(!app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn parallelism_editor_keeps_editing_keys_inside_the_modal() {
+        let mut fixture = configured_app(3);
+        open_parallelism_editor(&mut fixture.app);
+
+        for code in [
+            KeyCode::Char('1'),
+            KeyCode::Char('2'),
+            KeyCode::Char('3'),
+            KeyCode::Char('x'),
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert!(!fixture.app.handle_key(key(code)));
+            assert_eq!(fixture.app.view, View::RunAll);
+            assert!(fixture.app.modal.is_some());
+        }
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Esc)));
+        assert!(fixture.app.modal.is_none());
+        assert_eq!(configured_parallelism(&fixture), 3);
+    }
+
+    #[test]
+    fn parallelism_edit_is_saved_and_reloaded_for_the_next_editor_session() {
+        let mut fixture = configured_app(1);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "4");
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(configured_parallelism(&fixture), 4);
+
+        open_parallelism_editor(&mut fixture.app);
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(configured_parallelism(&fixture), 4);
+        assert_eq!(fixture.app.batch_parallelism, 4);
+    }
+
+    #[test]
+    fn invalid_parallelism_input_keeps_the_modal_and_existing_configuration() {
+        let overflow = format!("{}0", usize::MAX);
+        let invalid_inputs = [
+            String::new(),
+            " ".to_string(),
+            "0".to_string(),
+            "-1".to_string(),
+            "1.5".to_string(),
+            "not-a-number".to_string(),
+            overflow,
+        ];
+        let mut fixture = configured_app(3);
+
+        for invalid in invalid_inputs {
+            open_parallelism_editor(&mut fixture.app);
+            replace_parallelism_input(&mut fixture.app, &invalid);
+            assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+            assert!(fixture.app.modal.is_some());
+            assert!(fixture.app.last_error.is_some());
+            assert_eq!(configured_parallelism(&fixture), 3);
+            assert_eq!(fixture.app.batch_parallelism, 3);
+            assert!(!fixture.app.handle_key(key(KeyCode::Esc)));
+            assert!(fixture.app.modal.is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_parallelism_input_can_be_corrected_without_reopening_the_editor() {
+        let mut fixture = configured_app(3);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "0");
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert!(fixture.app.modal.is_some());
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Backspace)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('5'))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(configured_parallelism(&fixture), 5);
+    }
+
+    #[test]
+    fn save_failure_keeps_the_uncommitted_parallelism_input_editable() {
+        let mut fixture = configured_app(4);
+
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "8");
+        crate::application::fail_next_app_config_save();
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert!(fixture.app.modal.is_some());
+        assert!(fixture.app.last_error.is_some());
+        assert_eq!(configured_parallelism(&fixture), 4);
+
+        crate::application::clear_app_config_save_failure();
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('7'))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(configured_parallelism(&fixture), 87);
+    }
+
+    #[test]
+    fn app_config_read_failure_is_not_hidden_by_the_default_parallelism() {
+        let fixture = configured_app_with_content(r#"{"runAllParallelism": 0}"#);
+        assert!(fixture.app.last_error.is_some());
+    }
+
+    #[test]
+    fn refresh_picks_up_parallelism_saved_by_another_client() {
+        let mut fixture = configured_app(1);
+        AppConfig {
+            run_all_parallelism: 4,
+        }
+        .save_to(&fixture.config_path())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        fixture.app.handle_action(Action::Refresh);
+
+        assert_eq!(fixture.app.batch_parallelism, 4);
+    }
+
+    #[test]
+    fn refresh_does_not_overwrite_parallelism_that_is_being_edited() {
+        let mut fixture = configured_app(1);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "7");
+        AppConfig {
+            run_all_parallelism: 2,
+        }
+        .save_to(&fixture.config_path())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        fixture.app.refresh();
+        assert!(fixture.app.modal.is_some());
+        assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
+
+        assert_eq!(configured_parallelism(&fixture), 7);
+    }
+
+    #[test]
+    fn stale_batch_started_parallelism_does_not_replace_the_current_shared_setting() {
+        let mut fixture = configured_app(4);
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::BatchStarted {
+                total: 0,
+                parallelism: 1,
+            }));
+
+        assert_eq!(fixture.app.batch_parallelism, 4);
+    }
+
+    #[test]
+    fn resizing_run_all_parallelism_editor_does_not_save_unconfirmed_input() {
+        let mut fixture = configured_app(4);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "8");
+        fixture.app.on_resize(79, 23);
+        fixture.app.on_resize(80, 24);
+
+        assert_eq!(configured_parallelism(&fixture), 4);
+        assert_eq!(fixture.app.batch_parallelism, 4);
+    }
+
+    #[tokio::test]
+    async fn run_all_parallelism_remains_editable_while_run_all_is_active() {
+        let mut fixture = configured_app(1);
+        let application = fixture.app.application.clone();
+        let events = fixture.app.events.clone();
+        let logs_sender = fixture.app.logs_sender.clone();
+        assert!(
+            fixture
+                .app
+                .registry
+                .run_all(application, events, logs_sender)
+        );
+
+        open_parallelism_editor(&mut fixture.app);
+        fixture.app.registry.shutdown().await;
     }
 
     #[test]

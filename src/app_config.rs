@@ -1,6 +1,9 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{CruiseError, Result};
 
@@ -14,7 +17,7 @@ use crate::error::{CruiseError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    /// Maximum number of sessions the desktop GUI executes concurrently in `run --all` mode.
+    /// Maximum number of sessions the desktop GUI and TUI execute concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]
@@ -105,20 +108,30 @@ impl AppConfig {
                 ))
             })?;
         }
-        // Write to a temp file in the same directory then rename for atomicity.
-        let tmp_path = path.with_extension("json.tmp");
+        // Write to a uniquely named temp file in the same directory then rename for atomicity.
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp_path = parent.join(format!(".config-{}.tmp", Uuid::new_v4().simple()));
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| CruiseError::Other(format!("failed to serialize config: {e}")))?;
-        std::fs::write(&tmp_path, content).map_err(|e| {
-            CruiseError::Other(format!(
+        let mut tmp_created = false;
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            tmp_created = true;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, path)
+        })();
+        if let Err(e) = write_result {
+            if tmp_created {
+                let _ = fs::remove_file(&tmp_path);
+            }
+            return Err(CruiseError::Other(format!(
                 "failed to write config to {}: {e}",
                 tmp_path.display()
-            ))
-        })?;
-        if let Err(e) = std::fs::rename(&tmp_path, path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(CruiseError::Other(format!(
-                "failed to rename config file: {e}"
             )));
         }
         Ok(())

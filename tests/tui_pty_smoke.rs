@@ -7,6 +7,7 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cruise::app_config::AppConfig;
 use cruise::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 use tempfile::TempDir;
 
@@ -200,6 +201,35 @@ impl Fixture {
             "Cancellable terminal session",
             "sleep 30",
         )
+    }
+
+    fn app_config_path(&self) -> PathBuf {
+        self.home.join("config/cruise/config.json")
+    }
+
+    fn save_parallelism(&self, parallelism: usize) {
+        AppConfig {
+            run_all_parallelism: parallelism,
+        }
+        .save_to(&self.app_config_path())
+        .unwrap_or_else(|error| panic!("failed to save PTY app config: {error}"));
+    }
+
+    fn seed_gated_session(&self, id: &str) {
+        let _ = self.seed_current_branch_session(
+            id,
+            &format!("gated session {id}"),
+            "touch started; while [ ! -f release ]; do sleep 0.01; done; touch finished",
+        );
+    }
+
+    fn gated_path(&self, id: &str, marker: &str) -> PathBuf {
+        self.root.path().join(format!("repo-{id}")).join(marker)
+    }
+
+    fn release_gated_session(&self, id: &str) {
+        std::fs::write(self.gated_path(id, "release"), "release")
+            .unwrap_or_else(|error| panic!("failed to release gated session {id}: {error}"));
     }
 
     fn seed_display_session(
@@ -626,6 +656,143 @@ fn navigation_modals_validation_and_terminal_lifecycle_work() {
         !transcript.contains("\u{1b}[38;2;"),
         "NO_COLOR emitted truecolor styling: {transcript}"
     );
+}
+
+fn enter_run_all(tui: &mut PtySession) {
+    tui.send(b"3");
+    tui.wait_for_output("PARALLELISM", START_TIMEOUT);
+}
+
+fn edit_parallelism(tui: &mut PtySession, value: &str) {
+    tui.send(b"p");
+    tui.wait_for_output("Enter save", START_TIMEOUT);
+    let clear = [b'\x7f'; 16];
+    tui.send(&clear);
+    tui.send(value.as_bytes());
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen
+            .lines()
+            .any(|line| line.contains("PARALLELISM") && line.contains(value))
+    });
+}
+
+fn confirm_run_all(tui: &mut PtySession) {
+    tui.send(b"a");
+    tui.wait_for_output("Run all Planned and Suspended sessions?", START_TIMEOUT);
+    tui.send(b"\r");
+}
+
+#[test]
+fn tui_parallelism_edit_persists_and_is_loaded_after_restart() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+    enter_run_all(&mut tui);
+    edit_parallelism(&mut tui, "4");
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let config = AppConfig::load_from(&fixture.app_config_path())
+        .unwrap_or_else(|error| panic!("failed to reload PTY app config: {error}"));
+    assert_eq!(config.run_all_parallelism, 4);
+
+    let mut restarted = fixture.start(120, 30, true);
+    enter_run_all(&mut restarted);
+    restarted.wait_for_screen(START_TIMEOUT, |screen| {
+        screen
+            .lines()
+            .any(|line| line.contains("PARALLELISM") && line.contains('4'))
+    });
+    restarted.send(b"q");
+    let (status, transcript) = restarted.finish();
+    assert!(
+        status.success(),
+        "restarted cruise failed in PTY: {transcript}"
+    );
+}
+
+#[test]
+fn tui_parallelism_increase_applies_to_the_next_batch_schedule() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let ids = [
+        "20260831000000010_00000000000000000000000000000010",
+        "20260831000000011_00000000000000000000000000000011",
+        "20260831000000012_00000000000000000000000000000012",
+    ];
+    for id in ids {
+        fixture.seed_gated_session(id);
+    }
+    fixture.save_parallelism(1);
+
+    let mut tui = fixture.start(120, 30, true);
+    enter_run_all(&mut tui);
+    confirm_run_all(&mut tui);
+    wait_for_file(&fixture.gated_path(ids[0], "started"), START_TIMEOUT);
+    assert!(!fixture.gated_path(ids[1], "started").exists());
+
+    edit_parallelism(&mut tui, "2");
+    assert!(!fixture.gated_path(ids[1], "started").exists());
+    assert!(!fixture.gated_path(ids[2], "started").exists());
+    fixture.release_gated_session(ids[0]);
+    wait_for_file(&fixture.gated_path(ids[0], "finished"), START_TIMEOUT);
+    wait_for_file(&fixture.gated_path(ids[1], "started"), START_TIMEOUT);
+    wait_for_file(&fixture.gated_path(ids[2], "started"), START_TIMEOUT);
+    fixture.release_gated_session(ids[1]);
+    fixture.release_gated_session(ids[2]);
+    wait_for_file(&fixture.gated_path(ids[1], "finished"), START_TIMEOUT);
+    wait_for_file(&fixture.gated_path(ids[2], "finished"), START_TIMEOUT);
+    tui.wait_for_output("Run All finished", Duration::from_secs(20));
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+}
+
+#[test]
+fn tui_parallelism_decrease_does_not_cancel_workers_or_start_a_replacement_early() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let ids = [
+        "20260831000000020_00000000000000000000000000000020",
+        "20260831000000021_00000000000000000000000000000021",
+        "20260831000000022_00000000000000000000000000000022",
+    ];
+    for id in ids {
+        fixture.seed_gated_session(id);
+    }
+    fixture.save_parallelism(2);
+
+    let mut tui = fixture.start(120, 30, true);
+    enter_run_all(&mut tui);
+    confirm_run_all(&mut tui);
+    wait_for_file(&fixture.gated_path(ids[0], "started"), START_TIMEOUT);
+    wait_for_file(&fixture.gated_path(ids[1], "started"), START_TIMEOUT);
+    assert!(!fixture.gated_path(ids[2], "started").exists());
+
+    edit_parallelism(&mut tui, "1");
+    fixture.release_gated_session(ids[0]);
+    wait_for_file(&fixture.gated_path(ids[0], "finished"), START_TIMEOUT);
+    assert!(!fixture.gated_path(ids[2], "started").exists());
+
+    fixture.release_gated_session(ids[1]);
+    wait_for_file(&fixture.gated_path(ids[1], "finished"), START_TIMEOUT);
+    wait_for_file(&fixture.gated_path(ids[2], "started"), START_TIMEOUT);
+    fixture.release_gated_session(ids[2]);
+    tui.wait_for_output("Run All finished", Duration::from_secs(20));
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    wait_for_file(&fixture.gated_path(ids[2], "finished"), START_TIMEOUT);
 }
 
 #[test]

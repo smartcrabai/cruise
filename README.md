@@ -124,7 +124,7 @@ Running `cruise` with no arguments opens cruise's official interactive keyboard 
 cruise
 ```
 
-Typical flow: run `cruise`, press `n`, type the task, then either press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**.
+Typical flow: run `cruise`, press `n`, type the task, then either press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**. On Run All, press `p` to edit the shared parallelism setting, type a positive integer, and press `Enter` to save or `Esc` to cancel.
 
 The TUI requires an interactive TTY on macOS or Linux. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh`.
 
@@ -134,11 +134,11 @@ The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
-- **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
+- **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared GUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
-PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login`, `config`, and `exec` operations remain available through their CLI commands rather than TUI screens.
+PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
-The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 For `ask_user`, a question containing line breaks is rendered as adjacent prompt lines, and `Enter` submits the answer.
 
@@ -161,6 +161,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices |
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
+| `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
 | `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
 | `f` | Follow the log |
 | `c` | On Sessions, ask for confirmation to Clean reclaimable and closed-PR sessions |
@@ -364,12 +365,12 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
+          Set the maximum number of sessions the desktop GUI and TUI run concurrently in `run --all` mode.
 
-          Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
+          Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`; the flag's own help text mentions only the desktop GUI, but the TUI reads the same setting for its Run All batches. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise login`
 

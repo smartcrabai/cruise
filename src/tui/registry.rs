@@ -311,7 +311,6 @@ impl OperationRegistry {
     pub fn run_all(
         &mut self,
         app: CruiseApplication,
-        parallelism: usize,
         tx: UnboundedSender<UiEvent>,
         logs: mpsc::Sender<UiEvent>,
     ) -> bool {
@@ -319,19 +318,14 @@ impl OperationRegistry {
             return false;
         }
         let config_app = app.clone();
-        let configured_parallelism = parallelism;
         self.notifications = Some(tx.clone());
         let sink = Arc::new(ControlSink::new(tx.clone()));
         let log_sink = Arc::new(BoundedLogSink::new(logs, tx.clone()));
         self.batch = Some(tokio::spawn(async move {
             let parallelism_provider = move || {
-                if configured_parallelism == 0 {
-                    Ok(0)
-                } else {
-                    config_app
-                        .app_config()
-                        .map(|config| config.run_all_parallelism)
-                }
+                config_app
+                    .app_config()
+                    .map(|config| config.run_all_parallelism)
             };
             match std::panic::AssertUnwindSafe(app.run_all_with_parallelism_provider(
                 parallelism_provider,
