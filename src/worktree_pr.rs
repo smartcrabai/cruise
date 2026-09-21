@@ -1049,7 +1049,9 @@ mod tests {
         let mut session = SessionState::new(
             "20260921070001".to_string(),
             tmp.path().to_path_buf(),
-            "test.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: tmp.path().join("test.yaml"),
+            },
             "PR description logging task".to_string(),
         );
         let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

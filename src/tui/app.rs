@@ -2684,7 +2684,7 @@ mod tests {
         let mut state = SessionState::new_draft(
             crate::session::SessionManager::new_session_id(),
             PathBuf::from("."),
-            crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             input.to_string(),
         );
         state.attachments = vec![PathBuf::from("/tmp/persisted-image.png")];

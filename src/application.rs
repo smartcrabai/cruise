@@ -4197,7 +4197,6 @@ mod tests {
             input: input.to_string(),
             base_dir: base_dir.to_path_buf(),
             config_path: None,
-            config_source: None,
             config_yaml: Some(format!(
                 "command: [sh, -c, 'cat']\nmodel: '{model}'\nsteps:\n  s1:\n    prompt: model logging\n"
             )),

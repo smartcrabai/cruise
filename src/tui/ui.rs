@@ -1389,7 +1389,7 @@ mod tests {
                     app.sessions.push(crate::session::SessionState::new(
                         "session-1".to_string(),
                         std::path::PathBuf::from("."),
-                        "__builtin__".to_string(),
+                        crate::session_config::SessionConfigRef::BuiltinSnapshot,
                         "task".to_string(),
                     ));
                 });
@@ -1411,7 +1411,7 @@ mod tests {
             app.sessions.push(crate::session::SessionState::new(
                 "session-1".to_string(),
                 std::path::PathBuf::from("."),
-                "__builtin__".to_string(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
                 "task".to_string(),
             ));
         });

@@ -222,13 +222,14 @@ impl Fixture {
         let mut state = SessionState::new(
             id.to_string(),
             repo,
-            "tui-model.yaml".to_string(),
+            cruise::session_config::SessionConfigRef::File {
+                path: config.clone(),
+            },
             "TUI model logging session".to_string(),
         );
         state.phase = SessionPhase::Planned;
         state.workspace_mode = WorkspaceMode::CurrentBranch;
         state.target_branch = Some("main".to_string());
-        state.config_path = Some(config);
         state.has_dag = true;
         self.manager
             .create(&state)
