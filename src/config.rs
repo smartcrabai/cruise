@@ -41,9 +41,8 @@ pub struct WorkflowConfig {
     /// Mutually exclusive with `command`. Accepted values (validated by
     /// [`validate_sdk`]):
     ///
-    /// - `"jcode"` — drives the `jcode` CLI as an NDJSON subprocess under
-    ///   cruise's own `JCODE_HOME`, so its credentials and sessions stay
-    ///   separate from the user's `~/.jcode` (sign in with `cruise login`).
+    /// - `"jcode"` — drives the `jcode` CLI as an NDJSON subprocess in jcode's
+    ///   own home, using the credentials the user's own `jcode login` stored.
     ///   `model` / `plan_model` / per-step `model` are `provider/model`
     ///   references in jcode's own provider/model namespace, with an optional
     ///   `:effort` suffix (unset lets jcode pick its configured default).

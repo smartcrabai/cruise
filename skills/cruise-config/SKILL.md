@@ -62,7 +62,7 @@ The full spec is split into the files below. Load only the sections you need.
 | Doc | Contents |
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
-| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
+| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `jcode login` auth in jcode's own home) and `sdk: claude` (in-process claude CLI), differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |

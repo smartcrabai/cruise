@@ -1,58 +1,28 @@
 #!/usr/bin/env bash
 # Exercises action/scripts/provision-jcode.sh (credentials and provider
-# profiles landing in cruise's jcode home), the credential gate in
-# action/scripts/gate.sh, and the `env` reserved-name handling in
+# profiles landing in the jcode home the action pins), the credential gate
+# in action/scripts/gate.sh, and the `env` reserved-name handling in
 # action/scripts/setup-env.sh.
 #
-# provision-jcode.sh drives two binaries it must not re-implement, so both
-# are stubbed:
-#   - `cruise`, for `login --status` (which is where the jcode home path
-#     comes from) and `login --api-key <provider>` (the dedicated-key path).
-#   - `jcode`, for `version --json` and `provider add`.
-# The `jcode` stub reproduces the parts of jcode 0.82.0 this script depends
-# on -- the `[providers.<name>]` table it appends to $JCODE_HOME/config.toml,
-# the owner-only `provider-<name>.env` file it writes for a stdin key, its
-# --json report, and its rejection of a non-http base_url -- so the
-# assertions below can be made against real files. Every invocation is also
-# logged verbatim, so the flags this action passes are pinned independently
-# of what the stub then does with them.
+# provision-jcode.sh drives one binary it must not re-implement, so `jcode`
+# is stubbed for the four subcommands it uses: `version --json`,
+# `login <provider> --no-validate`, `provider add` and `auth status`.
+# The stub reproduces the parts of jcode 0.82.0 this script depends on --
+# the owner-only `<provider>.env` file `login` writes for a key read from
+# stdin, the `[providers.<name>]` table `provider add` appends to
+# $JCODE_HOME/config.toml plus the owner-only `provider-<name>.env` file it
+# writes for a stdin key, its --json report, and its rejection of a
+# non-http base_url -- so the assertions below can be made against real
+# files. Every invocation is also logged verbatim, so the flags this action
+# passes are pinned independently of what the stub then does with them.
 . "$(dirname "${BASH_SOURCE[0]}")/lib/action_test_harness.sh"
 
-FAKE_JCODE_HOME="$TMP/jcode-home"
-export FAKE_JCODE_HOME
-CONFIG_TOML="$FAKE_JCODE_HOME/config.toml"
-ENV_DIR="$FAKE_JCODE_HOME/config/jcode"
-
-stub cruise <<'SH'
-#!/usr/bin/env bash
-printf 'cruise %s\n' "$*" >> "$STUB_LOG"
-if [ "$1" = "login" ] && [ "$2" = "--status" ]; then
-  echo "cruise jcode home: $FAKE_JCODE_HOME"
-  echo "providers: $(ls "$FAKE_JCODE_HOME/config/jcode" 2>/dev/null | tr '\n' ' ')"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "--api-key" ]; then
-  provider="$3"
-  # Mirrors what `cruise login --api-key` does through `jcode login`:
-  # provider-specific env file, owner-only, holding one KEY=value line. The
-  # key must arrive in CRUISE_LOGIN_API_KEY, never in the argument list.
-  case "$provider" in
-    anthropic-api) file=anthropic.env; var=ANTHROPIC_API_KEY ;;
-    openai-api) file=openai.env; var=OPENAI_API_KEY ;;
-    *) echo "unsupported provider '$provider'" >&2; exit 1 ;;
-  esac
-  if [ -z "${CRUISE_LOGIN_API_KEY:-}" ]; then
-    echo "no key in CRUISE_LOGIN_API_KEY" >&2
-    exit 1
-  fi
-  mkdir -p "$FAKE_JCODE_HOME/config/jcode"
-  printf '%s=%s\n' "$var" "$CRUISE_LOGIN_API_KEY" > "$FAKE_JCODE_HOME/config/jcode/$file"
-  chmod 600 "$FAKE_JCODE_HOME/config/jcode/$file"
-  echo "Stored at $FAKE_JCODE_HOME/config/jcode/$file"
-  exit 0
-fi
-exit 0
-SH
+# The home provision-jcode.sh inherits; in the real action setup-env.sh
+# exports it for every step through $GITHUB_ENV.
+JCODE_HOME="$TMP/jcode-home"
+export JCODE_HOME
+CONFIG_TOML="$JCODE_HOME/config.toml"
+ENV_DIR="$JCODE_HOME/config/jcode"
 
 stub jcode <<'SH'
 #!/usr/bin/env bash
@@ -64,6 +34,23 @@ while [ "${1:-}" = "--no-update" ]; do shift; done
 case "${1:-}" in
   version)
     echo '{"version":"v0.82.0 (fake)","semver":"0.82.0"}'
+    exit 0
+    ;;
+  login)
+    shift
+    provider="$1"; shift
+    case "$provider" in
+      anthropic-api) file=anthropic.env; var=ANTHROPIC_API_KEY ;;
+      openai-api) file=openai.env; var=OPENAI_API_KEY ;;
+      *) echo "unsupported provider '$provider'" >&2; exit 1 ;;
+    esac
+    # jcode prompts for an API-key provider's key on stdin, and stores it in
+    # a provider-specific, owner-only env file holding one KEY=value line.
+    IFS= read -r stdin_key || stdin_key=""
+    mkdir -p "$JCODE_HOME/config/jcode"
+    printf '%s=%s\n' "$var" "$stdin_key" > "$JCODE_HOME/config/jcode/$file"
+    chmod 600 "$JCODE_HOME/config/jcode/$file"
+    echo "Stored at $JCODE_HOME/config/jcode/$file"
     exit 0
     ;;
   provider)
@@ -164,8 +151,8 @@ SH
 
 run_provision() {
   new_case
-  rm -rf "$FAKE_JCODE_HOME"
-  mkdir -p "$FAKE_JCODE_HOME"
+  rm -rf "$JCODE_HOME"
+  mkdir -p "$JCODE_HOME"
   ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}" \
   OPENAI_API_KEY_INPUT="${OPENAI_API_KEY_INPUT:-}" \
   PROVIDERS_INPUT="${PROVIDERS_INPUT:-}" \
@@ -185,32 +172,32 @@ assert_provision_fails() { # $1=name $2=expected message fragment
 }
 
 # ===========================================================================
-# dedicated provider keys -> cruise's jcode home
+# dedicated provider keys -> the pinned jcode home
 # ===========================================================================
 export ANTHROPIC_API_KEY_INPUT='sk-ant-secret' OPENAI_API_KEY_INPUT='sk-oai-secret'
 unset PROVIDERS_INPUT PROVIDER_API_KEYS_INPUT
 output="$(run_provision)"
 if grep -Fqx 'ANTHROPIC_API_KEY=sk-ant-secret' "$ENV_DIR/anthropic.env" \
   && grep -Fqx 'OPENAI_API_KEY=sk-oai-secret' "$ENV_DIR/openai.env"; then
-  pass "the dedicated keys land in <provider>.env files under cruise's jcode home"
+  pass "the dedicated keys land in <provider>.env files under the jcode home"
 else
-  fail "the dedicated keys land in <provider>.env files under cruise's jcode home" "$(ls -l "$ENV_DIR" 2>&1)"
+  fail "the dedicated keys land in <provider>.env files under the jcode home" "$(ls -l "$ENV_DIR" 2>&1)"
 fi
 # The credential files are jcode's, so their mode must be owner-only. 600 is
-# what `cruise login --api-key` produces through jcode.
+# what `jcode login` produces.
 if [ "$(ls -l "$ENV_DIR/anthropic.env" | cut -c1-10)" = "-rw-------" ]; then
   pass "a stored provider key file is owner-only"
 else
   fail "a stored provider key file is owner-only" "$(ls -l "$ENV_DIR/anthropic.env")"
 fi
-if grep -Fq 'cruise login --api-key anthropic-api' "$STUB_LOG" \
-  && grep -Fq 'cruise login --api-key openai-api' "$STUB_LOG"; then
-  pass "each dedicated key goes through 'cruise login --api-key <provider>'"
+if grep -Fqx 'jcode --no-update login anthropic-api --no-validate' "$STUB_LOG" \
+  && grep -Fqx 'jcode --no-update login openai-api --no-validate' "$STUB_LOG"; then
+  pass "each dedicated key goes through 'jcode login <provider> --no-validate'"
 else
-  fail "each dedicated key goes through 'cruise login --api-key <provider>'" "$(cat "$STUB_LOG")"
+  fail "each dedicated key goes through 'jcode login <provider> --no-validate'" "$(cat "$STUB_LOG")"
 fi
-# The key must travel in CRUISE_LOGIN_API_KEY (the stub hard-fails without
-# it) and never as an argument, where a process listing would expose it.
+# The key must travel on stdin, never as an argument, where a process listing
+# would expose it.
 if ! grep -Fq 'sk-ant-secret' "$STUB_LOG" && ! grep -Fq 'sk-oai-secret' "$STUB_LOG"; then
   pass "no dedicated key literal ever reaches an argument list"
 else
@@ -230,11 +217,11 @@ else
   fail "a dedicated-key-only run writes no config.toml" "$(cat "$CONFIG_TOML")"
 fi
 
-# Every jcode invocation must be bound to cruise's home with telemetry off.
-if grep -Fq "jcode-env JCODE_HOME=$FAKE_JCODE_HOME JCODE_NO_TELEMETRY=1" "$STUB_LOG"; then
-  pass "jcode runs against cruise's own JCODE_HOME with telemetry disabled"
+# Every jcode invocation must see the inherited home with telemetry off.
+if grep -Fq "jcode-env JCODE_HOME=$JCODE_HOME JCODE_NO_TELEMETRY=1" "$STUB_LOG"; then
+  pass "jcode inherits the pinned JCODE_HOME with telemetry disabled"
 else
-  fail "jcode runs against cruise's own JCODE_HOME with telemetry disabled" "$(cat "$STUB_LOG")"
+  fail "jcode inherits the pinned JCODE_HOME with telemetry disabled" "$(cat "$STUB_LOG")"
 fi
 if grep -Fqx 'jcode --no-update version --json' "$STUB_LOG"; then
   pass "the jcode version probe suppresses the auto-update check"
@@ -249,54 +236,22 @@ else
   fail "the version log prints jcode's semver field" "$output"
 fi
 
-# A cruise that reports no jcode home is a hard failure, not a silently
-# guessed path: everything below writes into that directory.
+# Running without an isolated JCODE_HOME is a hard failure rather than a
+# silent write into the runner user's real home: setup-env.sh pins one for
+# every step of this action.
 new_case
-stub cruise <<'SH'
-#!/usr/bin/env bash
-printf 'cruise %s\n' "$*" >> "$STUB_LOG"
-echo "some other output"
-SH
-out="$(ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT= PROVIDERS_INPUT= PROVIDER_API_KEYS_INPUT= \
+out="$(env -u JCODE_HOME ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT= PROVIDERS_INPUT= PROVIDER_API_KEYS_INPUT= \
   bash action/scripts/provision-jcode.sh 2>&1)"
 status=$?
-if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -Fq 'did not report a jcode home'; then
-  pass "a cruise that reports no jcode home fails the step"
+if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -Fq 'JCODE_HOME is not set'; then
+  pass "a run without JCODE_HOME fails the step"
 else
-  fail "a cruise that reports no jcode home fails the step" "status=$status output=$out"
+  fail "a run without JCODE_HOME fails the step" "status=$status output=$out"
 fi
 
 # ===========================================================================
-# providers -> [providers.<name>] profiles in cruise's jcode config.toml
+# providers -> [providers.<name>] profiles in the jcode home's config.toml
 # ===========================================================================
-# Restore the full cruise stub (the case above deliberately replaced it).
-stub cruise <<'SH'
-#!/usr/bin/env bash
-printf 'cruise %s\n' "$*" >> "$STUB_LOG"
-if [ "$1" = "login" ] && [ "$2" = "--status" ]; then
-  echo "cruise jcode home: $FAKE_JCODE_HOME"
-  echo "providers: $(ls "$FAKE_JCODE_HOME/config/jcode" 2>/dev/null | tr '\n' ' ')"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "--api-key" ]; then
-  provider="$3"
-  case "$provider" in
-    anthropic-api) file=anthropic.env; var=ANTHROPIC_API_KEY ;;
-    openai-api) file=openai.env; var=OPENAI_API_KEY ;;
-    *) echo "unsupported provider '$provider'" >&2; exit 1 ;;
-  esac
-  if [ -z "${CRUISE_LOGIN_API_KEY:-}" ]; then
-    echo "no key in CRUISE_LOGIN_API_KEY" >&2
-    exit 1
-  fi
-  mkdir -p "$FAKE_JCODE_HOME/config/jcode"
-  printf '%s=%s\n' "$var" "$CRUISE_LOGIN_API_KEY" > "$FAKE_JCODE_HOME/config/jcode/$file"
-  chmod 600 "$FAKE_JCODE_HOME/config/jcode/$file"
-  echo "Stored at $FAKE_JCODE_HOME/config/jcode/$file"
-  exit 0
-fi
-exit 0
-SH
 
 unset ANTHROPIC_API_KEY_INPUT OPENAI_API_KEY_INPUT
 export ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT=
@@ -577,6 +532,15 @@ if grep -Fqx 'CRUISE_FORCE_EXEC=false' "$GITHUB_ENV"; then
 else
   fail "setup-env pins CRUISE_FORCE_EXEC=false" "$(cat "$GITHUB_ENV")"
 fi
+# The isolation this action is responsible for: cruise no longer relocates
+# jcode itself, so the credentials only stay off the runner user's real
+# $HOME if setup-env.sh pins JCODE_HOME (and creates it) under RUNNER_TEMP
+# for every later step.
+if [ "$(genv JCODE_HOME)" = "$RUNNER_TEMP/cruise/jcode-home" ] && [ -d "$RUNNER_TEMP/cruise/jcode-home" ]; then
+  pass "setup-env pins JCODE_HOME under RUNNER_TEMP and creates it"
+else
+  fail "setup-env pins JCODE_HOME under RUNNER_TEMP and creates it" "$(cat "$GITHUB_ENV")"
+fi
 export MODEL_INPUT= PLAN_MODEL_INPUT=
 run_setup >/dev/null
 if ! grep -q '^CRUISE_MODEL=' "$GITHUB_ENV" && ! grep -q '^CRUISE_PLAN_MODEL=' "$GITHUB_ENV"; then
@@ -604,7 +568,7 @@ if grep -Fqx 'OPENAI_API_KEY=from-env' "$GITHUB_ENV"; then pass "env: OPENAI_API
 # Reserved: every literal name in RESERVED_KEYS plus the four prefix rules.
 for key in GITHUB_TOKEN GH_TOKEN PATH HOME SHELL \
            GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
-           XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME \
+           JCODE_HOME XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME \
            CRUISE_MODEL CRUISE_SDK CRUISE_CONFIG GITHUB_ANYTHING ACTIONS_ANYTHING RUNNER_ANYTHING; do
   env_case "" "$key=should-be-dropped"
   if printf '%s\n' "$env_out" | grep -Fq "::warning::cruise: ignoring 'env' entry for '$key'" \

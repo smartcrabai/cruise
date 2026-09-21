@@ -522,7 +522,7 @@ pub fn resolve_generated_plan_content(
 /// Backend transcript for `session_id`, when the backend publishes one that
 /// records terminal errors. Always `None` today.
 ///
-/// - `sdk: jcode` writes `$JCODE_HOME/sessions/<session_id>.json`, but that
+/// - `sdk: jcode` writes `<jcode home>/sessions/<session_id>.json`, but that
 ///   document holds only the session's messages. A turn killed by a provider
 ///   error (429, `context_length_exceeded`, a transport failure) leaves no error
 ///   field there — not even the partial assistant reply (verified against jcode
@@ -1077,6 +1077,9 @@ mod tests {
         let _guard = lock_process();
         let tmp = make_temp_dir();
         let _home = crate::test_support::set_fake_home(tmp.path());
+        // `jcode_home()` reads `JCODE_HOME` first; clear it so the fixture
+        // lands under the fake home rather than the developer's real one.
+        let _jcode_home = crate::test_support::EnvGuard::remove("JCODE_HOME");
         let sessions = crate::backend::jcode::jcode_home()
             .unwrap_or_else(|e| panic!("jcode home: {e}"))
             .join("sessions");

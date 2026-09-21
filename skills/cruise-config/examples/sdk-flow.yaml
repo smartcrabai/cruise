@@ -6,7 +6,7 @@ description: SDK-backed TDD flow
 
 # Plain model references: "provider/model[:effort]" (provider is a jcode
 # provider id; `jcode login --help` lists them all). Omit both to use the
-# jcode home's configured default. Sign in first with `cruise login`.
+# jcode home's configured default. Sign in first with `jcode login <provider>`.
 model: anthropic-api/claude-sonnet-4-6   # for ordinary prompt steps
 plan_model: openai-api/gpt-5.5:high      # for the built-in plan step (falls back to `model`)
 
