@@ -68,6 +68,7 @@ impl AskHandler for CliAskHandler {
             Some(question),
             "CLI",
         );
+        let _blocked = crate::herdr::blocked(question);
         crate::multiline_input::prompt_multiline(question)?.into_result()
     }
 }

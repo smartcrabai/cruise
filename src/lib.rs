@@ -47,6 +47,7 @@ pub mod yaml_metadata;
 pub mod batch_dashboard;
 pub mod console_mode;
 pub mod display;
+pub mod herdr;
 pub(crate) mod multiline_input;
 pub(crate) mod platform;
 pub mod run_observer;

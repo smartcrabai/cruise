@@ -368,6 +368,14 @@ impl NewSessionForm {
         self.step = Step::Task;
     }
 
+    /// Clear creation-only input after a session has been persisted.
+    pub fn reset_after_creation(&mut self) {
+        self.input.set_text("");
+        self.attachments.set_text("");
+        self.rewind();
+        self.mark_saved();
+    }
+
     pub fn toggle_workspace(&mut self) {
         self.workspace_mode = match self.workspace_mode {
             WorkspaceMode::Worktree => WorkspaceMode::CurrentBranch,
@@ -605,6 +613,96 @@ mod tests {
         assert!(form.should_autosave(form.last_change + Duration::from_millis(500)));
         form.mark_saved();
         assert!(!form.should_autosave(form.last_change + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn reset_after_creation_clears_creation_input_and_preserves_form_settings() {
+        let mut form = NewSessionForm {
+            step: Step::Launch,
+            source: SourceKind::GitHub,
+            workspace_mode: WorkspaceMode::CurrentBranch,
+            launch: Launch::SaveDraft,
+            skipped_explicit: true,
+            dirty: true,
+            ..NewSessionForm::default()
+        };
+        form.input.set_text("first line\nsecond line");
+        form.attachments.set_text("one.png\n/tmp/two.png");
+        form.working_dir.set_text("/tmp/project");
+        form.repository.set_text("acme/cruise");
+        form.config.set_text("workflow.yaml");
+        form.skipped.set_text("build, test");
+        form.options.allow_dirty_working_tree = true;
+        form.options.planning.grill = true;
+        form.options.planning.formal_spec = true;
+        form.options.planning.skip_planning = true;
+        let last_change = form.last_change;
+
+        form.reset_after_creation();
+
+        assert!(form.input.text().is_empty());
+        assert!(form.attachments.text().is_empty());
+        assert!(form.attachment_paths().is_empty());
+        assert_eq!(form.step, Step::Task);
+        assert!(!form.dirty);
+        assert_eq!(form.working_dir.text(), "/tmp/project");
+        assert_eq!(form.repository.text(), "acme/cruise");
+        assert_eq!(form.config.text(), "workflow.yaml");
+        assert_eq!(form.skipped.text(), "build, test");
+        assert_eq!(form.source, SourceKind::GitHub);
+        assert_eq!(form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(form.launch, Launch::SaveDraft);
+        assert!(form.options.allow_dirty_working_tree);
+        assert!(form.options.planning.grill);
+        assert!(form.options.planning.formal_spec);
+        assert!(form.options.planning.skip_planning);
+        assert!(form.skipped_explicit);
+        assert_eq!(form.last_change, last_change);
+    }
+
+    #[test]
+    fn reset_after_creation_is_idempotent_and_allows_new_autosaved_edits() {
+        let mut form = NewSessionForm::default();
+        form.input.set_text("old task");
+        form.attachments.set_text("old.png");
+        form.working_dir.set_text("/tmp/project");
+        form.options.allow_dirty_working_tree = true;
+        form.dirty = true;
+
+        form.reset_after_creation();
+        let preserved = (
+            form.working_dir.text(),
+            form.options.allow_dirty_working_tree,
+            form.last_change,
+        );
+        assert!(!form.should_autosave(form.last_change + Duration::from_millis(500)));
+
+        form.reset_after_creation();
+
+        assert!(form.input.text().is_empty());
+        assert!(form.attachments.text().is_empty());
+        assert_eq!(form.working_dir.text(), preserved.0);
+        assert_eq!(form.options.allow_dirty_working_tree, preserved.1);
+        assert_eq!(form.last_change, preserved.2);
+        assert!(!form.dirty);
+
+        form.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(form.dirty);
+        assert!(form.should_autosave(form.last_change + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn reset_after_creation_clears_attachments_when_task_text_is_already_empty() {
+        let mut form = NewSessionForm::default();
+        form.attachments.set_text("only-image.png");
+        form.dirty = true;
+
+        form.reset_after_creation();
+
+        assert!(form.input.text().is_empty());
+        assert!(form.attachments.text().is_empty());
+        assert!(form.attachment_paths().is_empty());
+        assert!(!form.dirty);
     }
 
     #[test]

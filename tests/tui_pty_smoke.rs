@@ -95,6 +95,7 @@ impl Fixture {
             // Ignore GIT_CONFIG_* pairs inherited from an outer cruise commit guard.
             .env("GIT_CONFIG_COUNT", "0")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env_remove("HERDR_ENV")
             .env_remove("CRUISE_CONFIG")
             .env_remove("CRUISE_MODEL")
             .env_remove("CRUISE_PLAN_MODEL")
@@ -193,6 +194,60 @@ impl Fixture {
         std::fs::write(self.manager.run_log_path(&id), "seeded-log-line\n")
             .unwrap_or_else(|error| panic!("{error}"));
         id
+    }
+
+    fn seed_model_prompt_session(&self) -> String {
+        let id = "20260831000000002_00000000000000000000000000000002";
+        let repo = self.root.path().join(format!("repo-{id}"));
+        std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("{error}"));
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "terminal model logging\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Cruise E2E",
+                "-c",
+                "user.email=cruise-e2e@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        let config = self.root.path().join(format!("{id}.yaml"));
+        let yaml = "command: [sh, -c, 'cat']\nmodel: 'provider/tui-model:free:xhigh'\nsteps:\n  verify:\n    prompt: tui model response\n";
+        std::fs::write(&config, yaml).unwrap_or_else(|error| panic!("{error}"));
+        let mut state = SessionState::new(
+            id.to_string(),
+            repo,
+            "tui-model.yaml".to_string(),
+            "TUI model logging session".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::CurrentBranch;
+        state.target_branch = Some("main".to_string());
+        state.config_path = Some(config);
+        state.has_dag = true;
+        self.manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(
+            state.plan_path(&self.manager.sessions_dir()),
+            "# TUI model plan\n\nrun the model step\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let workflow = cruise::config::WorkflowConfig::from_yaml(yaml)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let compiled =
+            cruise::workflow::compile(workflow).unwrap_or_else(|error| panic!("{error}"));
+        let dag = cruise::dag::build_dag(&compiled, 0).unwrap_or_else(|error| panic!("{error}"));
+        cruise::dag::save_dag(&dag, &self.manager.dag_path(id))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(self.manager.run_log_path(id), "seeded-log-line\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        id.to_string()
     }
 
     fn seed_cancellable_session(&self) -> String {
@@ -661,6 +716,63 @@ fn new_session_form_saves_a_draft_without_planning() {
     assert_eq!(draft.phase, SessionPhase::Draft);
 }
 
+fn assert_two_sessions(
+    manager: &SessionManager,
+    first_input: &str,
+    second_input: &str,
+    expected_phase: &SessionPhase,
+) {
+    let sessions = manager.list().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(sessions.len(), 2, "unexpected saved sessions: {sessions:?}");
+    let first = sessions
+        .iter()
+        .find(|session| session.input == first_input)
+        .unwrap_or_else(|| panic!("first session missing: {sessions:?}"));
+    let second = sessions
+        .iter()
+        .find(|session| session.input == second_input)
+        .unwrap_or_else(|| panic!("second session missing: {sessions:?}"));
+    assert_eq!(&first.phase, expected_phase);
+    assert_eq!(&second.phase, expected_phase);
+}
+
+#[test]
+fn new_session_ctrl_s_clears_input_before_the_next_saved_draft() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"first draft from terminal");
+    tui.send(b"\x13");
+    tui.wait_for_output("Saved draft", START_TIMEOUT);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"\x13");
+    tui.wait_for_output(
+        "Task description or an image attachment is required",
+        START_TIMEOUT,
+    );
+    tui.send(b"\x1b");
+    tui.send(b"second draft from terminal");
+    tui.send(b"\x13");
+    tui.wait_for_output("Saved draft", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    assert_two_sessions(
+        &fixture.manager,
+        "first draft from terminal",
+        "second draft from terminal",
+        &SessionPhase::Draft,
+    );
+}
+
 #[test]
 fn new_session_ctrl_p_validates_before_starting_planning() {
     if !tui_available() {
@@ -736,6 +848,43 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
 }
 
 #[test]
+fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.send(b"2");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"first planned through terminal");
+    tui.send(b"\x15");
+    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+
+    tui.send(b"n");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"\x15");
+    tui.wait_for_output(
+        "Task description or an image attachment is required",
+        START_TIMEOUT,
+    );
+    tui.send(b"\x1b");
+    tui.send(b"second planned through terminal");
+    tui.send(b"\x15");
+    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    assert_two_sessions(
+        &fixture.manager,
+        "first planned through terminal",
+        "second planned through terminal",
+        &SessionPhase::Planned,
+    );
+}
+
+#[test]
 fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     if !tui_available() {
         return;
@@ -781,6 +930,46 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
 }
 
 #[test]
+fn run_all_displays_model_notice_in_the_tui_log_view() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let id = fixture.seed_model_prompt_session();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.wait_for_output("TUI model logging session", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("Selected node", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("TUI model plan", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("seeded-log-line", START_TIMEOUT);
+    tui.send(b"f");
+    tui.wait_for_output("Log follow paused", START_TIMEOUT);
+    tui.send(b"a");
+    tui.wait_for_output("Run on Current Branch", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.send(b"3");
+    tui.send(b"a");
+    tui.send(b"\r");
+    tui.wait_for_output("Run All finished", Duration::from_secs(15));
+    thread::sleep(Duration::from_millis(250));
+    tui.wait_for_output("tui model response", START_TIMEOUT);
+    tui.wait_for_output("Model: provider/tui-model:free:xhigh", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let log = std::fs::read_to_string(fixture.manager.run_log_path(&id))
+        .unwrap_or_else(|error| panic!("read TUI run.log: {error}"));
+    assert!(
+        log.contains("[info] Model: provider/tui-model:free:xhigh"),
+        "TUI execution should persist the model notice: {log}"
+    );
+}
+
+#[test]
 fn undersized_terminal_shows_resize_notice_and_restores_terminal() {
     if !tui_available() {
         return;
@@ -804,9 +993,32 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(80, 24, true);
 
-    tui.wait_for_output("No sessions yet", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet") && screen.contains("c clean")
+    });
+
+    tui.send(b"c");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Clean")
+            && screen.contains("Enter confirm")
+            && screen.contains("Esc cancel")
+    });
+    tui.send(b"\x1b");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("No sessions yet")
+            && screen.contains("c clean")
+            && !screen.contains("Enter confirm")
+    });
+
     tui.send(b"?");
-    tui.wait_for_output("Keyboard-only; no mouse or child-owned TTY.", START_TIMEOUT);
+    let help_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Sessions only")
+            && screen.contains("Keyboard-only; no mouse or child-owned TTY.")
+    });
+    assert!(help_screen.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("clean") && line.contains("sessions only") && line.contains("confirmation")
+    }));
     tui.send(b"\x1b");
     thread::sleep(Duration::from_millis(100));
     tui.send(b"2");

@@ -1566,6 +1566,40 @@ fn plan_stream_callback(
     }
 }
 
+fn plan_info_callback(
+    logger: crate::session::SessionLogger,
+    sink: Arc<dyn ApplicationEventSink>,
+    id: String,
+    failure: Arc<Mutex<Option<String>>>,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    move |text: &str| {
+        logger.write(&format!("[info] {text}"));
+        if let Err(error) = sink.send(ApplicationEvent::LogChunk {
+            session_id: Some(id.clone()),
+            stream: EventStream::Info,
+            text: text.to_string(),
+            batch: false,
+        }) {
+            let mut failure = failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if failure.is_none() {
+                *failure = Some(error.to_string());
+            }
+        }
+    }
+}
+
+fn plan_info_callback_for_session(
+    manager: &SessionManager,
+    sink: Arc<dyn ApplicationEventSink>,
+    id: String,
+    failure: Arc<Mutex<Option<String>>>,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    let logger = crate::session::SessionLogger::new(manager.run_log_path(&id));
+    plan_info_callback(logger, sink, id, failure)
+}
+
 fn plan_checkpoint_callback(
     manager: SessionManager,
     id: String,
@@ -1583,6 +1617,10 @@ fn plan_checkpoint_callback(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "plan prompt execution wires streams, notice logging, and persistence"
+)]
 async fn run_plan_prompt(
     runtime: &Arc<ApplicationRuntime>,
     manager: &SessionManager,
@@ -1622,6 +1660,12 @@ async fn run_plan_prompt(
         EventStream::Stderr,
         Arc::clone(&stream_failure),
     );
+    let on_notice = plan_info_callback_for_session(
+        manager,
+        Arc::clone(sink),
+        context.state.id.clone(),
+        Arc::clone(&stream_failure),
+    );
     let streams = crate::step::prompt::StreamCallbacks {
         on_stdout: Some(&on_stdout),
         on_stderr: Some(&on_stderr),
@@ -1647,6 +1691,7 @@ async fn run_plan_prompt(
         // Replan, Fix, and Ask callers cannot opt in through this field.
         formal_spec: request.formal_spec && operation == OperationKind::Generate,
         on_session_id: Some(&on_session_id),
+        on_notice: Some(&on_notice),
         cancel_token: Some(&token),
     };
     let template = match operation {
@@ -4138,6 +4183,347 @@ mod tests {
         assert_eq!(
             read_log_tail(&path, 0).unwrap_or_else(|e| panic!("{e}")),
             ""
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_model_logging_session(
+        app: &CruiseApplication,
+        base_dir: &std::path::Path,
+        input: &str,
+        model: &str,
+    ) -> SessionState {
+        app.create_session(NewSessionRequest {
+            input: input.to_string(),
+            base_dir: base_dir.to_path_buf(),
+            config_path: None,
+            config_source: None,
+            config_yaml: Some(format!(
+                "command: [sh, -c, 'cat']\nmodel: '{model}'\nsteps:\n  s1:\n    prompt: model logging\n"
+            )),
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: false,
+            attachments: vec![],
+            skipped_steps: vec![],
+        })
+        .unwrap_or_else(|e| panic!("create model logging session: {e}"))
+    }
+
+    #[cfg(unix)]
+    fn info_events(events: &[ApplicationEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ApplicationEvent::LogChunk {
+                    session_id: Some(session_id),
+                    stream: EventStream::Info,
+                    text,
+                    batch: false,
+                } => Some((session_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_delivers_model_notice_as_info_and_persists_the_same_text() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "application model logging",
+            "provider/application-model:free:xhigh",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let sink_events = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
+            sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        app.generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("generate should complete: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            info_events(&events),
+            vec![(
+                session.id.clone(),
+                "Model: provider/application-model:free:xhigh".to_string()
+            )]
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                ApplicationEvent::PlanChunk { text, .. } if text.contains("Model:")
+            )),
+            "model notices must not contaminate plan content events: {events:?}"
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read application run.log: {e}"));
+        assert!(
+            log.contains("[info] Model: provider/application-model:free:xhigh"),
+            "saved log should contain the same info text: {log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quiet_application_planning_still_persists_and_delivers_model_info() {
+        let _lock = crate::test_support::lock_process();
+        let _quiet = crate::console_mode::quiet_guard();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "quiet application model logging",
+            "provider/quiet-model",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let sink_events = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
+            sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        app.generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("quiet generate should complete: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            info_events(&events),
+            vec![(
+                session.id.clone(),
+                "Model: provider/quiet-model".to_string()
+            )]
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read quiet run.log: {e}"));
+        assert!(log.contains("[info] Model: provider/quiet-model"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn info_event_delivery_failure_is_reported_after_the_notice_is_saved() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "failed info delivery",
+            "provider/failing-sink-model",
+        );
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|event: ApplicationEvent| {
+            if matches!(
+                event,
+                ApplicationEvent::LogChunk {
+                    stream: EventStream::Info,
+                    ..
+                }
+            ) {
+                Err(CruiseError::Other("info sink closed".to_string()))
+            } else {
+                Ok(())
+            }
+        });
+
+        let error = app
+            .generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("failed Info delivery must fail the operation"));
+        assert!(
+            error.to_string().contains("planning event delivery failed"),
+            "unexpected delivery error: {error}"
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read failed-delivery run.log: {e}"));
+        assert!(
+            log.contains("[info] Model: provider/failing-sink-model"),
+            "the file write must happen before event delivery: {log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_plan_sessions_keep_model_info_in_their_own_logs_and_events() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let first = create_model_logging_session(
+            &app,
+            temp.path(),
+            "parallel first",
+            "provider/parallel-first",
+        );
+        let second = create_model_logging_session(
+            &app,
+            temp.path(),
+            "parallel second",
+            "provider/parallel-second",
+        );
+        let first_events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let second_events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let first_sink_events = Arc::clone(&first_events);
+        let second_sink_events = Arc::clone(&second_events);
+        let first_sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+            first_sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+        let second_sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+            second_sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        let (first_result, second_result) = tokio::join!(
+            app.generate(&first.id, PlanRequest::default(), first_sink),
+            app.generate(&second.id, PlanRequest::default(), second_sink),
+        );
+        first_result.unwrap_or_else(|e| panic!("first generate failed: {e}"));
+        second_result.unwrap_or_else(|e| panic!("second generate failed: {e}"));
+
+        let first_log = std::fs::read_to_string(manager.run_log_path(&first.id))
+            .unwrap_or_else(|e| panic!("read first log: {e}"));
+        let second_log = std::fs::read_to_string(manager.run_log_path(&second.id))
+            .unwrap_or_else(|e| panic!("read second log: {e}"));
+        assert!(first_log.contains("Model: provider/parallel-first"));
+        assert!(
+            !first_log.contains("parallel-second"),
+            "first log: {first_log}"
+        );
+        assert!(second_log.contains("Model: provider/parallel-second"));
+        assert!(
+            !second_log.contains("parallel-first"),
+            "second log: {second_log}"
+        );
+        assert_eq!(
+            info_events(
+                &first_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
+            vec![(
+                first.id.clone(),
+                "Model: provider/parallel-first".to_string()
+            )]
+        );
+        assert_eq!(
+            info_events(
+                &second_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
+            vec![(
+                second.id.clone(),
+                "Model: provider/parallel-second".to_string()
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_fix_ask_and_replan_each_append_their_model_notice() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "all planning operations",
+            "provider/all-operations",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+
+        let run_operation = |events: &Arc<Mutex<Vec<ApplicationEvent>>>| {
+            let sink_events = Arc::clone(events);
+            Arc::new(move |event: ApplicationEvent| {
+                sink_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(event);
+                Ok(())
+            }) as Arc<dyn ApplicationEventSink>
+        };
+        app.generate(&session.id, PlanRequest::default(), run_operation(&events))
+            .await
+            .unwrap_or_else(|e| panic!("generate failed: {e}"));
+        app.fix(
+            &session.id,
+            "fix the generated plan".to_string(),
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fix failed: {e}"));
+        app.ask(
+            &session.id,
+            "what did the plan change?".to_string(),
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("ask failed: {e}"));
+        app.replan(
+            &session.id,
+            PlanRequest {
+                feedback: Some("replan the task".to_string()),
+                ..PlanRequest::default()
+            },
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("replan failed: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let info = info_events(&events);
+        assert_eq!(
+            info.len(),
+            4,
+            "each plan operation should announce once: {info:?}"
+        );
+        assert!(
+            info.iter().all(|(id, text)| {
+                id == &session.id && text == "Model: provider/all-operations"
+            })
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read all-operations log: {e}"));
+        assert_eq!(
+            log.matches("[info] Model: provider/all-operations").count(),
+            4,
+            "all plan operations should append instead of overwrite: {log}"
         );
     }
 }

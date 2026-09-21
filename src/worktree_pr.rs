@@ -140,9 +140,15 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let (pr_title, pr_body) =
-        generate_pr_description(&ctx.path, compiled, vars, rate_limit_retries, cancel_token)
-            .await?;
+    let (pr_title, pr_body) = generate_pr_description(
+        &ctx.path,
+        compiled,
+        vars,
+        rate_limit_retries,
+        cancel_token,
+        on_step_log,
+    )
+    .await?;
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
@@ -204,6 +210,7 @@ async fn generate_pr_description(
     vars: &mut VariableStore,
     rate_limit_retries: usize,
     cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<(String, String)> {
     let pr_prompt = match build_pr_prompt(vars, compiled) {
         Err(e) => {
@@ -227,6 +234,7 @@ async fn generate_pr_description(
             &env,
             &spinner,
             cancel_token,
+            on_step_log,
         )
         .await;
         drop(spinner);
@@ -234,7 +242,12 @@ async fn generate_pr_description(
     }
 
     let output = {
-        let on_notice = |msg: &str| spinner.suspend(|| crate::status_eprintln!("{msg}"));
+        let on_notice = |msg: &str| {
+            spinner.suspend(|| crate::status_eprintln!("{msg}"));
+            if let Some(cb) = on_step_log {
+                cb("info", msg);
+            }
+        };
         match executor
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
@@ -288,6 +301,7 @@ async fn generate_pr_via_sdk_tool(
     env: &std::collections::HashMap<String, String>,
     spinner: &crate::spinner::Spinner,
     cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<(String, String)> {
     use std::sync::{Arc, Mutex};
 
@@ -297,7 +311,12 @@ async fn generate_pr_via_sdk_tool(
         "{pr_prompt}\n\n\
          Call the submit_pr_metadata tool with the title and body."
     );
-    let on_notice = |msg: &str| spinner.suspend(|| crate::status_eprintln!("{msg}"));
+    let on_notice = |msg: &str| {
+        spinner.suspend(|| crate::status_eprintln!("{msg}"));
+        if let Some(cb) = on_step_log {
+            cb("info", msg);
+        }
+    };
     match executor
         .run(crate::executor::PromptRun {
             prompt: &prompt,
@@ -895,7 +914,7 @@ mod tests {
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, Some(&token)),
+            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, Some(&token), None),
         )
         .await;
 
@@ -927,7 +946,7 @@ mod tests {
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
 
         // cat echoes the prompt; the function should complete without panicking.
-        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None).await;
+        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None).await;
         // No assertion on values — only that the function accepts None and returns without hanging.
     }
 
@@ -952,7 +971,7 @@ mod tests {
         let mut vars = VariableStore::new("implement feature X".to_string());
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
 
-        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None).await;
+        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None).await;
 
         let expected = std::fs::canonicalize(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let actual_path = std::fs::read_to_string(&cwd_path)
@@ -992,6 +1011,7 @@ mod tests {
             &env,
             &spinner,
             None,
+            None,
         )
         .await;
         drop(spinner);
@@ -1003,5 +1023,73 @@ mod tests {
             .to_string();
         let actual = std::fs::canonicalize(actual_path).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pr_description_forwards_model_notice_to_step_log_before_no_commit_exit() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        crate::test_support::init_git_repo(tmp.path());
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- keep the branch unchanged")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let mut compiled =
+            minimal_compiled_workflow(vec!["sh".to_string(), "-c".to_string(), "cat".to_string()]);
+        compiled.model = Some("provider/pr-description-model:free:xhigh".to_string());
+        let mut vars = VariableStore::new("PR description logging task".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+        let ctx = worktree::WorktreeContext {
+            path: tmp.path().to_path_buf(),
+            branch: "main".to_string(),
+            original_dir: tmp.path().to_path_buf(),
+        };
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let mut session = SessionState::new(
+            "20260921070001".to_string(),
+            tmp.path().to_path_buf(),
+            "test.yaml".to_string(),
+            "PR description logging task".to_string(),
+        );
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let logs_sink = std::sync::Arc::clone(&logs);
+        let on_step_log = move |stream: &str, line: &str| {
+            logs_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("{stream}:{line}"));
+        };
+
+        let result = handle_worktree_pr_with_persistence(
+            &ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            Some(&on_step_log),
+            None,
+        )
+        .await;
+
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("an unchanged branch should stop before PR creation"));
+        assert!(
+            error.to_string().contains("no commits beyond its base"),
+            "unexpected no-commit result: {error}"
+        );
+        assert!(
+            logs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|line| line == "info:Model: provider/pr-description-model:free:xhigh"),
+            "PR description model notice must use the existing step-log callback"
+        );
     }
 }

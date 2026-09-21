@@ -178,6 +178,9 @@ pub struct PlanPromptCtx<'a> {
     pub formal_spec: bool,
     /// Called when an SDK backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
+    /// Additional destination for model and fallback notices, separate from
+    /// the terminal output used by this planning layer.
+    pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token forwarded to the executor.
     pub cancel_token: Option<&'a CancellationToken>,
 }
@@ -268,7 +271,16 @@ pub async fn run_plan_prompt_template(
     // prompts, so a spinner would clobber interactive input; only spin for the
     // command backend.
     let spinner = (!executor.is_sdk()).then(|| crate::spinner::Spinner::start("Cruising..."));
-    let on_notice = move |msg: &str| crate::status_eprintln!("{}", style(msg).dim());
+    let on_notice = |msg: &str| {
+        if let Some(spinner) = &spinner {
+            spinner.suspend(|| crate::status_eprintln!("{}", style(msg).dim()));
+        } else {
+            crate::status_eprintln!("{}", style(msg).dim());
+        }
+        if let Some(cb) = ctx.on_notice {
+            cb(msg);
+        }
+    };
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
@@ -768,6 +780,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: None,
         }
     }
@@ -806,6 +819,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
 
@@ -867,6 +881,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
         let mut vars = VariableStore::new("test input".to_string());

@@ -115,6 +115,17 @@ permission never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_NOTIFICATIONS=1` in CI, headless environments, or tests to
 disable them.
 
+### herdr integration
+
+Inside a [herdr](https://herdr.dev) pane (`HERDR_ENV=1` with `HERDR_PANE_ID` and
+`HERDR_BIN_PATH` set), the TUI, `cruise plan`, `cruise run`, and `cruise exec`
+report their lifecycle state through `"$HERDR_BIN_PATH" pane report-agent` as
+source `custom:cruise` / agent `cruise`: `working` while planning or executing
+steps, `blocked` while waiting for an answer, an option selection, or plan
+review, and `idle` otherwise. Authority is released on exit. Reporting is
+best-effort and never changes workflow success, failure, or exit status. Set
+`CRUISE_DISABLE_HERDR=1` to disable it.
+
 ### TUI (Interactive Keyboard Client)
 
 Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
@@ -448,6 +459,35 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
 
+### Model and Fallback Notices
+
+When a visible status or info channel is available, each prompt execution
+reports the Cruise-selected model there; every notice is also written to
+the session's `run.log`:
+
+```text
+Model: provider/model:free:xhigh
+```
+
+When retry policy switches models, Cruise reports the transition and then the
+replacement model:
+
+```text
+Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
+Model: provider/fallback
+```
+
+The complete model reference is retained, including its provider, path, and
+effort suffixes. When no model is configured, the notice identifies the
+backend instead, for example `Model: default model (jcode)`. Notices are sent
+to foreground CLI stderr when status output is enabled, the TUI's existing
+info log, and the session's `run.log`. Detached `cruise --plan` workers and
+the CLI's interactive `cruise run --all` dashboard suppress terminal notices,
+so those notices must be read from the session's `run.log`. They are not
+mixed into stdout or plan/Ask response content. The existing session
+lifecycle and log retention rules remain unchanged. In particular, transient
+`cruise exec` sessions are still removed after completion.
+
 > **`cruise exec`** is a separate path with a transient lifecycle: it executes in the current directory without planning, worktree creation, or PR creation, and removes its session after terminal completion. Paused or interrupted exec sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
 
 ### `cruise list` Actions
@@ -658,6 +698,8 @@ The CLI and desktop GUI also apply these process-level workflow overrides when l
 `CRUISE_TOOL_SOCKET` names the Unix socket a `cruise mcp-bridge` child dials to reach the parent run's tool server. Cruise sets it on the jcode child, which passes it on to the MCP servers it spawns; it is also the default for `cruise mcp-bridge --socket`.
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
+
+`CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
 
 Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_HOME` (cruise's own jcode home, which keeps your `~/.jcode` untouched) and `JCODE_NO_TELEMETRY=1`. When a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` are set to that effort as well; jcode ignores them for providers and models without reasoning-effort support.
 
