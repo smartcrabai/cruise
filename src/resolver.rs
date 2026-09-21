@@ -28,13 +28,6 @@ impl ConfigSource {
         }
     }
 
-    /// Returns whether a persisted source string represents the built-in default.
-    #[must_use]
-    pub fn is_builtin_source(source: &str) -> bool {
-        source == crate::new_session_history::BUILTIN_CONFIG_KEY
-            || source == "config: (builtin default)"
-    }
-
     /// Returns the path to the config file, or `None` for the built-in default.
     #[must_use]
     pub fn path(&self) -> Option<&PathBuf> {

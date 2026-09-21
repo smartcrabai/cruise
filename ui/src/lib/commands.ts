@@ -216,7 +216,6 @@ function newSessionRequest(params: NewSessionParams) {
     input: params.input,
     baseDir: params.baseDir,
     ...configPath,
-    configSource: null,
     configYaml: null,
     repo: params.repo ?? null,
     workspaceMode: params.workspaceMode ?? "Worktree",
@@ -323,4 +322,3 @@ export function fixSession(
     channel,
   }).then(() => getSessionPlan(params.sessionId));
 }
-

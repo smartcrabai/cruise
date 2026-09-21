@@ -63,6 +63,19 @@ describe("WorkflowInfoPanel", () => {
       expect(screen.getByText("my-config.yaml")).toBeInTheDocument();
     });
 
+    it("shows snapshot config labels as provided by the DTO", () => {
+      // Given / When: the backend derives a label for an inline snapshot
+      render(
+        <WorkflowInfoPanel
+          session={makeSession({ configSource: "Inline snapshot" })}
+          {...panelProps}
+        />
+      );
+
+      // Then: the snapshot origin is visible instead of being mistaken for a file path
+      expect(screen.getByText("Inline snapshot")).toBeInTheDocument();
+    });
+
     it("baseDir is shown", () => {
       // Given / When
       render(

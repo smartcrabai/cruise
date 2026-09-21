@@ -312,7 +312,6 @@ impl NewSessionForm {
                 if base_dir.is_empty() { "." } else { &base_dir },
             )),
             config_path,
-            config_source: None,
             config_yaml: None,
             repo,
             workspace_mode: if self.source == SourceKind::GitHub {

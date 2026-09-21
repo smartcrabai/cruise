@@ -1971,15 +1971,7 @@ impl TuiApp {
                     .next()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.active_session().and_then(|session| {
-                            session
-                                .config_path
-                                .as_ref()
-                                .map(|path| path.to_string_lossy().into_owned())
-                        })
-                    });
+                    .map(ToString::to_string);
                 let skipped_steps = lines
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
@@ -2536,7 +2528,9 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             PathBuf::from("."),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             format!("task {id}"),
         );
         state.phase = phase;

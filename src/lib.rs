@@ -30,6 +30,7 @@ pub mod resolver;
 pub mod retry;
 pub mod sdk_tools;
 pub mod session;
+pub mod session_config;
 pub mod session_edit;
 pub mod step;
 pub mod timeout;

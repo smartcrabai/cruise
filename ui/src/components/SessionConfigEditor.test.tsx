@@ -292,8 +292,8 @@ describe("SessionConfigEditor", () => {
   });
 
   describe("updateSessionSettings invocation", () => {
-    it("updateSessionSettings is called with correct args when Save button is clicked", async () => {
-      // Given: skip step-a, then uncheck and save
+    it("omits configPath when saving a skip-only edit for the current snapshot", async () => {
+      // Given: skip step-a, then save without selecting a config
       const steps = [makeStep("step-a"), makeStep("step-b")];
       mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
       render(
@@ -309,7 +309,50 @@ describe("SessionConfigEditor", () => {
       const saveBtn = await screen.findByRole("button", { name: /^save$/i });
       await userEvent.click(saveBtn);
 
-      // Then
+      // Then: the current snapshot is retained by omission rather than being
+      // interpreted as an explicit Auto selection.
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
+          skippedSteps: ["step-a"],
+        });
+      });
+    });
+
+    it("sends an empty configPath only when Auto is explicitly selected", async () => {
+      // Given: a session currently using a concrete config file
+      mockListConfigs.mockResolvedValue([{ name: "current.yaml", path: "/path/current.yaml" }]);
+      render(<SessionConfigEditor {...defaultProps} configPath="/path/current.yaml" />);
+      await waitFor(() => screen.getByLabelText("Config"));
+
+      // When: the user explicitly chooses Auto and saves
+      await userEvent.selectOptions(screen.getByLabelText("Config"), "");
+      await userEvent.click(await screen.findByRole("button", { name: /^save$/i }));
+
+      // Then: the empty value is sent to request a fresh Auto selection
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
+          configPath: "",
+          skippedSteps: [],
+        });
+      });
+    });
+
+    it("sends an empty configPath when a snapshot session returns to Auto before a skip-only save", async () => {
+      // Given: a snapshot-backed session starts with no config path
+      const steps = [makeStep("step-a"), makeStep("step-b")];
+      mockListConfigs.mockResolvedValue([{ name: "custom.yaml", path: "/path/custom.yaml" }]);
+      mockGetDefaults.mockResolvedValue({ steps, afterPrSteps: [], defaultSkippedSteps: [] });
+      render(<SessionConfigEditor {...defaultProps} configPath={null} />);
+      await waitFor(() => screen.getByLabelText("step-a"));
+
+      // When: select a file, return to Auto, and change a skipped step
+      const configSelect = screen.getByLabelText("Config");
+      await userEvent.selectOptions(configSelect, "/path/custom.yaml");
+      await userEvent.selectOptions(configSelect, "");
+      await userEvent.click(screen.getByLabelText("step-a"));
+      await userEvent.click(await screen.findByRole("button", { name: /^save$/i }));
+
+      // Then: explicit Auto is preserved in the update even though the initial path was empty
       await waitFor(() => {
         expect(mockUpdateSettings).toHaveBeenCalledWith("session-1", {
           configPath: "",

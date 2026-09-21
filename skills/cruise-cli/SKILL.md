@@ -209,7 +209,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 ## Config-file resolution
 
-`cruise plan`/`exec` resolve the **workflow YAML** in this order; `cruise run` loads the config recorded on the session (`config_path`, else `sessions/<id>/config.yaml`).
+`cruise plan`/`exec` resolve the **workflow YAML** in this order. `cruise run` loads the session's tagged `config` reference from `state.json`. A `kind: file` reference follows its absolute live `path`. `kind: builtin_snapshot`, `kind: repo_snapshot`, and `kind: inline_snapshot` references load only `sessions/<id>/config.yaml` and never rediscover or fall back to another config.
 
 1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` selects the built-in default workflow.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)

@@ -24,6 +24,7 @@ use crate::new_session_draft::NewSessionDraft;
 use crate::new_session_history::NewSessionHistory;
 use crate::option_handler::OptionHandler;
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::session_config::SessionConfigRef;
 use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
 use crate::step::{OptionChoice, option::OptionResult};
 
@@ -390,6 +391,11 @@ fn create_session_inner(
     request: NewSessionRequest,
     id: &str,
 ) -> Result<SessionState> {
+    if request.config_path.is_some() && request.config_yaml.is_some() {
+        return Err(CruiseError::Other(
+            "config_path and config_yaml cannot both be provided".to_string(),
+        ));
+    }
     let repo = request
         .repo
         .as_deref()
@@ -412,61 +418,38 @@ fn create_session_inner(
         .config_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| {
-            request.config_source.clone().map(|source| {
-                if crate::resolver::ConfigSource::is_builtin_source(&source) {
-                    crate::new_session_history::BUILTIN_CONFIG_KEY.to_string()
-                } else {
-                    source
-                        .strip_prefix("config: ")
-                        .unwrap_or(&source)
-                        .to_string()
-                }
-            })
-        })
         .map(|path| crate::new_session_history::expand_tilde(&path))
         .filter(|path| !path.trim().is_empty());
-    let (yaml, source) = if let Some(raw) = request.config_yaml.as_deref() {
+    let (yaml, source, config_ref) = if let Some(raw) = request.config_yaml.as_deref() {
         let source = crate::resolver::ConfigSource::Builtin;
-        (raw.to_string(), source)
+        (raw.to_string(), source, SessionConfigRef::inline_snapshot())
     } else {
-        crate::resolver::resolve_config_in_dir(requested.as_deref(), &base_dir)?
+        let (yaml, source) =
+            crate::resolver::resolve_config_in_dir(requested.as_deref(), &base_dir)?;
+        let config_ref =
+            SessionConfigRef::from_source(&source, repo.as_ref().map(|_| base_dir.as_path()))?;
+        (yaml, source, config_ref)
     };
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir)?;
     crate::config::validate_config(&config)?;
-    let persistent_path = if repo.is_some() {
-        crate::repo_clone::persistent_config_path(&source, &base_dir)
-    } else {
-        source.path().cloned()
-    };
-    let source_display = source.display_string();
     let mut state = SessionState::new_draft(
         id.to_string(),
         base_dir,
-        source_display,
+        config_ref,
         request.input.trim().to_string(),
     );
     state.workspace_mode = request.workspace_mode;
     state.allow_dirty_working_tree = request.allow_dirty_working_tree;
-    state.config_path = persistent_path;
     state.repo = repo;
     state.skipped_steps = request.skipped_steps;
-    manager.create(&state)?;
+    manager.create_with_config(&state, &config)?;
     let session_dir = manager.sessions_dir().join(id);
     state.attachments =
         crate::attachments::copy_images_into_session(&session_dir, &request.attachments)?;
-    if state.config_path.is_none() {
-        let snapshot = crate::repo_clone::serialize_resolved_config(&config)?;
-        crate::planning::write_plan_atomically(
-            &session_dir.join("config.yaml"),
-            snapshot.as_bytes(),
-        )?;
-    }
     manager.save(&state)?;
-    let resolved_config_key = source.path().map_or_else(
-        || crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
-        |path| crate::new_session_history::resolved_config_key_for_session(path),
-    );
+    let resolved_config_key = state
+        .config
+        .stable_identity(state.repo.as_deref(), &state.id);
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(crate::new_session_history::NewSessionHistoryEntry {
         selected_at: crate::session::current_iso8601(),
@@ -1040,8 +1023,6 @@ pub struct NewSessionRequest {
     #[serde(default)]
     pub config_path: Option<PathBuf>,
     #[serde(default)]
-    pub config_source: Option<String>,
-    #[serde(default)]
     pub config_yaml: Option<String>,
     #[serde(default)]
     pub repo: Option<String>,
@@ -1545,10 +1526,11 @@ async fn prepare_plan(
     crate::repo_clone::ensure_repo_session_workspace_cancelled(manager, &mut context.state, &token)
         .await?;
     manager.save(&context.state)?;
-    let key = crate::planning::plan_conversation_key_for_path(
-        &config,
-        context.state.config_path.as_deref(),
-    );
+    let identity = context
+        .state
+        .config
+        .stable_identity(context.state.repo.as_deref(), &context.state.id);
+    let key = crate::planning::plan_conversation_key(&config, &identity);
     context.resume = if context.state.plan_conversation_key.as_deref() == Some(key.as_str()) {
         context.state.plan_conversation_id.clone()
     } else {
@@ -1916,6 +1898,19 @@ impl CruiseApplication {
     pub fn read_session(&self, id: &str) -> Result<SessionState> {
         self.manager.load(id)
     }
+
+    /// Load a session's workflow through the application-owned session manager.
+    /// GUI and other presentation adapters must use this boundary instead of
+    /// resolving a process-global data directory independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session state or its referenced workflow cannot
+    /// be loaded.
+    pub fn session_config(&self, id: &str) -> Result<crate::config::WorkflowConfig> {
+        let state = self.manager.load(id)?;
+        self.manager.load_config(&state)
+    }
     #[must_use]
     pub fn discover_configs(&self) -> Vec<crate::configs::ConfigEntry> {
         crate::configs::list_user_configs()
@@ -2158,10 +2153,8 @@ impl CruiseApplication {
         let (yaml, source) = crate::resolver::resolve_config_in_dir(config_path.as_deref(), &base)?;
         let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base)?;
         crate::config::validate_config(&config)?;
-        let resolved_key = source.path().map_or_else(
-            || crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
-            |path| crate::new_session_history::resolved_config_key_for_session(path),
-        );
+        let resolved_key =
+            SessionConfigRef::from_source(&source, None)?.stable_identity(None, "defaults");
         let steps = crate::workflow::list_skippable_steps(&config)?;
         let after_pr_steps = crate::workflow::list_skippable_after_pr_steps(&config)?;
         let history = NewSessionHistory::load_best_effort();
@@ -2247,15 +2240,11 @@ impl CruiseApplication {
             CurrentStepUpdateDto::Clear => CurrentStepUpdate::Clear,
             CurrentStepUpdateDto::Set(step) => CurrentStepUpdate::Set(step),
         };
-        let config_path = state
-            .config_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
         crate::session_edit::update_session_settings(
             &self.manager,
             id,
             SessionSettingsUpdate {
-                config_path,
+                config_path: None,
                 skipped_steps: state.skipped_steps,
                 current_step_update,
             },
@@ -3116,39 +3105,6 @@ fn run_log_callback(
     }
 }
 
-fn config_reloader_for_path(
-    path: Option<&std::path::Path>,
-    effective_max_retries: usize,
-) -> Option<Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>> {
-    let path = path?.to_path_buf();
-    let last_mtime = Mutex::new(
-        std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok(),
-    );
-    Some(Box::new(move || {
-        let current_mtime = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        let mut last = last_mtime
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current_mtime == *last {
-            return Ok(None);
-        }
-        let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
-        crate::config::validate_config(&config)?;
-        crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
-        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
-        let compiled = crate::workflow::compile(config)?;
-        *last = current_mtime;
-        Ok(Some(crate::engine::ReloadedWorkflow {
-            compiled,
-            retry_policy,
-        }))
-    }))
-}
-
 fn node_checkpoint_callback(
     manager: SessionManager,
     id: String,
@@ -3266,8 +3222,10 @@ async fn execute_run(
     let on_log = run_log_callback(logger, id.to_string(), log_sink, batch_started);
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
-    let config_reloader =
-        config_reloader_for_path(setup.state.config_path.as_deref(), setup.max_retries);
+    let config_reloader = crate::session_config::config_reloader_for_reference(
+        &setup.state.config,
+        setup.max_retries,
+    );
     let execution = {
         let ctx = crate::engine::ExecutionContext {
             compiled: &setup.compiled,
@@ -3825,8 +3783,11 @@ mod tests {
             "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
         )
         .unwrap_or_else(|e| panic!("write initial config failed: {e}"));
-        let reloader = config_reloader_for_path(Some(&path), 3)
-            .unwrap_or_else(|| panic!("expected a config reloader"));
+        let reloader = crate::session_config::config_reloader_for_reference(
+            &crate::session_config::SessionConfigRef::File { path: path.clone() },
+            3,
+        )
+        .unwrap_or_else(|| panic!("expected a config reloader"));
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(
@@ -3958,7 +3919,6 @@ mod tests {
                 input: "formal planning task".to_string(),
                 base_dir: temp.path().to_path_buf(),
                 config_path: None,
-                config_source: None,
                 config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
                 repo: None,
                 workspace_mode: WorkspaceMode::Worktree,
@@ -4002,7 +3962,6 @@ mod tests {
                 input: "lifecycle boundary task".to_string(),
                 base_dir: temp.path().to_path_buf(),
                 config_path: None,
-                config_source: None,
                 config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
                 repo: None,
                 workspace_mode: WorkspaceMode::Worktree,
@@ -4089,7 +4048,9 @@ mod tests {
         let mut ordinary = SessionState::new(
             "20260830000000".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "ordinary".to_string(),
         );
         ordinary.phase = SessionPhase::Planned;
@@ -4118,7 +4079,9 @@ mod tests {
             let mut state = SessionState::new(
                 "20260830000002".to_string(),
                 PathBuf::from("/tmp"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             state.phase = phase;
@@ -4139,7 +4102,7 @@ mod tests {
         let state = SessionState::new_draft(
             "s".to_string(),
             PathBuf::from("/tmp"),
-            "__builtin__".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         let reservation = batch.reserve(&[state]);

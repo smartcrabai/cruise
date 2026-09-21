@@ -222,7 +222,7 @@ fn render_info(
             "Phase    ",
             Span::styled(session.phase.label(), phase_style(app, &session.phase)),
         ),
-        labeled_line(app, "Source   ", Span::raw(session.config_source.as_str())),
+        labeled_line(app, "Source   ", Span::raw(session.config.display_label())),
         labeled_line(
             app,
             "Directory",

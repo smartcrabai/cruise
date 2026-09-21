@@ -15,14 +15,13 @@ use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, Plan
 use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::new_session_history::{
-    BUILTIN_CONFIG_KEY, HistoryScope, NewSessionHistory, resolved_config_key_for_session,
-};
+use crate::new_session_history::{HistoryScope, NewSessionHistory};
 use crate::planning::{
     PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
 };
 use crate::resolver::ConfigSource;
 use crate::session::{SessionManager, SessionPhase, SessionState};
+use crate::session_config::SessionConfigRef;
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_skippable_steps};
 
@@ -678,22 +677,10 @@ fn create_planning_session(
 ) -> Result<SessionState> {
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
-    let mut session =
-        SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = source.path().cloned();
-    manager.create(&session)?;
-
-    if session.config_path.is_none()
-        && let Err(error) = std::fs::write(
-            manager.sessions_dir().join(&session_id).join("config.yaml"),
-            yaml,
-        )
-    {
-        // Do not leave a persisted session that cannot be loaded because its
-        // builtin config snapshot was not written.
-        let _ = manager.delete(&session_id);
-        return Err(error.into());
-    }
+    let config_ref = SessionConfigRef::from_source(source, None)?;
+    let session = SessionState::new(session_id.clone(), base_dir, config_ref, input);
+    let config = crate::resolver::load_config_from_source(yaml, source)?;
+    manager.create_with_config(&session, &config)?;
 
     Ok(session)
 }
@@ -806,23 +793,18 @@ fn build_repo_planning_session(
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path)?;
     validate_config(&config)?;
 
+    let config_ref = SessionConfigRef::from_source(&source, Some(clone_path))?;
     let mut session = SessionState::new(
         session_id.to_string(),
         clone_path.to_path_buf(),
-        source.display_string(),
+        config_ref,
         input,
     );
     session.repo = Some(repo.to_string());
     // Configs that live inside the clone (or the builtin default) are serialized
     // after reference resolution into the session directory so they stay
     // readable after the clone is removed at approval time.
-    session.config_path = crate::repo_clone::persistent_config_path(&source, clone_path);
-    manager.create(&session)?;
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(session_id);
-        let config_to_persist = crate::repo_clone::serialize_resolved_config(&config)?;
-        std::fs::write(session_dir.join("config.yaml"), config_to_persist)?;
-    }
+    manager.create_with_config(&session, &config)?;
     Ok((config, session))
 }
 
@@ -1058,10 +1040,9 @@ fn select_skipped_steps_with_history(
         return Ok(Some(vec![]));
     }
 
-    let key = match session.config_path.as_deref() {
-        Some(p) => resolved_config_key_for_session(p),
-        None => BUILTIN_CONFIG_KEY.to_string(),
-    };
+    let key = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
     let mut history = NewSessionHistory::load_best_effort();
 
     let base_dir_str = session.base_dir.to_string_lossy();
@@ -1666,9 +1647,14 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let config_path = manager.sessions_dir().join(&session.id).join("config.yaml");
+        let expected = crate::session_config::serialize_resolved_config(
+            &crate::resolver::load_config_from_source(yaml, &ConfigSource::Builtin)
+                .unwrap_or_else(|e| panic!("{e:?}")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             std::fs::read_to_string(config_path).unwrap_or_else(|e| panic!("{e:?}")),
-            yaml
+            expected
         );
     }
 
@@ -2196,7 +2182,7 @@ steps:
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session(id, &repo);
-        session.config_path = Some(config_path);
+        session.config = crate::session_config::SessionConfigRef::File { path: config_path };
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         (manager, session)
     }
@@ -2337,7 +2323,9 @@ steps:
         let mut session = SessionState::new(
             "20260621100000".to_string(),
             base_dir,
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "implement the feature".to_string(),
         );
         // SessionState::new starts in AwaitingApproval — the default
@@ -2371,7 +2359,9 @@ steps:
         let mut session = SessionState::new(
             "20260621100001".to_string(),
             base_dir.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "implement the feature".to_string(),
         );
         session.repo = Some("owner/repo".to_string());

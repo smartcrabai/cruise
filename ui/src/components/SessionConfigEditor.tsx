@@ -46,6 +46,7 @@ export function SessionConfigEditor({
   const [configSteps, setConfigSteps] = useState<SkippableStepDto[]>([]);
   const [afterPrSteps, setAfterPrSteps] = useState<SkippableStepDto[]>([]);
   const [selectedConfigPath, setSelectedConfigPath] = useState<string>(configPath ?? "");
+  const [configSelectionInteracted, setConfigSelectionInteracted] = useState(false);
   const [selectedSkippedSteps, setSelectedSkippedSteps] = useState<Set<string>>(new Set(skippedSteps));
   const [selectedCurrentStep, setSelectedCurrentStep] = useState<string>(currentStep ?? "");
   const [isSaving, setIsSaving] = useState(false);
@@ -202,7 +203,8 @@ export function SessionConfigEditor({
       );
   }
 
-  const hasConfigChanged = selectedConfigPath !== (configPath ?? "");
+  const hasConfigChanged =
+    configSelectionInteracted || selectedConfigPath !== (configPath ?? "");
   const hasSkipChanged =
     selectedSkippedSteps.size !== skippedSteps.length ||
     Array.from(selectedSkippedSteps).some((id) => !skippedSteps.includes(id));
@@ -212,11 +214,13 @@ export function SessionConfigEditor({
 
   const buildSettings = () => {
     const base: { configPath?: string; skippedSteps: string[]; currentStep?: string | null } = {
-      // Send an explicit empty value for Auto. The backend distinguishes this
-      // from an omitted value so a built-in-pinned session can be unpinned.
-      configPath: selectedConfigPath,
       skippedSteps: Array.from(selectedSkippedSteps),
     };
+    // Omission retains the current reference, including repo and inline
+    // snapshots. An empty value is only an explicit Auto reselection.
+    if (hasConfigChanged) {
+      base.configPath = selectedConfigPath;
+    }
     if (hasCurrentStepChanged) {
       base.currentStep = selectedCurrentStep === "" ? null : selectedCurrentStep;
     }
@@ -230,6 +234,7 @@ export function SessionConfigEditor({
     try {
       const updated = await updateSessionSettings(sessionId, buildSettings());
       onSessionUpdated(updated);
+      setConfigSelectionInteracted(false);
 
       const channel = new Channel<ApplicationEvent>();
       channel.onmessage = (event) => {
@@ -264,6 +269,7 @@ export function SessionConfigEditor({
     try {
       const updated = await updateSessionSettings(sessionId, buildSettings());
       onSessionUpdated(updated);
+      setConfigSelectionInteracted(false);
     } catch (e) {
       const msg = String(e);
       setError(msg);
@@ -292,7 +298,10 @@ export function SessionConfigEditor({
         <ConfigSelect
           id="session-config-select"
           value={selectedConfigPath}
-          onChange={setSelectedConfigPath}
+          onChange={(value) => {
+            setSelectedConfigPath(value);
+            setConfigSelectionInteracted(true);
+          }}
           disabled={isDisabled || isFailedOrSuspended}
           configs={configs}
           baseDir={baseDir}
@@ -384,6 +393,7 @@ export function SessionConfigEditor({
             type="button"
             onClick={() => {
               setSelectedConfigPath(configPath ?? "");
+              setConfigSelectionInteracted(false);
               setSelectedSkippedSteps(new Set(skippedSteps));
               setSelectedCurrentStep(currentStep ?? "");
             }}
