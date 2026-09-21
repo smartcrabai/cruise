@@ -637,6 +637,9 @@ fn editing_without_a_config_selection_preserves_snapshot_and_reports_no_config_c
 
 #[test]
 fn explicit_empty_config_selection_reselects_auto_file_instead_of_creating_a_builtin_snapshot() {
+    let _env_lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let manager = SessionManager::new(temp.path().join("data"));
     let id = "20260921070001";
