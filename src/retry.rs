@@ -15,7 +15,9 @@
 //!   `Retry-After` hint wins), and a model that has spent its retry budget is
 //!   swapped for the next entry of its fallback chain — with no delay, a fresh
 //!   budget, and never after the turn already streamed visible text. A
-//!   [`RetryClass::ClientError`] only switches and leaves no cooldown behind;
+//!   [`RetryClass::ClientError`] only switches and leaves no cooldown behind,
+//!   while a [`RetryClass::ModelMissing`] switches *and* cools the model down
+//!   so later turns stop re-selecting a model the provider does not have;
 //!   see [`classify_retryable`] for the per-status rules.
 //!
 //! The retry *budget* is always the caller's existing `PromptRun::max_retries`,
@@ -81,6 +83,27 @@ const PERMANENT_MARKERS: &[&str] = &[
     "too long",
     "max_tokens",
     "insufficient",
+];
+
+/// Wordings that name the *model* as the defect rather than the request: the
+/// provider has no such model, so every later turn must avoid it too.
+///
+/// Matched against [`provider_head`] only, never the appended child stderr,
+/// and deliberately narrow: `unsupported model` is excluded because it also
+/// spells a refused *parameter* (`unsupported model parameter:
+/// 'temperature'`), and `invalid model` because it is cruise's own wording for
+/// a reference the backend could not parse, which is already
+/// [`RetryClass::ModelUnusable`].
+const MODEL_MISSING_MARKERS: &[&str] = &[
+    "model_not_supported",
+    "model not supported",
+    "model is not supported",
+    "model_not_found",
+    "model not found",
+    "unknown model",
+    "model does not exist",
+    "no such model",
+    "not a valid model",
 ];
 
 /// Provider-side failure wordings (HTTP 5xx and its prose equivalents).
@@ -225,8 +248,14 @@ pub(crate) enum RetryClass {
     ServerError,
     /// Request-side refusal (HTTP 4xx other than 429, 401, 403, 407 and 408;
     /// see [`classify_retryable`]): only another model can help, and it is the
-    /// one class that never cools down the model it leaves behind.
+    /// one class that never cools down the model it leaves behind, because a
+    /// refused request says nothing about the model's health.
     ClientError,
+    /// The provider answered, but does not have this model at all
+    /// (`model_not_supported`, `404 model_not_found`). Switch-only like
+    /// [`RetryClass::ClientError`] — yet here the model *is* the defect, so it
+    /// cools down and later turns stop re-selecting it.
+    ModelMissing,
     /// Transport failure (connection reset, timeout, terminated stream), and
     /// HTTP 408: the path failed rather than the request being refused. Like
     /// every class but [`RetryClass::ClientError`], an abandoned model cools
@@ -245,9 +274,19 @@ impl RetryClass {
             RetryClass::RateLimit => "Rate limit",
             RetryClass::ServerError => "Server error",
             RetryClass::ClientError => "Client error",
+            RetryClass::ModelMissing => "Missing model",
             RetryClass::Network => "Network error",
             RetryClass::ModelUnusable => "Unusable model",
         }
+    }
+
+    /// Whether leaving a model behind for this class makes the model itself
+    /// suspect, so it must be skipped for [`MODEL_COOLDOWN`].
+    /// [`RetryClass::ClientError`] is the one class that says nothing about
+    /// the model.
+    #[must_use]
+    fn cools_down(self) -> bool {
+        !matches!(self, RetryClass::ClientError)
     }
 }
 
@@ -309,6 +348,33 @@ fn is_permanent(lower: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Whether `lower` (already lowercased) reports that the provider does not
+/// have this model, rather than refusing this request. The reference itself is
+/// the defect: neither waiting nor re-sending helps, and no later turn should
+/// pick the model again.
+///
+/// Takes the [`provider_head`] of the failure text, not the whole of it.
+fn is_model_missing(head: &str) -> bool {
+    MODEL_MISSING_MARKERS
+        .iter()
+        .any(|marker| head.contains(marker))
+}
+
+/// The provider's own error text: everything before the child-process stderr
+/// tail the SDK backends append (`\njcode stderr:\n…`,
+/// `\nclaude stderr:\n…`; see [`crate::backend::jcode`]).
+///
+/// Up to 64 lines of arbitrary child logging travel in that tail, including
+/// lines about other models and other turns, so it must never decide *which
+/// model* a failure is about. The status-code rules guard the same hazard by
+/// checking 4xx last; a wording cannot be ordered out of reach that way, so it
+/// is scoped instead.
+fn provider_head(lower: &str) -> &str {
+    lower
+        .find(" stderr:\n")
+        .map_or(lower, |at| &lower[..lower[..at].rfind('\n').unwrap_or(0)])
+}
+
 /// The provider limit wordings: the command backend's
 /// [`crate::step::command::is_rate_limited`] — so the SDK backends retry
 /// exactly what `command:` retries — plus the subscription-window phrasings the
@@ -349,6 +415,14 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 ///   rather than the request being refused.
 /// - every other 4xx is [`RetryClass::ClientError`]; see
 ///   [`FallbackEngine::next`] for what that class does.
+/// - a failure whose provider text names the model itself as absent
+///   (`400 model_not_supported`, `404 model_not_found`) is
+///   [`RetryClass::ModelMissing`] rather than a client error. It is checked
+///   after the limit, 408, 5xx and network rules — which keep winning — and
+///   before the bare 4xx fallthrough, so it never turns a throttled or
+///   unreachable provider into a dead model. It does override the permanent
+///   wordings, which is how `invalid_request_error: model not found` reaches
+///   the next chain entry instead of failing the step.
 ///
 /// The order matters, and the bare 4xx check is deliberately **last**. The
 /// text classified here is not a clean provider status line: the jcode backend
@@ -363,12 +437,13 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 /// invalid_request: context length exceeded` is the provider refusing *this*
 /// model's request, which the next entry of the fallback chain may well
 /// accept. A permanent wording without a status code (`unknown option
-/// '--effort'`) stays `None`.
+/// '--effort'`) stays `None`, unless it also names the model as absent.
 #[must_use]
 pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
     let lower = text.to_lowercase();
     let client_status = first_client_status_code(&lower);
-    if is_permanent(&lower) && client_status.is_none() {
+    let model_missing = is_model_missing(provider_head(&lower));
+    if is_permanent(&lower) && client_status.is_none() && !model_missing {
         return None;
     }
     if is_limit_wording(&lower) {
@@ -384,6 +459,9 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
     }
     if NETWORK_MARKERS.iter().any(|marker| lower.contains(marker)) {
         return Some(RetryClass::Network);
+    }
+    if model_missing {
+        return Some(RetryClass::ModelMissing);
     }
     client_status.map(|_| RetryClass::ClientError)
 }
@@ -470,7 +548,7 @@ fn failure_detail(class: RetryClass, text: &str) -> String {
     let code = match class {
         RetryClass::RateLimit => has_status_code(&lower, "429").then_some("429"),
         RetryClass::ServerError => first_server_status_code(&lower),
-        RetryClass::ClientError => first_client_status_code(&lower),
+        RetryClass::ClientError | RetryClass::ModelMissing => first_client_status_code(&lower),
         RetryClass::Network => has_status_code(&lower, "408").then_some("408"),
         RetryClass::ModelUnusable => None,
     };
@@ -695,6 +773,10 @@ impl FallbackEngine {
     /// refused this request, so re-sending it unchanged would fail the same
     /// way, and with no usable candidate the original error surfaces. It is
     /// also the one class that leaves no cooldown on the model it abandons.
+    /// A [`RetryClass::ModelMissing`] switches the same way but does cool the
+    /// model down: the provider has no such model, so every later turn — and
+    /// every later step retrying through `if.fail.retry` — must stop choosing
+    /// it instead of burning a request on the same 4xx.
     /// Every other class — including the [`RetryClass::Network`] an HTTP 408
     /// arrives as — switches first too, but falls back to a same-model backoff
     /// when no candidate is usable, the turn already streamed visible text, or
@@ -712,15 +794,13 @@ impl FallbackEngine {
             return self.switch(class, message).unwrap_or(RetryAction::GiveUp);
         }
 
-        // Client (4xx other than 429), provider/server and transport failures
-        // use a fallback immediately when one is available. If switching is
-        // disabled or no candidate is usable, retain the policy's same-model
-        // retry behavior instead of making `model_fallback: false` silently
-        // disable all retries.
-        if matches!(
-            class,
-            RetryClass::ClientError | RetryClass::ServerError | RetryClass::Network
-        ) && self.max_retries > 0
+        // Every class but a rate limit uses a fallback immediately when one is
+        // available: another model is the only thing that can help. If
+        // switching is disabled or no candidate is usable, retain the policy's
+        // same-model retry behavior instead of making `model_fallback: false`
+        // silently disable all retries.
+        if !matches!(class, RetryClass::RateLimit)
+            && self.max_retries > 0
             && !streamed
             && let Some(action) = self.switch(class, message)
         {
@@ -729,9 +809,10 @@ impl FallbackEngine {
 
         // Rate limits retry the same model first. Server/network failures reach
         // this path only when no usable fallback can be selected, or when the
-        // turn already streamed visible text. A client error never does: the
-        // same request to the same model returns the same status.
-        if !matches!(class, RetryClass::ClientError)
+        // turn already streamed visible text. A refused request and a missing
+        // model never do: the same request to the same model returns the same
+        // status.
+        if !matches!(class, RetryClass::ClientError | RetryClass::ModelMissing)
             && self.attempts < self.max_retries
             && let Some(delay) = self.delay_for(message, self.attempts + 1)
         {
@@ -756,7 +837,7 @@ impl FallbackEngine {
             return action;
         }
         if self.policy.is_some()
-            && !matches!(class, RetryClass::ClientError)
+            && class.cools_down()
             && let Some(model) = self.model.as_deref()
         {
             RetryPolicy::start_cooldown(model);
@@ -803,7 +884,7 @@ impl FallbackEngine {
         let to = self.take_candidate()?;
         let from = self.model.replace(to.clone());
         if self.policy.is_some()
-            && !matches!(class, RetryClass::ClientError)
+            && class.cools_down()
             && let Some(previous) = from.as_deref()
         {
             RetryPolicy::start_cooldown(previous);
@@ -951,7 +1032,7 @@ mod tests {
     fn retryable_classes_cover_client_errors_except_rate_limits() {
         for (message, expected) in [
             ("API Error: HTTP 400 bad request", RetryClass::ClientError),
-            ("status 404 model_not_found", RetryClass::ClientError),
+            ("status 404 model_not_found", RetryClass::ModelMissing),
             ("upstream returned 413", RetryClass::ClientError),
             // A named 4xx beats the permanent wordings: another model may
             // accept the request the provider just refused.
@@ -1046,7 +1127,7 @@ mod tests {
             "400"
         );
         assert_eq!(
-            failure_detail(RetryClass::ClientError, "status 404 model_not_found"),
+            failure_detail(RetryClass::ModelMissing, "status 404 model_not_found"),
             "404"
         );
         // The notice must name the code that produced the class, not a 5xx
@@ -1093,7 +1174,7 @@ mod tests {
     fn retry_classification_rejects_permanent_failures() {
         for message in [
             "authentication_error: invalid API key",
-            "invalid_request_error: model not found",
+            "invalid_request_error: unsupported parameter 'reasoning'",
             "context length exceeded: 500000 tokens > limit",
             "max_tokens must be <= 5000",
             "insufficient credit balance",
@@ -1406,7 +1487,7 @@ mod tests {
         let mut streamed = engine(config.clone(), "test-client-streamed/primary", 3);
 
         assert_eq!(
-            streamed.next(Failure::Failed("HTTP 404 model_not_found"), true),
+            streamed.next(Failure::Failed("HTTP 413 payload too large"), true),
             RetryAction::GiveUp
         );
         assert_eq!(streamed.model(), Some("test-client-streamed/primary"));
@@ -1420,6 +1501,137 @@ mod tests {
         assert_eq!(later.model(), Some("test-client-streamed/primary"));
         assert!(!later.startup_blocked());
         assert_eq!(later.take_startup_switch(), None);
+    }
+
+    #[test]
+    fn model_missing_wordings_classify_where_no_other_rule_names_the_failure() {
+        // The real Copilot refusal that motivated the class: a 400 whose body
+        // names the model, not the request.
+        assert_eq!(
+            classify_retryable(
+                "Copilot API error (HTTP 400 Bad Request): {\"error\":{\"message\":\"The requested \
+                 model is not supported.\",\"code\":\"model_not_supported\",\"param\":\"model\",\
+                 \"type\":\"invalid_request_error\"}}"
+            ),
+            Some(RetryClass::ModelMissing)
+        );
+        // A spelling naming no status code still classifies, where the
+        // permanent wordings would otherwise swallow it.
+        assert_eq!(
+            classify_retryable("unknown model: gpt-5.6-luna"),
+            Some(RetryClass::ModelMissing)
+        );
+        // A missing model also beats the permanent wordings it travels with:
+        // the request is fine, the reference is not.
+        assert_eq!(
+            classify_retryable("invalid_request_error: model not found"),
+            Some(RetryClass::ModelMissing)
+        );
+        // A refused request stays a client error: the model itself is fine.
+        assert_eq!(
+            classify_retryable("API Error: HTTP 400 bad request"),
+            Some(RetryClass::ClientError)
+        );
+        // And a bare `not found` is not a statement about the model.
+        assert_eq!(
+            classify_retryable("status 404: not found"),
+            Some(RetryClass::ClientError)
+        );
+    }
+
+    #[test]
+    fn model_missing_never_outranks_a_limit_a_5xx_or_the_stderr_tail() {
+        // A marker riding in the appended stderr tail is a log line about some
+        // other model or turn: it must not turn a wait, an outage or a
+        // transport blip into a dead model. Same hazard the status-code rules
+        // guard by checking 4xx last.
+        for (message, expected) in [
+            (
+                "HTTP 429 Too Many Requests\njcode stderr:\n[warn] copilot: model_not_supported \
+                 for gpt-5-mini, falling back",
+                RetryClass::RateLimit,
+            ),
+            (
+                "Error: 503 service unavailable\nclaude stderr:\nwarn: unknown model alias ignored",
+                RetryClass::ServerError,
+            ),
+            (
+                "fetch failed\njcode stderr:\n[jcode] unknown model alias in config, ignoring",
+                RetryClass::Network,
+            ),
+            (
+                "HTTP 400 bad request\njcode stderr:\nunknown model in $JCODE_HOME/config.toml",
+                RetryClass::ClientError,
+            ),
+            // A refused *parameter* names a model without the model being
+            // absent, so it stays the class that leaves no cooldown.
+            (
+                "API Error: 400 invalid_request_error: unsupported model parameter: 'temperature'",
+                RetryClass::ClientError,
+            ),
+        ] {
+            assert_eq!(classify_retryable(message), Some(expected), "for {message}");
+        }
+    }
+
+    #[test]
+    fn retry_model_missing_switches_and_cools_the_model_down() {
+        let config = policy(&[("test-missing/primary", &["test-missing/spare"])]);
+        let mut first = engine(config.clone(), "test-missing/primary", 1);
+        assert_eq!(
+            first.next(Failure::Failed("HTTP 400 model_not_supported"), false),
+            RetryAction::Switch {
+                from: Some("test-missing/primary".to_string()),
+                to: "test-missing/spare".to_string(),
+                detail: "400".to_string(),
+                attempt: 1,
+                of: 3,
+            }
+        );
+
+        // Unlike a refused request, a model the provider does not have must
+        // never be selected again: a later turn — a step retried through
+        // `if.fail.retry`, say — starts on the spare instead of spending
+        // another request on the identical 400.
+        assert!(RetryPolicy::is_cooling("test-missing/primary"));
+        let mut later = engine(config, "test-missing/primary", 1);
+        assert_eq!(later.model(), Some("test-missing/spare"));
+        assert_eq!(
+            later.take_startup_switch(),
+            Some((
+                "test-missing/primary".to_string(),
+                "test-missing/spare".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn retry_model_missing_cools_the_model_down_even_when_it_cannot_switch() {
+        // No candidate to switch to, and re-sending is pointless, so the error
+        // surfaces at once — without spending a single same-model backoff.
+        let solo = policy(&[("test-missing-solo/primary", &[])]);
+        let mut solo = engine(solo, "test-missing-solo/primary", 3);
+        assert_eq!(
+            solo.next(Failure::Failed("404 model_not_found"), false),
+            RetryAction::GiveUp
+        );
+        assert_eq!(solo.model(), Some("test-missing-solo/primary"));
+        assert!(RetryPolicy::is_cooling("test-missing-solo/primary"));
+
+        // Replaying text the user already saw on another model is never safe,
+        // so a streamed turn gives up as well — yet the replay hazard belongs
+        // to this turn and the missing model does not, so it cools down too.
+        let config = policy(&[(
+            "test-missing-streamed/primary",
+            &["test-missing-streamed/spare"],
+        )]);
+        let mut streamed = engine(config, "test-missing-streamed/primary", 3);
+        assert_eq!(
+            streamed.next(Failure::Failed("HTTP 404 model_not_found"), true),
+            RetryAction::GiveUp
+        );
+        assert_eq!(streamed.model(), Some("test-missing-streamed/primary"));
+        assert!(RetryPolicy::is_cooling("test-missing-streamed/primary"));
     }
 
     #[test]
