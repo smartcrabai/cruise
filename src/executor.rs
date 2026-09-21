@@ -59,8 +59,8 @@ pub struct PromptRun<'a> {
     /// Command mode passes these to the spawned process; `sdk: jcode` and
     /// `sdk: claude` pass them to the `jcode` / `claude` child process.
     pub env: &'a HashMap<String, String>,
-    /// Callback invoked with human-readable progress notices: rate-limit
-    /// retries and model fallbacks.
+    /// Callback invoked with human-readable progress notices: selected models,
+    /// rate-limit retries, and model fallbacks.
     pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token.
     pub cancel_token: Option<&'a CancellationToken>,
@@ -206,6 +206,20 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
     }
 }
 
+fn notify_model_notice(
+    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
+    model: Option<&str>,
+    backend: &str,
+) {
+    let Some(cb) = on_notice else {
+        return;
+    };
+    match model.filter(|model| !model.is_empty()) {
+        Some(selected) => cb(&format!("Model: {selected}")),
+        None => cb(&format!("Model: default model ({backend})")),
+    }
+}
+
 /// Command-backend execution: resolve the `{model}` placeholder then delegate to
 /// the existing [`run_prompt`].
 async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOutcome> {
@@ -216,6 +230,8 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
         req.model_or_mode.map(str::to_string)
     };
     let resolved_command = resolved.command;
+
+    notify_model_notice(req.on_notice, req.model_or_mode, "command");
 
     let retry = |msg: &str| {
         if let Some(cb) = req.on_notice {
@@ -416,6 +432,7 @@ async fn run_with_fallback(
 ) -> Result<PromptOutcome> {
     let on_delta = req.stream.and_then(|s| s.on_stdout);
     let mut engine = FallbackEngine::new(policy, req.model_or_mode, req.max_retries);
+    let mut model_reported = false;
     if engine.startup_blocked() {
         return Err(CruiseError::Other(
             "all configured models are cooling down after retryable failures".to_string(),
@@ -425,17 +442,22 @@ async fn run_with_fallback(
         && let Some(cb) = req.on_notice
     {
         cb(&format!(
-            "fallback: {from} -> {to} (still cooling down from an earlier failure)"
+            "Warning: Fallback: {from} -> {to} (still cooling down from an earlier failure)"
         ));
     }
 
     loop {
-        let failed = match start(engine.model()) {
+        let model = engine.model().map(str::to_string);
+        let failed = match start(model.as_deref()) {
             Err(error) => AttemptFailure::Unusable {
                 message: error.to_string(),
                 error,
             },
             Ok(rx_std) => {
+                if !model_reported {
+                    notify_model_notice(req.on_notice, model.as_deref(), label);
+                    model_reported = true;
+                }
                 let folded =
                     stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token)
                         .await?;
@@ -478,10 +500,11 @@ async fn run_with_fallback(
             } => {
                 if let Some(cb) = req.on_notice {
                     cb(&format!(
-                        "fallback: {} -> {to} ({detail}, attempt {attempt}/{of})",
+                        "Warning: Fallback: {} -> {to} ({detail}, attempt {attempt}/{of})",
                         from.as_deref().unwrap_or("default model")
                     ));
                 }
+                model_reported = false;
                 // A switch runs immediately; the wait below is still the
                 // cancellation checkpoint every retry passes through.
                 Duration::ZERO
@@ -809,6 +832,366 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_model_notice_precedes_assistant_output_without_mutating_the_outcome() {
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let events = recorder();
+        let events_sink = Arc::clone(&events);
+        let on_notice = move |msg: &str| {
+            record(&notices_sink, msg);
+            record(&events_sink, msg);
+        };
+        let output_sink = Arc::clone(&events);
+        let on_stdout = move |line: &str| record(&output_sink, &format!("assistant:{line}"));
+        let stream = StreamCallbacks {
+            on_stdout: Some(&on_stdout),
+            on_stderr: None,
+        };
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh");
+        req.on_notice = Some(&on_notice);
+        req.stream = Some(&stream);
+
+        let start_events = Arc::clone(&events);
+        let outcome = run_with_fallback(&req, "jcode", None, |model| {
+            assert_eq!(model, req.model_or_mode);
+            record(&start_events, "backend-start");
+            Ok(canned(vec![
+                StreamChunk::Session("session-1".to_string()),
+                StreamChunk::Delta("assistant output\n".to_string()),
+                StreamChunk::Done("assistant result".to_string()),
+            ]))
+        })
+        .await
+        .unwrap_or_else(|e| panic!("expected a successful prompt: {e}"));
+
+        assert_eq!(outcome.result.output, "assistant result");
+        assert_eq!(outcome.result.stderr, "");
+        assert_eq!(outcome.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            recorded(&notices),
+            ["Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh"]
+        );
+        assert_eq!(
+            recorded(&events),
+            [
+                "backend-start",
+                "Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh",
+                "assistant:assistant output"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_model_notice_names_the_selected_sdk_backend() {
+        for backend in ["jcode", "claude"] {
+            let notices = recorder();
+            let notices_sink = Arc::clone(&notices);
+            let on_notice = move |msg: &str| record(&notices_sink, msg);
+            let env = HashMap::new();
+            let mut req = base_req(&env);
+            req.on_notice = Some(&on_notice);
+
+            run_with_fallback(&req, backend, None, |_| {
+                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{backend} default run failed: {e}"));
+
+            assert_eq!(
+                recorded(&notices),
+                [format!("Model: default model ({backend})")]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_backend_reports_selected_or_default_model_without_mixing_into_output() {
+        for (model, expected_notice) in [
+            (
+                Some("command/provider/model:free:xhigh"),
+                "Model: command/provider/model:free:xhigh",
+            ),
+            (None, "Model: default model (command)"),
+        ] {
+            let notices = recorder();
+            let notices_sink = Arc::clone(&notices);
+            let on_notice = move |msg: &str| record(&notices_sink, msg);
+            let env = HashMap::new();
+            let executor = Executor::Command {
+                command: vec!["sh".to_string(), "-c".to_string(), "cat".to_string()],
+            };
+            let outcome = executor
+                .run(PromptRun {
+                    prompt: "assistant output",
+                    model_or_mode: model,
+                    max_retries: 0,
+                    env: &env,
+                    on_notice: Some(&on_notice),
+                    cancel_token: None,
+                    working_dir: None,
+                    stream: None,
+                    tools: Vec::new(),
+                    on_session_id: None,
+                    resume: None,
+                })
+                .await
+                .unwrap_or_else(|e| panic!("command run failed: {e}"));
+
+            assert_eq!(recorded(&notices), [expected_notice]);
+            assert_eq!(outcome.result.output, "assistant output");
+            assert_eq!(outcome.result.stderr, "");
+            assert!(!outcome.result.output.contains("Model:"));
+            assert!(outcome.session_id.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_step_and_plan_overrides_are_the_model_notice_source() {
+        let executor = jcode_executor();
+        let selected_models = [
+            executor
+                .step_model_or_mode(Some("step/provider/model:free:xhigh"), Some("global/model")),
+            executor
+                .plan_model_or_mode(Some("plan/provider/model:free:xhigh"), Some("global/model")),
+        ];
+
+        for selected in selected_models {
+            let selected = selected.unwrap_or_else(|| panic!("an override should be selected"));
+            let notices = recorder();
+            let notices_sink = Arc::clone(&notices);
+            let on_notice = move |msg: &str| record(&notices_sink, msg);
+            let env = HashMap::new();
+            let mut req = base_req(&env);
+            req.model_or_mode = Some(selected.as_str());
+            req.on_notice = Some(&on_notice);
+
+            run_with_fallback(&req, "jcode", None, |_| {
+                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+            })
+            .await
+            .unwrap_or_else(|e| panic!("override run failed: {e}"));
+
+            assert_eq!(recorded(&notices), [format!("Model: {selected}")]);
+        }
+    }
+
+    #[tokio::test]
+    async fn same_model_retry_reports_one_model_line_and_keeps_the_retry_notice() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("test-executor-same-retry/model");
+        req.max_retries = 1;
+        req.on_notice = Some(&on_notice);
+
+        let outcome = run_with_fallback(&req, "jcode", Some(fast_policy(&[])), |model| {
+            record(&models_sink, model.unwrap_or_default());
+            if recorded(&models).len() == 1 {
+                Ok(canned(vec![limit_chunk()]))
+            } else {
+                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("same-model retry should succeed: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-same-retry/model",
+                "test-executor-same-retry/model"
+            ]
+        );
+        let notices = recorded(&notices);
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.starts_with("Model:"))
+                .count(),
+            1
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.starts_with("Rate limit detected")),
+            "retry notice missing: {notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.starts_with("Warning: Fallback:")),
+            "same-model retry must not report fallback: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_fallbacks_report_full_references_once_in_transition_order() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh");
+        req.max_retries = 1;
+        req.on_notice = Some(&on_notice);
+
+        let policy = fast_policy(&[(
+            "opencode-zen/muse-spark-1.3-contributor-free:xhigh",
+            &[
+                "openrouter/z-ai/glm-5.2:free:xhigh",
+                "provider/last-resort:free:xhigh",
+            ],
+        )]);
+        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
+            let model = model.unwrap_or_default();
+            record(&models_sink, model);
+            if model == "provider/last-resort:free:xhigh" {
+                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+            } else {
+                Ok(canned(vec![limit_chunk()]))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("fallback chain should reach its final model: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        let lifecycle = recorded(&notices)
+            .into_iter()
+            .filter(|notice| {
+                notice.starts_with("Model:") || notice.starts_with("Warning: Fallback:")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lifecycle.len(),
+            5,
+            "unexpected model lifecycle notices: {lifecycle:?}"
+        );
+        assert_eq!(
+            lifecycle[0],
+            "Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh"
+        );
+        assert!(lifecycle[1].starts_with(
+            "Warning: Fallback: opencode-zen/muse-spark-1.3-contributor-free:xhigh -> \
+             openrouter/z-ai/glm-5.2:free:xhigh ("
+        ));
+        assert_eq!(lifecycle[2], "Model: openrouter/z-ai/glm-5.2:free:xhigh");
+        assert!(lifecycle[3].starts_with(
+            "Warning: Fallback: openrouter/z-ai/glm-5.2:free:xhigh -> provider/last-resort:free:xhigh ("
+        ));
+        assert_eq!(lifecycle[4], "Model: provider/last-resort:free:xhigh");
+    }
+
+    #[tokio::test]
+    async fn startup_cooldown_reports_only_the_selected_replacement_model() {
+        let primary = "test-executor-startup/primary";
+        let spare = "test-executor-startup/spare";
+        let policy = fast_policy(&[(primary, &[spare])]);
+        let env = HashMap::new();
+        let mut first = base_req(&env);
+        first.model_or_mode = Some(primary);
+        first.max_retries = 1;
+
+        run_with_fallback(&first, "jcode", Some(Arc::clone(&policy)), |model| {
+            if model == Some(spare) {
+                Ok(canned(vec![StreamChunk::Done("first".to_string())]))
+            } else {
+                Ok(canned(vec![limit_chunk()]))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("initial fallback run failed: {e}"));
+
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let mut second = base_req(&env);
+        second.model_or_mode = Some(primary);
+        second.on_notice = Some(&on_notice);
+
+        run_with_fallback(&second, "jcode", Some(policy), |model| {
+            record(&models_sink, model.unwrap_or_default());
+            Ok(canned(vec![StreamChunk::Done("second".to_string())]))
+        })
+        .await
+        .unwrap_or_else(|e| panic!("cooldown replacement run failed: {e}"));
+
+        assert_eq!(recorded(&models), [spare]);
+        let notices = recorded(&notices);
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.starts_with("Model:"))
+                .collect::<Vec<_>>(),
+            ["Model: test-executor-startup/spare"]
+        );
+        assert!(
+            notices.iter().any(|notice| {
+                notice.starts_with(
+                    "Warning: Fallback: test-executor-startup/primary -> test-executor-startup/spare (still cooling down"
+                )
+            }),
+            "startup fallback notice missing: {notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice == "Model: test-executor-startup/primary"),
+            "a cooling primary must not be reported as started: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_models_cooling_down_stops_before_any_model_notice_or_backend_start() {
+        let primary = "test-executor-all-cooling/primary";
+        let spare = "test-executor-all-cooling/spare";
+        for model in [primary, spare] {
+            let env = HashMap::new();
+            let mut cooling_run = base_req(&env);
+            cooling_run.model_or_mode = Some(model);
+            let _ = run_with_fallback(&cooling_run, "jcode", Some(fast_policy(&[])), |_| {
+                Ok(canned(vec![limit_chunk()]))
+            })
+            .await;
+        }
+        let policy = fast_policy(&[(primary, &[spare])]);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some(primary);
+        req.on_notice = Some(&on_notice);
+
+        let Err(error) = run_with_fallback(&req, "jcode", Some(policy), |_| {
+            panic!("a fully cooling-down policy must not start a backend")
+        })
+        .await
+        else {
+            panic!("all cooling-down models must prevent execution")
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("all configured models are cooling down"),
+            "unexpected error: {error}"
+        );
+        assert!(recorded(&notices).is_empty());
+    }
+
+    #[tokio::test]
     async fn fallback_spends_the_model_budget_then_switches_immediately() {
         let models = recorder();
         let models_sink = Arc::clone(&models);
@@ -853,10 +1236,20 @@ mod tests {
         let notices = recorded(&notices);
         assert!(
             notices.iter().any(|n| {
-                n == "fallback: test-executor-budget/primary -> test-executor-budget/spare \
+                n == "Warning: Fallback: test-executor-budget/primary -> test-executor-budget/spare \
                          (429, attempt 2/3)"
             }),
             "got: {notices:?}"
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.starts_with("Model:"))
+                .collect::<Vec<_>>(),
+            [
+                &"Model: test-executor-budget/primary".to_string(),
+                &"Model: test-executor-budget/spare".to_string()
+            ]
         );
     }
 
@@ -1026,10 +1419,22 @@ mod tests {
         let notices = recorded(&notices);
         assert!(
             notices.iter().any(|n| {
-                n == "fallback: test-executor-unusable/primary -> test-executor-unusable/spare \
+                n == "Warning: Fallback: test-executor-unusable/primary -> test-executor-unusable/spare \
                          (unusable model, attempt 1/1)"
             }),
             "got: {notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice == "Model: test-executor-unusable/primary"),
+            "an unusable candidate must not be reported as started: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "Model: test-executor-unusable/spare"),
+            "the usable fallback must be reported: {notices:?}"
         );
     }
 
@@ -1060,7 +1465,7 @@ mod tests {
         let token = CancellationToken::new();
         let cancel_on_switch = token.clone();
         let on_notice = move |msg: &str| {
-            if msg.starts_with("fallback:") {
+            if msg.starts_with("Warning: Fallback:") {
                 cancel_on_switch.cancel();
             }
         };
@@ -1093,6 +1498,46 @@ mod tests {
         );
         // The spare was decided on but never spawned.
         assert_eq!(recorded(&models), ["test-executor-cancel/primary"]);
+    }
+
+    #[tokio::test]
+    async fn no_notice_callback_preserves_fallback_result_without_direct_executor_output() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("test-executor-no-callback/primary");
+        req.max_retries = 1;
+
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            Some(fast_policy(&[(
+                "test-executor-no-callback/primary",
+                &["test-executor-no-callback/spare"],
+            )])),
+            |model| {
+                let model = model.unwrap_or_default();
+                record(&models_sink, model);
+                if model.ends_with("/spare") {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                } else {
+                    Ok(canned(vec![limit_chunk()]))
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fallback without a notice callback should succeed: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(
+            recorded(&models),
+            [
+                "test-executor-no-callback/primary",
+                "test-executor-no-callback/primary",
+                "test-executor-no-callback/spare"
+            ]
+        );
     }
 
     #[tokio::test]

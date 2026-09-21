@@ -194,6 +194,60 @@ impl Fixture {
         id
     }
 
+    fn seed_model_prompt_session(&self) -> String {
+        let id = "20260831000000002_00000000000000000000000000000002";
+        let repo = self.root.path().join(format!("repo-{id}"));
+        std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("{error}"));
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "terminal model logging\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Cruise E2E",
+                "-c",
+                "user.email=cruise-e2e@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        let config = self.root.path().join(format!("{id}.yaml"));
+        let yaml = "command: [sh, -c, 'cat']\nmodel: 'provider/tui-model:free:xhigh'\nsteps:\n  verify:\n    prompt: tui model response\n";
+        std::fs::write(&config, yaml).unwrap_or_else(|error| panic!("{error}"));
+        let mut state = SessionState::new(
+            id.to_string(),
+            repo,
+            "tui-model.yaml".to_string(),
+            "TUI model logging session".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::CurrentBranch;
+        state.target_branch = Some("main".to_string());
+        state.config_path = Some(config);
+        state.has_dag = true;
+        self.manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(
+            state.plan_path(&self.manager.sessions_dir()),
+            "# TUI model plan\n\nrun the model step\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let workflow = cruise::config::WorkflowConfig::from_yaml(yaml)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let compiled =
+            cruise::workflow::compile(workflow).unwrap_or_else(|error| panic!("{error}"));
+        let dag = cruise::dag::build_dag(&compiled, 0).unwrap_or_else(|error| panic!("{error}"));
+        cruise::dag::save_dag(&dag, &self.manager.dag_path(id))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(self.manager.run_log_path(id), "seeded-log-line\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        id.to_string()
+    }
+
     fn seed_cancellable_session(&self) -> String {
         self.seed_current_branch_session(
             "20260831000000001_00000000000000000000000000000001",
@@ -773,6 +827,46 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     let log = std::fs::read_to_string(fixture.manager.run_log_path(&id))
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(log.contains("e2e-run-complete"), "run log: {log}");
+}
+
+#[test]
+fn run_all_displays_model_notice_in_the_tui_log_view() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let id = fixture.seed_model_prompt_session();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.wait_for_output("TUI model logging session", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("Selected node", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("TUI model plan", START_TIMEOUT);
+    tui.send(b"]");
+    tui.wait_for_output("seeded-log-line", START_TIMEOUT);
+    tui.send(b"f");
+    tui.wait_for_output("Log follow paused", START_TIMEOUT);
+    tui.send(b"a");
+    tui.wait_for_output("Run on Current Branch", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.send(b"3");
+    tui.send(b"a");
+    tui.send(b"\r");
+    tui.wait_for_output("Run All finished", Duration::from_secs(15));
+    thread::sleep(Duration::from_millis(250));
+    tui.wait_for_output("tui model response", START_TIMEOUT);
+    tui.wait_for_output("Model: provider/tui-model:free:xhigh", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let log = std::fs::read_to_string(fixture.manager.run_log_path(&id))
+        .unwrap_or_else(|error| panic!("read TUI run.log: {error}"));
+    assert!(
+        log.contains("[info] Model: provider/tui-model:free:xhigh"),
+        "TUI execution should persist the model notice: {log}"
+    );
 }
 
 #[test]
