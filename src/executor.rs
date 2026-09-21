@@ -52,7 +52,7 @@ pub struct PromptRun<'a> {
     /// `sdk: claude`).
     pub model_or_mode: Option<&'a str>,
     /// Maximum retries per prompt. SDK fallback policies also use this budget
-    /// for 5xx/network failures and fallback switching.
+    /// for 4xx (except 429), 5xx and network failures and fallback switching.
     pub max_retries: usize,
     /// Environment variables applied to the prompt run.
     ///
@@ -333,8 +333,9 @@ async fn stream_to_outcome(
 /// `claude-agent-sdk` ([`crate::backend::claude`]).
 ///
 /// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model unless the workflow's explicit `retry:` policy or
-/// model-array policy names a fallback model to switch to.
+/// off on the same model — and a 4xx (except 429), 5xx or network failure moves
+/// on — unless the workflow's explicit `retry:` policy or model-array policy
+/// names no fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
@@ -424,6 +425,9 @@ impl AttemptFailure {
 /// on the same model, on
 /// [`crate::step::command::calculate_backoff`]'s 2s-doubling schedule, up to
 /// `req.max_retries` times.
+///
+/// Under a policy, a 4xx other than 429 never re-sends the same request to the
+/// same model: it switches to the next fallback entry, or surfaces unchanged.
 async fn run_with_fallback(
     req: &PromptRun<'_>,
     label: &str,
@@ -544,8 +548,9 @@ async fn run_with_fallback(
 /// once for the whole run, including its retries, and torn down on return.
 ///
 /// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model unless the workflow's explicit `retry:` policy or
-/// model-array policy names a fallback model to switch to.
+/// off on the same model — and a 4xx (except 429), 5xx or network failure moves
+/// on — unless the workflow's explicit `retry:` policy or model-array policy
+/// names no fallback model to switch to.
 ///
 /// Retries deliberately start from `req.resume` (the caller's session), not the
 /// aborted attempt's session id: re-sending the same prompt into a
@@ -1089,6 +1094,51 @@ mod tests {
             "Warning: Fallback: openrouter/z-ai/glm-5.2:free:xhigh -> provider/last-resort:free:xhigh ("
         ));
         assert_eq!(lifecycle[4], "Model: provider/last-resort:free:xhigh");
+    }
+
+    #[tokio::test]
+    async fn client_error_switches_models_without_resending_the_same_request() {
+        let models = recorder();
+        let models_sink = Arc::clone(&models);
+        let notices = recorder();
+        let notices_sink = Arc::clone(&notices);
+        let on_notice = move |msg: &str| record(&notices_sink, msg);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("test-smoke-400/primary");
+        req.max_retries = 2;
+        req.on_notice = Some(&on_notice);
+
+        let policy = fast_policy(&[("test-smoke-400/primary", &["test-smoke-400/spare"])]);
+        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
+            let model = model.unwrap_or_default();
+            record(&models_sink, model);
+            if model == "test-smoke-400/spare" {
+                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+            } else {
+                Ok(canned(vec![StreamChunk::Error(
+                    "jcode: provider error: API Error: 400 invalid_request: unsupported parameter"
+                        .to_string(),
+                )]))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("400 should switch to the fallback model: {e}"));
+
+        assert_eq!(outcome.result.output, "ok");
+        assert_eq!(
+            recorded(&models),
+            ["test-smoke-400/primary", "test-smoke-400/spare"],
+            "400 must not be resent to the same model"
+        );
+        let fallback = recorded(&notices)
+            .into_iter()
+            .find(|n| n.starts_with("Warning: Fallback:"))
+            .unwrap_or_else(|| panic!("no fallback notice: {:?}", recorded(&notices)));
+        assert!(
+            fallback.contains("test-smoke-400/primary -> test-smoke-400/spare (400,"),
+            "unexpected fallback notice: {fallback}"
+        );
     }
 
     #[tokio::test]

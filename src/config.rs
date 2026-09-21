@@ -385,7 +385,8 @@ fn default_max_delay_ms() -> u64 {
     300_000
 }
 
-/// How the SDK backends handle a retryable failure (rate limit, 5xx, network).
+/// How the SDK backends handle a retryable failure (rate limit, 4xx other than
+/// 429, 5xx, network).
 ///
 /// Opt-in: declaring `retry:`, or using a workflow-level model array with
 /// fallback entries, enables the fallback engine in [`crate::retry`]. The

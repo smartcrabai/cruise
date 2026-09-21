@@ -9,12 +9,14 @@
 //!   rate limit (`Failure::Limited`) is retryable, always on the same model,
 //!   on the command backend's 2s-doubling backoff
 //!   ([`crate::step::command::calculate_backoff`]).
-//! - **Policy** — 5xx and network failures become retryable too
-//!   (`classify_retryable`), the backoff becomes
-//!   `min(base_delay_ms * 2^(attempt-1), 8s)` with jitter (a server
+//! - **Policy** — 4xx (except 429, 401, 403, 407 and 408), 5xx and network
+//!   failures become retryable too ([`classify_retryable`]), the backoff
+//!   becomes `min(base_delay_ms * 2^(attempt-1), 8s)` with jitter (a server
 //!   `Retry-After` hint wins), and a model that has spent its retry budget is
 //!   swapped for the next entry of its fallback chain — with no delay, a fresh
-//!   budget, and never after the turn already streamed visible text.
+//!   budget, and never after the turn already streamed visible text. A
+//!   [`RetryClass::ClientError`] only switches and leaves no cooldown behind;
+//!   see [`classify_retryable`] for the per-status rules.
 //!
 //! The retry *budget* is always the caller's existing `PromptRun::max_retries`,
 //! spent per model: this module adds no second retry count, and
@@ -55,8 +57,11 @@ const STATUS_MARKER_WINDOW: usize = 24;
 /// Markers that turn a bare number into an HTTP status code.
 const STATUS_MARKERS: &[&str] = &["http", "status", "code", "error", "returned", "upstream"];
 
-/// Status codes reported in provider error text.
-const STATUS_CODES: &[&str] = &["429", "500", "502", "503", "504"];
+/// Status codes another model cannot fix, so they never become a
+/// [`RetryClass::ClientError`]: `429` is a wait, `401` / `403` / `407` are
+/// credential and permission failures, and `408` is a path timeout classified
+/// as a network error.
+const NON_CLIENT_4XX: &[&str] = &["401", "403", "407", "408", "429"];
 
 /// Wordings that make a failure permanent: neither waiting nor another model
 /// changes the outcome, so text containing one is never classified as
@@ -218,7 +223,14 @@ pub(crate) enum RetryClass {
     RateLimit,
     /// Provider-side failure (HTTP 5xx, "overloaded", "service unavailable").
     ServerError,
-    /// Transport failure (connection reset, timeout, terminated stream).
+    /// Request-side refusal (HTTP 4xx other than 429, 401, 403, 407 and 408;
+    /// see [`classify_retryable`]): only another model can help, and it is the
+    /// one class that never cools down the model it leaves behind.
+    ClientError,
+    /// Transport failure (connection reset, timeout, terminated stream), and
+    /// HTTP 408: the path failed rather than the request being refused. Like
+    /// every class but [`RetryClass::ClientError`], an abandoned model cools
+    /// down.
     Network,
     /// The backend could not dispatch the model reference at all, so only
     /// another model can help.
@@ -232,6 +244,7 @@ impl RetryClass {
         match self {
             RetryClass::RateLimit => "Rate limit",
             RetryClass::ServerError => "Server error",
+            RetryClass::ClientError => "Client error",
             RetryClass::Network => "Network error",
             RetryClass::ModelUnusable => "Unusable model",
         }
@@ -320,20 +333,49 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 }
 
 /// Classify an error message, returning `None` for permanent failures
-/// (authentication, invalid request, context overflow) which must never be
-/// retried.
+/// (authentication, invalid request, context overflow) which name no HTTP
+/// status code and must never be retried.
 ///
 /// Unifies the command backend's [`crate::step::command::is_rate_limited`] and
 /// the SDK backends' limit wordings ([`is_limit_message`]), and extends them
-/// with the 5xx and network conditions the fallback engine also retries.
+/// with the 5xx, network and 4xx conditions the fallback engine also retries.
+/// The per-status rules, authoritative for this module:
+///
+/// - `429` is [`RetryClass::RateLimit`]: a wait, not a refusal.
+/// - `401`, `403` and `407` never become retryable — no other model can supply
+///   credentials the run does not have, so they fall through to the permanent
+///   wordings, which is where credential and permission failures belong.
+/// - `408` is [`RetryClass::Network`]: a request timeout is the path failing
+///   rather than the request being refused.
+/// - every other 4xx is [`RetryClass::ClientError`]; see
+///   [`FallbackEngine::next`] for what that class does.
+///
+/// The order matters, and the bare 4xx check is deliberately **last**. The
+/// text classified here is not a clean provider status line: the jcode backend
+/// appends a tail of the process's stderr to it, so a Node stack frame
+/// (`at fetch (node:internal/errors:496:11)`) or a `retry-after-ms: 400` hint
+/// travels with the real error. Checking 4xx early let such a number hijack
+/// `429 Too Many Requests` into a client error, which never waits and never
+/// re-sends. The unambiguous wordings therefore win first, and only text that
+/// names nothing else falls through to the client-error class.
+///
+/// A named 4xx status still wins over the permanent wordings: `400
+/// invalid_request: context length exceeded` is the provider refusing *this*
+/// model's request, which the next entry of the fallback chain may well
+/// accept. A permanent wording without a status code (`unknown option
+/// '--effort'`) stays `None`.
 #[must_use]
 pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
     let lower = text.to_lowercase();
-    if is_permanent(&lower) {
+    let client_status = first_client_status_code(&lower);
+    if is_permanent(&lower) && client_status.is_none() {
         return None;
     }
     if is_limit_wording(&lower) {
         return Some(RetryClass::RateLimit);
+    }
+    if has_status_code(&lower, "408") {
+        return Some(RetryClass::Network);
     }
     if SERVER_MARKERS.iter().any(|marker| lower.contains(marker))
         || first_server_status_code(&lower).is_some()
@@ -343,34 +385,65 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
     if NETWORK_MARKERS.iter().any(|marker| lower.contains(marker)) {
         return Some(RetryClass::Network);
     }
-    None
+    client_status.map(|_| RetryClass::ClientError)
+}
+
+/// Return the first standalone HTTP status code named in `lower` that starts
+/// with `leading` and is not in `excluded`.
+fn first_status_code<'t>(lower: &'t str, leading: char, excluded: &[&str]) -> Option<&'t str> {
+    lower.char_indices().find_map(|(at, ch)| {
+        if ch != leading {
+            return None;
+        }
+        let code = lower.get(at..at + 3)?;
+        (!excluded.contains(&code)
+            && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            && has_status_code(lower, code))
+        .then_some(code)
+    })
 }
 
 /// Return the first standalone HTTP 5xx status code named in `lower`.
 fn first_server_status_code(lower: &str) -> Option<&str> {
-    lower.char_indices().find_map(|(at, ch)| {
-        if ch != '5' {
-            return None;
-        }
-        let code = lower.get(at..at + 3)?;
-        (code.as_bytes()[1..].iter().all(u8::is_ascii_digit) && has_status_code(lower, code))
-            .then_some(code)
-    })
+    first_status_code(lower, '5', &[])
+}
+
+/// Return the first standalone 4xx status code in `lower` outside
+/// [`NON_CLIENT_4XX`].
+fn first_client_status_code(lower: &str) -> Option<&str> {
+    first_status_code(lower, '4', NON_CLIENT_4XX)
 }
 
 /// Whether `code` occurs as a standalone number preceded, within
 /// [`STATUS_MARKER_WINDOW`] bytes, by a marker that makes it an HTTP status.
 /// Keeps `max_tokens: 5000` and `context length 500000` out of the retryable
 /// classes.
+///
+/// Two shapes are rejected even when a marker precedes them, because the
+/// jcode backend appends process stderr to the failure text and both occur
+/// there next to the word `error`:
+///
+/// - a source position, `code` followed by `:` and another digit —
+///   `at fetch (node:internal/errors:496:11)` names line 496, column 11;
+/// - a URL port, `code` preceded by `:` and followed by `/` —
+///   `https://api.example.com:443/v1/messages`.
+///
+/// `status 404: not found` and `HTTP/1.1 400 bad request` keep matching: a
+/// colon followed by a space is punctuation, not a column number.
 fn has_status_code(lower: &str, code: &str) -> bool {
     let bytes = lower.as_bytes();
     let mut from = 0;
     while let Some(rel) = lower[from..].find(code) {
         let at = from + rel;
         let end = at + code.len();
-        let standalone = (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
-            && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric());
-        if standalone {
+        let before = (at > 0).then(|| bytes[at - 1]);
+        let after = bytes.get(end).copied();
+        let source_position =
+            after == Some(b':') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit);
+        let url_port = before == Some(b':') && after == Some(b'/');
+        let standalone = before.is_none_or(|b| !b.is_ascii_alphanumeric())
+            && after.is_none_or(|b| !b.is_ascii_alphanumeric());
+        if standalone && !source_position && !url_port {
             let mut start = at.saturating_sub(STATUS_MARKER_WINDOW);
             while !lower.is_char_boundary(start) {
                 start += 1;
@@ -387,17 +460,21 @@ fn has_status_code(lower: &str, code: &str) -> bool {
     false
 }
 
-/// Notice detail for a model switch: the HTTP status code the failure text
-/// names (the `429` of `Warning: Fallback: a -> b (429, attempt 2/5)`), or the class
-/// label when it names none.
+/// Notice detail for a model switch: the HTTP status code that produced
+/// `class` (the `429` of `Warning: Fallback: a -> b (429, attempt 2/5)`), or
+/// the class label when the text names none. The code must agree with the
+/// class, because the text may name several: a [`RetryClass::ClientError`]
+/// reports its own 4xx even when an `(upstream 503)` aside follows.
 fn failure_detail(class: RetryClass, text: &str) -> String {
     let lower = text.to_lowercase();
-    STATUS_CODES
-        .iter()
-        .find(|code| has_status_code(&lower, code))
-        .map(|code| (*code).to_string())
-        .or_else(|| first_server_status_code(&lower).map(str::to_string))
-        .unwrap_or_else(|| class.label().to_lowercase())
+    let code = match class {
+        RetryClass::RateLimit => has_status_code(&lower, "429").then_some("429"),
+        RetryClass::ServerError => first_server_status_code(&lower),
+        RetryClass::ClientError => first_client_status_code(&lower),
+        RetryClass::Network => has_status_code(&lower, "408").then_some("408"),
+        RetryClass::ModelUnusable => None,
+    };
+    code.map_or_else(|| class.label().to_lowercase(), str::to_string)
 }
 
 /// The server's own retry hint, clamped to [`RETRY_AFTER_CLAMP`].
@@ -613,6 +690,16 @@ impl FallbackEngine {
 
     /// Decide what to do after a failed turn. `streamed` reports whether the
     /// turn already pushed assistant text to the user's output sink.
+    ///
+    /// A [`RetryClass::ClientError`] only ever switches models: the provider
+    /// refused this request, so re-sending it unchanged would fail the same
+    /// way, and with no usable candidate the original error surfaces. It is
+    /// also the one class that leaves no cooldown on the model it abandons.
+    /// Every other class — including the [`RetryClass::Network`] an HTTP 408
+    /// arrives as — switches first too, but falls back to a same-model backoff
+    /// when no candidate is usable, the turn already streamed visible text, or
+    /// `--rate-limit-retries 0` disabled retrying, and cools the model it
+    /// switched away from down.
     pub(crate) fn next(&mut self, failure: Failure<'_>, streamed: bool) -> RetryAction {
         let Some(class) = self.classify(failure) else {
             return RetryAction::GiveUp;
@@ -625,12 +712,15 @@ impl FallbackEngine {
             return self.switch(class, message).unwrap_or(RetryAction::GiveUp);
         }
 
-        // Provider/server and transport failures use a fallback immediately
-        // when one is available. If switching is disabled or no candidate is
-        // usable, retain the policy's same-model retry behavior instead of
-        // making `model_fallback: false` silently disable all retries.
-        if matches!(class, RetryClass::ServerError | RetryClass::Network)
-            && self.max_retries > 0
+        // Client (4xx other than 429), provider/server and transport failures
+        // use a fallback immediately when one is available. If switching is
+        // disabled or no candidate is usable, retain the policy's same-model
+        // retry behavior instead of making `model_fallback: false` silently
+        // disable all retries.
+        if matches!(
+            class,
+            RetryClass::ClientError | RetryClass::ServerError | RetryClass::Network
+        ) && self.max_retries > 0
             && !streamed
             && let Some(action) = self.switch(class, message)
         {
@@ -639,8 +729,10 @@ impl FallbackEngine {
 
         // Rate limits retry the same model first. Server/network failures reach
         // this path only when no usable fallback can be selected, or when the
-        // turn already streamed visible text.
-        if self.attempts < self.max_retries
+        // turn already streamed visible text. A client error never does: the
+        // same request to the same model returns the same status.
+        if !matches!(class, RetryClass::ClientError)
+            && self.attempts < self.max_retries
             && let Some(delay) = self.delay_for(message, self.attempts + 1)
         {
             self.attempts += 1;
@@ -664,6 +756,7 @@ impl FallbackEngine {
             return action;
         }
         if self.policy.is_some()
+            && !matches!(class, RetryClass::ClientError)
             && let Some(model) = self.model.as_deref()
         {
             RetryPolicy::start_cooldown(model);
@@ -703,11 +796,14 @@ impl FallbackEngine {
         (delay <= Duration::from_millis(config.max_delay_ms)).then_some(delay)
     }
 
-    /// Move to the next usable chain entry, cooling down the model left behind.
+    /// Move to the next usable chain entry, cooling down the model left behind
+    /// — except after a [`RetryClass::ClientError`] (see
+    /// [`FallbackEngine::next`]).
     fn switch(&mut self, class: RetryClass, message: &str) -> Option<RetryAction> {
         let to = self.take_candidate()?;
         let from = self.model.replace(to.clone());
         if self.policy.is_some()
+            && !matches!(class, RetryClass::ClientError)
             && let Some(previous) = from.as_deref()
         {
             RetryPolicy::start_cooldown(previous);
@@ -849,6 +945,148 @@ mod tests {
             failure_detail(RetryClass::ServerError, "HTTP status 501"),
             "501"
         );
+    }
+
+    #[test]
+    fn retryable_classes_cover_client_errors_except_rate_limits() {
+        for (message, expected) in [
+            ("API Error: HTTP 400 bad request", RetryClass::ClientError),
+            ("status 404 model_not_found", RetryClass::ClientError),
+            ("upstream returned 413", RetryClass::ClientError),
+            // A named 4xx beats the permanent wordings: another model may
+            // accept the request the provider just refused.
+            (
+                "API Error: 400 invalid_request: context length exceeded",
+                RetryClass::ClientError,
+            ),
+            // 429 stays a rate limit, whatever else the text says.
+            ("HTTP status 429", RetryClass::RateLimit),
+            ("API Error: 429 rate limit exceeded", RetryClass::RateLimit),
+        ] {
+            assert_eq!(classify_retryable(message), Some(expected), "for {message}");
+        }
+    }
+
+    #[test]
+    fn credential_and_permission_statuses_are_never_retryable() {
+        for message in [
+            // Given a credential or permission failure, no other model can
+            // supply what the run is missing. None of these carries a
+            // permanent wording, so only the excluded-code list keeps them
+            // out of the client-error class.
+            "HTTP status 401",
+            "upstream returned 403",
+            "status 407",
+        ] {
+            assert_eq!(classify_retryable(message), None, "for {message}");
+        }
+    }
+
+    #[test]
+    fn request_timeout_status_is_a_network_failure() {
+        // Given a 408, the path timed out rather than the request being
+        // refused, so it joins the transport failures rather than the 4xx.
+        assert_eq!(
+            classify_retryable("API Error: HTTP 408 request timeout"),
+            Some(RetryClass::Network)
+        );
+    }
+
+    #[test]
+    fn appended_stderr_numbers_do_not_hijack_the_named_status() {
+        // The jcode backend appends a stderr tail to the failure text, so a
+        // Node stack frame and a `retry-after-ms` hint travel with the real
+        // status. Neither may demote the failure to a client error, which
+        // would stop the run waiting out a 429 or a 5xx.
+        for (message, expected) in [
+            (
+                "API Error: 429 Too Many Requests\njcode stderr:\nat fetch (node:internal/errors:496:11)",
+                RetryClass::RateLimit,
+            ),
+            (
+                "Error: 500 internal server error, retry-after-ms: 400",
+                RetryClass::ServerError,
+            ),
+        ] {
+            assert_eq!(classify_retryable(message), Some(expected), "for {message}");
+        }
+    }
+
+    #[test]
+    fn source_positions_and_url_ports_are_not_status_codes() {
+        // Both shapes sit within a marker window of the word `error`, so only
+        // their punctuation tells them apart from a real status.
+        assert!(!has_status_code(
+            "fetch failed: https://api.example.com:443/v1/messages",
+            "443"
+        ));
+        assert!(!has_status_code(
+            "uncaught error at /app/errors.js:404:17",
+            "404"
+        ));
+        assert_eq!(
+            classify_retryable("fetch failed: https://api.example.com:443/v1/messages"),
+            Some(RetryClass::Network)
+        );
+
+        // The wordings a provider really uses keep classifying as before.
+        for message in ["status 404: not found", "HTTP/1.1 400 bad request"] {
+            assert_eq!(
+                classify_retryable(message),
+                Some(RetryClass::ClientError),
+                "for {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_status_detail_names_the_refused_code() {
+        assert_eq!(
+            failure_detail(RetryClass::ClientError, "API Error: HTTP 400 bad request"),
+            "400"
+        );
+        assert_eq!(
+            failure_detail(RetryClass::ClientError, "status 404 model_not_found"),
+            "404"
+        );
+        // The notice must name the code that produced the class, not a 5xx
+        // the provider mentioned in passing.
+        assert_eq!(
+            failure_detail(
+                RetryClass::ClientError,
+                "API Error: 400 bad request (upstream 503)"
+            ),
+            "400"
+        );
+    }
+
+    #[test]
+    fn request_timeout_detail_names_the_status_not_the_class() {
+        assert_eq!(
+            failure_detail(RetryClass::Network, "API Error: HTTP 408 request timeout"),
+            "408"
+        );
+        // A transport failure that names no status still falls back to the
+        // class label.
+        assert_eq!(
+            failure_detail(RetryClass::Network, "socket hang up"),
+            "network error"
+        );
+    }
+
+    #[test]
+    fn client_error_classification_needs_a_real_status_code() {
+        for message in [
+            // Permanent wordings without a status code stay permanent.
+            "invalid request: the model does not support tools",
+            "error: unknown option '--effort'",
+            // Numbers that only look like status codes are not statuses.
+            "max_tokens: 5000 is above the model maximum",
+            "context length 500000 exceeded",
+            "model claude-opus-4-6 refused the 400 token continuation",
+        ] {
+            assert_eq!(classify_retryable(message), None, "for {message}");
+        }
     }
 
     #[test]
@@ -1127,6 +1365,180 @@ mod tests {
             }
         );
         assert_eq!(engine.model(), Some("test-server/fallback"));
+    }
+
+    #[test]
+    fn retry_client_error_switches_immediately_and_never_resends_the_same_model() {
+        let config = policy(&[("test-client/primary", &["test-client/fallback"])]);
+        let mut engine = engine(config, "test-client/primary", 3);
+
+        // Given a 4xx, the next chain entry takes over at once.
+        assert_eq!(
+            engine.next(
+                Failure::Failed("API Error: 400 invalid_request: context length exceeded"),
+                false
+            ),
+            RetryAction::Switch {
+                from: Some("test-client/primary".to_string()),
+                to: "test-client/fallback".to_string(),
+                detail: "400".to_string(),
+                attempt: 1,
+                of: 7,
+            }
+        );
+        assert_eq!(engine.model(), Some("test-client/fallback"));
+
+        // Then, with the chain exhausted, the error surfaces instead of the
+        // fallback re-sending a request the provider already refused.
+        assert_eq!(
+            engine.next(Failure::Failed("API Error: 400 invalid_request"), false),
+            RetryAction::GiveUp
+        );
+        assert_eq!(engine.model(), Some("test-client/fallback"));
+    }
+
+    #[test]
+    fn retry_client_error_after_visible_text_fails_without_switching() {
+        let config = policy(&[(
+            "test-client-streamed/primary",
+            &["test-client-streamed/spare"],
+        )]);
+        let mut streamed = engine(config.clone(), "test-client-streamed/primary", 3);
+
+        assert_eq!(
+            streamed.next(Failure::Failed("HTTP 404 model_not_found"), true),
+            RetryAction::GiveUp
+        );
+        assert_eq!(streamed.model(), Some("test-client-streamed/primary"));
+
+        // And the model the run gave up on stays usable: the request was
+        // refused, so there is nothing to cool down. Observed directly,
+        // because "a later engine still starts on the primary" also holds
+        // when the primary *and* every candidate are cooling.
+        assert!(!RetryPolicy::is_cooling("test-client-streamed/primary"));
+        let mut later = engine(config, "test-client-streamed/primary", 3);
+        assert_eq!(later.model(), Some("test-client-streamed/primary"));
+        assert!(!later.startup_blocked());
+        assert_eq!(later.take_startup_switch(), None);
+    }
+
+    #[test]
+    fn retry_client_error_switch_leaves_the_abandoned_model_usable() {
+        // Given a 4xx switch away from the primary,
+        let config = policy(&[("test-cool4xx/primary", &["test-cool4xx/spare"])]);
+        let mut first = engine(config.clone(), "test-cool4xx/primary", 1);
+        assert!(matches!(
+            first.next(Failure::Failed("HTTP 400 bad request"), false),
+            RetryAction::Switch { .. }
+        ));
+
+        // When a later turn resolves the same primary, it is not cooling: a
+        // refused request says nothing about the model's health.
+        assert!(!RetryPolicy::is_cooling("test-cool4xx/primary"));
+        let mut later = engine(config, "test-cool4xx/primary", 1);
+        assert_eq!(later.model(), Some("test-cool4xx/primary"));
+        assert!(!later.startup_blocked());
+        assert_eq!(later.take_startup_switch(), None);
+    }
+
+    #[test]
+    fn retry_client_error_with_a_zero_budget_gives_up_without_switching() {
+        // `--rate-limit-retries 0` disables retrying, and a fallback chain
+        // must not become a second retry count for 4xx either.
+        let config = policy(&[("test-client-zero/primary", &["test-client-zero/spare"])]);
+        let mut engine = engine(config, "test-client-zero/primary", 0);
+        assert_eq!(
+            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            RetryAction::GiveUp
+        );
+        assert_eq!(engine.model(), Some("test-client-zero/primary"));
+    }
+
+    #[test]
+    fn retry_client_error_without_model_fallback_gives_up_instead_of_backing_off() {
+        // With switching disabled a server error degrades to a same-model
+        // backoff, but a 4xx must not: the same request returns the same
+        // status however long the run waits.
+        let mut config = policy(&[("test-client-nofb/primary", &["test-client-nofb/spare"])]);
+        config.model_fallback = false;
+        let mut engine = engine(config, "test-client-nofb/primary", 3);
+        assert_eq!(
+            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            RetryAction::GiveUp
+        );
+        assert_eq!(engine.model(), Some("test-client-nofb/primary"));
+    }
+
+    #[test]
+    fn retry_request_timeout_takes_the_network_path() {
+        // A 408 switches first, like any transport failure, and the notice
+        // names the status rather than the class.
+        let config = policy(&[("test-408/primary", &["test-408/spare"])]);
+        let mut switching = engine(config, "test-408/primary", 3);
+        assert_eq!(
+            switching.next(
+                Failure::Failed("API Error: HTTP 408 request timeout"),
+                false
+            ),
+            RetryAction::Switch {
+                from: Some("test-408/primary".to_string()),
+                to: "test-408/spare".to_string(),
+                detail: "408".to_string(),
+                attempt: 1,
+                of: 7,
+            }
+        );
+
+        // With no candidate it re-sends to the same model, unlike a 4xx.
+        let mut config = policy(&[]);
+        config.model_fallback = false;
+        let mut alone = engine(config, "test-408-alone/primary", 1);
+        assert!(matches!(
+            alone.next(
+                Failure::Failed("API Error: HTTP 408 request timeout"),
+                false
+            ),
+            RetryAction::Backoff {
+                class: RetryClass::Network,
+                attempt: 1,
+                ..
+            }
+        ));
+        assert_eq!(alone.model(), Some("test-408-alone/primary"));
+    }
+
+    #[test]
+    fn retry_server_error_switch_cools_the_abandoned_model() {
+        // Given a 5xx switch away from the primary,
+        let config = policy(&[("test-cool5xx/primary", &["test-cool5xx/spare"])]);
+        let mut first = engine(config.clone(), "test-cool5xx/primary", 1);
+        assert!(matches!(
+            first.next(Failure::Failed("HTTP status 503"), false),
+            RetryAction::Switch { .. }
+        ));
+
+        // When a later turn resolves the same primary, the unhealthy model is
+        // still skipped for its cooldown.
+        let mut later = engine(config, "test-cool5xx/primary", 1);
+        assert_eq!(later.model(), Some("test-cool5xx/spare"));
+        assert_eq!(
+            later.take_startup_switch(),
+            Some((
+                "test-cool5xx/primary".to_string(),
+                "test-cool5xx/spare".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn retry_client_error_without_a_policy_fails_the_run() {
+        let mut engine = FallbackEngine::new(None, Some("test-client-none/only"), 3);
+
+        assert_eq!(
+            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            RetryAction::GiveUp
+        );
+        assert_eq!(engine.model(), Some("test-client-none/only"));
     }
 
     #[test]
