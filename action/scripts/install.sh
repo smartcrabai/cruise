@@ -5,12 +5,12 @@
 # MIN_CRUISE_VERSION.
 #
 # The floor is not cosmetic: this action generates configs with no `sdk:` line
-# and provisions credentials into cruise's own jcode home (see
-# provision-jcode.sh), both of which only mean anything to a cruise whose
-# default backend is `sdk: jcode`. An older binary would reject the config
-# outright or silently resolve a backend that no longer exists, so an old
-# binary paired with this action is refused with a message naming both
-# versions instead of failing deep inside the run.
+# and provisions jcode credentials for the run (see provision-jcode.sh), both
+# of which only mean anything to a cruise whose default backend is
+# `sdk: jcode`. An older binary would reject the config outright or silently
+# resolve a backend that no longer exists, so an old binary paired with this
+# action is refused with a message naming both versions instead of failing
+# deep inside the run.
 #
 # The `jcode` binary itself is installed by install-jcode.sh.
 set -euo pipefail

@@ -14,10 +14,10 @@
 #      neither `sdk` nor `model`/`plan_model`: omitting `sdk` selects
 #      cruise's own default backend (`sdk: jcode`), and omitting the model
 #      references lets jcode use the default provider/model configured in
-#      cruise's jcode home (see provision-jcode.sh). The `model`/`plan_model`
-#      inputs (CRUISE_MODEL/CRUISE_PLAN_MODEL env overrides, applied by
-#      cruise itself) still take priority over this generated config when
-#      set.
+#      the jcode home this action pins (see provision-jcode.sh). The
+#      `model`/`plan_model` inputs (CRUISE_MODEL/CRUISE_PLAN_MODEL env
+#      overrides, applied by cruise itself) still take priority over this
+#      generated config when set.
 #
 # exec config (`exec` command only): `cruise exec` binds the whole plan text
 # to {input} and never runs a planning step (plan.md stays empty), so this

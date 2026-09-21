@@ -13,8 +13,8 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 ## Prerequisites
 
 - [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.82.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `cruise login` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, not `cruise login`.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.82.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
+- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
@@ -145,7 +145,7 @@ The TUI has three views:
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
-PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login`, `config`, and `exec` operations remain available through their CLI commands rather than TUI screens.
+PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
 The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
@@ -206,7 +206,6 @@ Commands:
   clean        Remove sessions with closed/merged PRs
   config       Show or update application-level configuration (`~/.config/cruise/config.json`)
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
-  login        Sign in to a model provider for the `jcode` SDK backend
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine and open it in the default browser
 
@@ -380,22 +379,6 @@ Options:
 ```
 
 Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`; the flag's own help text mentions only the WebUI, but the TUI reads the same setting for its Run All batches. The CLI ignores this setting; use the one-shot `cruise run --all --parallelism <N>` flag instead.
-
-#### `cruise login`
-
-```
-cruise login [OPTIONS] [PROVIDER]
-
-Arguments:
-  [PROVIDER]  Provider to sign in to directly; omit when stdin, stdout, and stderr are TTYs for Cruise's action menu and jcode's picker
-
-Options:
-      --api-key  Store an API key for PROVIDER instead of running the OAuth flow
-                 (also available when all three standard streams are TTYs; key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin; conflicts with `--status`)
-      --status   List the providers configured in cruise's jcode home and the models available to them
-```
-
-Manages credentials for the default `sdk: jcode` backend. Everything is stored in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), never in your `~/.jcode` and never in a cruise config file. When stdin, stdout, and stderr are all TTYs, argument-free `cruise login` shows a Cruise action menu: provider login hands the terminal to `jcode login`, API-key entry asks for a provider and, unless `CRUISE_LOGIN_API_KEY` is set, a hidden key, status shows authenticated providers and models, and Exit closes the menu. Explicit `cruise login <provider>`, `cruise login <provider> --api-key`, and `cruise login --status` remain one-shot shortcuts for automation. TTY colors honor `NO_COLOR`; if any standard stream is redirected, argument-free invocation delegates without the menu or ANSI decoration. The API key is never a command-line argument and is handed to jcode through stdin. See [SDK Mode](#sdk-mode).
 
 #### `cruise clean`
 
@@ -642,15 +625,15 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 
 #### `sdk: jcode` -- the jcode CLI (default)
 
-`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.82.0 or newer is required; an older binary is rejected with a clear error. This floor provides both the `run --ndjson` event contract and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows the ones cruise can already authenticate as. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
+`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.82.0 or newer is required; an older binary is rejected with a clear error. This floor provides both the `run --ndjson` event contract and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `jcode auth status` shows the ones you are already signed in to. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
 
-Credentials, sessions, and configuration live in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), kept completely separate from your own `~/.jcode` -- cruise never reads or writes it. Sign in with [`cruise login`](#cruise-login); running `sdk: jcode` with no authenticated provider fails with an error pointing at `cruise login`.
+Credentials, sessions, `config.toml`, and the MCP registration all live in jcode's own home -- `$JCODE_HOME` when that variable is set and non-empty, otherwise `~/.jcode` -- exactly the home your interactive `jcode` sessions use. Cruise has no home of its own and never injects `JCODE_HOME` into the jcode child, so exporting it before starting cruise relocates credentials, sessions, and config together -- that is how the [GitHub Action](docs/github-actions.md) keeps a job's credentials out of a persistent runner's `~/.jcode`. Sign in with `jcode login <provider>` and check the result with `jcode auth status`; running `sdk: jcode` with no authenticated provider fails with an error pointing at `jcode login`. Sharing that home cuts both ways: the `cruise` MCP server cruise registers in `mcp.json` (see below) stays registered afterwards, so `mcp__cruise__*` tools also show up in your own interactive jcode sessions, and the MCP servers you configured there load inside cruise runs.
 
 Because jcode cannot register custom tools in-process, cruise's tools (`ask_user`, `submit_plan`, ...) reach the model through a stdio MCP server and appear as `mcp__cruise__<tool>`. Cruise registers that server with jcode's upstream `timeout_secs` set to 86,400 seconds (24 hours), so an interactive `ask_user` question can wait up to 24 hours at the MCP layer, subject to any shorter workflow step timeout. One caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), which takes precedence over cruise's registration. A project-local MCP server named `cruise` is rejected with an error (it would shadow cruise's tools); other project-local servers are loaded but pointed out with a warning.
 
 #### `sdk: claude` -- the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unaffected by `cruise login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
 
 #### Tool-less (non-interactive) planning
 
@@ -706,7 +689,7 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 
 `CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
 
-Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_HOME` (cruise's own jcode home, which keeps your `~/.jcode` untouched) and `JCODE_NO_TELEMETRY=1`. When a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` are set to that effort as well; jcode ignores them for providers and models without reasoning-effort support.
+Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_NO_TELEMETRY=1`, and, when a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` set to that effort (jcode ignores them for providers and models without reasoning-effort support). `JCODE_HOME` is *not* among them -- see [`sdk: jcode`](#sdk-jcode----the-jcode-cli-default) for how the child inherits the ambient jcode home.
 
 ```yaml
 env:                        # top-level: applied to all steps

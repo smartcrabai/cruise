@@ -12,8 +12,8 @@
 //!
 //! - `command` — the model name substituted into the command line.
 //! - `sdk: jcode` — a `provider/model[:effort]` reference in jcode's own
-//!   provider/model namespace, driven as a `jcode run --ndjson` subprocess
-//!   under cruise's private `JCODE_HOME` -- see [`run_jcode`] and
+//!   provider/model namespace, driven as a `jcode run --ndjson` subprocess in
+//!   jcode's own home -- see [`run_jcode`] and
 //!   [`crate::backend::jcode`].
 //! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
@@ -94,9 +94,9 @@ pub struct PromptOutcome {
 pub enum Executor {
     /// Spawn an external command (the classic `claude -p` path).
     Command { command: Vec<String> },
-    /// Drive the `jcode` CLI as an NDJSON subprocess (`sdk: jcode`) under
-    /// cruise's private `JCODE_HOME`, exposing cruise's tools over the
-    /// [`ToolBridge`]. See [`run_jcode`].
+    /// Drive the `jcode` CLI as an NDJSON subprocess (`sdk: jcode`) in jcode's
+    /// own home, exposing cruise's tools over the [`ToolBridge`]. See
+    /// [`run_jcode`].
     Jcode,
     /// Drive the `claude` CLI in-process through `claude-agent-sdk`
     /// (`sdk: claude`). See [`run_claude`].
@@ -538,7 +538,7 @@ async fn run_with_fallback(
 }
 
 /// `Jcode`-backend execution: run the prompt as a `jcode run --ndjson`
-/// subprocess ([`crate::backend::jcode`]) under cruise's private `JCODE_HOME`.
+/// subprocess ([`crate::backend::jcode`]) in jcode's own home.
 ///
 /// jcode has no in-process tool registration, so cruise's tools are served to
 /// it over a per-run Unix socket by a [`ToolBridge`]: the `cruise mcp-bridge`
@@ -556,7 +556,7 @@ async fn run_with_fallback(
 /// aborted attempt's session id: re-sending the same prompt into a
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let home = jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
+    jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
     let bridge = ToolBridge::start(req.tools.clone())?;
 
     run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
@@ -567,7 +567,6 @@ async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
             effort,
             cwd: req.working_dir.map(Path::to_path_buf),
             resume_session_id: req.resume.clone(),
-            home: home.clone(),
             tool_socket: bridge.socket_path().to_path_buf(),
             env: req.env.clone(),
             cancel: req.cancel_token.cloned(),

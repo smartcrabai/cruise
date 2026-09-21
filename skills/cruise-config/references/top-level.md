@@ -63,7 +63,7 @@ step fails the load (see [steps.md](steps.md)).
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against cruise's own jcode home (sign in with `cruise login`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
+- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against jcode's own home (`$JCODE_HOME`, else `~/.jcode`; sign in with `jcode login <provider>`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder

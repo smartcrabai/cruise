@@ -11,18 +11,26 @@
 //! and the per-run socket path travels to that child in the `jcode` process
 //! environment (see [`crate::tool_bridge`]).
 //!
-//! ## Isolation from the user's jcode
+//! ## The jcode home cruise shares
 //!
 //! jcode keeps credentials, `config.toml`, sessions, logs and its global
-//! `mcp.json` under `$JCODE_HOME`, and it writes into that home on *any*
-//! subcommand -- a probe as small as `jcode version` creates `logs/` and
-//! migration stamps there. So every cruise invocation is built by
-//! [`jcode_command`], which points `$JCODE_HOME` at cruise's own directory
-//! ([`jcode_home`]), disables telemetry and suppresses the auto-update check;
-//! the user's `~/.jcode` is never read or written. [`build_command`] also
-//! defaults `JCODE_OPENAI_SERVICE_TIER` to `off` unless the workflow `env:` or
-//! cruise's environment sets it, since jcode's own default is priority
-//! processing.
+//! `mcp.json` under its home: `$JCODE_HOME` when the environment sets it, else
+//! `~/.jcode`. Cruise runs against that same home -- [`jcode_home`] mirrors
+//! jcode's own resolution -- and never sets `JCODE_HOME` on a child, so a run
+//! authenticates with the user's own `jcode login` and exporting `JCODE_HOME`
+//! before starting cruise relocates cruise and jcode together.
+//!
+//! Sharing the home cuts both ways, deliberately: cruise's `mcp-bridge`
+//! registration ([`ensure_mcp_registration`]) is visible to the user's own
+//! interactive jcode sessions, and the MCP servers the user registered there
+//! load into cruise runs.
+//!
+//! [`build_command`] defaults `JCODE_OPENAI_SERVICE_TIER` to `off` unless the
+//! workflow `env:` or cruise's environment names a tier: jcode's own default is
+//! priority processing, which an unattended batch run should not pay for. In
+//! the shared home that default also overrides an `openai_service_tier` the
+//! user's own `config.toml` sets -- an interactive preference must not silently
+//! price every cruise run.
 //!
 //! The one MCP source outside that home is the run directory: jcode also reads
 //! `.jcode/mcp.json` / `.mcp.json` / `.claude/mcp.json` from it, last-wins over
@@ -47,8 +55,13 @@ use crate::tool_bridge::{MCP_SERVER_NAME, TOOL_SOCKET_ENV};
 /// Executable name looked up on `PATH` when no explicit binary is configured.
 const JCODE_BINARY: &str = "jcode";
 
-/// Directory under cruise's data dir used as `$JCODE_HOME`.
-const JCODE_HOME_DIR: &str = "jcode-home";
+/// Environment variable jcode reads to relocate its home. Cruise only *reads*
+/// it, to resolve the same home jcode would use.
+const JCODE_HOME_ENV: &str = "JCODE_HOME";
+
+/// Default jcode home, relative to the user's home directory, used when
+/// [`JCODE_HOME_ENV`] is unset or empty.
+const DEFAULT_JCODE_HOME_DIR: &str = ".jcode";
 
 /// Lowest `jcode` version whose `run --ndjson` event shape and MCP configuration
 /// this backend are verified against.
@@ -78,11 +91,17 @@ const MCP_BRIDGE_SUBCOMMAND: &str = "mcp-bridge";
 /// self-update from inside a workflow run.
 const NO_UPDATE_FLAG: &str = "--no-update";
 
+/// jcode's telemetry opt-out. Cruise sets it on every child it launches, after
+/// any workflow `env:` so a workflow cannot undo it.
+const NO_TELEMETRY_ENV: &str = "JCODE_NO_TELEMETRY";
+
 /// jcode's environment override for its `[provider].openai_service_tier`
 /// setting (`priority|flex|off`). jcode v0.84.0 defaults the setting to
-/// `"priority"` -- `OpenAI` priority processing at higher usage -- and cruise
-/// never edits its private home's `config.toml`, so an unattended run would
-/// otherwise always pay for it. Ignored by non-OpenAI providers.
+/// `"priority"` -- `OpenAI` priority processing at higher usage -- so an
+/// unattended batch run would otherwise always pay for it. The override also
+/// wins over the shared home's `config.toml`, which is deliberate: an
+/// interactive preference must not price every cruise run. Ignored by
+/// non-OpenAI providers.
 const OPENAI_SERVICE_TIER_ENV: &str = "JCODE_OPENAI_SERVICE_TIER";
 
 /// Tier cruise requests when neither the workflow `env:` nor cruise's own
@@ -102,7 +121,7 @@ const STDERR_TAIL_LINES: usize = 64;
 /// jcode's own diagnosis is on stderr, which [`send_failure`] appends.
 const NO_RESULT_MESSAGE: &str = "the jcode CLI exited without reporting a result";
 
-/// Files jcode merges *after* `$JCODE_HOME/mcp.json`, i.e. whose entries win.
+/// Files jcode merges *after* the home's `mcp.json`, i.e. whose entries win.
 ///
 /// Discovery is limited to the run directory itself (jcode does not walk up to
 /// parents), so scanning these three paths under the working directory covers
@@ -125,9 +144,6 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) effort: Option<EffortLevel>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) resume_session_id: Option<String>,
-    /// `$JCODE_HOME` for the child: cruise's private jcode home, as returned by
-    /// [`jcode_home`].
-    pub(crate) home: PathBuf,
     /// Unix socket the spawned `cruise mcp-bridge` should dial, published to the
     /// child as [`TOOL_SOCKET_ENV`].
     pub(crate) tool_socket: PathBuf,
@@ -141,17 +157,23 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) binary: Option<PathBuf>,
 }
 
-/// Cruise's private `$JCODE_HOME`: `<data dir>/jcode-home`.
-///
-/// Separate from the user's `~/.jcode` so cruise's credentials, sessions and
-/// MCP registration never mix with (or invalidate) the ones the user's own
-/// jcode TUI relies on.
+/// The jcode home a cruise-launched `jcode` resolves to: `$JCODE_HOME` when the
+/// environment sets it to a non-empty value, else `~/.jcode` (see the module
+/// header).
 ///
 /// # Errors
 ///
-/// Returns an error if the cruise data directory cannot be determined.
+/// Returns an error if `JCODE_HOME` names nothing and the user's home directory
+/// cannot be determined.
 pub fn jcode_home() -> Result<PathBuf> {
-    Ok(crate::paths::data_dir()?.join(JCODE_HOME_DIR))
+    if let Some(value) = std::env::var_os(JCODE_HOME_ENV)
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    let home = home::home_dir()
+        .ok_or_else(|| CruiseError::Other("cannot determine home directory".to_string()))?;
+    Ok(home.join(DEFAULT_JCODE_HOME_DIR))
 }
 
 /// The `jcode` executable to invoke: `binary` when a caller names one (tests
@@ -160,34 +182,16 @@ pub(crate) fn resolve_binary(binary: Option<&Path>) -> PathBuf {
     binary.map_or_else(|| PathBuf::from(JCODE_BINARY), Path::to_path_buf)
 }
 
-/// Environment that binds a cruise-launched `jcode` to cruise's private home.
+/// A `jcode` invocation with telemetry and the auto-update check off and no
+/// stdin.
 ///
-/// `JCODE_HOME` is what keeps the user's `~/.jcode` untouched: jcode writes
-/// `logs/`, `config.toml` and migration stamps into its home on *any*
-/// subcommand, so even a `jcode version` probe would otherwise touch it.
-/// `JCODE_NO_TELEMETRY` keeps an embedded run from reporting. Both are applied
-/// *after* any workflow `env:`, so a workflow cannot undo either.
-fn isolation_env(home: &Path) -> [(&'static str, std::ffi::OsString); 2] {
-    [
-        ("JCODE_HOME", home.as_os_str().to_os_string()),
-        ("JCODE_NO_TELEMETRY", std::ffi::OsString::from("1")),
-    ]
-}
-
-/// A `jcode` invocation bound to `home`, with telemetry and the auto-update
-/// check off and no stdin.
-///
-/// Every short cruise probe (`version`, `auth status`, `model list`) and
-/// `cruise login` build on this; the prompt run adds its own stdio wiring in
-/// [`build_command`].
-pub(crate) fn jcode_command(binary: &Path, home: &Path) -> std::process::Command {
+/// The short cruise probes (`version`, `auth status`) build on this; the prompt
+/// run adds its own stdio wiring in [`build_command`].
+fn jcode_command(binary: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(binary);
     command
         .arg(NO_UPDATE_FLAG)
-        .envs(isolation_env(home))
-        // This is a cruise-login input only. The API-key flow forwards the
-        // value through the child's stdin, never through its environment.
-        .env_remove("CRUISE_LOGIN_API_KEY")
+        .env(NO_TELEMETRY_ENV, "1")
         .stdin(Stdio::null());
     command
 }
@@ -214,35 +218,32 @@ fn probe_detail(output: &std::process::Output) -> String {
 }
 
 /// Everything that must hold before a `sdk: jcode` prompt can run: a
-/// new-enough binary, a prepared private home with cruise registered as an MCP
-/// server, no project-local MCP config in the run directory that would shadow
-/// it, and at least one authenticated provider.
+/// new-enough binary, cruise registered as an MCP server in jcode's home, no
+/// project-local MCP config in the run directory that would shadow it, and at
+/// least one authenticated provider.
 ///
 /// `env` is the workflow's `env:`, which [`build_command`] passes to the child:
 /// the authentication gate must see the same environment the run will, since
 /// jcode also accepts credentials from variables such as `ANTHROPIC_API_KEY`.
 ///
-/// Returns the `$JCODE_HOME` to run under. Runs once per prompt (not per
-/// rate-limit attempt), so the two short `jcode` invocations it makes are
-/// negligible next to a model turn.
+/// Runs once per prompt (not per rate-limit attempt), so the two short `jcode`
+/// invocations it makes are negligible next to a model turn.
 ///
 /// # Errors
 ///
 /// Returns an error if `jcode` is missing or older than [`MIN_JCODE_VERSION`],
-/// if the home or its `mcp.json` cannot be prepared, if the run directory
-/// carries an MCP server named [`MCP_SERVER_NAME`], or if no provider is
-/// authenticated for cruise's home.
+/// if the home cannot be resolved or its `mcp.json` cannot be prepared, if the
+/// run directory carries an MCP server named [`MCP_SERVER_NAME`], or if no
+/// provider is authenticated.
 pub(crate) fn preflight(
     binary: Option<&Path>,
     working_dir: Option<&Path>,
     env: &HashMap<String, String>,
     on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<PathBuf> {
+) -> Result<()> {
     let bin = resolve_binary(binary);
-    let home = jcode_home()?;
-    std::fs::create_dir_all(&home)?;
-    check_version(&bin, &home)?;
-    ensure_mcp_registration(&home)?;
+    check_version(&bin)?;
+    ensure_mcp_registration(&jcode_home()?)?;
     // jcode discovers project-local MCP config in the directory it runs in:
     // `-C <working_dir>` when the caller gave one, cruise's own cwd otherwise
     // (see [`build_command`]). Check whichever it will actually be.
@@ -253,14 +254,13 @@ pub(crate) fn preflight(
     if let Some(dir) = run_dir {
         check_project_mcp_config(&dir, on_notice)?;
     }
-    ensure_authenticated(&bin, &home, env)?;
-    Ok(home)
+    ensure_authenticated(&bin, env)
 }
 
 /// Reject a `jcode` older than [`MIN_JCODE_VERSION`], and a missing one with a
 /// message that names the install requirement instead of a bare ENOENT.
-fn check_version(binary: &Path, home: &Path) -> Result<()> {
-    let output = jcode_command(binary, home)
+fn check_version(binary: &Path) -> Result<()> {
+    let output = jcode_command(binary)
         .args(["version", "--json"])
         .output()
         .map_err(|e| {
@@ -329,8 +329,8 @@ fn format_version((major, minor, patch): (u64, u64, u64)) -> String {
 /// The `mcpServers.cruise` entry cruise registers: this binary, run as the
 /// stdio MCP bridge with a fixed upstream per-request deadline.
 ///
-/// Deliberately free of the per-run socket path. `$JCODE_HOME` is shared by
-/// every cruise process on the machine, so a per-run rewrite would have
+/// Deliberately free of the per-run socket path. The home is shared by every
+/// cruise process on the machine, so a per-run rewrite would have
 /// concurrent runs (CLI next to `WebUI`, several repositories) overwrite each
 /// other's registration. The socket travels in the `jcode` child's environment
 /// instead, which jcode passes on to the MCP servers it spawns.
@@ -362,8 +362,9 @@ fn registration_entry(exe: &Path) -> serde_json::Value {
 ///
 /// # Errors
 ///
-/// Returns an error if the executable path cannot be determined, if the lock
-/// cannot be taken, or if the file cannot be read or replaced.
+/// Returns an error if the executable path cannot be determined, if the home
+/// cannot be created, if the lock cannot be taken, or if the file cannot be
+/// read or replaced.
 fn ensure_mcp_registration(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     let path = home.join("mcp.json");
@@ -371,6 +372,9 @@ fn ensure_mcp_registration(home: &Path) -> Result<()> {
     if registration_matches(&path, &entry) {
         return Ok(());
     }
+    // The home is jcode's, but cruise may reach it first on a machine where
+    // jcode has never run: both the lock and `mcp.json` live inside it.
+    std::fs::create_dir_all(home)?;
     with_registration_lock(&home.join("mcp.json.cruise-lock"), || {
         // Re-check under the lock: a concurrent cruise may have written the
         // same entry while this process waited.
@@ -399,10 +403,10 @@ fn registration_matches(path: &Path, entry: &serde_json::Value) -> bool {
 
 /// Write `entry` into `mcpServers.cruise`, atomically replacing the file.
 ///
-/// Any other server in the file is preserved: the home is cruise's, but a user
-/// may legitimately add an MCP server for cruise's runs to use, and silently
-/// dropping it on an executable-path change would be a surprise. Anything that
-/// is not a JSON object is replaced outright -- there is nothing to merge into.
+/// Any other server in the file is preserved: the home is jcode's own, so it
+/// carries the MCP servers the user registered for their interactive sessions,
+/// and dropping them here would break that jcode. Anything that is not a JSON
+/// object is replaced outright -- there is nothing to merge into.
 fn write_registration(path: &Path, entry: &serde_json::Value) -> Result<()> {
     let mut document = std::fs::read_to_string(path)
         .ok()
@@ -479,7 +483,7 @@ struct ProjectMcpConfig {
 /// Reject or warn about project-local MCP configuration in `dir`.
 ///
 /// jcode merges MCP sources last-wins with project-local files *after*
-/// `$JCODE_HOME/mcp.json`, so a repository-provided server named
+/// the home's `mcp.json`, so a repository-provided server named
 /// [`MCP_SERVER_NAME`] replaces cruise's bridge outright and the model silently
 /// loses `ask_user` / `submit_plan` / the rest. That is a hard error. Servers
 /// under other names are additive but still load third-party processes into a
@@ -498,7 +502,7 @@ fn check_project_mcp_config(
             return Err(CruiseError::Other(format!(
                 "{} defines an MCP server named '{MCP_SERVER_NAME}', which jcode would load \
                  instead of cruise's tool bridge (project-local MCP config wins over \
-                 $JCODE_HOME/mcp.json), leaving the model without cruise's planning tools. \
+                 the home's mcp.json), leaving the model without cruise's planning tools. \
                  Rename that server or remove the file to run with `sdk: jcode`.",
                 found.path.display()
             )));
@@ -539,7 +543,7 @@ fn project_mcp_configs(dir: &Path) -> Vec<ProjectMcpConfig> {
     found
 }
 
-/// Authentication state of cruise's private jcode home, as reported by
+/// Authentication state of the jcode home a run will use, as reported by
 /// `jcode auth status --json`.
 pub struct AuthStatus {
     /// jcode's own summary flag. Narrower than [`AuthStatus::is_usable`]: it
@@ -577,7 +581,8 @@ impl AuthStatus {
     }
 }
 
-/// Read `jcode auth status --json` for cruise's private home.
+/// Read `jcode auth status --json`, i.e. the credentials the user's own `jcode
+/// login` stored.
 ///
 /// `env` is added to the probe's environment so credentials a workflow supplies
 /// that way (jcode reads e.g. `ANTHROPIC_API_KEY`) count as authenticated here
@@ -586,24 +591,15 @@ impl AuthStatus {
 /// # Errors
 ///
 /// Returns an error if `jcode` cannot be run or its JSON cannot be read.
-pub fn auth_status<S: std::hash::BuildHasher>(
-    binary: Option<&Path>,
-    home: &Path,
-    env: &HashMap<String, String, S>,
-) -> Result<AuthStatus> {
+fn auth_status(binary: Option<&Path>, env: &HashMap<String, String>) -> Result<AuthStatus> {
     let bin = resolve_binary(binary);
-    let mut command = std::process::Command::new(&bin);
+    let mut command = jcode_command(&bin);
+    // Workflow `env:` first, so cruise's fixed setting wins over it: a workflow
+    // cannot re-enable telemetry.
     command
-        .arg(NO_UPDATE_FLAG)
-        .args(["auth", "status", "--json"]);
-    // Workflow `env:` first, so cruise's isolation settings win over it.
-    command
+        .args(["auth", "status", "--json"])
         .envs(env)
-        .envs(isolation_env(home))
-        // Keep the login-only input out of auth probes as well. `auth_status`
-        // starts its child directly rather than through `jcode_command`.
-        .env_remove("CRUISE_LOGIN_API_KEY")
-        .stdin(Stdio::null());
+        .env(NO_TELEMETRY_ENV, "1");
     let output = command.output().map_err(|e| {
         CruiseError::Other(format!(
             "`sdk: jcode` needs the `jcode` CLI on PATH, but running \
@@ -643,19 +639,18 @@ fn parse_auth_status(stdout: &str) -> Option<AuthStatus> {
     })
 }
 
-/// Fail with `cruise login` guidance when cruise's jcode home has no usable
-/// credentials, instead of letting the run reach the model and come back with
-/// jcode's raw provider error.
-fn ensure_authenticated(binary: &Path, home: &Path, env: &HashMap<String, String>) -> Result<()> {
-    if auth_status(Some(binary), home, env)?.is_usable() {
+/// Fail with `jcode login` guidance when the jcode home a run will use has no
+/// usable credentials, instead of letting the run reach the model and come back
+/// with jcode's raw provider error.
+fn ensure_authenticated(binary: &Path, env: &HashMap<String, String>) -> Result<()> {
+    if auth_status(Some(binary), env)?.is_usable() {
         return Ok(());
     }
-    Err(CruiseError::Other(format!(
-        "no provider is authenticated for `sdk: jcode`. cruise keeps its jcode credentials \
-         separate from your own `~/.jcode`, in {}; run `cruise login` to sign in there \
-         (`cruise login --status` lists what is configured).",
-        home.display()
-    )))
+    Err(CruiseError::Other(
+        "no provider is authenticated for `sdk: jcode`; run `jcode login <provider>` to sign in \
+         (`jcode auth status` lists what is configured)."
+            .to_string(),
+    ))
 }
 
 /// A cruise `provider/model[:effort]` reference split into the parts
@@ -805,7 +800,7 @@ async fn run_async(config: JcodeRunnerConfig, prompt: String, tx: &Sender<Stream
         return;
     };
     // A finished turn waits for jcode to exit by itself: it persists the session
-    // under $JCODE_HOME on shutdown, and `--resume` for the next planning turn
+    // under its home on shutdown, and `--resume` for the next planning turn
     // depends on that file. Only once the child is gone is stderr at EOF, so the
     // drain task is awaited after that -- snapshotting earlier would miss a
     // rate-limit line that arrived in the same scheduling tick.
@@ -1107,9 +1102,10 @@ fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Co
     }
     command.arg(prompt);
 
-    // Workflow `env:` first, so cruise's own isolation settings below cannot be
-    // overridden by a workflow into reading the user's jcode home or enabling
-    // telemetry.
+    // Workflow `env:` first, so cruise's own fixed settings below cannot be
+    // overridden by a workflow into enabling telemetry. `JCODE_HOME` is not
+    // among them: a workflow that sets it relocates jcode, exactly as it would
+    // outside cruise.
     command.envs(&config.env);
     // Workflow `env:` wins, then cruise's own process environment (inherited by
     // the child as-is); only when neither names a tier does cruise turn priority
@@ -1119,7 +1115,7 @@ fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Co
     {
         command.env(OPENAI_SERVICE_TIER_ENV, OPENAI_SERVICE_TIER_DEFAULT);
     }
-    command.envs(isolation_env(&config.home));
+    command.env(NO_TELEMETRY_ENV, "1");
     command.env(TOOL_SOCKET_ENV, &config.tool_socket);
     if let Some(effort) = config.effort {
         // `jcode run` has no effort flag; these are jcode's environment
@@ -1318,24 +1314,6 @@ mod tests {
         assert!(!status.is_usable());
     }
 
-    /// Cruise's jcode home must be its own directory under the cruise data dir,
-    /// never the user's `~/.jcode` (PROHIBITED §6).
-    #[test]
-    fn jcode_home_is_cruise_owned_and_not_the_user_home() {
-        let _guard = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let home = jcode_home().unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            home,
-            tmp.path()
-                .join(".local")
-                .join("share")
-                .join("cruise")
-                .join(JCODE_HOME_DIR)
-        );
-    }
-
     mod mcp_registration {
         use super::*;
 
@@ -1363,7 +1341,7 @@ mod tests {
         }
 
         /// The steady state is a no-op, which is what makes a shared
-        /// `$JCODE_HOME` safe for concurrent runs: the file is only rewritten
+        /// home safe for concurrent runs: the file is only rewritten
         /// when the executable path changes.
         #[test]
         fn is_idempotent_and_leaves_the_file_untouched_on_a_second_call() {
@@ -1478,7 +1456,7 @@ mod tests {
             std::fs::write(&path, body).unwrap_or_else(|e| panic!("{e:?}"));
         }
 
-        /// jcode merges project-local MCP config *after* `$JCODE_HOME/mcp.json`,
+        /// jcode merges project-local MCP config *after* the home's `mcp.json`,
         /// so a repository server named `cruise` replaces cruise's bridge and
         /// the model silently loses every planning tool. That must be an error,
         /// not a warning.
@@ -1543,9 +1521,8 @@ mod tests {
     mod invocation {
         use super::*;
 
-        fn config(home: &Path) -> JcodeRunnerConfig {
+        fn config() -> JcodeRunnerConfig {
             JcodeRunnerConfig {
-                home: home.to_path_buf(),
                 tool_socket: PathBuf::from("/tmp/cruise-test.sock"),
                 ..JcodeRunnerConfig::default()
             }
@@ -1567,8 +1544,7 @@ mod tests {
 
         #[test]
         fn always_streams_ndjson_and_suppresses_updates() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let command = build_command(&config(tmp.path()), "do the thing");
+            let command = build_command(&config(), "do the thing");
             let args = args_of(&command);
             assert!(args.contains(&"run".to_string()), "got {args:?}");
             assert!(args.contains(&"--ndjson".to_string()), "got {args:?}");
@@ -1577,36 +1553,26 @@ mod tests {
         }
 
         #[test]
-        fn isolates_the_home_and_disables_telemetry() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let command = build_command(&config(tmp.path()), "p");
-            assert_eq!(
-                env_of(&command, "JCODE_HOME").as_deref(),
-                Some(tmp.path().to_string_lossy().as_ref())
-            );
+        fn disables_telemetry_and_publishes_the_tool_socket() {
+            let command = build_command(&config(), "p");
             assert_eq!(env_of(&command, "JCODE_NO_TELEMETRY").as_deref(), Some("1"));
             assert_eq!(
                 env_of(&command, TOOL_SOCKET_ENV).as_deref(),
                 Some("/tmp/cruise-test.sock")
             );
+            // Nothing pins the child's home: it inherits the ambient one.
+            assert_eq!(env_of(&command, JCODE_HOME_ENV), None);
         }
 
-        /// A workflow `env:` block must not be able to redirect jcode at the
-        /// user's home or re-enable telemetry (PROHIBITED §6).
+        /// A workflow `env:` block must not be able to re-enable telemetry for
+        /// an embedded run, while its own variables still reach the child.
         #[test]
-        fn workflow_env_cannot_override_the_isolation_settings() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let mut cfg = config(tmp.path());
-            cfg.env
-                .insert("JCODE_HOME".to_string(), "/home/someone/.jcode".to_string());
+        fn workflow_env_cannot_re_enable_telemetry() {
+            let mut cfg = config();
             cfg.env
                 .insert("JCODE_NO_TELEMETRY".to_string(), "0".to_string());
             cfg.env.insert("MY_VAR".to_string(), "kept".to_string());
             let command = build_command(&cfg, "p");
-            assert_eq!(
-                env_of(&command, "JCODE_HOME").as_deref(),
-                Some(tmp.path().to_string_lossy().as_ref())
-            );
             assert_eq!(env_of(&command, "JCODE_NO_TELEMETRY").as_deref(), Some("1"));
             assert_eq!(env_of(&command, "MY_VAR").as_deref(), Some("kept"));
         }
@@ -1614,7 +1580,7 @@ mod tests {
         #[test]
         fn provider_and_model_are_bound_in_the_model_route() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let mut cfg = config(tmp.path());
+            let mut cfg = config();
             // A bare GPT model makes jcode switch away from Copilot despite
             // `--provider copilot`; its routed model form binds both fields.
             cfg.model = Some("gpt-5.6-sol".to_string());
@@ -1641,8 +1607,7 @@ mod tests {
         /// `--model` (which would make the model id unresolvable).
         #[test]
         fn effort_travels_as_environment_overrides_not_as_a_model_suffix() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let mut cfg = config(tmp.path());
+            let mut cfg = config();
             cfg.model = Some("gpt-5.6".to_string());
             cfg.effort = Some(EffortLevel::XHigh);
             let command = build_command(&cfg, "p");
@@ -1662,8 +1627,7 @@ mod tests {
 
         #[test]
         fn no_effort_leaves_the_reasoning_overrides_unset() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let command = build_command(&config(tmp.path()), "p");
+            let command = build_command(&config(), "p");
             assert_eq!(env_of(&command, "JCODE_OPENAI_REASONING_EFFORT"), None);
         }
 
@@ -1673,7 +1637,7 @@ mod tests {
         fn openai_service_tier_defaults_to_off() {
             let _guard = crate::test_support::lock_process();
             let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
-            let command = build_command(&config(Path::new("/unused/jcode-home")), "p");
+            let command = build_command(&config(), "p");
             assert_eq!(
                 env_of(&command, OPENAI_SERVICE_TIER_ENV).as_deref(),
                 Some("off")
@@ -1684,7 +1648,7 @@ mod tests {
         fn workflow_env_service_tier_is_kept() {
             let _guard = crate::test_support::lock_process();
             let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
-            let mut cfg = config(Path::new("/unused/jcode-home"));
+            let mut cfg = config();
             cfg.env
                 .insert(OPENAI_SERVICE_TIER_ENV.to_string(), "priority".to_string());
             let command = build_command(&cfg, "p");
@@ -1700,7 +1664,7 @@ mod tests {
         fn process_env_service_tier_is_inherited_not_overridden() {
             let _guard = crate::test_support::lock_process();
             let _set = crate::test_support::EnvGuard::set(OPENAI_SERVICE_TIER_ENV, "flex");
-            let command = build_command(&config(Path::new("/unused/jcode-home")), "p");
+            let command = build_command(&config(), "p");
             // Not set explicitly on the command: inheritance carries `flex`
             // through.
             assert_eq!(env_of(&command, OPENAI_SERVICE_TIER_ENV), None);
@@ -1750,7 +1714,6 @@ mod tests {
             let binary = install_stub(tmp.path(), stdout_body, stderr_body, code);
             let rx = stream_agent(
                 JcodeRunnerConfig {
-                    home: tmp.path().join("home"),
                     tool_socket: tmp.path().join("tools.sock"),
                     binary: Some(binary),
                     ..JcodeRunnerConfig::default()
@@ -1906,10 +1869,14 @@ mod tests {
             assert!(matches!(chunks.last(), Some(StreamChunk::Done(t)) if t == "ok"));
         }
 
-        /// The child must receive cruise's private home and the per-run socket:
-        /// that environment handoff is the whole tool bridge.
+        /// Cruise resolves the home jcode itself would (`$JCODE_HOME`, else
+        /// `~/.jcode`) and never names it for the child, which therefore
+        /// inherits exactly the ambient value.
         #[test]
-        fn the_child_receives_the_home_and_the_tool_socket() {
+        fn the_ambient_jcode_home_is_honored_and_never_overridden() {
+            let _guard = crate::test_support::lock_process();
+            let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let _home_env = crate::test_support::set_fake_home(fake_home.path());
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let binary = install_stub(
                 tmp.path(),
@@ -1917,11 +1884,21 @@ mod tests {
                 "",
                 0,
             );
-            let home = tmp.path().join("home");
             let socket = tmp.path().join("tools.sock");
+
+            {
+                let _unset = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
+                assert_eq!(
+                    jcode_home().unwrap_or_else(|e| panic!("{e:?}")),
+                    fake_home.path().join(DEFAULT_JCODE_HOME_DIR)
+                );
+            }
+
+            let ambient = tmp.path().join("ambient-home");
+            let _set = crate::test_support::EnvGuard::set(JCODE_HOME_ENV, ambient.as_os_str());
+            assert_eq!(jcode_home().unwrap_or_else(|e| panic!("{e:?}")), ambient);
             let rx = stream_agent(
                 JcodeRunnerConfig {
-                    home: home.clone(),
                     tool_socket: socket.clone(),
                     binary: Some(binary.clone()),
                     ..JcodeRunnerConfig::default()
@@ -1933,12 +1910,11 @@ mod tests {
                 matches!(chunks.last(), Some(StreamChunk::Done(_))),
                 "{chunks:?}"
             );
-            let seen = std::fs::read_to_string(binary.with_extension("env"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
             assert_eq!(
-                seen,
-                format!("{}|{}", home.display(), socket.display()),
-                "the child must inherit JCODE_HOME and {TOOL_SOCKET_ENV}"
+                std::fs::read_to_string(binary.with_extension("env"))
+                    .unwrap_or_else(|e| panic!("{e:?}")),
+                format!("{}|{}", ambient.display(), socket.display()),
+                "the child must inherit the ambient {JCODE_HOME_ENV} and {TOOL_SOCKET_ENV}"
             );
         }
 
@@ -1955,7 +1931,6 @@ mod tests {
             cancel.cancel();
             let rx = stream_agent(
                 JcodeRunnerConfig {
-                    home: tmp.path().join("home"),
                     tool_socket: tmp.path().join("tools.sock"),
                     binary: Some(binary),
                     cancel: Some(cancel),
@@ -1971,7 +1946,6 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let rx = stream_agent(
                 JcodeRunnerConfig {
-                    home: tmp.path().join("home"),
                     tool_socket: tmp.path().join("tools.sock"),
                     binary: Some(tmp.path().join("does-not-exist")),
                     ..JcodeRunnerConfig::default()
@@ -1989,7 +1963,7 @@ mod tests {
         fn a_version_below_the_floor_is_rejected_with_the_requirement() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let binary = install_stub(tmp.path(), r#"{"semver":"0.81.7"}"#, "", 0);
-            let err = check_version(&binary, &tmp.path().join("home"))
+            let err = check_version(&binary)
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
@@ -2002,26 +1976,7 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let semver = format_version(MIN_JCODE_VERSION);
             let binary = install_stub(tmp.path(), &format!(r#"{{"semver":"{semver}"}}"#), "", 0);
-            check_version(&binary, &tmp.path().join("home")).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-
-        /// Even the version probe must run against cruise's home: jcode writes
-        /// `logs/` and migration stamps into `$JCODE_HOME` on any subcommand, so
-        /// an unset one would have cruise write into the user's `~/.jcode`.
-        #[test]
-        fn the_version_probe_runs_against_cruise_s_home() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let semver = format_version(MIN_JCODE_VERSION);
-            let binary = install_stub(tmp.path(), &format!(r#"{{"semver":"{semver}"}}"#), "", 0);
-            let home = tmp.path().join("home");
-            check_version(&binary, &home).unwrap_or_else(|e| panic!("{e:?}"));
-            let seen = std::fs::read_to_string(binary.with_extension("env"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(
-                seen.starts_with(&home.display().to_string()),
-                "expected JCODE_HOME={}, saw {seen}",
-                home.display()
-            );
+            check_version(&binary).unwrap_or_else(|e| panic!("{e:?}"));
         }
 
         /// A probe that fails for its own reason must carry jcode's diagnosis,
@@ -2030,7 +1985,7 @@ mod tests {
         fn an_unreadable_version_probe_reports_status_and_stderr() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let binary = install_stub(tmp.path(), "", "error: invalid config.toml", 2);
-            let err = check_version(&binary, &tmp.path().join("home"))
+            let err = check_version(&binary)
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
@@ -2041,17 +1996,18 @@ mod tests {
         #[test]
         fn a_missing_binary_names_the_install_requirement() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let err = check_version(&tmp.path().join("does-not-exist"), tmp.path())
+            let err = check_version(&tmp.path().join("does-not-exist"))
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
             assert!(err.contains("`jcode` CLI on PATH"), "got {err}");
         }
 
-        /// An unauthenticated cruise home must point the user at `cruise login`
-        /// rather than letting jcode's raw provider error surface later.
+        /// An unauthenticated jcode must point the user at their own
+        /// `jcode login` rather than letting jcode's raw provider error surface
+        /// later.
         #[test]
-        fn an_unauthenticated_home_is_rejected_with_cruise_login_guidance() {
+        fn an_unauthenticated_home_is_rejected_with_jcode_login_guidance() {
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let binary = install_stub(
                 tmp.path(),
@@ -2059,37 +2015,11 @@ mod tests {
                 "",
                 0,
             );
-            let home = tmp.path().join("home");
-            let err = ensure_authenticated(&binary, &home, &HashMap::new())
+            let err = ensure_authenticated(&binary, &HashMap::new())
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
-            assert!(err.contains("cruise login"), "got {err}");
-            assert!(err.contains(&home.display().to_string()), "got {err}");
-        }
-
-        /// `auth_status` must read cruise's home, never the ambient one.
-        #[test]
-        fn auth_status_runs_against_the_given_home() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(
-                tmp.path(),
-                r#"{"any_available":true,"providers":[{"id":"anthropic-api","status":"available"}]}"#,
-                "",
-                0,
-            );
-            let home = tmp.path().join("home");
-            let status = auth_status(Some(&binary), &home, &HashMap::new())
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(status.any_available);
-            assert_eq!(status.available(), vec!["anthropic-api"]);
-            let seen = std::fs::read_to_string(binary.with_extension("env"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(
-                seen.starts_with(&home.display().to_string()),
-                "expected JCODE_HOME={}, saw {seen}",
-                home.display()
-            );
+            assert!(err.contains("jcode login"), "got {err}");
         }
 
         /// The gate must see the workflow's `env:`, since jcode accepts
@@ -2101,20 +2031,20 @@ mod tests {
             let binary = install_stub(tmp.path(), r#"{"any_available":true}"#, "", 0);
             let mut env = HashMap::new();
             env.insert("CRUISE_PROBE_MARKER".to_string(), "seen".to_string());
-            auth_status(Some(&binary), &tmp.path().join("home"), &env)
-                .unwrap_or_else(|e| panic!("{e:?}"));
+            auth_status(Some(&binary), &env).unwrap_or_else(|e| panic!("{e:?}"));
             let seen = std::fs::read_to_string(binary.with_extension("marker"))
                 .unwrap_or_else(|e| panic!("{e:?}"));
             assert_eq!(seen, "seen");
         }
 
-        /// The whole gate in one pass: a good binary, a fresh home, and a clean
-        /// working directory must yield cruise's home with cruise registered.
+        /// The whole gate in one pass: a good binary and a clean working
+        /// directory must leave cruise registered in jcode's home.
         #[test]
-        fn preflight_prepares_the_home_and_registers_the_bridge() {
+        fn preflight_registers_the_bridge_in_the_jcode_home() {
             let _guard = crate::test_support::lock_process();
             let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let _env = crate::test_support::set_fake_home(fake_home.path());
+            let _no_home = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             // One stub answers both `version --json` and `auth status --json`:
             // the two payloads have disjoint keys, so each parser reads its own.
@@ -2128,9 +2058,9 @@ mod tests {
                 0,
             );
             let workdir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let home = preflight(Some(&binary), Some(workdir.path()), &HashMap::new(), None)
+            preflight(Some(&binary), Some(workdir.path()), &HashMap::new(), None)
                 .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(home.starts_with(fake_home.path()), "{}", home.display());
+            let home = jcode_home().unwrap_or_else(|e| panic!("{e:?}"));
             let document: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(home.join("mcp.json")).unwrap_or_else(|e| panic!("{e:?}")),
             )
@@ -2150,6 +2080,7 @@ mod tests {
             let _guard = crate::test_support::lock_process();
             let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let _env = crate::test_support::set_fake_home(fake_home.path());
+            let _no_home = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
             let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let binary = install_stub(
                 tmp.path(),

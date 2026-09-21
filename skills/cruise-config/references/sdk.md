@@ -37,21 +37,19 @@ A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode`
 
 ## `sdk: jcode` — the jcode CLI (default)
 
-`sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.82.0 or newer** is required — an older binary is rejected with a clear error, because cruise relies on both the NDJSON event shape and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows which ones cruise can already authenticate as. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
+`sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.82.0 or newer** is required — an older binary is rejected with a clear error, because cruise relies on both the NDJSON event shape and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `jcode auth status` shows which ones you are signed in to. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
 
 OpenAI priority processing is off by default (cruise sets `JCODE_OPENAI_SERVICE_TIER=off`); opt in with `env.JCODE_OPENAI_SERVICE_TIER: "priority"` — see [the configuration example](env-and-llm.md#openai-priority-processing-with-jcode).
 
-### Authentication and isolation
+### Authentication and the shared jcode home
 
-Credentials, sessions, `config.toml`, and MCP registration live in **cruise's own jcode home** (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), completely separate from your `~/.jcode` — cruise never reads or writes it, and runs jcode with telemetry and the auto-update check disabled. Sign in with:
+Credentials, sessions, `config.toml`, and MCP registration live in **jcode's own home** — `$JCODE_HOME` when that variable is set and non-empty, otherwise `~/.jcode` — the same home an interactive `jcode` session uses. Cruise has no home of its own and never injects `JCODE_HOME` into the jcode child; exporting it before starting cruise relocates everything at once, which is how the GitHub Action keeps credentials off a runner's real home.
 
-- `cruise login` — when stdin, stdout, and stderr are all TTYs, opens Cruise's action menu; **Sign in or configure a provider** then hands the terminal to `jcode login` (interactive picker / OAuth flow) against cruise's home. With an explicit provider, `cruise login <provider>` remains a one-shot direct delegation; if any standard stream is redirected, argument-free use also delegates directly.
-- `cruise login <provider> --api-key` — one-shot API-key entry (key from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin — never a CLI argument). The same action is available from the TTY menu, where provider id and cancellation are handled before invoking jcode.
-- `cruise login --status` — lists the providers configured in cruise's home and their models.
+- `jcode login <provider>` — sign in (interactive picker / OAuth flow, or the provider's API key).
+- `jcode auth status` — list the authenticated providers; `--json` for machine-readable output.
+- `jcode model list` — list the models those providers expose.
 
-The TTY menu and rich status output use color when available and keep the same textual markers and headings with `NO_COLOR=1`. Non-TTY status remains line-oriented and machine-readable: authenticated homes report the home, providers, and models; homes with no authenticated providers report the home and a sign-in hint. No menu or ANSI decoration is added to automation output.
-
-Running `sdk: jcode` with no authenticated provider fails with an error pointing at `cruise login`. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) in that home's `config.toml` — cruise adds no provider notation of its own.
+Running `sdk: jcode` with no authenticated provider fails with an error pointing at `jcode login`. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) in that home's `config.toml` — cruise adds no provider notation of its own.
 
 ### Custom tools via MCP
 
@@ -59,7 +57,7 @@ jcode cannot register custom tools in-process, so cruise's tools reach the model
 
 ## `sdk: claude` — the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unaffected by `cruise login`. The CLI runs with permissions bypassed: cruise workflows are unattended, so there is no console to answer a permission prompt on.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed: cruise workflows are unattended, so there is no console to answer a permission prompt on.
 
 ## Differences from command mode
 

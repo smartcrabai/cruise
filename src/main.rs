@@ -40,7 +40,6 @@ mod graph;
 mod herdr;
 mod issue_publish;
 mod list_cmd;
-mod login_cmd;
 mod mcp_bridge;
 mod metadata;
 mod multiline_input;
@@ -110,7 +109,6 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
-        Some(cli::Commands::Login(args)) => login_cmd::run(&args),
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
