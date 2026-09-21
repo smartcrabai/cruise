@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# Minimal test framework (same style as scripts/test_adhoc_signing.sh)
+# Minimal test framework
 # ---------------------------------------------------------------------------
 PASS=0
 FAIL=0

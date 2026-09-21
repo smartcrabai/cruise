@@ -568,7 +568,7 @@ impl AuthStatus {
     ///
     /// `any_available` alone is not enough: jcode reports it `false` for an
     /// `openai-compatible` endpoint or a custom `[providers.<name>]` profile
-    /// (the arrangement JCODE.md §3.5 documents for custom providers) while
+    /// (the arrangement cruise provisions for custom providers) while
     /// still listing that provider as `available` and running turns through it.
     /// Gating on the flag alone would block those runs outright.
     #[must_use]
