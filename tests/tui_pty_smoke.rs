@@ -185,6 +185,14 @@ impl Fixture {
         id.to_string()
     }
 
+    fn seed_resumable_session(&self) -> String {
+        self.seed_current_branch_session(
+            "20260831000000003_00000000000000000000000000000003",
+            "Resumable terminal session",
+            "sleep 2; echo resumed",
+        )
+    }
+
     fn seed_planned_session(&self) -> String {
         let id = "20260831000000000_00000000000000000000000000000000";
         let id =
@@ -776,6 +784,52 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
 }
 
 #[test]
+fn suspended_session_can_be_resumed_through_the_pty() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let id = fixture.seed_resumable_session();
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.wait_for_output("Resumable terminal session", START_TIMEOUT);
+    tui.send(b"a");
+    tui.wait_for_output("Run on Current Branch", START_TIMEOUT);
+    tui.send(b"j\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Running")
+            && fixture
+                .manager
+                .load(&id)
+                .is_ok_and(|state| state.phase == SessionPhase::Running)
+    });
+    tui.send(b"a");
+    tui.wait_for_output("Cancel", START_TIMEOUT);
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Suspended")
+            && fixture
+                .manager
+                .load(&id)
+                .is_ok_and(|state| state.phase == SessionPhase::Suspended)
+    });
+    tui.send(b"a");
+    tui.wait_for_output("Resume", START_TIMEOUT);
+    tui.send(b"\r");
+    tui.wait_for_screen(Duration::from_secs(15), |screen| {
+        screen.contains("Completed")
+            && fixture
+                .manager
+                .load(&id)
+                .is_ok_and(|state| state.phase == SessionPhase::Completed)
+    });
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+}
+
+#[test]
 fn undersized_terminal_shows_resize_notice_and_restores_terminal() {
     if !tui_available() {
         return;
@@ -894,6 +948,75 @@ fn phase_specific_action_palettes_expose_the_supported_operations() {
 }
 
 #[test]
+fn sessions_entry_point_shows_derived_sidebar_statuses_and_draft_symbol() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.seed_display_session(1, "sidebar draft", SessionPhase::Draft, false, None);
+    fixture.seed_display_session(2, "sidebar input", SessionPhase::AwaitingInput, false, None);
+    fixture.seed_display_session(
+        3,
+        "sidebar approval",
+        SessionPhase::AwaitingApproval,
+        true,
+        None,
+    );
+    fixture.seed_display_session(
+        4,
+        "sidebar planning",
+        SessionPhase::AwaitingApproval,
+        false,
+        None,
+    );
+    fixture.seed_display_session(5, "sidebar planned", SessionPhase::Planned, true, None);
+    fixture.seed_display_session(6, "sidebar completed", SessionPhase::Completed, false, None);
+    fixture.seed_display_session(
+        7,
+        "sidebar failed",
+        SessionPhase::Failed("run failed".to_string()),
+        false,
+        None,
+    );
+    fixture.seed_display_session(8, "sidebar suspended", SessionPhase::Suspended, false, None);
+    let plan_failed_id = fixture.seed_display_session(
+        9,
+        "sidebar plan failed",
+        SessionPhase::AwaitingApproval,
+        false,
+        None,
+    );
+    let mut plan_failed = fixture
+        .manager
+        .load(&plan_failed_id)
+        .unwrap_or_else(|error| panic!("failed to load plan-failed fixture: {error}"));
+    plan_failed.plan_error = Some("planner failed".to_string());
+    fixture
+        .manager
+        .save(&plan_failed)
+        .unwrap_or_else(|error| panic!("failed to save plan-failed fixture: {error}"));
+
+    let mut tui = fixture.start(120, 30, false);
+    for expected in [
+        "Awaiting Input",
+        "Awaiting Approval",
+        "Planning",
+        "Planned",
+        "Completed",
+        "Failed",
+        "Suspended",
+        "Plan Failed",
+    ] {
+        tui.wait_for_output(expected, START_TIMEOUT);
+    }
+    tui.wait_for_output("◯", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+}
+
+#[test]
 fn destructive_actions_cancel_cleanly_then_apply_after_confirmation() {
     if !tui_available() {
         return;
@@ -984,6 +1107,10 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
     tui.wait_for_output("What should cruise do?", START_TIMEOUT);
     tui.send(b"interactive ask user e2e");
     tui.send(b"\x10");
+    let planning_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Planning") && screen.contains("interactive ask user e2e")
+    });
+    assert!(planning_screen.contains("Planning"));
     let socket_file = PathBuf::from(format!("{}.socket", fake_jcode.display()));
     wait_for_file(&socket_file, START_TIMEOUT);
     let socket = std::fs::read_to_string(&socket_file)
@@ -1008,6 +1135,7 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
             .any(|pair| pair[0].contains("First line") && pair[1].contains("Second line"))
             && screen.contains("Prompt")
             && screen.contains("Enter submit")
+            && screen.contains("Awaiting Input")
     });
     assert!(prompt_screen.contains("First line"));
     assert!(prompt_screen.contains("Second line"));
@@ -1018,6 +1146,11 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
         .unwrap_or_else(|_| panic!("ask_user ToolBridge thread panicked"));
     assert_eq!(response["result"]["isError"], false);
     assert_eq!(response["result"]["content"][0]["text"], "answer from PTY");
+
+    let planning_again = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Planning") && !screen.contains("Awaiting Input")
+    });
+    assert!(planning_again.contains("Planning"));
 
     let cleared_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
         !screen.contains("First line")
@@ -1041,6 +1174,10 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
         .unwrap_or_else(|error| panic!("failed to release fake jcode: {error}"));
 
     tui.wait_for_screen(START_TIMEOUT, |screen| screen.contains("Awaiting Approval"));
+    tui.send(b"a");
+    tui.wait_for_output("Approve", START_TIMEOUT);
+    tui.send(b"\r");
+    tui.wait_for_output("Planned", START_TIMEOUT);
     tui.send(b"q");
     let (status, transcript) = tui.finish();
     assert!(status.success(), "cruise failed in PTY: {transcript}");
@@ -1054,10 +1191,7 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
         .into_iter()
         .find(|session| session.input == "interactive ask user e2e")
         .unwrap_or_else(|| panic!("interactive session was not persisted"));
-    assert!(matches!(
-        session.phase,
-        SessionPhase::AwaitingApproval | SessionPhase::Planned
-    ));
+    assert!(matches!(session.phase, SessionPhase::Planned));
     let plan = std::fs::read_to_string(session.plan_path(&fixture.manager.sessions_dir()))
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(plan.contains("Interactive E2E Plan"));

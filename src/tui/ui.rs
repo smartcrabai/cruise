@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
 
-use super::app::{DetailTab, Modal, TuiApp, View, action_label};
+use super::app::{DetailTab, Modal, SidebarStatus, TuiApp, View, action_label};
 use super::forms::{Editor, Launch, SourceKind, Step};
 pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
@@ -141,15 +141,24 @@ fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let row_width = usize::from(area.width)
+        .saturating_sub(2)
+        .saturating_sub(Line::from("▸ ").width());
     let items = app.sessions.iter().map(|session| {
-        let phase = session.phase.label();
-        let title_width = usize::from(area.width)
-            .saturating_sub(phase.chars().count())
-            .saturating_sub(7);
+        let status = app.sidebar_status(session);
+        let prefix = format!("{} ", status.symbol());
+        let suffix = format!(" · {}", status.label());
+        let status_style = sidebar_status_style(app, status);
+        let title_width = row_width
+            .saturating_sub(Line::from(prefix.as_str()).width())
+            .saturating_sub(Line::from(suffix.as_str()).width());
         ListItem::new(Line::from(vec![
-            Span::styled("● ", phase_style(app, &session.phase)),
-            Span::raw(truncate(session.title_or_input(), title_width)),
-            Span::styled(format!(" · {phase}"), phase_style(app, &session.phase)),
+            Span::styled(prefix, status_style),
+            Span::raw(truncate_sidebar_title(
+                session.title_or_input(),
+                title_width,
+            )),
+            Span::styled(suffix, status_style),
         ]))
     });
     let mut state =
@@ -161,7 +170,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 format!(" Sessions  {} ", app.sessions.len()),
                 true,
             ))
-            .highlight_style(selection(app))
+            .highlight_style(sidebar_selection(app))
             .highlight_symbol("▸ "),
         area,
         &mut state,
@@ -1052,6 +1061,30 @@ fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
     }
 }
 
+#[must_use]
+pub(crate) fn sidebar_status_style(app: &TuiApp, status: SidebarStatus) -> Style {
+    match status {
+        SidebarStatus::AwaitingInput | SidebarStatus::AwaitingApproval => {
+            colored(app, Color::Rgb(125, 211, 252))
+        }
+        SidebarStatus::Running | SidebarStatus::Planning => warning(app),
+        SidebarStatus::Draft | SidebarStatus::Completed => success(app),
+        SidebarStatus::Planned => colored(app, Color::Rgb(96, 165, 250)),
+        SidebarStatus::Failed | SidebarStatus::PlanFailed => error_style(app),
+        SidebarStatus::Suspended => colored(app, Color::Rgb(192, 132, 252)),
+    }
+}
+
+fn sidebar_selection(app: &TuiApp) -> Style {
+    if app.display.no_color {
+        selection(app)
+    } else {
+        Style::default()
+            .bg(Color::Rgb(30, 41, 59))
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
 fn workspace_label(mode: WorkspaceMode) -> &'static str {
     match mode {
         WorkspaceMode::Worktree => "worktree",
@@ -1072,9 +1105,37 @@ fn truncate(value: &str, max: usize) -> String {
     }
 }
 
+fn truncate_sidebar_title(value: &str, max: usize) -> String {
+    let value_width = Line::from(value).width();
+    if value_width <= max {
+        return value.to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = Line::from(ellipsis).width();
+    if max < ellipsis_width {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let mut width = 0;
+    for (start, character) in value.char_indices() {
+        let end = start + character.len_utf8();
+        let character_width = Line::from(&value[start..end]).width();
+        if width + character_width + ellipsis_width > max {
+            break;
+        }
+        result.push(character);
+        width += character_width;
+    }
+    result.push_str(ellipsis);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionState;
 
     fn rendered_lines_with(
         width: u16,
@@ -1101,6 +1162,38 @@ mod tests {
         process_lock: Option<crate::test_support::ProcessLock>,
         configure: impl FnOnce(&mut TuiApp),
     ) -> Vec<String> {
+        rendered_buffer_with_lock(width, height, no_color, view, process_lock, configure)
+            .content
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
+            .collect()
+    }
+
+    fn rendered_buffer_with(
+        width: u16,
+        height: u16,
+        no_color: bool,
+        view: View,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> ratatui::buffer::Buffer {
+        rendered_buffer_with_lock(
+            width,
+            height,
+            no_color,
+            view,
+            Some(crate::test_support::lock_process()),
+            configure,
+        )
+    }
+
+    fn rendered_buffer_with_lock(
+        width: u16,
+        height: u16,
+        no_color: bool,
+        view: View,
+        process_lock: Option<crate::test_support::ProcessLock>,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> ratatui::buffer::Buffer {
         let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = crate::application::CruiseApplication::new(
             crate::session::SessionManager::new(temp.path().to_path_buf()),
@@ -1117,13 +1210,7 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &mut app))
             .unwrap_or_else(|error| panic!("{error}"));
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(usize::from(width))
-            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
-            .collect()
+        terminal.backend().buffer().clone()
     }
 
     fn rendered_view_with(
@@ -1134,6 +1221,335 @@ mod tests {
         configure: impl FnOnce(&mut TuiApp),
     ) -> String {
         rendered_lines_with(width, height, no_color, view, configure).join("\n")
+    }
+
+    fn style_test_app(no_color: bool) -> TuiApp {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = crate::application::CruiseApplication::new(
+            crate::session::SessionManager::new(temp.path().to_path_buf()),
+        );
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (log_tx, _) = tokio::sync::mpsc::channel(4);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            event_tx,
+            log_tx,
+            Some(crate::test_support::lock_process()),
+        );
+        app.display.no_color = no_color;
+        app
+    }
+
+    fn sidebar_session(id: &str, phase: SessionPhase) -> SessionState {
+        let mut state = SessionState::new(
+            id.to_string(),
+            std::path::PathBuf::from("."),
+            "cruise.yaml".to_string(),
+            format!("{id} title"),
+        );
+        state.phase = phase;
+        state
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, width: u16, row: usize) -> String {
+        buffer
+            .content
+            .chunks(usize::from(width))
+            .nth(row)
+            .map(|cells| cells.iter().map(ratatui::buffer::Cell::symbol).collect())
+            .unwrap_or_default()
+    }
+
+    fn row_containing(buffer: &ratatui::buffer::Buffer, width: u16, text: &str) -> usize {
+        (0..usize::from(buffer.area.height))
+            .rev()
+            .find(|row| {
+                let rendered = row_text(buffer, width, *row);
+                let compact = rendered.replace(' ', "");
+                let expected = text.replace(' ', "");
+                (rendered.contains(text) || compact.contains(&expected))
+                    && (rendered.contains("●") || rendered.contains("◯"))
+            })
+            .unwrap_or_else(|| panic!("missing {text:?} in rendered buffer"))
+    }
+
+    fn foreground_for_symbol(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        row: usize,
+        symbol: &str,
+    ) -> Color {
+        buffer
+            .content
+            .chunks(usize::from(width))
+            .nth(row)
+            .and_then(|cells| cells.iter().find(|cell| cell.symbol() == symbol))
+            .map_or_else(
+                || panic!("missing symbol {symbol:?} on row {row}"),
+                |cell| cell.fg,
+            )
+    }
+
+    fn cells_for_text<'a>(
+        buffer: &'a ratatui::buffer::Buffer,
+        width: u16,
+        row: usize,
+        text: &str,
+    ) -> &'a [ratatui::buffer::Cell] {
+        let cells = buffer
+            .content
+            .chunks(usize::from(width))
+            .nth(row)
+            .unwrap_or_else(|| panic!("missing row {row}"));
+        let symbols = text
+            .chars()
+            .map(|character| character.to_string())
+            .collect::<Vec<_>>();
+        let start = cells
+            .windows(symbols.len())
+            .position(|window| {
+                window
+                    .iter()
+                    .zip(&symbols)
+                    .all(|(cell, symbol)| cell.symbol() == symbol.as_str())
+            })
+            .unwrap_or_else(|| panic!("missing {text:?} on row {row}"));
+        &cells[start..start + symbols.len()]
+    }
+
+    fn assert_sidebar_row_status(
+        index: usize,
+        status: SidebarStatus,
+        phase: SessionPhase,
+        plan_available: bool,
+        color: Color,
+    ) {
+        let selected_id = format!("s{index}");
+        let unselected_id = format!("u{index}");
+        let mut selected = sidebar_session(&selected_id, phase.clone());
+        let mut unselected = sidebar_session(&unselected_id, phase);
+        if status == SidebarStatus::PlanFailed {
+            selected.plan_error = Some("planner failed".to_string());
+            unselected.plan_error = Some("planner failed".to_string());
+        }
+        let buffer = rendered_buffer_with(120, 24, false, View::Sessions, |app| {
+            app.sessions = vec![selected, unselected];
+            app.selected = 0;
+            if plan_available {
+                app.sidebar_plan_available.insert(selected_id.clone());
+                app.sidebar_plan_available.insert(unselected_id.clone());
+            }
+        });
+        let selected_row = row_containing(&buffer, 120, &format!("{selected_id} title"));
+        let unselected_row = row_containing(&buffer, 120, &format!("{unselected_id} title"));
+        let symbol = status.symbol();
+        assert_eq!(
+            foreground_for_symbol(&buffer, 120, selected_row, symbol),
+            color
+        );
+        assert_eq!(
+            foreground_for_symbol(&buffer, 120, unselected_row, symbol),
+            color
+        );
+        for row in [selected_row, unselected_row] {
+            for cell in cells_for_text(&buffer, 120, row, status.label()) {
+                assert_eq!(cell.fg, color, "status {status:?} label cell");
+            }
+        }
+        let selected_title =
+            cells_for_text(&buffer, 120, selected_row, &format!("{selected_id} title"));
+        assert!(
+            selected_title
+                .iter()
+                .all(|cell| cell.bg == Color::Rgb(30, 41, 59))
+        );
+        assert!(
+            selected_title
+                .iter()
+                .all(|cell| cell.modifier.contains(Modifier::BOLD))
+        );
+        let unselected_title = cells_for_text(
+            &buffer,
+            120,
+            unselected_row,
+            &format!("{unselected_id} title"),
+        );
+        assert!(unselected_title.iter().all(|cell| cell.bg == Color::Reset));
+        assert!(
+            unselected_title
+                .iter()
+                .all(|cell| !cell.modifier.contains(Modifier::BOLD))
+        );
+        let expected_symbol = if status == SidebarStatus::Draft {
+            "◯"
+        } else {
+            "●"
+        };
+        assert_eq!(symbol, expected_symbol);
+    }
+
+    #[test]
+    fn sidebar_status_styles_match_the_approved_palette_and_no_color() {
+        let app = style_test_app(false);
+        let cases = [
+            (SidebarStatus::AwaitingInput, Color::Rgb(125, 211, 252)),
+            (SidebarStatus::AwaitingApproval, Color::Rgb(125, 211, 252)),
+            (SidebarStatus::Running, Color::Rgb(251, 191, 36)),
+            (SidebarStatus::Planning, Color::Rgb(251, 191, 36)),
+            (SidebarStatus::Draft, Color::Rgb(74, 222, 128)),
+            (SidebarStatus::Planned, Color::Rgb(96, 165, 250)),
+            (SidebarStatus::Completed, Color::Rgb(74, 222, 128)),
+            (SidebarStatus::Failed, Color::Rgb(248, 113, 113)),
+            (SidebarStatus::PlanFailed, Color::Rgb(248, 113, 113)),
+            (SidebarStatus::Suspended, Color::Rgb(192, 132, 252)),
+        ];
+
+        for (status, color) in cases {
+            assert_eq!(sidebar_status_style(&app, status).fg, Some(color));
+        }
+
+        drop(app);
+        let no_color_app = style_test_app(true);
+        for (status, _) in cases {
+            let style = sidebar_status_style(&no_color_app, status);
+            assert_eq!(style.fg, None);
+            assert_eq!(style.bg, None);
+        }
+    }
+
+    #[test]
+    fn sidebar_rows_render_all_statuses_with_selection_and_palette() {
+        let cases = [
+            (
+                SidebarStatus::AwaitingInput,
+                SessionPhase::AwaitingInput,
+                false,
+                Color::Rgb(125, 211, 252),
+            ),
+            (
+                SidebarStatus::AwaitingApproval,
+                SessionPhase::AwaitingApproval,
+                true,
+                Color::Rgb(125, 211, 252),
+            ),
+            (
+                SidebarStatus::Running,
+                SessionPhase::Running,
+                false,
+                Color::Rgb(251, 191, 36),
+            ),
+            (
+                SidebarStatus::Planning,
+                SessionPhase::AwaitingApproval,
+                false,
+                Color::Rgb(251, 191, 36),
+            ),
+            (
+                SidebarStatus::Draft,
+                SessionPhase::Draft,
+                false,
+                Color::Rgb(74, 222, 128),
+            ),
+            (
+                SidebarStatus::Planned,
+                SessionPhase::Planned,
+                false,
+                Color::Rgb(96, 165, 250),
+            ),
+            (
+                SidebarStatus::Completed,
+                SessionPhase::Completed,
+                false,
+                Color::Rgb(74, 222, 128),
+            ),
+            (
+                SidebarStatus::Failed,
+                SessionPhase::Failed("run failed".to_string()),
+                false,
+                Color::Rgb(248, 113, 113),
+            ),
+            (
+                SidebarStatus::PlanFailed,
+                SessionPhase::AwaitingApproval,
+                false,
+                Color::Rgb(248, 113, 113),
+            ),
+            (
+                SidebarStatus::Suspended,
+                SessionPhase::Suspended,
+                false,
+                Color::Rgb(192, 132, 252),
+            ),
+        ];
+
+        for (index, (status, phase, plan_available, color)) in cases.into_iter().enumerate() {
+            assert_sidebar_row_status(index, status, phase, plan_available, color);
+        }
+    }
+
+    #[test]
+    fn sidebar_uses_the_draft_circle_and_keeps_long_status_labels_visible() {
+        let draft_buffer = rendered_buffer_with(120, 24, false, View::Sessions, |app| {
+            app.sessions = vec![
+                sidebar_session("draft", SessionPhase::Draft),
+                sidebar_session("completed", SessionPhase::Completed),
+            ];
+            app.selected = 1;
+        });
+        let draft_row = row_containing(&draft_buffer, 120, "draft title");
+        assert!(row_text(&draft_buffer, 120, draft_row).contains("◯"));
+
+        for width in [80, 120] {
+            let buffer = rendered_buffer_with(width, 24, false, View::Sessions, |app| {
+                let mut state = sidebar_session(
+                    "日本語の長いタイトルを含むセッション",
+                    SessionPhase::AwaitingApproval,
+                );
+                state.plan_error = Some("planner failed".to_string());
+                app.sessions = vec![state];
+                app.selected = 0;
+            });
+            let row = row_containing(&buffer, width, "日本語の長い");
+            let text = row_text(&buffer, width, row);
+            assert!(text.contains("Plan Failed"), "width {width}: {text:?}");
+            assert!(text.contains("▸ "), "width {width}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn no_color_keeps_sidebar_content_and_selection_without_rgb_styles() {
+        let buffer = rendered_buffer_with(120, 24, true, View::Sessions, |app| {
+            app.sessions = vec![sidebar_session("completed", SessionPhase::Completed)];
+            app.selected = 0;
+        });
+        let row = row_containing(&buffer, 120, "completed title");
+        let cells = buffer
+            .content
+            .chunks(120)
+            .nth(row)
+            .unwrap_or_else(|| panic!("missing row {row}"));
+        let marker = cells
+            .iter()
+            .find(|cell| cell.symbol() == "●")
+            .unwrap_or_else(|| panic!("missing status symbol"));
+        assert_eq!(marker.fg, Color::Reset);
+        assert_eq!(marker.bg, Color::Reset);
+        assert!(row_text(&buffer, 120, row).contains("▸ "));
+        assert!(row_text(&buffer, 120, row).contains("Completed"));
+    }
+
+    #[test]
+    fn info_tab_keeps_the_persisted_phase_when_sidebar_shows_plan_failed() {
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("approval", SessionPhase::AwaitingApproval);
+            state.plan_error = Some("planner failed".to_string());
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+
+        assert!(view.contains("Plan Failed"));
+        assert!(view.contains("Phase    Awaiting Approval"));
     }
 
     #[test]

@@ -49,6 +49,17 @@ impl PromptQueue {
         }
     }
 
+    #[must_use]
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|prompt| prompt.session_id == session_id)
+            || self
+                .items
+                .iter()
+                .any(|prompt| prompt.session_id == session_id)
+    }
+
     pub fn sync_session(
         &mut self,
         session_id: &str,
@@ -225,5 +236,41 @@ mod tests {
         queue.enqueue(prompt.into());
         queue.open_next();
         assert!(queue.selected_option().is_none());
+    }
+
+    fn prompt(session_id: &str, request_id: &str) -> PromptItem {
+        PromptItem {
+            request_id: request_id.to_string(),
+            session_id: session_id.to_string(),
+            kind: PendingPromptKind::Ask,
+            question: "What next?".to_string(),
+            choices: vec![],
+        }
+    }
+
+    #[test]
+    fn has_session_detects_active_and_queued_prompts_but_not_other_sessions() {
+        let mut queue = PromptQueue::default();
+        queue.enqueue(prompt("queued", "queued-request"));
+        queue.enqueue(prompt("active", "active-request"));
+
+        assert!(queue.has_session("queued"));
+        assert!(queue.has_session("active"));
+        assert!(!queue.has_session("missing"));
+
+        queue.open_next();
+        assert!(queue.has_session("queued"));
+        assert!(queue.has_session("active"));
+    }
+
+    #[test]
+    fn has_session_stops_reporting_a_prompt_after_session_sync_removes_it() {
+        let mut queue = PromptQueue::default();
+        queue.enqueue(prompt("session", "request"));
+        queue.open_next();
+        assert!(queue.has_session("session"));
+
+        queue.sync_session("session", std::iter::empty());
+        assert!(!queue.has_session("session"));
     }
 }
