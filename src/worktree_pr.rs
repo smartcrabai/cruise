@@ -1,7 +1,7 @@
-/// Shared worktree PR helper functions used by both the CLI and the GUI.
+/// Shared worktree PR helper functions used by both the CLI and the `WebUI`.
 ///
 /// Functions in this module are extracted from `run_cmd.rs` so that
-/// `src-tauri` (the GUI crate) can call the same PR post-processing logic
+/// `src/webui` can call the same PR post-processing logic
 /// without duplicating it.
 use std::path::Path;
 

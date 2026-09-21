@@ -1726,7 +1726,7 @@ mod tests {
 
     /// Run config while capturing `on_step_log` emissions as `(stream, line)` pairs.
     /// Useful for testing the engine's progress-line callback independently of
-    /// what the CLI/GUI frontends do with those lines.
+    /// what the CLI/`WebUI` frontends do with those lines.
     async fn run_config_with_log(
         yaml: &str,
         input: &str,

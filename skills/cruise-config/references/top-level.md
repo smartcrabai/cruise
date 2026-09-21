@@ -111,7 +111,7 @@ Model used by the built-in plan step (driven by `cruise plan`). Falls back to `m
 
 ## `description`
 
-Free-form text shown alongside the file name in the CLI/GUI config selectors. Purely informational; no effect on execution.
+Free-form text shown alongside the file name in the CLI/WebUI config selectors. Purely informational; no effect on execution.
 
 ```yaml
 description: Full TDD flow with review loop

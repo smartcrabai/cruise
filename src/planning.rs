@@ -19,7 +19,7 @@ use crate::variable::VariableStore;
 // Built-in plan/fix/ask prompt templates, embedded at compile time. The `*_SDK`
 // variants drive the agent via the `submit_plan` / `update_plan` / `ask_user`
 // tools instead of writing the plan file directly. Shared by the CLI
-// (`plan_cmd`) and the GUI (`src-tauri`) so the two never drift.
+// (`plan_cmd`) and the WebUI (`src/webui`) so the two never drift.
 pub const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 pub const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 pub const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
@@ -69,7 +69,7 @@ fn clarification_guidance(interactive: bool) -> &'static str {
 ///
 /// Registers both `{plan}` (the session plan file path) and `{plan.language}`
 /// (the effective `languages.plan` value, including environment/locale
-/// resolution applied before planning) so CLI and GUI planning prompts resolve
+/// resolution applied before planning) so CLI and `WebUI` planning prompts resolve
 /// the same variables.
 #[must_use]
 pub fn setup_plan_vars(
@@ -159,7 +159,7 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
 pub struct PlanPromptCtx<'a> {
     /// Workflow configuration (selects command vs SDK backend, model refs).
     pub config: &'a WorkflowConfig,
-    /// UI handler backing the SDK `ask_user` tool (CLI or GUI).
+    /// UI handler backing the SDK `ask_user` tool (CLI or `WebUI`).
     pub ask: Arc<dyn AskHandler>,
     /// Session `plan.md` path (where SDK plan tools read/write).
     pub plan_path: &'a Path,
@@ -533,7 +533,7 @@ pub fn resolve_generated_plan_content(
 /// - `sdk: claude` transcripts are not read by cruise.
 ///
 /// The two consumers (`ensure_plan_persisted` and
-/// [`resolve_generated_plan_content`], the latter also called by the GUI) treat
+/// [`resolve_generated_plan_content`], the latter also called by the `WebUI`) treat
 /// `None` as "no extra diagnosis available" and keep their generic message.
 #[must_use]
 pub fn read_sdk_transcript(_working_dir: Option<&Path>, _session_id: &str) -> Option<String> {

@@ -1,7 +1,7 @@
 //! Bounded-concurrency batch scheduler for `run --all`.
 //!
-//! Used by the CLI (`src/run_cmd.rs`) and the GUI (`src-tauri/src/commands.rs`)
-//! for parallel session execution.
+//! Used by the CLI (`src/run_cmd.rs`) and the `WebUI` (`src/webui`) for parallel
+//! session execution.
 //!
 //! ## Scheduling rules
 //! 1. Seed from [`SessionManager::run_all_remaining`] to get the initial candidate list.

@@ -10,7 +10,7 @@ pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 ///
 /// Lives here (rather than in the CLI-only `cli` module) because this file is
 /// shared by both the `cruise` binary and the `cruise` library crate (used by
-/// the Tauri GUI), and [`resolve_effective_max_retries`] must be callable from
+/// the `WebUI`), and [`resolve_effective_max_retries`] must be callable from
 /// both.
 pub const DEFAULT_MAX_RETRIES: usize = 3;
 
@@ -129,7 +129,7 @@ pub struct WorkflowConfig {
     pub after_pr: IndexMap<String, StepConfig>,
 
     /// Human-readable description displayed alongside the file name in config selectors
-    /// (CLI and GUI both read this via [`crate::yaml_metadata::extract_one_line_description`],
+    /// (CLI and `WebUI` both read this via [`crate::yaml_metadata::extract_one_line_description`],
     /// which parses the full `WorkflowConfig` first and falls back to a raw re-parse only
     /// when that fails). Kept as a real field (rather than derived purely from YAML text)
     /// so it round-trips when a config is persisted back to YAML, e.g. into a session's

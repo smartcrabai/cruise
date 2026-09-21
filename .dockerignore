@@ -8,10 +8,6 @@ target
 id_rsa
 id_ed25519
 node_modules
-ui/node_modules
-ui/dist
-ui/.next
-src-tauri/target
 *.md
 !README.md
 .vscode

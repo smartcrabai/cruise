@@ -69,9 +69,32 @@ pub enum Commands {
     Login(LoginArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
+    /// Serve the browser UI from this machine and open it in the default browser.
+    Webui(WebuiArgs),
     /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
     #[command(name = "mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WebuiArgs {
+    /// Interface to bind. Non-loopback values expose an unauthenticated UI.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// TCP port to listen on.
+    #[arg(long, default_value_t = 8484)]
+    pub port: u16,
+
+    /// Do not open the browser automatically.
+    #[arg(long)]
+    pub no_open: bool,
+
+    /// Serve templates and static files from this directory (containing
+    /// `templates/` and `static/`) instead of the embedded copy; templates are
+    /// re-read on every request (development: `--webui-dir webui`).
+    #[arg(long, value_name = "DIR")]
+    pub webui_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -233,7 +256,7 @@ pub struct ListArgs {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
-    /// Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
+    /// Set the maximum number of sessions the `WebUI` runs concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
     #[arg(long, value_name = "N")]

@@ -21,7 +21,7 @@ pub struct NewSessionHistoryEntry {
     /// User-typed task description. Empty string for legacy entries.
     #[serde(default)]
     pub input: String,
-    /// The raw config selection shown in the GUI dropdown.
+    /// The raw config selection shown in the `WebUI` dropdown.
     ///
     /// `None` means "auto resolve".
     #[serde(default)]

@@ -331,7 +331,7 @@ fn format_version((major, minor, patch): (u64, u64, u64)) -> String {
 ///
 /// Deliberately free of the per-run socket path. `$JCODE_HOME` is shared by
 /// every cruise process on the machine, so a per-run rewrite would have
-/// concurrent runs (CLI next to GUI, several repositories) overwrite each
+/// concurrent runs (CLI next to `WebUI`, several repositories) overwrite each
 /// other's registration. The socket travels in the `jcode` child's environment
 /// instead, which jcode passes on to the MCP servers it spawns.
 ///
@@ -352,8 +352,8 @@ fn registration_entry(exe: &Path) -> serde_json::Value {
 /// executable.
 ///
 /// The entry is `current_exe`-derived, so it is rewritten when cruise moves (a
-/// reinstall, a different build) and when the CLI and the GUI take turns -- the
-/// GUI runs prompts in-process, so `current_exe` is then `cruise-gui`, which
+/// reinstall, a different build) and when the CLI and the `WebUI` take turns --
+/// the `WebUI` runs prompts in-process, so `current_exe` is then `cruise`, which
 /// serves `mcp-bridge` too. It is also rewritten when a fixed registration
 /// field such as `timeout_secs` changes. Every rewrite takes an advisory lock
 /// and lands through tmp+rename, so concurrent cruise processes sharing the
