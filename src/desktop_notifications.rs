@@ -41,7 +41,7 @@ pub(crate) trait NotificationBackend {
     fn send(&self, payload: &NotificationPayload);
 }
 
-fn sanitize_text(text: &str) -> String {
+pub(crate) fn sanitize_text(text: &str) -> String {
     text.chars()
         .map(|character| {
             if character <= '\u{1f}' || character == '\u{7f}' {

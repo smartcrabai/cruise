@@ -115,6 +115,17 @@ permission never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_NOTIFICATIONS=1` in CI, headless environments, or tests to
 disable them.
 
+### herdr integration
+
+Inside a [herdr](https://herdr.dev) pane (`HERDR_ENV=1` with `HERDR_PANE_ID` and
+`HERDR_BIN_PATH` set), the TUI, `cruise plan`, `cruise run`, and `cruise exec`
+report their lifecycle state through `"$HERDR_BIN_PATH" pane report-agent` as
+source `custom:cruise` / agent `cruise`: `working` while planning or executing
+steps, `blocked` while waiting for an answer, an option selection, or plan
+review, and `idle` otherwise. Authority is released on exit. Reporting is
+best-effort and never changes workflow success, failure, or exit status. Set
+`CRUISE_DISABLE_HERDR=1` to disable it.
+
 ### TUI (Interactive Keyboard Client)
 
 Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
@@ -644,6 +655,8 @@ The CLI and desktop GUI also apply these process-level workflow overrides when l
 `CRUISE_TOOL_SOCKET` names the Unix socket a `cruise mcp-bridge` child dials to reach the parent run's tool server. Cruise sets it on the jcode child, which passes it on to the MCP servers it spawns; it is also the default for `cruise mcp-bridge --socket`.
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
+
+`CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
 
 Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_HOME` (cruise's own jcode home, which keeps your `~/.jcode` untouched) and `JCODE_NO_TELEMETRY=1`. When a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` are set to that effort as well; jcode ignores them for providers and models without reasoning-effort support.
 

@@ -447,6 +447,23 @@ impl TuiApp {
         !self.registry.tasks_empty() || self.registry.batch_busy() || self.application_has_claims()
     }
 
+    /// The lifecycle state herdr should show for this pane.
+    ///
+    /// A plan awaiting approval is *not* blocked: nothing is waiting on the
+    /// user, herdr derives `done` from the working→idle transition instead.
+    #[must_use]
+    pub fn herdr_state(&self) -> (crate::herdr::AgentState, Option<&str>) {
+        use crate::herdr::AgentState;
+
+        if !self.prompts.is_empty() {
+            (AgentState::Blocked, self.prompts.front_question())
+        } else if self.is_busy() {
+            (AgentState::Working, None)
+        } else {
+            (AgentState::Idle, None)
+        }
+    }
+
     fn application_has_claims(&self) -> bool {
         self.sessions.iter().any(|session| {
             self.application
@@ -3396,6 +3413,33 @@ mod tests {
         notifications
             .next()
             .unwrap_or_else(|| panic!("expected one queued notification"))
+    }
+
+    #[test]
+    fn herdr_state_is_blocked_only_while_a_prompt_is_queued() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-1".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+        assert_eq!(
+            app.herdr_state(),
+            (
+                crate::herdr::AgentState::Blocked,
+                Some("Which provider should be used?")
+            )
+        );
+
+        app.prompts.close_active();
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
     }
 
     #[test]

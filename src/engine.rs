@@ -1202,6 +1202,7 @@ pub(crate) async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             let prompt_text = format!("  {resolved}");
+            let _blocked = crate::herdr::blocked(&resolved);
             let text = crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?;
             vars.set_input(text);
         } else {

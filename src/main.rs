@@ -37,6 +37,7 @@ mod exec_cmd;
 mod executor;
 mod file_tracker;
 mod graph;
+mod herdr;
 mod issue_publish;
 mod list_cmd;
 mod login_cmd;

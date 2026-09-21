@@ -33,7 +33,9 @@ pub async fn run() -> Result<()> {
         ));
     }
     let data_dir = crate::paths::data_dir()?;
-    run_with_application(CruiseApplication::new(SessionManager::new(data_dir))).await
+    let result = run_with_application(CruiseApplication::new(SessionManager::new(data_dir))).await;
+    crate::herdr::release();
+    result
 }
 
 async fn run_with_application(application: CruiseApplication) -> Result<()> {
@@ -55,6 +57,8 @@ async fn run_with_application(application: CruiseApplication) -> Result<()> {
     let mut input_error: Option<String> = None;
     let mut redraw = true;
     loop {
+        let (state, message) = app.herdr_state();
+        crate::herdr::report(state, message);
         for payload in app.take_notifications() {
             std::mem::drop(tokio::task::spawn_blocking(move || {
                 crate::desktop_notifications::send_payload_best_effort(&payload);
