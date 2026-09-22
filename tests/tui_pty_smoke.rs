@@ -1311,7 +1311,11 @@ fn active_run_all_can_be_cancelled_and_suspends_the_session() {
 
 #[test]
 #[cfg(unix)]
-fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the entry-point test covers the complete Ask lifecycle in one PTY"
+)]
+fn ask_user_uses_the_real_pty_path_for_inline_plan_questions_and_resume() {
     if !tui_available() {
         return;
     }
@@ -1352,17 +1356,32 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
             )
         }
     });
-    let prompt_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+    let info_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Awaiting Input")
+            && !screen.contains("First line")
+            && !screen.contains("Second line")
+            && !screen.contains("Answer:")
+    });
+    assert!(info_screen.contains("Awaiting Input"));
+    assert!(!info_screen.contains("First line"));
+    assert!(!info_screen.contains("Answer:"));
+
+    tui.send(b"]");
+    tui.send(b"]");
+    let plan_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
         let rows = screen.lines().collect::<Vec<_>>();
         rows.windows(2)
             .any(|pair| pair[0].contains("First line") && pair[1].contains("Second line"))
-            && screen.contains("Prompt")
-            && screen.contains("Enter submit")
+            && screen.contains("Answer")
+            && !screen.contains("Prompt")
             && screen.contains("Awaiting Input")
     });
-    assert!(prompt_screen.contains("First line"));
-    assert!(prompt_screen.contains("Second line"));
+    assert!(plan_screen.contains("First line"));
+    assert!(plan_screen.contains("Second line"));
+    assert!(plan_screen.contains("Answer"));
+    assert!(!plan_screen.contains("Prompt"));
 
+    tui.send(b"\r");
     tui.send(b"answer from PTY\r");
     let response = ask_thread
         .join()
@@ -1378,15 +1397,48 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
     let cleared_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
         !screen.contains("First line")
             && !screen.contains("Second line")
-            && !screen.contains("Enter submit")
+            && !screen.contains("Answer")
             && !screen.contains("Prompt")
     });
     assert!(!cleared_screen.contains("First line"));
-    assert!(!cleared_screen.contains("Enter submit"));
+    assert!(!cleared_screen.contains("Answer"));
+
+    let next_ask_thread = thread::spawn({
+        let socket = socket.clone();
+        move || {
+            call_tool(
+                &socket,
+                2,
+                "ask_user",
+                &serde_json::json!({ "question": "Next line\nFinal line" }),
+            )
+        }
+    });
+    let next_plan_screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+        let rows = screen.lines().collect::<Vec<_>>();
+        rows.windows(2)
+            .any(|pair| pair[0].contains("Next line") && pair[1].contains("Final line"))
+            && screen.contains("Answer")
+            && !screen.contains("Prompt")
+    });
+    assert!(next_plan_screen.contains("Next line"));
+    assert!(next_plan_screen.contains("Final line"));
+    assert!(!next_plan_screen.contains("Prompt"));
+
+    tui.send(b"\r");
+    tui.send(b"second answer\r");
+    let next_response = next_ask_thread
+        .join()
+        .unwrap_or_else(|_| panic!("second ask_user ToolBridge thread panicked"));
+    assert_eq!(next_response["result"]["isError"], false);
+    assert_eq!(
+        next_response["result"]["content"][0]["text"],
+        "second answer"
+    );
 
     let submit = call_tool(
         &socket,
-        2,
+        3,
         "submit_plan",
         &serde_json::json!({
             "content": "# Interactive E2E Plan\n\n- preserve the answer path\n"
