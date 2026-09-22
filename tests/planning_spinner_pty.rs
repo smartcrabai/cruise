@@ -334,6 +334,37 @@ impl PtySession {
             }
         }
     }
+
+    /// Cancel the CLI's remaining interactive prompts and wait for it to exit.
+    ///
+    /// A single Escape byte per prompt level is not reliable: `inquire` restores
+    /// the terminal mode between nested prompts, and a byte delivered inside
+    /// that window is discarded rather than queued. Escape is therefore resent
+    /// until the process actually exits, which keeps the teardown deterministic
+    /// regardless of how many prompt levels remain or how slow the host is.
+    fn cancel_until_exit(mut self) -> (ExitStatus, String) {
+        let deadline = Instant::now() + EXIT_TIMEOUT;
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("failed to poll script: {error}"))
+            {
+                return (status, self.raw());
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let status = self
+                    .child
+                    .wait()
+                    .unwrap_or_else(|error| panic!("failed to reap script: {error}"));
+                return (status, self.raw());
+            }
+            self.answer_terminal_queries();
+            self.send(b"\x1b");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 impl Drop for PtySession {
@@ -408,6 +439,28 @@ fn wait_for_loader_frames(session: &PtySession, minimum: usize) {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for {minimum} distinct Planning... frames; raw transcript:\n{}",
+            session.raw()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Wait until `needle` has been written to the PTY more often than `baseline`.
+///
+/// Screen-content predicates cannot distinguish a freshly rendered prompt from
+/// the answered copy `inquire` leaves behind, which matters when the menu before
+/// and after planning offer the same options. Counting new writes in the raw
+/// transcript gives an unambiguous "the next prompt has rendered" boundary.
+fn wait_for_new_output(session: &mut PtySession, needle: &str, baseline: usize) {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        session.answer_terminal_queries();
+        if session.raw().matches(needle).count() > baseline {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a new {needle:?} render beyond {baseline}; raw transcript:\n{}",
             session.raw()
         );
         thread::sleep(Duration::from_millis(25));
@@ -523,6 +576,12 @@ fn cli_plan_pauses_loader_for_ask_user_and_resumes_after_answer() {
         .unwrap_or_else(|error| panic!("failed to read ToolBridge socket path: {error}"));
     let socket = PathBuf::from(socket);
     wait_for_file(&socket, START_TIMEOUT);
+
+    // The loader animates for as long as the turn stays silent, so wait for the
+    // frames that prove it is running before asking the question. Sampling the
+    // transcript only after `ask_user` has already paused the loader is a race:
+    // on a slow host the question can arrive within the first 80ms frame.
+    wait_for_loader_frames(&pty, 2);
 
     let ask_thread = thread::spawn({
         let socket = socket.clone();
@@ -657,10 +716,15 @@ fn cli_list_generate_plan_reuses_planning_loader_and_clears_it() {
     wait_for_loader_frames(&pty, 2);
     fs::write(control.with_extension("release"), b"release")
         .unwrap_or_else(|error| panic!("failed to release command backend: {error}"));
-    pty.wait_for_screen(|screen| screen.contains("Action:"));
+    // `inquire` leaves the answered "? Action: Generate Plan" line on screen, so
+    // "Action:" alone matches before planning even starts. Wait for an option
+    // that only the post-planning AwaitingApproval menu offers.
+    pty.wait_for_screen(|screen| screen.contains("Approve"));
     pty.send(b"\x1b");
-    pty.send(b"\x1b");
-    let (status, raw) = pty.finish();
+    // Escape must dismiss the action menu and then the session picker. Resend it
+    // until the CLI exits so the teardown does not depend on a byte landing
+    // while `inquire` is between prompts.
+    let (status, raw) = pty.cancel_until_exit();
     assert!(status.success(), "cruise list failed:\n{raw}");
     let mut parser = vt100::Parser::new(40, 160, 0);
     parser.process(raw.as_bytes());
@@ -712,6 +776,10 @@ fn cli_list_replan_reuses_planning_loader_and_preserves_planned_state() {
     pty.send(b"\r");
     pty.wait_for_screen(|screen| screen.contains("Describe the changes needed:"));
     pty.send(b"keep the plan structure\r");
+    // The pre-planning menu has already rendered "Action:", and the menu shown
+    // after replanning offers the same options, so record the current count and
+    // wait for a strictly newer render below.
+    let action_renders_before_planning = pty.raw().matches("Action:").count();
     pty.wait_for_file(&control.with_extension("started"));
 
     // Then: Replan uses the same loader boundary and leaves a Planned session
@@ -719,14 +787,12 @@ fn cli_list_replan_reuses_planning_loader_and_preserves_planned_state() {
     wait_for_loader_frames(&pty, 2);
     fs::write(control.with_extension("release"), b"release")
         .unwrap_or_else(|error| panic!("failed to release command backend: {error}"));
-    pty.wait_for_screen(|screen| screen.contains("Action:"));
+    wait_for_new_output(&mut pty, "Action:", action_renders_before_planning);
     pty.send(b"\x1b");
     // The action editor restores terminal mode before the outer picker can
-    // consume another key; wait for that observable boundary instead of
-    // relying on two back-to-back Escape bytes.
-    pty.wait_for_screen(|screen| screen.contains("Select a session:"));
-    pty.send(b"\x1b");
-    let (status, raw) = pty.finish();
+    // consume another key, so a single extra Escape can be dropped. Resend it
+    // until the CLI exits instead.
+    let (status, raw) = pty.cancel_until_exit();
     assert!(status.success(), "cruise list replan failed:\n{raw}");
 
     let listed = run_cruise(&fixture, &["list", "--json"]);
