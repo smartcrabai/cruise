@@ -21,7 +21,7 @@
     "sdk": {
       "type": "string",
       "enum": ["jcode", "claude"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess under cruise's own JCODE_HOME (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix; sign in with `cruise login`); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess in jcode's own home, using the credentials `jcode login` stored (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
     },
     "model": {
       "oneOf": [

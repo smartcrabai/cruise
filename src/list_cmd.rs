@@ -63,7 +63,7 @@ fn session_to_json_with_plan_availability(
         phase,
         phase_error,
         plan_error: session.plan_error,
-        config_source: session.config_source,
+        config_source: session.config.display_label(),
         input: session.input,
         title: session.title,
         current_step: session.current_step,
@@ -76,9 +76,7 @@ fn session_to_json_with_plan_availability(
         workspace_mode: session.workspace_mode,
         target_branch: session.target_branch,
         pr_url: session.pr_url,
-        config_path: session
-            .config_path
-            .map(|p| p.to_string_lossy().into_owned()),
+        config_path: session.config.selection_value(),
         updated_at: session.updated_at,
         awaiting_input: session.awaiting_input,
         plan_available,
@@ -552,18 +550,11 @@ async fn edit_session_settings_interactive(
         CurrentStepUpdate::Unchanged
     };
 
-    // Keep the current explicit config path; changing config is not yet
-    // supported from the interactive picker.
-    let config_path = session
-        .config_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-
     let (updated, config_changed) = update_session_settings(
         manager,
         &session.id,
         SessionSettingsUpdate {
-            config_path,
+            config_path: None,
             skipped_steps,
             current_step_update,
         },
@@ -869,7 +860,9 @@ mod tests {
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("/tmp/cruise.yaml"),
+            },
             "task".to_string(),
         );
         session.phase = SessionPhase::Running;
@@ -895,7 +888,9 @@ mod tests {
         let mut s = SessionState::new(
             id.to_string(),
             PathBuf::from("/tmp"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("/tmp/cruise.yaml"),
+            },
             input.to_string(),
         );
         s.phase = phase;
@@ -1738,7 +1733,9 @@ mod tests {
         // Given: session with base_dir and optional path fields set
         let mut session = make_session("20260306143000", "task", SessionPhase::Planned);
         session.worktree_path = Some(PathBuf::from("/tmp/worktree"));
-        session.config_path = Some(PathBuf::from("/home/user/config.yaml"));
+        session.config = crate::session_config::SessionConfigRef::File {
+            path: PathBuf::from("/home/user/config.yaml"),
+        };
 
         // When
         let dto = session_to_json(session);
@@ -1750,11 +1747,11 @@ mod tests {
     }
 
     #[test]
-    fn test_session_to_json_null_optional_paths_are_none() {
+    fn test_session_to_json_snapshot_path_is_derived_from_the_reference() {
         let session = make_session("20260306143000", "task", SessionPhase::Planned);
         let dto = session_to_json(session);
         assert_eq!(dto.worktree_path, None);
-        assert_eq!(dto.config_path, None);
+        assert_eq!(dto.config_path, Some("/tmp/cruise.yaml".to_string()));
     }
 
     #[test]

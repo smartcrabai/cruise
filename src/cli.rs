@@ -61,17 +61,34 @@ pub enum Commands {
     Config(ConfigArgs),
     /// Execute the workflow config directly in the current directory (no plan, no worktree, no PR).
     Exec(ExecArgs),
-    /// Sign in to a model provider for the `jcode` SDK backend.
-    ///
-    /// Cruise keeps its jcode credentials in its own `JCODE_HOME`, separate
-    /// from your `~/.jcode`, so signing in here never touches your own jcode
-    /// login.
-    Login(LoginArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
+    /// Serve the browser UI from this machine and open it in the default browser.
+    Webui(WebuiArgs),
     /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
     #[command(name = "mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WebuiArgs {
+    /// Interface to bind. Non-loopback values expose an unauthenticated UI.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// TCP port to listen on.
+    #[arg(long, default_value_t = 8484)]
+    pub port: u16,
+
+    /// Do not open the browser automatically.
+    #[arg(long)]
+    pub no_open: bool,
+
+    /// Serve templates and static files from this directory (containing
+    /// `templates/` and `static/`) instead of the embedded copy; templates are
+    /// re-read on every request (development: `--webui-dir webui`).
+    #[arg(long, value_name = "DIR")]
+    pub webui_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -125,8 +142,8 @@ pub struct PlanArgs {
 
     /// Maximum number of retries per LLM call.
     ///
-    /// SDK fallback policies also use this budget for 5xx/network failures and
-    /// fallback switching.
+    /// SDK fallback policies also use this budget for retryable 4xx, 5xx and
+    /// network failures and fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
@@ -156,8 +173,8 @@ pub struct PlanWorkerArgs {
 
     /// Maximum number of retries per LLM call.
     ///
-    /// SDK fallback policies also use this budget for 5xx/network failures and
-    /// fallback switching.
+    /// SDK fallback policies also use this budget for retryable 4xx, 5xx and
+    /// network failures and fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 }
@@ -190,8 +207,8 @@ pub struct RunArgs {
 
     /// Maximum number of retries per step.
     ///
-    /// SDK fallback policies also use this budget for 5xx/network failures and
-    /// fallback switching.
+    /// SDK fallback policies also use this budget for retryable 4xx, 5xx and
+    /// network failures and fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
@@ -233,7 +250,7 @@ pub struct ListArgs {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
-    /// Set the maximum number of sessions the desktop GUI runs concurrently in `run --all` mode.
+    /// Set the maximum number of sessions the `WebUI` runs concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI always runs `run --all` sequentially.
     #[arg(long, value_name = "N")]
@@ -260,40 +277,14 @@ pub struct ExecArgs {
 
     /// Maximum number of retries per step.
     ///
-    /// SDK fallback policies also use this budget for 5xx/network failures and
-    /// fallback switching.
+    /// SDK fallback policies also use this budget for retryable 4xx, 5xx and
+    /// network failures and fallback switching.
     #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
     pub rate_limit_retries: usize,
 
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct LoginArgs {
-    /// Provider to sign in to directly (e.g. `claude`, `openai`, `anthropic-api`).
-    /// When stdin, stdout, and stderr are all TTYs, omit this to open Cruise's
-    /// action menu; choosing provider login then hands control to jcode's
-    /// interactive picker. If any stream is redirected, omission delegates
-    /// directly to jcode without the menu.
-    pub provider: Option<String>,
-
-    /// Store an API key instead of running the OAuth flow. When all three
-    /// standard streams are TTYs, this is also available from Cruise's
-    /// argument-free action menu. The key is read from the
-    /// `CRUISE_LOGIN_API_KEY` environment variable if set, otherwise from an
-    /// echo-less prompt or piped stdin. Requires a provider argument, but never
-    /// accepts the key as an inline command-line argument. The key is handed to
-    /// jcode, which stores it under cruise's `JCODE_HOME`; cruise never writes
-    /// it to its own config.
-    #[arg(long, conflicts_with = "status")]
-    pub api_key: bool,
-
-    /// List the providers configured in cruise's jcode home and the models
-    /// available to them, then exit.
-    #[arg(long)]
-    pub status: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -830,88 +821,6 @@ mod tests {
             }
             _ => panic!("expected Exec subcommand"),
         }
-    }
-
-    // -- Login subcommand ------------------------------------------------------
-
-    #[test]
-    fn test_login_subcommand_without_arguments_opens_the_cruise_action_menu() {
-        // Given: `cruise login` with nothing else
-        let cli = Cli::parse_from(["cruise", "login"]);
-        // When/Then: no provider, no flags -- runtime selects Cruise's TTY menu
-        match cli.command {
-            Some(Commands::Login(args)) => {
-                assert_eq!(args.provider, None);
-                assert!(!args.api_key);
-                assert!(!args.status);
-            }
-            _ => panic!("expected Login subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_login_subcommand_passes_the_provider_through() {
-        let cli = Cli::parse_from(["cruise", "login", "anthropic-api"]);
-        match cli.command {
-            Some(Commands::Login(args)) => {
-                assert_eq!(args.provider.as_deref(), Some("anthropic-api"));
-            }
-            _ => panic!("expected Login subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_login_api_key_takes_a_provider_and_no_inline_value() {
-        // The key must never be a CLI argument (it would land in the process
-        // list), so --api-key is a bare flag next to the provider.
-        let cli = Cli::parse_from(["cruise", "login", "--api-key", "openai-api"]);
-        match cli.command {
-            Some(Commands::Login(args)) => {
-                assert!(args.api_key);
-                assert_eq!(args.provider.as_deref(), Some("openai-api"));
-            }
-            _ => panic!("expected Login subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_login_status_flag_parses() {
-        let cli = Cli::parse_from(["cruise", "login", "--status"]);
-        match cli.command {
-            Some(Commands::Login(args)) => assert!(args.status),
-            _ => panic!("expected Login subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_login_api_key_and_status_conflict() {
-        assert!(
-            Cli::try_parse_from(["cruise", "login", "--api-key", "--status"]).is_err(),
-            "--api-key and --status are mutually exclusive"
-        );
-    }
-
-    #[test]
-    fn login_help_describes_the_tty_menu_and_non_inline_api_key() {
-        let mut command = Cli::command();
-        let login = command
-            .find_subcommand_mut("login")
-            .unwrap_or_else(|| panic!("login subcommand is missing"));
-        let help = login.render_help().to_string();
-        let lowercase_help = help.to_ascii_lowercase();
-
-        assert!(
-            lowercase_help.contains("menu"),
-            "login help should describe the argument-free menu: {help}"
-        );
-        assert!(
-            help.contains("CRUISE_LOGIN_API_KEY") && help.contains("stdin"),
-            "login help should describe safe API-key input: {help}"
-        );
-        assert!(
-            help.contains("--api-key") && lowercase_help.contains("argument"),
-            "login help should make clear that the key is not an inline argument: {help}"
-        );
     }
 
     // -- mcp-bridge subcommand -------------------------------------------------

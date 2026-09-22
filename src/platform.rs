@@ -70,6 +70,25 @@ pub(crate) fn shell_command() -> (&'static str, &'static str) {
     }
 }
 
+/// Opens a URL in the user's default browser.
+///
+/// # Errors
+///
+/// Returns an error when the platform opener cannot be spawned.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let command = "open";
+    #[cfg(not(target_os = "macos"))]
+    let command = "xdg-open";
+    std::process::Command::new(command)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

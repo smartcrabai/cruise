@@ -6,6 +6,7 @@ use crate::cli::DraftArgs;
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::session::{SessionManager, SessionPhase, SessionState};
+use crate::session_config::SessionConfigRef;
 
 pub fn run(args: DraftArgs) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
@@ -19,23 +20,16 @@ pub fn run(args: DraftArgs) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
+    let config = crate::resolver::load_config_from_source(&yaml, &source)?;
+    let config_ref = SessionConfigRef::from_source(&source, None)?;
     let mut session = SessionState::new(
         session_id.clone(),
         base_dir,
-        source.display_string(),
+        config_ref,
         input.trim().to_string(),
     );
-    session.config_path = source.path().cloned();
     session.phase = SessionPhase::Draft;
-    manager.create(&session)?;
-
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(&session_id);
-        if let Err(e) = std::fs::write(session_dir.join("config.yaml"), &yaml) {
-            let _ = manager.delete(&session_id);
-            return Err(CruiseError::IoError(e));
-        }
-    }
+    manager.create_with_config(&session, &config)?;
 
     eprintln!(
         "\n{} Session {} saved as draft.",

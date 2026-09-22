@@ -1,7 +1,7 @@
 //! Image attachment handling for planning input.
 //!
 //! When the user attaches images to a planning task (via CLI `--image` flag,
-//! drag-and-drop into the CLI prompt, or the GUI form), this module:
+//! drag-and-drop into the CLI prompt, or the `WebUI` form), this module:
 //! 1. Copies each source file into the session's `attachments/` directory so
 //!    the path stays stable after the user moves the original.
 //! 2. Returns the absolute paths of the stored copies. Callers append those

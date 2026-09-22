@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::paths;
 use crate::resolver::{ConfigSource, load_config_from_source, resolve_config};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::session_config::SessionConfigRef;
 
 pub(crate) struct ExecRequest {
     pub input: String,
@@ -81,20 +82,19 @@ pub(crate) fn setup_exec_session(
 ) -> Result<SessionState> {
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
-    let mut session =
-        SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = source.path().cloned();
+    let config_ref = SessionConfigRef::from_source(source, None)?;
+    let mut session = SessionState::new(session_id.clone(), base_dir, config_ref, input);
     session.workspace_mode = WorkspaceMode::CurrentBranch;
     session.allow_dirty_working_tree = true;
     session.phase = SessionPhase::Planned;
     session.exec = true;
-    manager.create(&session)?;
+    manager.create_with_config(
+        &session,
+        &crate::resolver::load_config_from_source(yaml, source)?,
+    )?;
 
     let session_dir = manager.sessions_dir().join(&session_id);
     let write_result: crate::error::Result<()> = (|| {
-        if session.config_path.is_none() {
-            std::fs::write(session_dir.join("config.yaml"), yaml)?;
-        }
         let plan_path = session.plan_path(&manager.sessions_dir());
         std::fs::write(&plan_path, "")?;
         Ok(())
@@ -376,11 +376,11 @@ mod tests {
             setup_exec_session(&manager, &source, &yaml, "explicit config test".to_string())
                 .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: session.config_path is the absolute path of the config file
-        let stored = session
-            .config_path
-            .clone()
-            .unwrap_or_else(|| panic!("expected config_path to be set for explicit source"));
+        // Then: the session stores the supplied file as a live absolute reference
+        let stored = match session.config {
+            crate::session_config::SessionConfigRef::File { path } => path,
+            reference => panic!("expected a live file reference, got {reference:?}"),
+        };
         assert!(
             stored.is_absolute(),
             "config_path must be absolute, got: {stored:?}"
@@ -512,7 +512,9 @@ steps:
             let mut session = SessionState::new(
                 id.to_string(),
                 tmp.path().to_path_buf(),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             session.phase = phase;
@@ -549,7 +551,9 @@ steps:
             let mut session = SessionState::new(
                 id.to_string(),
                 tmp.path().to_path_buf(),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             session.phase = phase;

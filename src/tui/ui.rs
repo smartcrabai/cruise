@@ -73,6 +73,28 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(border(app, false));
+    if app.view == View::Sessions {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let status = Line::from(footer_status_spans(app));
+        let hints = Line::from(footer_spans(app, Vec::new()));
+        let hint_width = u16::try_from(hints.width())
+            .unwrap_or(u16::MAX)
+            .min(inner.width.saturating_sub(1));
+        let split =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(hint_width)]).split(inner);
+        frame.render_widget(Paragraph::new(status), split[0]);
+        frame.render_widget(Paragraph::new(hints), split[1]);
+    } else {
+        frame.render_widget(Paragraph::new(footer_line(app)).block(block), area);
+    }
+}
+
+fn footer_status_spans(app: &TuiApp) -> Vec<Span<'_>> {
     let status = app.status.as_deref().unwrap_or("Ready");
     let busy = app.is_busy();
     let mut spans = vec![
@@ -94,10 +116,17 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             error_style(app),
         ));
     }
+    spans
+}
+
+fn footer_spans<'a>(app: &TuiApp, mut spans: Vec<Span<'a>>) -> Vec<Span<'a>> {
     let hints: &[(&str, &str)] = match app.view {
-        View::Sessions if app.sessions.is_empty() => &[("n", "new"), ("?", "help"), ("q", "quit")],
+        View::Sessions if app.sessions.is_empty() => {
+            &[("n", "new"), ("c", "clean"), ("?", "help"), ("q", "quit")]
+        }
         View::Sessions => &[
             ("Enter", "actions"),
+            ("c", "clean"),
             ("Tab", "detail"),
             ("?", "help"),
             ("q", "quit"),
@@ -110,6 +139,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ],
         View::RunAll => &[("Enter", "run/stop"), ("?", "help"), ("q", "quit")],
     };
+    spans.reserve(hints.len() * 4);
     for &(shortcut, description) in hints {
         spans.extend([
             Span::raw("   "),
@@ -118,14 +148,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             Span::styled(description, muted(app)),
         ]);
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(border(app, false)),
-        ),
-        area,
-    );
+    spans
+}
+
+fn footer_line(app: &TuiApp) -> Line<'_> {
+    Line::from(footer_spans(app, footer_status_spans(app)))
 }
 fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     app.load_tab_data();
@@ -231,7 +258,7 @@ fn render_info(
             "Phase    ",
             Span::styled(session.phase.label(), phase_style(app, &session.phase)),
         ),
-        labeled_line(app, "Source   ", Span::raw(session.config_source.as_str())),
+        labeled_line(app, "Source   ", Span::raw(session.config.display_label())),
         labeled_line(
             app,
             "Directory",
@@ -826,6 +853,7 @@ Ctrl+Enter  next question from a multiline editor
 Space  toggle the current choice     PgUp/PgDn/Home/End  jump
 ←→ / [ ]  detail tabs
 a / Enter  actions   o  prompt/link   f  follow log   r  refresh
+c  clean sessions (Sessions only; asks for confirmation)
 Ctrl+Enter  save multiline input in action dialogs
 Ctrl+R  toggle save/regenerate
 Esc  close, or back one question   ?  help   q/Ctrl-C  quit
@@ -1244,7 +1272,9 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             std::path::PathBuf::from("."),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             format!("{id} title"),
         );
         state.phase = phase;
@@ -1758,8 +1788,66 @@ mod tests {
         assert!(view.contains("Enter next"));
         assert!(view.contains("Shift-Tab back"));
         assert!(view.contains("Ctrl+P/G/U start now"));
+        assert!(!view.contains("c clean"));
         assert!(!view.contains("F5"));
         assert!(!view.contains("a actions"));
+    }
+
+    #[test]
+    fn sessions_footer_shows_clean_hint_for_empty_and_nonempty_lists_at_supported_widths() {
+        let mut missing = Vec::new();
+        for width in [80, 120] {
+            for no_color in [false, true] {
+                let empty = rendered_view_with(width, 24, no_color, View::Sessions, |_| {});
+                if !empty.contains("c clean") {
+                    missing.push(format!("empty width={width}, no_color={no_color}"));
+                }
+
+                let populated = rendered_view_with(width, 24, no_color, View::Sessions, |app| {
+                    app.sessions.push(crate::session::SessionState::new(
+                        "session-1".to_string(),
+                        std::path::PathBuf::from("."),
+                        crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                        "task".to_string(),
+                    ));
+                });
+                if !populated.contains("c clean") {
+                    missing.push(format!("populated width={width}, no_color={no_color}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "missing Clean hint in {missing:?}");
+    }
+
+    #[test]
+    fn sessions_footer_keeps_clean_hint_visible_after_a_long_status() {
+        let view = rendered_view_with(80, 24, true, View::Sessions, |app| {
+            app.status = Some(
+                "status begins with a message that is much longer than the terminal width"
+                    .to_string(),
+            );
+            app.sessions.push(crate::session::SessionState::new(
+                "session-1".to_string(),
+                std::path::PathBuf::from("."),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                "task".to_string(),
+            ));
+        });
+
+        let missing = ["status begins", "Enter actions", "c clean"]
+            .into_iter()
+            .filter(|expected| !view.contains(expected))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "missing footer content: {missing:?}");
+    }
+
+    #[test]
+    fn run_all_footer_keeps_its_controls_without_the_sessions_clean_hint() {
+        let view = rendered_view_with(80, 24, false, View::RunAll, |_| {});
+        assert!(view.contains("Enter run/stop"));
+        assert!(view.contains("? help"));
+        assert!(view.contains("q quit"));
+        assert!(!view.contains("c clean"));
     }
 
     #[test]
@@ -1778,6 +1866,12 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing help text: {expected}");
         }
+        assert!(help.lines().any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("clean")
+                && line.contains("sessions only")
+                && line.contains("confirmation")
+        }));
     }
 
     #[test]

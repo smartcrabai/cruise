@@ -1,4 +1,4 @@
-//! Client-neutral application facade shared by the CLI, TUI, and Tauri.
+//! Client-neutral application facade shared by the CLI, TUI, and `WebUI`.
 //!
 //! This module deliberately owns operation claims, prompt request identity, and
 //! the neutral event vocabulary. Presentation adapters only translate these
@@ -24,6 +24,7 @@ use crate::new_session_draft::NewSessionDraft;
 use crate::new_session_history::NewSessionHistory;
 use crate::option_handler::OptionHandler;
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::session_config::SessionConfigRef;
 use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate};
 use crate::step::{OptionChoice, option::OptionResult};
 
@@ -68,7 +69,7 @@ pub struct OptionChoicePayload {
     pub next_step: Option<String>,
 }
 
-/// A single client-neutral event vocabulary shared by the TUI and Tauri.
+/// A single client-neutral event vocabulary shared by the TUI and `WebUI`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "event",
@@ -151,6 +152,9 @@ pub enum ApplicationEvent {
     },
     BatchFinished {
         cancelled: bool,
+    },
+    BatchFailed {
+        error: String,
     },
     LogChunk {
         session_id: Option<String>,
@@ -395,6 +399,11 @@ fn create_session_inner(
     request: NewSessionRequest,
     id: &str,
 ) -> Result<SessionState> {
+    if request.config_path.is_some() && request.config_yaml.is_some() {
+        return Err(CruiseError::Other(
+            "config_path and config_yaml cannot both be provided".to_string(),
+        ));
+    }
     let repo = request
         .repo
         .as_deref()
@@ -417,61 +426,38 @@ fn create_session_inner(
         .config_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| {
-            request.config_source.clone().map(|source| {
-                if crate::resolver::ConfigSource::is_builtin_source(&source) {
-                    crate::new_session_history::BUILTIN_CONFIG_KEY.to_string()
-                } else {
-                    source
-                        .strip_prefix("config: ")
-                        .unwrap_or(&source)
-                        .to_string()
-                }
-            })
-        })
         .map(|path| crate::new_session_history::expand_tilde(&path))
         .filter(|path| !path.trim().is_empty());
-    let (yaml, source) = if let Some(raw) = request.config_yaml.as_deref() {
+    let (yaml, source, config_ref) = if let Some(raw) = request.config_yaml.as_deref() {
         let source = crate::resolver::ConfigSource::Builtin;
-        (raw.to_string(), source)
+        (raw.to_string(), source, SessionConfigRef::inline_snapshot())
     } else {
-        crate::resolver::resolve_config_in_dir(requested.as_deref(), &base_dir)?
+        let (yaml, source) =
+            crate::resolver::resolve_config_in_dir(requested.as_deref(), &base_dir)?;
+        let config_ref =
+            SessionConfigRef::from_source(&source, repo.as_ref().map(|_| base_dir.as_path()))?;
+        (yaml, source, config_ref)
     };
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir)?;
     crate::config::validate_config(&config)?;
-    let persistent_path = if repo.is_some() {
-        crate::repo_clone::persistent_config_path(&source, &base_dir)
-    } else {
-        source.path().cloned()
-    };
-    let source_display = source.display_string();
     let mut state = SessionState::new_draft(
         id.to_string(),
         base_dir,
-        source_display,
+        config_ref,
         request.input.trim().to_string(),
     );
     state.workspace_mode = request.workspace_mode;
     state.allow_dirty_working_tree = request.allow_dirty_working_tree;
-    state.config_path = persistent_path;
     state.repo = repo;
     state.skipped_steps = request.skipped_steps;
-    manager.create(&state)?;
+    manager.create_with_config(&state, &config)?;
     let session_dir = manager.sessions_dir().join(id);
     state.attachments =
         crate::attachments::copy_images_into_session(&session_dir, &request.attachments)?;
-    if state.config_path.is_none() {
-        let snapshot = crate::repo_clone::serialize_resolved_config(&config)?;
-        crate::planning::write_plan_atomically(
-            &session_dir.join("config.yaml"),
-            snapshot.as_bytes(),
-        )?;
-    }
     manager.save(&state)?;
-    let resolved_config_key = source.path().map_or_else(
-        || crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
-        |path| crate::new_session_history::resolved_config_key_for_session(path),
-    );
+    let resolved_config_key = state
+        .config
+        .stable_identity(state.repo.as_deref(), &state.id);
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(crate::new_session_history::NewSessionHistoryEntry {
         selected_at: crate::session::current_iso8601(),
@@ -680,6 +666,15 @@ impl ApplicationRuntime {
         }
         record.operation = OperationKind::BatchRun;
         true
+    }
+
+    /// Whether a Run All batch is currently in flight.
+    #[must_use]
+    pub fn batch_active(&self) -> bool {
+        self.batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     /// Begin the process-wide Run All operation.
@@ -1062,8 +1057,6 @@ pub struct NewSessionRequest {
     pub base_dir: PathBuf,
     #[serde(default)]
     pub config_path: Option<PathBuf>,
-    #[serde(default)]
-    pub config_source: Option<String>,
     #[serde(default)]
     pub config_yaml: Option<String>,
     #[serde(default)]
@@ -1568,10 +1561,11 @@ async fn prepare_plan(
     crate::repo_clone::ensure_repo_session_workspace_cancelled(manager, &mut context.state, &token)
         .await?;
     manager.save(&context.state)?;
-    let key = crate::planning::plan_conversation_key_for_path(
-        &config,
-        context.state.config_path.as_deref(),
-    );
+    let identity = context
+        .state
+        .config
+        .stable_identity(context.state.repo.as_deref(), &context.state.id);
+    let key = crate::planning::plan_conversation_key(&config, &identity);
     context.resume = if context.state.plan_conversation_key.as_deref() == Some(key.as_str()) {
         context.state.plan_conversation_id.clone()
     } else {
@@ -1607,6 +1601,40 @@ fn plan_stream_callback(
     }
 }
 
+fn plan_info_callback(
+    logger: crate::session::SessionLogger,
+    sink: Arc<dyn ApplicationEventSink>,
+    id: String,
+    failure: Arc<Mutex<Option<String>>>,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    move |text: &str| {
+        logger.write(&format!("[info] {text}"));
+        if let Err(error) = sink.send(ApplicationEvent::LogChunk {
+            session_id: Some(id.clone()),
+            stream: EventStream::Info,
+            text: text.to_string(),
+            batch: false,
+        }) {
+            let mut failure = failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if failure.is_none() {
+                *failure = Some(error.to_string());
+            }
+        }
+    }
+}
+
+fn plan_info_callback_for_session(
+    manager: &SessionManager,
+    sink: Arc<dyn ApplicationEventSink>,
+    id: String,
+    failure: Arc<Mutex<Option<String>>>,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    let logger = crate::session::SessionLogger::new(manager.run_log_path(&id));
+    plan_info_callback(logger, sink, id, failure)
+}
+
 fn plan_checkpoint_callback(
     manager: SessionManager,
     id: String,
@@ -1624,6 +1652,10 @@ fn plan_checkpoint_callback(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "plan prompt execution wires streams, notice logging, and persistence"
+)]
 async fn run_plan_prompt(
     runtime: &Arc<ApplicationRuntime>,
     manager: &SessionManager,
@@ -1663,6 +1695,12 @@ async fn run_plan_prompt(
         EventStream::Stderr,
         Arc::clone(&stream_failure),
     );
+    let on_notice = plan_info_callback_for_session(
+        manager,
+        Arc::clone(sink),
+        context.state.id.clone(),
+        Arc::clone(&stream_failure),
+    );
     let streams = crate::step::prompt::StreamCallbacks {
         on_stdout: Some(&on_stdout),
         on_stderr: Some(&on_stderr),
@@ -1679,15 +1717,17 @@ async fn run_plan_prompt(
         ask,
         plan_path: &context.staged_plan_path,
         interactive: planning_interactive,
+        progress: crate::planning::PlanProgress::Hidden,
         rate_limit_retries: request.rate_limit_retries,
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,
         // Formal specifications are limited to Generate operations. CLI and
-        // official GUI/TUI callers only set the flag for new-session planning,
+        // official WebUI/TUI callers only set the flag for new-session planning,
         // while direct API Generate callers may use it for any eligible phase.
         // Replan, Fix, and Ask callers cannot opt in through this field.
         formal_spec: request.formal_spec && operation == OperationKind::Generate,
         on_session_id: Some(&on_session_id),
+        on_notice: Some(&on_notice),
         cancel_token: Some(&token),
     };
     let template = match operation {
@@ -1828,7 +1868,7 @@ async fn execute_plan(
 /// Run one planning operation with the policy belonging to its resolved config.
 ///
 /// Scoping an explicit `None` is important: config resolution also publishes a
-/// process-wide fallback policy for non-task callers, but GUI planning requests
+/// process-wide fallback policy for non-task callers, but `WebUI` planning requests
 /// for different sessions may run concurrently.
 async fn with_plan_retry_policy<F, T>(config: &crate::config::WorkflowConfig, future: F) -> T
 where
@@ -1945,6 +1985,14 @@ impl CruiseApplication {
     /// Returns an error when the session cannot be loaded.
     pub fn read_session(&self, id: &str) -> Result<SessionState> {
         self.manager.load(id)
+    }
+    /// Load the workflow config resolved for one persisted session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config cannot be read or parsed.
+    pub fn session_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
+        self.manager.load_config(state)
     }
     #[must_use]
     pub fn discover_configs(&self) -> Vec<crate::configs::ConfigEntry> {
@@ -2188,10 +2236,8 @@ impl CruiseApplication {
         let (yaml, source) = crate::resolver::resolve_config_in_dir(config_path.as_deref(), &base)?;
         let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base)?;
         crate::config::validate_config(&config)?;
-        let resolved_key = source.path().map_or_else(
-            || crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
-            |path| crate::new_session_history::resolved_config_key_for_session(path),
-        );
+        let resolved_key =
+            SessionConfigRef::from_source(&source, None)?.stable_identity(None, "defaults");
         let steps = crate::workflow::list_skippable_steps(&config)?;
         let after_pr_steps = crate::workflow::list_skippable_after_pr_steps(&config)?;
         let history = NewSessionHistory::load_best_effort();
@@ -2277,15 +2323,11 @@ impl CruiseApplication {
             CurrentStepUpdateDto::Clear => CurrentStepUpdate::Clear,
             CurrentStepUpdateDto::Set(step) => CurrentStepUpdate::Set(step),
         };
-        let config_path = state
-            .config_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
         crate::session_edit::update_session_settings(
             &self.manager,
             id,
             SessionSettingsUpdate {
-                config_path,
+                config_path: None,
                 skipped_steps: state.skipped_steps,
                 current_step_update,
             },
@@ -3146,39 +3188,6 @@ fn run_log_callback(
     }
 }
 
-fn config_reloader_for_path(
-    path: Option<&std::path::Path>,
-    effective_max_retries: usize,
-) -> Option<Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>> {
-    let path = path?.to_path_buf();
-    let last_mtime = Mutex::new(
-        std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok(),
-    );
-    Some(Box::new(move || {
-        let current_mtime = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        let mut last = last_mtime
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current_mtime == *last {
-            return Ok(None);
-        }
-        let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
-        crate::config::validate_config(&config)?;
-        crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
-        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
-        let compiled = crate::workflow::compile(config)?;
-        *last = current_mtime;
-        Ok(Some(crate::engine::ReloadedWorkflow {
-            compiled,
-            retry_policy,
-        }))
-    }))
-}
-
 fn node_checkpoint_callback(
     manager: SessionManager,
     id: String,
@@ -3296,8 +3305,10 @@ async fn execute_run(
     let on_log = run_log_callback(logger, id.to_string(), log_sink, batch_started);
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
-    let config_reloader =
-        config_reloader_for_path(setup.state.config_path.as_deref(), setup.max_retries);
+    let config_reloader = crate::session_config::config_reloader_for_reference(
+        &setup.state.config,
+        setup.max_retries,
+    );
     let execution = {
         let ctx = crate::engine::ExecutionContext {
             compiled: &setup.compiled,
@@ -3863,8 +3874,11 @@ mod tests {
             "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
         )
         .unwrap_or_else(|e| panic!("write initial config failed: {e}"));
-        let reloader = config_reloader_for_path(Some(&path), 3)
-            .unwrap_or_else(|| panic!("expected a config reloader"));
+        let reloader = crate::session_config::config_reloader_for_reference(
+            &crate::session_config::SessionConfigRef::File { path: path.clone() },
+            3,
+        )
+        .unwrap_or_else(|| panic!("expected a config reloader"));
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(
@@ -3996,7 +4010,6 @@ mod tests {
                 input: "formal planning task".to_string(),
                 base_dir: temp.path().to_path_buf(),
                 config_path: None,
-                config_source: None,
                 config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
                 repo: None,
                 workspace_mode: WorkspaceMode::Worktree,
@@ -4040,7 +4053,6 @@ mod tests {
                 input: "lifecycle boundary task".to_string(),
                 base_dir: temp.path().to_path_buf(),
                 config_path: None,
-                config_source: None,
                 config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
                 repo: None,
                 workspace_mode: WorkspaceMode::Worktree,
@@ -4129,7 +4141,9 @@ mod tests {
         let mut state = SessionState::new(
             id.clone(),
             temp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "plan availability".to_string(),
         );
         state.phase = SessionPhase::AwaitingApproval;
@@ -4168,7 +4182,9 @@ mod tests {
         let mut ordinary = SessionState::new(
             "20260830000000".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "ordinary".to_string(),
         );
         ordinary.phase = SessionPhase::Planned;
@@ -4197,7 +4213,9 @@ mod tests {
             let mut state = SessionState::new(
                 "20260830000002".to_string(),
                 PathBuf::from("/tmp"),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
                 "task".to_string(),
             );
             state.phase = phase;
@@ -4218,7 +4236,7 @@ mod tests {
         let state = SessionState::new_draft(
             "s".to_string(),
             PathBuf::from("/tmp"),
-            "__builtin__".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         let reservation = batch.reserve(&[state]);
@@ -4234,7 +4252,9 @@ mod tests {
         let mut planned = SessionState::new(
             "20260830000000".to_string(),
             temp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "planned batch session".to_string(),
         );
         planned.phase = SessionPhase::Planned;
@@ -4338,6 +4358,346 @@ mod tests {
         assert_eq!(
             read_log_tail(&path, 0).unwrap_or_else(|e| panic!("{e}")),
             ""
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_model_logging_session(
+        app: &CruiseApplication,
+        base_dir: &std::path::Path,
+        input: &str,
+        model: &str,
+    ) -> SessionState {
+        app.create_session(NewSessionRequest {
+            input: input.to_string(),
+            base_dir: base_dir.to_path_buf(),
+            config_path: None,
+            config_yaml: Some(format!(
+                "command: [sh, -c, 'cat']\nmodel: '{model}'\nsteps:\n  s1:\n    prompt: model logging\n"
+            )),
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: false,
+            attachments: vec![],
+            skipped_steps: vec![],
+        })
+        .unwrap_or_else(|e| panic!("create model logging session: {e}"))
+    }
+
+    #[cfg(unix)]
+    fn info_events(events: &[ApplicationEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ApplicationEvent::LogChunk {
+                    session_id: Some(session_id),
+                    stream: EventStream::Info,
+                    text,
+                    batch: false,
+                } => Some((session_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_delivers_model_notice_as_info_and_persists_the_same_text() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "application model logging",
+            "provider/application-model:free:xhigh",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let sink_events = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
+            sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        app.generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("generate should complete: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            info_events(&events),
+            vec![(
+                session.id.clone(),
+                "Model: provider/application-model:free:xhigh".to_string()
+            )]
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                ApplicationEvent::PlanChunk { text, .. } if text.contains("Model:")
+            )),
+            "model notices must not contaminate plan content events: {events:?}"
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read application run.log: {e}"));
+        assert!(
+            log.contains("[info] Model: provider/application-model:free:xhigh"),
+            "saved log should contain the same info text: {log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quiet_application_planning_still_persists_and_delivers_model_info() {
+        let _lock = crate::test_support::lock_process();
+        let _quiet = crate::console_mode::quiet_guard();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "quiet application model logging",
+            "provider/quiet-model",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let sink_events = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
+            sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        app.generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("quiet generate should complete: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            info_events(&events),
+            vec![(
+                session.id.clone(),
+                "Model: provider/quiet-model".to_string()
+            )]
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read quiet run.log: {e}"));
+        assert!(log.contains("[info] Model: provider/quiet-model"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn info_event_delivery_failure_is_reported_after_the_notice_is_saved() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "failed info delivery",
+            "provider/failing-sink-model",
+        );
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|event: ApplicationEvent| {
+            if matches!(
+                event,
+                ApplicationEvent::LogChunk {
+                    stream: EventStream::Info,
+                    ..
+                }
+            ) {
+                Err(CruiseError::Other("info sink closed".to_string()))
+            } else {
+                Ok(())
+            }
+        });
+
+        let error = app
+            .generate(&session.id, PlanRequest::default(), sink)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("failed Info delivery must fail the operation"));
+        assert!(
+            error.to_string().contains("planning event delivery failed"),
+            "unexpected delivery error: {error}"
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read failed-delivery run.log: {e}"));
+        assert!(
+            log.contains("[info] Model: provider/failing-sink-model"),
+            "the file write must happen before event delivery: {log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_plan_sessions_keep_model_info_in_their_own_logs_and_events() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let first = create_model_logging_session(
+            &app,
+            temp.path(),
+            "parallel first",
+            "provider/parallel-first",
+        );
+        let second = create_model_logging_session(
+            &app,
+            temp.path(),
+            "parallel second",
+            "provider/parallel-second",
+        );
+        let first_events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let second_events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let first_sink_events = Arc::clone(&first_events);
+        let second_sink_events = Arc::clone(&second_events);
+        let first_sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+            first_sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+        let second_sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+            second_sink_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        let (first_result, second_result) = tokio::join!(
+            app.generate(&first.id, PlanRequest::default(), first_sink),
+            app.generate(&second.id, PlanRequest::default(), second_sink),
+        );
+        first_result.unwrap_or_else(|e| panic!("first generate failed: {e}"));
+        second_result.unwrap_or_else(|e| panic!("second generate failed: {e}"));
+
+        let first_log = std::fs::read_to_string(manager.run_log_path(&first.id))
+            .unwrap_or_else(|e| panic!("read first log: {e}"));
+        let second_log = std::fs::read_to_string(manager.run_log_path(&second.id))
+            .unwrap_or_else(|e| panic!("read second log: {e}"));
+        assert!(first_log.contains("Model: provider/parallel-first"));
+        assert!(
+            !first_log.contains("parallel-second"),
+            "first log: {first_log}"
+        );
+        assert!(second_log.contains("Model: provider/parallel-second"));
+        assert!(
+            !second_log.contains("parallel-first"),
+            "second log: {second_log}"
+        );
+        assert_eq!(
+            info_events(
+                &first_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
+            vec![(
+                first.id.clone(),
+                "Model: provider/parallel-first".to_string()
+            )]
+        );
+        assert_eq!(
+            info_events(
+                &second_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
+            vec![(
+                second.id.clone(),
+                "Model: provider/parallel-second".to_string()
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_fix_ask_and_replan_each_append_their_model_notice() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let session = create_model_logging_session(
+            &app,
+            temp.path(),
+            "all planning operations",
+            "provider/all-operations",
+        );
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+
+        let run_operation = |events: &Arc<Mutex<Vec<ApplicationEvent>>>| {
+            let sink_events = Arc::clone(events);
+            Arc::new(move |event: ApplicationEvent| {
+                sink_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(event);
+                Ok(())
+            }) as Arc<dyn ApplicationEventSink>
+        };
+        app.generate(&session.id, PlanRequest::default(), run_operation(&events))
+            .await
+            .unwrap_or_else(|e| panic!("generate failed: {e}"));
+        app.fix(
+            &session.id,
+            "fix the generated plan".to_string(),
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fix failed: {e}"));
+        app.ask(
+            &session.id,
+            "what did the plan change?".to_string(),
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("ask failed: {e}"));
+        app.replan(
+            &session.id,
+            PlanRequest {
+                feedback: Some("replan the task".to_string()),
+                ..PlanRequest::default()
+            },
+            run_operation(&events),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("replan failed: {e}"));
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let info = info_events(&events);
+        assert_eq!(
+            info.len(),
+            4,
+            "each plan operation should announce once: {info:?}"
+        );
+        assert!(
+            info.iter().all(|(id, text)| {
+                id == &session.id && text == "Model: provider/all-operations"
+            })
+        );
+        let log = std::fs::read_to_string(manager.run_log_path(&session.id))
+            .unwrap_or_else(|e| panic!("read all-operations log: {e}"));
+        assert_eq!(
+            log.matches("[info] Model: provider/all-operations").count(),
+            4,
+            "all plan operations should append instead of overwrite: {log}"
         );
     }
 }

@@ -16,7 +16,7 @@ There is no state-expansion algorithm or node-budget fallback.
 | 4.4: legacy and invalid files | separate `LegacyGraph` decoder, version checks, non-destructive `application::session_dag` | `checkpoint_outvotes_stale_session_position_and_preserves_invalid_files`, CLI missing-checkpoint rejection |
 | 5, 9.4: conservative normal-exit analysis | iterative reachability and Kosaraju in `graph::validation` | static/dynamic/user skips, actual entry, unreachable cycles, disabled file-change branches, optional dangerous branches, large SCC tests |
 | 5.3, 6.2: real entry points | pre-workspace validation in run, exec, shared application setup, reload and after-pr | public CLI normal/dry-run tests, after-pr rejection before main side effects, existing application and after-pr tests |
-| 6.1, 6.3: display and phase boundaries | Tauri DTO, Graph panel, TUI, browser fixture, separate after-pr graph | DTO serialization test, UI regression tests, headless real-Mermaid rendering of a back edge, self-loop, terminal edge and traversal labels |
+| 6.1, 6.3: display and phase boundaries | WebUI DTO, Graph panel, TUI, browser fixture, separate after-pr graph | DTO serialization test, WebUI regression tests, headless real-Mermaid rendering of a back edge, self-loop, terminal edge and traversal labels |
 | 7, 9.2: retained contracts | existing config/group budget resolution, workflow expansion, parallel parent execution, backend APIs | existing config, engine, parallel, CLI and shared-application regression suites |
 
 ## Test corrections and their higher-authority grounds
@@ -67,11 +67,6 @@ confirmation attempts obtained answers. There is no unlimited-mode setting,
 backend/authentication change, per-iteration history or independently resumable
 after-pr phase.
 
-The TypeScript 7 pin in place before this change could build the UI but was outside the linter's
-published `>=4.8.4 <6.1.0` peer range and crashed before reading source files.
-The development-only compiler pin is 6.0.3 so the required lint and build commands
-can use one supported toolchain. Runtime UI dependencies are unchanged.
-
 ## Final validation
 
 - `cargo fmt -- --check`: passed.
@@ -80,11 +75,7 @@ can use one supported toolchain. Runtime UI dependencies are unchanged.
   covering the library, CLI unit and integration suites.
   Bounded concurrency avoids an existing five-second commit-guard fixture timeout
   under host contention without changing its assertions or deadline.
-- `cargo check --offline --locked -p cruise-gui` and
-  `cargo test --offline --locked -p cruise-gui`: passed, including the GUI tests.
-- `pnpm --dir ui test`: the whole Vitest suite passed.
-- `pnpm --dir ui run lint` and `pnpm --dir ui run build`: passed.
-  Vite reports only its non-blocking large-chunk advisory.
+- `cargo test webui`: WebUI template, route, partial, and behavior tests passed.
 - Real headless Chrome rendered the cyclic browser fixture with four SVG nodes,
   five edges, a back-edge, a self-loop, a normal terminal and accepted-count labels.
   No replacement renderer was introduced.

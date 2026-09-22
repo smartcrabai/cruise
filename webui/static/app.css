@@ -1,0 +1,289 @@
+.prose {
+  color: #374151;
+  font-size: 0.875rem;
+  line-height: 1.714;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: #111827;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.prose h1 {
+  font-size: 1.875rem;
+  margin: 0 0 1rem;
+}
+
+.prose h2 {
+  font-size: 1.5rem;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.prose h3 {
+  font-size: 1.25rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.prose h4 {
+  font-size: 1.125rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.prose p {
+  margin: 0.75rem 0;
+}
+
+.prose ul,
+.prose ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.prose ul {
+  list-style-type: disc;
+}
+
+.prose ol {
+  list-style-type: decimal;
+}
+
+.prose li {
+  color: #374151;
+  margin: 0.25rem 0;
+}
+
+.prose code {
+  background: #f3f4f6;
+  border-radius: 0.25rem;
+  color: #1d4ed8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.75rem;
+  padding: 0.125rem 0.25rem;
+}
+
+.prose pre {
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 0.25rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.prose pre code {
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  padding: 0;
+}
+
+.prose blockquote {
+  border-left: 4px solid #d1d5db;
+  color: #4b5563;
+  margin: 1rem 0;
+  padding-left: 1rem;
+}
+
+.prose table {
+  border-collapse: collapse;
+  margin: 1rem 0;
+  width: 100%;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid #d1d5db;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.prose th {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.prose td {
+  color: #374151;
+}
+
+.prose a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
+.prose a:hover {
+  color: #3b82f6;
+}
+
+.prose hr {
+  border: 0;
+  border-top: 1px solid #d1d5db;
+  margin: 1.5rem 0;
+}
+
+.prose strong {
+  color: #111827;
+  font-weight: 600;
+}
+
+.prose em {
+  font-style: italic;
+}
+
+@media (prefers-color-scheme: dark) {
+  .prose {
+    color: #d1d5db;
+  }
+
+  .prose h1,
+  .prose h2,
+  .prose h3,
+  .prose h4,
+  .prose strong {
+    color: #f3f4f6;
+  }
+
+  .prose li {
+    color: #d1d5db;
+  }
+
+  .prose code {
+    background: #1f2937;
+    color: #93c5fd;
+  }
+
+  .prose pre {
+    background: #111827;
+    border-color: #374151;
+  }
+
+  .prose blockquote {
+    border-color: #374151;
+    color: #9ca3af;
+  }
+
+  .prose th,
+  .prose td {
+    border-color: #374151;
+  }
+
+  .prose th {
+    color: #e5e7eb;
+  }
+
+  .prose td {
+    color: #d1d5db;
+  }
+
+  .prose a {
+    color: #60a5fa;
+  }
+
+  .prose a:hover {
+    color: #93c5fd;
+  }
+
+  .prose hr {
+    border-color: #374151;
+  }
+}
+
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 150ms;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* macOS overlay scrollbars float above the content and hide text under the
+   thumb. Style them so they are classic scrollbars that reserve layout width. */
+* {
+  scrollbar-gutter: stable;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(0 0 0 / 22%);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(0 0 0 / 38%);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 20%);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 32%);
+    background-clip: content-box;
+  }
+}
+
+dialog {
+  border: 0;
+  border-radius: 0.5rem;
+  padding: 0;
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 60%);
+}
+
+/* Tab strip: the server renders aria-selected, app.js keeps it in sync on click. */
+.cruise-tab {
+  color: #6b7280;
+  border-bottom: 2px solid transparent;
+}
+.cruise-tab:hover {
+  color: #374151;
+}
+.cruise-tab[aria-selected="true"] {
+  color: #2563eb;
+  border-bottom-color: #3b82f6;
+}
+@media (prefers-color-scheme: dark) {
+  .cruise-tab {
+    color: #9ca3af;
+  }
+  .cruise-tab:hover {
+    color: #d1d5db;
+  }
+  .cruise-tab[aria-selected="true"] {
+    color: #60a5fa;
+  }
+}
