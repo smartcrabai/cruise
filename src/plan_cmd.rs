@@ -17,7 +17,8 @@ use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{HistoryScope, NewSessionHistory};
 use crate::planning::{
-    PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
+    PlanProgress, PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template,
+    setup_plan_vars,
 };
 use crate::resolver::ConfigSource;
 use crate::session::{SessionManager, SessionPhase, SessionState};
@@ -54,6 +55,7 @@ fn cli_plan_ctx<'a>(
         ask,
         plan_path,
         interactive,
+        progress: PlanProgress::Console,
         rate_limit_retries,
         working_dir,
         grill,

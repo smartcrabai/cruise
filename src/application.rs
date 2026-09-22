@@ -1694,6 +1694,7 @@ async fn run_plan_prompt(
         ask,
         plan_path: &context.staged_plan_path,
         interactive: planning_interactive,
+        progress: crate::planning::PlanProgress::Hidden,
         rate_limit_retries: request.rate_limit_retries,
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,

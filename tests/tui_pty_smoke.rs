@@ -1204,6 +1204,11 @@ fn ask_user_uses_the_real_pty_path_for_multiline_display_and_immediate_dismiss()
     tui.send(b"\x10");
     let socket_file = PathBuf::from(format!("{}.socket", fake_jcode.display()));
     wait_for_file(&socket_file, START_TIMEOUT);
+    assert!(
+        !tui.transcript().contains("Planning..."),
+        "CLI planning loader must stay hidden from the TUI transcript:\n{}",
+        tui.transcript()
+    );
     let socket = std::fs::read_to_string(&socket_file)
         .unwrap_or_else(|error| panic!("failed to read ToolBridge socket path: {error}"));
     let socket = PathBuf::from(socket);
