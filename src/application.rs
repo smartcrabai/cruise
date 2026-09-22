@@ -239,6 +239,11 @@ impl OperationClaim {
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
     }
+
+    fn promote_to_batch_run(&self) -> bool {
+        self.runtime
+            .promote_batch_claim(&self.session_id, self.identity)
+    }
 }
 
 impl Drop for OperationClaim {
@@ -645,6 +650,24 @@ impl ApplicationRuntime {
             .map(|record| record.operation)
     }
 
+    fn promote_batch_claim(&self, session_id: &str, identity: u64) -> bool {
+        let mut claims = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = claims.get_mut(session_id) else {
+            return false;
+        };
+        if record.identity != identity
+            || record.operation != OperationKind::BatchQueued
+            || record.token.is_cancelled()
+        {
+            return false;
+        }
+        record.operation = OperationKind::BatchRun;
+        true
+    }
+
     /// Whether a Run All batch is currently in flight.
     #[must_use]
     pub fn batch_active(&self) -> bool {
@@ -988,7 +1011,7 @@ impl BatchClaim {
                 state.id.clone(),
                 ClaimRecord {
                     identity,
-                    operation: OperationKind::BatchRun,
+                    operation: OperationKind::BatchQueued,
                     token: token.clone(),
                     terminal: false,
                 },
@@ -1930,6 +1953,13 @@ impl CruiseApplication {
         std::fs::read_to_string(state.plan_path(&self.manager.sessions_dir()))
             .map_err(|e| CruiseError::Other(format!("failed to read plan for {id}: {e}")))
     }
+
+    /// Report whether a session has non-empty, readable plan markdown.
+    #[must_use]
+    pub fn session_plan_available(&self, state: &SessionState) -> bool {
+        state.has_usable_plan(&self.manager.sessions_dir())
+    }
+
     #[must_use]
     pub fn runtime(&self) -> Arc<ApplicationRuntime> {
         Arc::clone(&self.runtime)
@@ -3500,6 +3530,14 @@ where
             })?;
             continue;
         }
+        if !claim.promote_to_batch_run() {
+            sink.send(ApplicationEvent::BatchSessionFinished {
+                id,
+                phase: scheduled.phase.label().to_string(),
+                error: Some("session claim was no longer active".to_string()),
+            })?;
+            continue;
+        }
         let worker_app = app.clone();
         let worker_sink = Arc::clone(sink);
         let worker_log_sink = log_sink.cloned();
@@ -4095,6 +4133,49 @@ mod tests {
     }
 
     #[test]
+    fn session_plan_available_requires_nonempty_readable_markdown_and_ignores_plan_error() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "plan availability".to_string(),
+        );
+        state.phase = SessionPhase::AwaitingApproval;
+        state.plan_error = Some("stale error is presentation metadata".to_string());
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let app = CruiseApplication::new(manager.clone());
+        let plan_path = state.plan_path(&manager.sessions_dir());
+
+        assert!(!app.session_plan_available(&state));
+
+        std::fs::write(&plan_path, "")
+            .unwrap_or_else(|error| panic!("failed to write empty plan: {error}"));
+        assert!(!app.session_plan_available(&state));
+
+        std::fs::write(&plan_path, " \n\t")
+            .unwrap_or_else(|error| panic!("failed to write whitespace plan: {error}"));
+        assert!(!app.session_plan_available(&state));
+
+        std::fs::write(&plan_path, "# A usable plan\n")
+            .unwrap_or_else(|error| panic!("failed to write usable plan: {error}"));
+        assert!(app.session_plan_available(&state));
+
+        std::fs::remove_file(&plan_path)
+            .unwrap_or_else(|error| panic!("failed to remove plan: {error}"));
+        std::fs::create_dir(&plan_path)
+            .unwrap_or_else(|error| panic!("failed to replace plan with directory: {error}"));
+        assert!(!app.session_plan_available(&state));
+    }
+
+    #[test]
     fn application_listing_hides_transient_exec_sessions() {
         let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
@@ -4163,6 +4244,92 @@ mod tests {
         batch.cancel();
         assert!(reservation.reserved[0].token().is_cancelled());
     }
+
+    #[test]
+    fn batch_parallelism_one_keeps_queued_sessions_at_their_persisted_phase() {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = SessionManager::new(temp.path().to_path_buf());
+        let mut planned = SessionState::new(
+            "20260830000000".to_string(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "planned batch session".to_string(),
+        );
+        planned.phase = SessionPhase::Planned;
+        let mut suspended = planned.clone();
+        suspended.id = "20260830000001".to_string();
+        suspended.input = "suspended batch session".to_string();
+        suspended.phase = SessionPhase::Suspended;
+        manager
+            .create(&planned)
+            .unwrap_or_else(|error| panic!("failed to create planned session: {error}"));
+        manager
+            .create(&suspended)
+            .unwrap_or_else(|error| panic!("failed to create suspended session: {error}"));
+
+        let runtime = Arc::new(ApplicationRuntime::new(manager.clone()));
+        let batch = runtime
+            .try_begin_batch()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let candidates = manager
+            .run_all_candidates()
+            .unwrap_or_else(|error| panic!("failed to list batch candidates: {error}"));
+        assert_eq!(candidates.len(), 2);
+        let reservation = batch.reserve(&candidates);
+        let mut queued = reservation
+            .reserved
+            .into_iter()
+            .zip(candidates)
+            .collect::<std::collections::VecDeque<_>>();
+        let parallelism = 1;
+        assert!(queued.len() > parallelism);
+
+        let (active_claim, active_state) = queued
+            .pop_front()
+            .unwrap_or_else(|| panic!("missing first queued session"));
+        let (_, queued_state) = queued
+            .front()
+            .unwrap_or_else(|| panic!("missing second queued session"));
+        assert_eq!(active_state.phase, SessionPhase::Planned);
+        assert_eq!(queued_state.phase, SessionPhase::Suspended);
+        assert_eq!(
+            runtime.active_operation(active_claim.session_id()),
+            Some(OperationKind::BatchQueued)
+        );
+        assert_eq!(
+            runtime.active_operation(&queued_state.id),
+            Some(OperationKind::BatchQueued)
+        );
+
+        let persisted_queued = manager
+            .load(&queued_state.id)
+            .unwrap_or_else(|error| panic!("failed to reload queued session: {error}"));
+        assert_eq!(persisted_queued.phase, SessionPhase::Suspended);
+
+        assert!(
+            !runtime.promote_batch_claim(active_claim.session_id(), active_claim.identity() + 1)
+        );
+        assert_eq!(
+            runtime.active_operation(active_claim.session_id()),
+            Some(OperationKind::BatchQueued)
+        );
+        assert!(active_claim.promote_to_batch_run());
+        assert_eq!(
+            runtime.active_operation(active_claim.session_id()),
+            Some(OperationKind::BatchRun)
+        );
+        assert_eq!(
+            runtime.active_operation(&queued_state.id),
+            Some(OperationKind::BatchQueued)
+        );
+        let persisted_queued = manager
+            .load(&queued_state.id)
+            .unwrap_or_else(|error| panic!("failed to reload queued session: {error}"));
+        assert_eq!(persisted_queued.phase, SessionPhase::Suspended);
+    }
+
     #[test]
     fn request_defaults_keep_rate_limit_retries() {
         assert_eq!(

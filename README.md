@@ -151,6 +151,8 @@ The New Session dialogue autosaves its answers 500 ms after a change. Other scre
 
 For `ask_user`, a question containing line breaks is rendered as adjacent prompt lines, and `Enter` submits the answer.
 
+The Sessions sidebar shows a presentation status, which can differ from the persisted session **Phase** while planning, running, or waiting for a user action. A filled `●` marks **Awaiting Input** and **Awaiting Approval** in light blue, **Running** and **Planning** in yellow, **Planned** in blue, **Completed** in green, **Failed** and **Plan Failed** in red, and **Suspended** in purple. A draft uses a green `◯`. The status text remains visible when `NO_COLOR` is set.
+
 #### Keyboard map
 
 The TUI is keyboard-only. Keys are fixed and cannot be configured:

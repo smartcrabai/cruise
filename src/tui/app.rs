@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10,10 +10,10 @@ use super::prompts::PromptQueue;
 use super::registry::{OperationRegistry, UiEvent};
 use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
-    PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
+    OperationKind, PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
 };
 use crate::platform::open_url;
-use crate::session::{SessionState, WorkspaceMode};
+use crate::session::{SessionPhase, SessionState, WorkspaceMode};
 use std::path::{Path, PathBuf};
 const SESSION_LOG_LIMIT: usize = 10_000;
 const BATCH_LOG_LIMIT: usize = 2_000;
@@ -60,6 +60,104 @@ impl DetailTab {
             Self::Plan => "Plan",
             Self::Log => "Log",
         }
+    }
+}
+
+/// Presentation-only status used by the Sessions sidebar.
+///
+/// The persisted [`SessionPhase`] remains the source of lifecycle state. This
+/// enum is intentionally kept separate so that transient user-action and
+/// planning states do not become part of the saved session format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarStatus {
+    AwaitingInput,
+    AwaitingApproval,
+    Running,
+    Planning,
+    Draft,
+    Planned,
+    Completed,
+    Failed,
+    PlanFailed,
+    Suspended,
+}
+
+impl SidebarStatus {
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingInput => "Awaiting Input",
+            Self::AwaitingApproval => "Awaiting Approval",
+            Self::Running => "Running",
+            Self::Planning => "Planning",
+            Self::Draft => "Draft",
+            Self::Planned => "Planned",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::PlanFailed => "Plan Failed",
+            Self::Suspended => "Suspended",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            Self::Draft => "◯",
+            _ => "●",
+        }
+    }
+}
+
+fn classify_sidebar_status(
+    session: &SessionState,
+    operation: Option<OperationKind>,
+    has_prompt: bool,
+    plan_available: bool,
+) -> SidebarStatus {
+    if has_prompt {
+        return SidebarStatus::AwaitingInput;
+    }
+
+    match operation {
+        Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
+            return SidebarStatus::Planning;
+        }
+        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+            return SidebarStatus::Running;
+        }
+        Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
+    }
+
+    let status = match &session.phase {
+        SessionPhase::Completed => SidebarStatus::Completed,
+        SessionPhase::Failed(_) => SidebarStatus::Failed,
+        SessionPhase::Suspended => SidebarStatus::Suspended,
+        SessionPhase::Draft
+        | SessionPhase::AwaitingInput
+        | SessionPhase::AwaitingApproval
+        | SessionPhase::Planned
+            if session.plan_error.is_some() =>
+        {
+            SidebarStatus::PlanFailed
+        }
+        SessionPhase::Draft => SidebarStatus::Draft,
+        SessionPhase::AwaitingInput => SidebarStatus::AwaitingInput,
+        SessionPhase::AwaitingApproval if plan_available => SidebarStatus::AwaitingApproval,
+        SessionPhase::AwaitingApproval => SidebarStatus::Planning,
+        SessionPhase::Planned => SidebarStatus::Planned,
+        SessionPhase::Running => SidebarStatus::Running,
+    };
+    if matches!(
+        status,
+        SidebarStatus::Draft
+            | SidebarStatus::AwaitingApproval
+            | SidebarStatus::Running
+            | SidebarStatus::Planned
+    ) && (session.awaiting_input || session.pending_ask_question.is_some())
+    {
+        SidebarStatus::AwaitingInput
+    } else {
+        status
     }
 }
 
@@ -141,6 +239,7 @@ pub struct TuiApp {
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
+    pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
@@ -201,6 +300,7 @@ impl TuiApp {
             ask_responses: HashMap::new(),
             ask_active: std::collections::HashSet::new(),
             plan_cache: HashMap::new(),
+            sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
             plan_scroll: 0,
             log_scroll: 0,
@@ -403,6 +503,15 @@ impl TuiApp {
                     }
                 }
                 self.sessions = sessions;
+                self.sidebar_plan_available = self
+                    .sessions
+                    .iter()
+                    .filter(|state| {
+                        matches!(&state.phase, SessionPhase::AwaitingApproval)
+                            && self.application.session_plan_available(state)
+                    })
+                    .map(|state| state.id.clone())
+                    .collect();
                 self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
                 self.evict_inactive_caches();
                 if self.status.is_none() || !self.is_busy() {
@@ -418,6 +527,16 @@ impl TuiApp {
             Err(error) => self.set_error(error.to_string()),
         }
         self.registry.reap();
+    }
+
+    #[must_use]
+    pub(crate) fn sidebar_status(&self, session: &SessionState) -> SidebarStatus {
+        classify_sidebar_status(
+            session,
+            self.application.runtime().active_operation(&session.id),
+            self.prompts.has_session(&session.id),
+            self.sidebar_plan_available.contains(&session.id),
+        )
     }
 
     fn evict_inactive_caches(&mut self) {
@@ -2521,6 +2640,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionPhase;
     use tempfile::TempDir;
 
     fn app_for(application: CruiseApplication) -> TuiApp {
@@ -2568,6 +2688,346 @@ mod tests {
             question: Some("What should happen next?".to_string()),
             choices: vec![],
         }
+    }
+
+    fn sidebar_session(id: &str, phase: crate::session::SessionPhase) -> SessionState {
+        let mut state = SessionState::new(
+            id.to_string(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            format!("task {id}"),
+        );
+        state.phase = phase;
+        state
+    }
+
+    fn queued_prompt(session_id: &str, request_id: &str) -> crate::tui::prompts::PromptItem {
+        crate::tui::prompts::PromptItem {
+            request_id: request_id.to_string(),
+            session_id: session_id.to_string(),
+            kind: PendingPromptKind::Ask,
+            question: "What should happen next?".to_string(),
+            choices: vec![],
+        }
+    }
+
+    fn app_for_manager(manager: crate::session::SessionManager) -> TuiApp {
+        let application = CruiseApplication::new(manager);
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        )
+    }
+
+    fn first_sidebar_status(app: &TuiApp) -> SidebarStatus {
+        let session = app
+            .sessions
+            .first()
+            .unwrap_or_else(|| panic!("expected one session"));
+        app.sidebar_status(session)
+    }
+
+    #[test]
+    fn sidebar_status_has_stable_labels_and_symbols() {
+        let cases = [
+            (SidebarStatus::AwaitingInput, "Awaiting Input", "●"),
+            (SidebarStatus::AwaitingApproval, "Awaiting Approval", "●"),
+            (SidebarStatus::Running, "Running", "●"),
+            (SidebarStatus::Planning, "Planning", "●"),
+            (SidebarStatus::Draft, "Draft", "◯"),
+            (SidebarStatus::Planned, "Planned", "●"),
+            (SidebarStatus::Completed, "Completed", "●"),
+            (SidebarStatus::Failed, "Failed", "●"),
+            (SidebarStatus::PlanFailed, "Plan Failed", "●"),
+            (SidebarStatus::Suspended, "Suspended", "●"),
+        ];
+
+        for (status, label, symbol) in cases {
+            assert_eq!(status.label(), label);
+            assert_eq!(status.symbol(), symbol);
+        }
+    }
+
+    #[test]
+    fn sidebar_status_maps_persisted_lifecycle_phases() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Draft, SidebarStatus::Draft),
+            (SessionPhase::AwaitingInput, SidebarStatus::AwaitingInput),
+            (SessionPhase::Planned, SidebarStatus::Planned),
+            (SessionPhase::Running, SidebarStatus::Running),
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("failure".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let state = sidebar_session(&format!("phase-{index}"), phase);
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn same_session_prompt_wins_over_running_and_prompt_scope_is_per_session() {
+        let mut app = app_without_lock();
+        let target_id = "target";
+        let other_id = "other";
+        let target = sidebar_session(target_id, SessionPhase::Running);
+        let other = sidebar_session(other_id, SessionPhase::Draft);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(target_id, crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim target session: {error}"));
+
+        app.prompts
+            .enqueue(queued_prompt(target_id, "target-request"));
+        assert_eq!(app.sidebar_status(&target), SidebarStatus::AwaitingInput);
+
+        app.prompts
+            .enqueue(queued_prompt(other_id, "other-request"));
+        assert_eq!(app.sidebar_status(&other), SidebarStatus::AwaitingInput);
+
+        let unrelated = sidebar_session("unrelated", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&unrelated), SidebarStatus::Draft);
+
+        drop(claim);
+    }
+
+    #[test]
+    fn active_prompt_and_queued_prompt_both_count_as_awaiting_input() {
+        let mut app = app_without_lock();
+        let state = sidebar_session("prompt-session", SessionPhase::Planned);
+        app.prompts
+            .enqueue(queued_prompt(&state.id, "queued-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn planning_operations_override_saved_phase_and_existing_plan() {
+        let app = app_without_lock();
+        for (index, operation) in [
+            crate::application::OperationKind::Generate,
+            crate::application::OperationKind::Fix,
+            crate::application::OperationKind::Replan,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (phase_index, phase) in [
+                SessionPhase::Draft,
+                SessionPhase::AwaitingApproval,
+                SessionPhase::Planned,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("planning-{index}-{phase_index}");
+                let state = sidebar_session(&id, phase);
+                let claim = app
+                    .application
+                    .runtime()
+                    .try_begin(&id, operation)
+                    .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+                assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+                drop(claim);
+            }
+        }
+    }
+
+    #[test]
+    fn ask_operation_is_running_and_mutations_do_not_imply_running() {
+        let app = app_without_lock();
+        let ask_id = "ask-session";
+        let ask_state = sidebar_session(ask_id, SessionPhase::AwaitingApproval);
+        let ask_claim = app
+            .application
+            .runtime()
+            .try_begin(ask_id, crate::application::OperationKind::Ask)
+            .unwrap_or_else(|error| panic!("failed to claim ask session: {error}"));
+        assert_eq!(app.sidebar_status(&ask_state), SidebarStatus::Running);
+        drop(ask_claim);
+
+        for (index, operation) in [
+            crate::application::OperationKind::BatchQueued,
+            crate::application::OperationKind::Mutate,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("mutation-{index}");
+            let state = sidebar_session(&id, SessionPhase::Completed);
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, operation)
+                .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::Completed);
+            drop(claim);
+        }
+    }
+
+    #[test]
+    fn a_claim_for_another_session_does_not_make_this_session_running() {
+        let app = app_without_lock();
+        let claim = app
+            .application
+            .runtime()
+            .try_begin("other-session", crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim other session: {error}"));
+        let state = sidebar_session("this-session", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Draft);
+        drop(claim);
+    }
+
+    #[test]
+    fn plan_error_is_plan_failed_for_all_plan_phases_and_retry_is_planning() {
+        let app = app_without_lock();
+        for (index, phase) in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut state = sidebar_session(&format!("plan-error-{index}"), phase);
+            state.plan_error = Some("planner failed".to_string());
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::PlanFailed);
+        }
+
+        let id = "plan-retry";
+        let mut state = sidebar_session(id, SessionPhase::AwaitingApproval);
+        state.plan_error = Some("stale planner failure".to_string());
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim retry session: {error}"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn terminal_phases_are_not_hidden_by_stale_prompt_flags_or_plan_errors() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("run failed".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let mut state = sidebar_session(&format!("terminal-{index}"), phase);
+            state.awaiting_input = true;
+            state.pending_ask_question = Some("old question".to_string());
+            state.plan_error = Some("old plan failure".to_string());
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn saved_input_waiting_data_is_used_without_a_local_operation() {
+        let app = app_without_lock();
+
+        let mut option_wait = sidebar_session("option-wait", SessionPhase::Planned);
+        option_wait.awaiting_input = true;
+        assert_eq!(
+            app.sidebar_status(&option_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let mut question_wait = sidebar_session("question-wait", SessionPhase::Planned);
+        question_wait.pending_ask_question = Some("question".to_string());
+        assert_eq!(
+            app.sidebar_status(&question_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let phase_fallback = sidebar_session("phase-fallback", SessionPhase::AwaitingInput);
+        assert_eq!(
+            app.sidebar_status(&phase_fallback),
+            SidebarStatus::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn planning_claim_wins_after_a_question_is_answered_but_phase_is_stale() {
+        let mut app = app_without_lock();
+        let id = "answered-question";
+        let state = sidebar_session(id, SessionPhase::AwaitingInput);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim answered-question session: {error}"));
+        app.prompts.enqueue(queued_prompt(id, "question-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.close_active();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn awaiting_approval_uses_plan_file_availability_and_refresh_rebuilds_the_cache() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("data"));
+        let id = crate::session::SessionManager::new_session_id();
+        let mut state = sidebar_session(&id, SessionPhase::AwaitingApproval);
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        let mut app = app_for_manager(manager.clone());
+
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "# usable plan\n")
+            .unwrap_or_else(|error| panic!("failed to write plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        std::fs::write(&plan_path, " \n\t")
+            .unwrap_or_else(|error| panic!("failed to write whitespace plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "restored plan")
+            .unwrap_or_else(|error| panic!("failed to restore plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        manager
+            .delete(&id)
+            .unwrap_or_else(|error| panic!("failed to delete session: {error}"));
+        app.refresh();
+        assert!(app.sessions.is_empty());
+
+        state.plan_error = None;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to recreate session: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
     }
 
     #[test]

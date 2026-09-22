@@ -1686,7 +1686,6 @@ mod tests {
         /// `<binary>.marker` the `CRUISE_PROBE_MARKER` variable a test uses to
         /// prove workflow `env:` reached the child.
         fn install_stub(dir: &Path, stdout_body: &str, stderr_body: &str, code: i32) -> PathBuf {
-            use std::os::unix::fs::PermissionsExt as _;
             let path = dir.join("jcode");
             let script = format!(
                 "#!/bin/sh\nprintf '%s' \"$JCODE_HOME|$CRUISE_TOOL_SOCKET\" > \"$0.env\"\n\
@@ -1695,9 +1694,7 @@ mod tests {
                  cat <<'CRUISE_EOF'\n{stdout_body}\nCRUISE_EOF\n\
                  cat >&2 <<'CRUISE_ERR'\n{stderr_body}\nCRUISE_ERR\nexit {code}\n"
             );
-            std::fs::write(&path, script).unwrap_or_else(|e| panic!("{e:?}"));
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_else(|e| panic!("{e:?}"));
+            crate::test_support::write_executable_script(&path, &script);
             path
         }
 
