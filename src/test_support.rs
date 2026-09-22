@@ -117,19 +117,51 @@ pub fn prepend_to_path(dir: &Path) -> EnvGuard {
     EnvGuard::set("PATH", joined)
 }
 
+/// Write `script` to `path` as a `0o755` executable, publishing it only after
+/// the writing handle is closed.
+///
+/// On Linux, `execve` fails with `ETXTBSY` ("Text file busy") while any
+/// process holds the image open for writing. Tests run as parallel threads of
+/// one process, so a thread that forks while a stub is mid-write inherits that
+/// writable descriptor, and an `exec` of the same inode then fails. Writing a
+/// temporary sibling and renaming it into place means the executable path is
+/// only ever published after the handle is closed, which shrinks the window to
+/// the staging file's own lifetime: a standalone C reproduction of this race
+/// measured roughly 900 failures per run when writing in place versus roughly
+/// 50 when renaming. The residual comes from a fork landing inside that
+/// staging write, which no purely file-side change can remove.
+///
+/// # Panics
+///
+/// Panics if writing, setting permissions, or renaming the script fails.
+#[cfg(unix)]
+pub fn write_executable_script(path: &Path, script: &str) {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let staging = path.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&staging).unwrap_or_else(|e| panic!("{e:?}"));
+        file.write_all(script.as_bytes())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        file.sync_all().unwrap_or_else(|e| panic!("{e:?}"));
+        // Dropping the handle here is the point: the rename below must publish
+        // a file that no descriptor still holds open for writing.
+    }
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    std::fs::rename(&staging, path).unwrap_or_else(|e| panic!("{e:?}"));
+}
+
 /// Install a minimal `gh` stub that exits 0 for `--version` and 1 for
 /// everything else.  Used to simulate an installed `gh` CLI that passes the
 /// preflight check.
 ///
 /// # Panics
 ///
-/// Panics if writing the script file, reading its metadata, or setting
-/// permissions fails.
+/// Panics if writing the script file or setting permissions fails.
 #[cfg(unix)]
 pub fn install_version_only_gh(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let script_path = bin_dir.join("gh");
     let script = concat!(
         "#!/bin/sh\n",
         "if [ \"$1\" = \"--version\" ]; then\n",
@@ -138,12 +170,7 @@ pub fn install_version_only_gh(bin_dir: &Path) {
         "fi\n",
         "exit 1\n",
     );
-    std::fs::write(&script_path, script).unwrap_or_else(|e| panic!("{e:?}"));
-    let mut perms = std::fs::metadata(&script_path)
-        .unwrap_or_else(|e| panic!("{e:?}"))
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
+    write_executable_script(&bin_dir.join("gh"), script);
 }
 
 /// Extract the error message from a `Result`, panicking if it was `Ok`.
