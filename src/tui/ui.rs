@@ -1419,6 +1419,55 @@ mod tests {
         rendered_lines_with(width, height, no_color, view, configure).join("\n")
     }
 
+    fn rendered_persisted_session(phase: SessionPhase, plan: Option<&str>) -> (String, DetailTab) {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("cruise"));
+        let mut state = crate::session::SessionState::new(
+            "2026092100000000_00000000000000000000000000000001".to_string(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            "rendered TUI session".to_string(),
+        );
+        state.phase = phase;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to persist test session: {error}"));
+        if let Some(plan) = plan {
+            std::fs::write(state.plan_path(&manager.sessions_dir()), plan)
+                .unwrap_or_else(|error| panic!("failed to write test plan: {error}"));
+        }
+        let application = crate::application::CruiseApplication::new(manager);
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (log_tx, _) = tokio::sync::mpsc::channel(4);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            event_tx,
+            log_tx,
+            Some(crate::test_support::lock_process()),
+        );
+        app.display.no_color = true;
+        let selected_tab = app.tab;
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let output = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (output, selected_tab)
+    }
+
     fn configure_ask_sessions(app: &mut TuiApp, tab: DetailTab, selected: usize) {
         configure_ask_sessions_with_question(app, tab, selected, "Which provider should be used?");
     }
@@ -1875,6 +1924,38 @@ mod tests {
                 "missing Tab hint at width {width}"
             );
         }
+    }
+
+    #[test]
+    fn planned_session_renders_saved_plan_without_a_tab_navigation_key() {
+        let (view, selected_tab) = rendered_persisted_session(
+            SessionPhase::Planned,
+            Some("# Saved plan sentinel\n\nThe Plan panel is selected by default."),
+        );
+
+        assert_eq!(selected_tab, DetailTab::Plan);
+        assert!(view.contains("Plan  Markdown"));
+        assert!(view.contains("Saved plan sentinel"));
+        assert!(view.contains("The Plan panel is selected by default."));
+    }
+
+    #[test]
+    fn planning_phase_without_a_plan_still_renders_the_plan_panel_message() {
+        let (view, selected_tab) = rendered_persisted_session(SessionPhase::AwaitingApproval, None);
+
+        assert_eq!(selected_tab, DetailTab::Plan);
+        assert!(view.contains("Plan  Markdown"));
+        assert!(view.contains("No plan has been generated for this session."));
+        assert!(!view.contains("Session information"));
+    }
+
+    #[test]
+    fn awaiting_input_without_a_plan_opens_the_plan_tab_on_the_awaiting_input_panel() {
+        let (view, selected_tab) = rendered_persisted_session(SessionPhase::AwaitingInput, None);
+
+        assert_eq!(selected_tab, DetailTab::Plan);
+        assert!(view.contains("Plan  Awaiting Input"));
+        assert!(!view.contains("Session information"));
     }
 
     #[test]

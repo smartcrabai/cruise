@@ -835,7 +835,8 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     tui.wait_for_output("even with uncommitted changes?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\x15");
-    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output("planned through terminal e2e", START_TIMEOUT);
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -868,6 +869,8 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
     tui.wait_for_output("What should cruise do?", START_TIMEOUT);
     tui.send(b"first planned through terminal");
     tui.send(b"\x15");
+    // A Planned session opens on its Plan tab; step back to Info for the phase.
+    tui.send(b"[[");
     tui.wait_for_output("Phase    Planned", START_TIMEOUT);
 
     tui.send(b"n");
@@ -880,6 +883,7 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
     tui.send(b"\x1b");
     tui.send(b"second planned through terminal");
     tui.send(b"\x15");
+    tui.send(b"[[");
     tui.wait_for_output("Phase    Planned", START_TIMEOUT);
     tui.send(b"q");
 
@@ -903,7 +907,9 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     let mut tui = fixture.start(120, 30, false);
 
     tui.wait_for_output("E2E terminal session", START_TIMEOUT);
-    tui.send(b"]");
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output("E2E Plan", START_TIMEOUT);
+    tui.send(b"[");
     tui.wait_for_output("Selected node", START_TIMEOUT);
     tui.send(b"]");
     tui.wait_for_output("E2E Plan", START_TIMEOUT);
@@ -936,6 +942,36 @@ fn run_all_executes_a_planned_session_and_details_remain_browsable() {
     let log = std::fs::read_to_string(fixture.manager.run_log_path(&id))
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(log.contains("e2e-run-complete"), "run log: {log}");
+}
+
+#[test]
+fn planning_phase_without_a_plan_opens_plan_and_manual_info_survives_refresh() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.seed_display_session(
+        1,
+        "awaiting approval without a plan",
+        SessionPhase::AwaitingApproval,
+        false,
+        None,
+    );
+    let mut tui = fixture.start(120, 30, true);
+
+    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
+    tui.wait_for_output(
+        "No plan has been generated for this session.",
+        START_TIMEOUT,
+    );
+    tui.send(b"[[");
+    tui.wait_for_output("Phase    Awaiting Approval", START_TIMEOUT);
+    tui.send(b"r");
+    tui.wait_for_output("Phase    Awaiting Approval", START_TIMEOUT);
+    tui.send(b"q");
+
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
 }
 
 #[test]
@@ -994,7 +1030,8 @@ fn run_all_displays_model_notice_in_the_tui_log_view() {
     let mut tui = fixture.start(120, 30, true);
 
     tui.wait_for_output("TUI model logging session", START_TIMEOUT);
-    tui.send(b"]");
+    // A Planned session opens on its Plan tab, so step back to Graph first.
+    tui.send(b"[");
     tui.wait_for_output("Selected node", START_TIMEOUT);
     tui.send(b"]");
     tui.wait_for_output("TUI model plan", START_TIMEOUT);
@@ -1151,8 +1188,10 @@ fn phase_specific_action_palettes_expose_the_supported_operations() {
     assert_palette(&mut tui, &["Generate Plan", "Delete"]);
     tui.send(b"j");
     assert_palette(&mut tui, &["Approve", "Ask About Plan"]);
+    tui.send(b"[[");
     tui.send(b"j");
     assert_palette(&mut tui, &["Run in Worktree", "Replan"]);
+    tui.send(b"[[");
     tui.send(b"j");
     assert_palette(&mut tui, &["Retry", "Edit Current Step"]);
     tui.send(b"j");
@@ -1268,7 +1307,10 @@ fn destructive_actions_cancel_cleanly_then_apply_after_confirmation() {
     tui.send(b"\r");
     tui.wait_for_output(&format!("Reset to Planned {completed_id}?"), START_TIMEOUT);
     tui.send(b"\r");
-    tui.wait_for_output("Planned", START_TIMEOUT);
+    tui.wait_for_output(
+        "No plan has been generated for this session.",
+        START_TIMEOUT,
+    );
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -1344,6 +1386,11 @@ fn ask_user_uses_the_real_pty_path_for_inline_plan_questions_and_resume() {
         .unwrap_or_else(|error| panic!("failed to read ToolBridge socket path: {error}"));
     let socket = PathBuf::from(socket);
     wait_for_file(&socket, START_TIMEOUT);
+
+    // Planning opens the Plan tab by default; select Info manually so the
+    // question can be shown to stay out of every other detail tab.
+    tui.send(b"[[");
+    tui.wait_for_output("Session information", START_TIMEOUT);
 
     let ask_thread = thread::spawn({
         let socket = socket.clone();
