@@ -611,13 +611,12 @@ mod tests {
         /// streaming mode and what makes these tests deterministic: the write
         /// cannot lose a race against the child exiting.
         fn stub(body: &str) -> Stub {
-            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
             let path = dir.path().join("claude-stub");
-            std::fs::write(&path, format!("#!/bin/sh\nread -r _user_frame\n{body}"))
-                .unwrap_or_else(|e| panic!("write stub: {e}"));
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-                .unwrap_or_else(|e| panic!("chmod stub: {e}"));
+            crate::test_support::write_executable_script(
+                &path,
+                &format!("#!/bin/sh\nread -r _user_frame\n{body}"),
+            );
             Stub {
                 path,
                 dir: dir.path().to_path_buf(),

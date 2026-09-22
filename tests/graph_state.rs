@@ -559,11 +559,12 @@ fn graph_view_uses_a_checkpoint_when_session_display_state_is_stale() {
     let mut session = SessionState::new(
         session_id.into(),
         dir.path().into(),
-        config_path.to_string_lossy().into_owned(),
+        cruise::session_config::SessionConfigRef::File {
+            path: config_path.clone(),
+        },
         String::new(),
     );
     session.phase = SessionPhase::Planned;
-    session.config_path = Some(config_path.clone());
     manager.create(&session).unwrap();
 
     let compiled =
@@ -662,7 +663,9 @@ fn explicit_restart_archives_even_a_corrupt_checkpoint() {
     let mut session = SessionState::new(
         "restart".into(),
         dir.path().into(),
-        "test".into(),
+        cruise::session_config::SessionConfigRef::File {
+            path: std::path::PathBuf::from("test"),
+        },
         String::new(),
     );
     manager.create(&session).unwrap();

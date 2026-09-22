@@ -113,7 +113,6 @@ assert_file_exists ".dockerignore exists" ".dockerignore"
 assert_contains ".dockerignore excludes .git" ".dockerignore" ".git"
 assert_contains ".dockerignore excludes target" ".dockerignore" "target"
 assert_contains ".dockerignore excludes node_modules" ".dockerignore" "node_modules"
-assert_contains ".dockerignore excludes src-tauri/target" ".dockerignore" "src-tauri/target"
 
 # ---------------------------------------------------------------------------
 # .github/workflows/docker-publish.yml
@@ -147,7 +146,7 @@ assert_contains "build-binary matrix includes arm64" "$WORKFLOW" "arm64"
 # Native ARM runner (no cross-compilation)
 assert_contains "build-binary uses ubuntu-24.04-arm runner for ARM" "$WORKFLOW" "ubuntu-24.04-arm"
 
-# Cargo build: bin cruise only, not --workspace (would pull in GUI crates)
+# Cargo build: bin cruise only
 assert_contains "cargo build uses --bin cruise flag" "$WORKFLOW" "--bin cruise"
 assert_not_contains "cargo build does not use --workspace" "$WORKFLOW" "--workspace"
 

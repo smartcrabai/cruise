@@ -573,15 +573,10 @@ steps:
 
 #[cfg(unix)]
 fn install_claude_stub(root: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let script = root.join("claude");
-    std::fs::write(
-        &script,
+    crate::test_support::write_executable_script(
+        &root.join("claude"),
         "#!/bin/sh\ncat >/dev/null\ntouch \"$CHILD.started\"\nsleep 2\ntouch \"$CHILD.stopped\"\n",
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("{e}"));
+    );
 }
 
 #[cfg(unix)]

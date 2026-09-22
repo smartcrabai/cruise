@@ -1202,6 +1202,7 @@ pub(crate) async fn run_prompt_step(
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
             let prompt_text = format!("  {resolved}");
+            let _blocked = crate::herdr::blocked(&resolved);
             let text = crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?;
             vars.set_input(text);
         } else {
@@ -1725,7 +1726,7 @@ mod tests {
 
     /// Run config while capturing `on_step_log` emissions as `(stream, line)` pairs.
     /// Useful for testing the engine's progress-line callback independently of
-    /// what the CLI/GUI frontends do with those lines.
+    /// what the CLI/`WebUI` frontends do with those lines.
     async fn run_config_with_log(
         yaml: &str,
         input: &str,

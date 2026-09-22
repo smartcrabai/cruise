@@ -584,7 +584,9 @@ mod tests {
         let mut session = SessionState::new(
             id.to_string(),
             base_dir.to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "test task".to_string(),
         );
         session.phase = SessionPhase::AwaitingApproval;

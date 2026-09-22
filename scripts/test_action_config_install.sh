@@ -452,8 +452,8 @@ assert_contains "install: unparseable --version output names the cause" \
 rm -f "$STUB_DIR/cruise"
 
 # --- minimum cruise version: an older binary is refused --------------------
-# This action generates `sdk:`-less configs and provisions credentials into
-# cruise's own jcode home, both of which only mean anything from v0.2.0 on.
+# This action generates `sdk:`-less configs and provisions jcode credentials
+# for the run, both of which only mean anything from v0.2.0 on.
 # Pairing an older binary with this action must fail loudly here rather than
 # somewhere inside the run, both when the installer produced it...
 new_case

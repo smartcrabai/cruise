@@ -15,14 +15,14 @@ use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, Plan
 use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::new_session_history::{
-    BUILTIN_CONFIG_KEY, HistoryScope, NewSessionHistory, resolved_config_key_for_session,
-};
+use crate::new_session_history::{HistoryScope, NewSessionHistory};
 use crate::planning::{
-    PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template, setup_plan_vars,
+    PlanProgress, PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template,
+    setup_plan_vars,
 };
 use crate::resolver::ConfigSource;
 use crate::session::{SessionManager, SessionPhase, SessionState};
+use crate::session_config::SessionConfigRef;
 use crate::variable::VariableStore;
 use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_skippable_steps};
 
@@ -40,6 +40,7 @@ fn cli_plan_ctx<'a>(
     grill: bool,
     formal_spec: bool,
     cancel_token: Option<&'a CancellationToken>,
+    on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
     // a handler that errors rather than blocking on stdin (ask_user is not
@@ -54,14 +55,25 @@ fn cli_plan_ctx<'a>(
         ask,
         plan_path,
         interactive,
+        progress: PlanProgress::Console,
         rate_limit_retries,
         working_dir,
         grill,
         formal_spec,
         on_session_id: None,
+        on_notice,
         cancel_token,
     }
 }
+
+fn cli_notice_callback(
+    manager: &SessionManager,
+    session_id: &str,
+) -> impl Fn(&str) + Send + Sync + 'static {
+    let logger = crate::session::SessionLogger::new(manager.run_log_path(session_id));
+    move |message: &str| logger.write(&format!("[info] {message}"))
+}
+
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
 #[expect(
     clippy::fn_params_excessive_bools,
@@ -224,6 +236,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         return Ok(());
     }
 
+    let _herdr = crate::herdr::start();
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
@@ -290,6 +303,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     } else {
         let work_dir = plan_working_dir(&session).to_path_buf();
         let cancel_token = CancellationToken::new();
+        let on_notice = cli_notice_callback(&manager, &session.id);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -299,6 +313,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             args.grill,
             args.formal_spec,
             Some(&cancel_token),
+            Some(&on_notice),
         );
         let plan_result = tokio::select! {
             result = generate_plan_markdown(&ctx, &mut vars, &mut resume) => result,
@@ -532,7 +547,20 @@ async fn approve_with_title(
     // The `generate_title` tool needs an SDK backend, which includes the default
     // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
     if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
-        match generate_title_via_sdk(config, &session.input, plan_content, cancel_token).await {
+        let log_notice = cli_notice_callback(manager, &session.id);
+        let on_notice = |message: &str| {
+            crate::status_eprintln!("{}", style(message).dim());
+            log_notice(message);
+        };
+        match generate_title_via_sdk(
+            config,
+            &session.input,
+            plan_content,
+            cancel_token,
+            Some(&on_notice),
+        )
+        .await
+        {
             Ok(title) => session.title = Some(title),
             Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
             Err(e) => {
@@ -553,6 +581,7 @@ async fn generate_title_via_sdk(
     input: &str,
     plan_content: &str,
     cancel_token: Option<&CancellationToken>,
+    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<String> {
     let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
@@ -580,7 +609,7 @@ async fn generate_title_via_sdk(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: 1,
             env: &env,
-            on_notice: None,
+            on_notice,
             cancel_token,
             working_dir: None,
             stream: None,
@@ -678,22 +707,10 @@ fn create_planning_session(
 ) -> Result<SessionState> {
     let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
-    let mut session =
-        SessionState::new(session_id.clone(), base_dir, source.display_string(), input);
-    session.config_path = source.path().cloned();
-    manager.create(&session)?;
-
-    if session.config_path.is_none()
-        && let Err(error) = std::fs::write(
-            manager.sessions_dir().join(&session_id).join("config.yaml"),
-            yaml,
-        )
-    {
-        // Do not leave a persisted session that cannot be loaded because its
-        // builtin config snapshot was not written.
-        let _ = manager.delete(&session_id);
-        return Err(error.into());
-    }
+    let config_ref = SessionConfigRef::from_source(source, None)?;
+    let session = SessionState::new(session_id.clone(), base_dir, config_ref, input);
+    let config = crate::resolver::load_config_from_source(yaml, source)?;
+    manager.create_with_config(&session, &config)?;
 
     Ok(session)
 }
@@ -806,23 +823,18 @@ fn build_repo_planning_session(
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path)?;
     validate_config(&config)?;
 
+    let config_ref = SessionConfigRef::from_source(&source, Some(clone_path))?;
     let mut session = SessionState::new(
         session_id.to_string(),
         clone_path.to_path_buf(),
-        source.display_string(),
+        config_ref,
         input,
     );
     session.repo = Some(repo.to_string());
     // Configs that live inside the clone (or the builtin default) are serialized
     // after reference resolution into the session directory so they stay
     // readable after the clone is removed at approval time.
-    session.config_path = crate::repo_clone::persistent_config_path(&source, clone_path);
-    manager.create(&session)?;
-    if session.config_path.is_none() {
-        let session_dir = manager.sessions_dir().join(session_id);
-        let config_to_persist = crate::repo_clone::serialize_resolved_config(&config)?;
-        std::fs::write(session_dir.join("config.yaml"), config_to_persist)?;
-    }
+    manager.create_with_config(&session, &config)?;
     Ok((config, session))
 }
 
@@ -893,6 +905,7 @@ async fn generate_plan_for_session(
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
     // Background worker is non-interactive, so grill mode is never used here.
+    let on_notice = cli_notice_callback(manager, &session.id);
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
@@ -902,6 +915,7 @@ async fn generate_plan_for_session(
         false,
         false,
         None,
+        Some(&on_notice),
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
 }
@@ -1058,10 +1072,9 @@ fn select_skipped_steps_with_history(
         return Ok(Some(vec![]));
     }
 
-    let key = match session.config_path.as_deref() {
-        Some(p) => resolved_config_key_for_session(p),
-        None => BUILTIN_CONFIG_KEY.to_string(),
-    };
+    let key = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
     let mut history = NewSessionHistory::load_best_effort();
 
     let base_dir_str = session.base_dir.to_string_lossy();
@@ -1113,6 +1126,7 @@ async fn run_approve_loop(
     // interactive path — the noninteractive branch auto-approves below.
     // Grill affects only the initial plan template; fix/ask turns are standard.
     let cancel_token = CancellationToken::new();
+    let on_notice = cli_notice_callback(manager, &session.id);
     let ctx = cli_plan_ctx(
         config,
         plan_path,
@@ -1122,6 +1136,7 @@ async fn run_approve_loop(
         false,
         false,
         Some(&cancel_token),
+        Some(&on_notice),
     );
 
     // Read the plan once up front; re-read only after Fix modifies it.
@@ -1158,6 +1173,8 @@ async fn run_approve_loop(
             return Ok(());
         }
 
+        let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
+
         let options = vec!["Approve", "Fix", "Ask", "Execute now", "Publish as Issue"];
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
@@ -1179,6 +1196,7 @@ async fn run_approve_loop(
                     continue;
                 };
                 session.skipped_steps = skipped_steps;
+                drop(review);
                 tokio::select! {
                     result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
                     _ = tokio::signal::ctrl_c() => {
@@ -1226,6 +1244,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
+                drop(review);
                 let fix_result = tokio::select! {
                     result = run_fix_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
@@ -1252,6 +1271,7 @@ async fn run_approve_loop(
                     InputResult::Cancelled => continue,
                 };
                 vars.set_prev_input(Some(text));
+                drop(review);
                 let ask_result = tokio::select! {
                     result = run_ask_plan(&ctx, vars, resume) => result,
                     _ = tokio::signal::ctrl_c() => {
@@ -1334,6 +1354,7 @@ pub async fn replan_session(
             .clone()
             .unwrap_or_else(|| session.base_dir.clone());
         let mut resume: Option<String> = None;
+        let on_notice = cli_notice_callback(manager, &session.id);
         // Fix-plan reuses the standard template regardless of grill.
         let ctx = cli_plan_ctx(
             &config,
@@ -1344,6 +1365,7 @@ pub async fn replan_session(
             false,
             false,
             None,
+            Some(&on_notice),
         );
         run_fix_plan(&ctx, &mut vars, &mut resume).await?;
 
@@ -1451,8 +1473,8 @@ fn prompt_for_plan_input() -> Result<String> {
 ///
 /// Accepts sessions in `Draft | AwaitingInput | AwaitingApproval | Planned`
 /// phases; this is the path behind `cruise list` → Generate Plan / Replan. The
-/// phase transition after successful regeneration matches the GUI's
-/// `regenerate_plan` command (`src-tauri/src/commands.rs:1422-1427`):
+/// phase transition after successful regeneration matches the `WebUI`'s
+/// regenerate-plan flow:
 ///
 /// - `Draft | AwaitingInput` → `AwaitingApproval`
 /// - `AwaitingApproval` → `AwaitingApproval` (no-op)
@@ -1493,6 +1515,7 @@ pub async fn regenerate_plan_for_session(
 
         let work_dir = plan_working_dir(session).to_path_buf();
         let mut resume: Option<String> = None;
+        let on_notice = cli_notice_callback(manager, &session.id);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -1502,6 +1525,7 @@ pub async fn regenerate_plan_for_session(
             false,
             false,
             None,
+            Some(&on_notice),
         );
         generate_plan_markdown(&ctx, &mut vars, &mut resume)
             .await
@@ -1526,7 +1550,7 @@ pub async fn regenerate_plan_for_session(
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
 
         session.plan_error = None;
-        // Phase transition matching GUI's regenerate_plan (src-tauri/src/commands.rs:1422-1427):
+        // Phase transition matching the WebUI's regenerate-plan behavior:
         // - Draft | AwaitingInput → AwaitingApproval
         // - AwaitingApproval → AwaitingApproval (no-op)
         // - Planned → Planned (preserve approval; do NOT silently un-approve)
@@ -1666,9 +1690,14 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let config_path = manager.sessions_dir().join(&session.id).join("config.yaml");
+        let expected = crate::session_config::serialize_resolved_config(
+            &crate::resolver::load_config_from_source(yaml, &ConfigSource::Builtin)
+                .unwrap_or_else(|e| panic!("{e:?}")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             std::fs::read_to_string(config_path).unwrap_or_else(|e| panic!("{e:?}")),
-            yaml
+            expected
         );
     }
 
@@ -1990,7 +2019,7 @@ steps:
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token)),
+            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token), None),
         )
         .await;
 
@@ -2024,7 +2053,7 @@ steps:
 
         // cat echoes the prompt; the generate_title tool is never called.
         // With no token, the function should complete (with an Err: None from the store).
-        let result = generate_title_via_sdk(&config, "task", "# Plan", None).await;
+        let result = generate_title_via_sdk(&config, "task", "# Plan", None, None).await;
 
         // The title store remains empty because cat doesn't call the tool,
         // so the function returns Err with "title store returned None".
@@ -2196,7 +2225,7 @@ steps:
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session(id, &repo);
-        session.config_path = Some(config_path);
+        session.config = crate::session_config::SessionConfigRef::File { path: config_path };
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         (manager, session)
     }
@@ -2337,7 +2366,9 @@ steps:
         let mut session = SessionState::new(
             "20260621100000".to_string(),
             base_dir,
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "implement the feature".to_string(),
         );
         // SessionState::new starts in AwaitingApproval — the default
@@ -2371,7 +2402,9 @@ steps:
         let mut session = SessionState::new(
             "20260621100001".to_string(),
             base_dir.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "implement the feature".to_string(),
         );
         session.repo = Some("owner/repo".to_string());

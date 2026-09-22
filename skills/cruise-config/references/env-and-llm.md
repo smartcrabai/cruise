@@ -46,7 +46,7 @@ jcode v0.84.0 defaults `[provider].openai_service_tier` to `"priority"` ([jcode 
 
 ## Process-level config overrides
 
-The CLI and desktop GUI apply these environment variables when loading a
+The CLI and WebUI apply these environment variables when loading a
 workflow config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`,
 `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`,
 `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are
@@ -60,10 +60,10 @@ then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LA
 
 ## Session title generation
 
-After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the GUI sidebar:
+After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the WebUI sidebar:
 
 - **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) invokes the agent with the `generate_title` tool only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model`, then `model`, then the backend default. SDK title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
 - **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
-- `cruise list` **Approve**, GUI/TUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
+- `cruise list` **Approve**, WebUI/TUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
 
 No `llm:` workflow field or `CRUISE_LLM_*` override exists. Title generation uses the configured execution backend and model resolution above.
