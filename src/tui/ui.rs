@@ -1531,15 +1531,16 @@ mod tests {
 
         for width in [80, 120] {
             let buffer = rendered_buffer_with(width, 24, false, View::Sessions, |app| {
-                let mut state = sidebar_session(
-                    "日本語の長いタイトルを含むセッション",
-                    SessionPhase::AwaitingApproval,
-                );
+                // sakoku-ignore-next-line
+                let title = "日本語の長いタイトルを含むセッション";
+                let mut state = sidebar_session(title, SessionPhase::AwaitingApproval);
                 state.plan_error = Some("planner failed".to_string());
                 app.sessions = vec![state];
                 app.selected = 0;
             });
-            let row = row_containing(&buffer, width, "日本語の長い");
+            // sakoku-ignore-next-line
+            let needle = "日本語の長い";
+            let row = row_containing(&buffer, width, needle);
             let text = row_text(&buffer, width, row);
             assert!(text.contains("Plan Failed"), "width {width}: {text:?}");
             assert!(text.contains("▸ "), "width {width}: {text:?}");
