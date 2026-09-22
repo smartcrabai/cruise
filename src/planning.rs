@@ -20,7 +20,7 @@ use crate::variable::VariableStore;
 // Built-in plan/fix/ask prompt templates, embedded at compile time. The `*_SDK`
 // variants drive the agent via the `submit_plan` / `update_plan` / `ask_user`
 // tools instead of writing the plan file directly. Shared by the CLI
-// (`plan_cmd`) and the GUI (`src-tauri`) so the two never drift.
+// (`plan_cmd`) and the WebUI (`src/webui`) so the two never drift.
 pub const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 pub const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 pub const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
@@ -70,7 +70,7 @@ fn clarification_guidance(interactive: bool) -> &'static str {
 ///
 /// Registers both `{plan}` (the session plan file path) and `{plan.language}`
 /// (the effective `languages.plan` value, including environment/locale
-/// resolution applied before planning) so CLI and GUI planning prompts resolve
+/// resolution applied before planning) so CLI and `WebUI` planning prompts resolve
 /// the same variables.
 #[must_use]
 pub fn setup_plan_vars(
@@ -170,7 +170,7 @@ pub enum PlanProgress {
 pub struct PlanPromptCtx<'a> {
     /// Workflow configuration (selects command vs SDK backend, model refs).
     pub config: &'a WorkflowConfig,
-    /// UI handler backing the SDK `ask_user` tool (CLI or GUI).
+    /// UI handler backing the SDK `ask_user` tool (CLI or `WebUI`).
     pub ask: Arc<dyn AskHandler>,
     /// Session `plan.md` path (where SDK plan tools read/write).
     pub plan_path: &'a Path,
@@ -191,6 +191,9 @@ pub struct PlanPromptCtx<'a> {
     pub formal_spec: bool,
     /// Called when an SDK backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
+    /// Additional destination for model and fallback notices, separate from
+    /// the terminal output used by this planning layer.
+    pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token forwarded to the executor.
     pub cancel_token: Option<&'a CancellationToken>,
 }
@@ -348,6 +351,9 @@ pub async fn run_plan_prompt_template(
         } else {
             crate::status_eprintln!("{}", style(msg).dim());
         }
+        if let Some(cb) = ctx.on_notice {
+            cb(msg);
+        }
     };
     let outcome = executor
         .run(PromptRun {
@@ -488,18 +494,6 @@ pub fn plan_conversation_key(config: &WorkflowConfig, config_identity: &str) -> 
     key
 }
 
-/// Resolve a config identity from a path and compute its conversation key.
-/// The path is part of the key even if two files happen to have identical
-/// bytes, preventing accidental cross-config conversation reuse.
-#[must_use]
-pub fn plan_conversation_key_for_path(config: &WorkflowConfig, path: Option<&Path>) -> String {
-    let identity = path.map_or_else(
-        || "__builtin__".to_string(),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    plan_conversation_key(config, &identity)
-}
-
 /// Write bytes to a path by replacing it atomically.
 ///
 /// The parent directory is created when necessary, and a temporary file is
@@ -602,7 +596,7 @@ pub fn resolve_generated_plan_content(
 /// Backend transcript for `session_id`, when the backend publishes one that
 /// records terminal errors. Always `None` today.
 ///
-/// - `sdk: jcode` writes `$JCODE_HOME/sessions/<session_id>.json`, but that
+/// - `sdk: jcode` writes `<jcode home>/sessions/<session_id>.json`, but that
 ///   document holds only the session's messages. A turn killed by a provider
 ///   error (429, `context_length_exceeded`, a transport failure) leaves no error
 ///   field there — not even the partial assistant reply (verified against jcode
@@ -613,7 +607,7 @@ pub fn resolve_generated_plan_content(
 /// - `sdk: claude` transcripts are not read by cruise.
 ///
 /// The two consumers (`ensure_plan_persisted` and
-/// [`resolve_generated_plan_content`], the latter also called by the GUI) treat
+/// [`resolve_generated_plan_content`], the latter also called by the `WebUI`) treat
 /// `None` as "no extra diagnosis available" and keep their generic message.
 #[must_use]
 pub fn read_sdk_transcript(_working_dir: Option<&Path>, _session_id: &str) -> Option<String> {
@@ -861,6 +855,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: None,
         }
     }
@@ -900,6 +895,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
 
@@ -962,6 +958,7 @@ mod tests {
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
         let mut vars = VariableStore::new("test input".to_string());
@@ -1157,6 +1154,9 @@ mod tests {
         let _guard = lock_process();
         let tmp = make_temp_dir();
         let _home = crate::test_support::set_fake_home(tmp.path());
+        // `jcode_home()` reads `JCODE_HOME` first; clear it so the fixture
+        // lands under the fake home rather than the developer's real one.
+        let _jcode_home = crate::test_support::EnvGuard::remove("JCODE_HOME");
         let sessions = crate::backend::jcode::jcode_home()
             .unwrap_or_else(|e| panic!("jcode home: {e}"))
             .join("sessions");

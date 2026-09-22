@@ -15,8 +15,8 @@
 # No `sdk:` field: omitting both `sdk` and `command` selects cruise's
 # default `jcode` backend, which is what the cruise GitHub Action
 # provisions and drives. It is equally usable outside the Action --
-# `cruise plan`/`cruise run` on a workstation, against the credentials you
-# set up with `cruise login`.
+# `cruise plan`/`cruise run` on a workstation, against your own jcode
+# credentials (`jcode login <provider>`).
 
 # `model`/`plan_model` are left unset so the jcode home's configured default
 # provider/model is used -- the recommended default when this config is used

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::session::{SessionPhase, SessionState};
+use crate::session_config::SessionConfigRef;
 
 pub static GLOBAL_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -216,7 +217,9 @@ pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
     let mut session = SessionState::new(
         id.to_string(),
         PathBuf::from(base_dir),
-        "cruise.yaml".to_string(),
+        SessionConfigRef::File {
+            path: PathBuf::from(base_dir).join("cruise.yaml"),
+        },
         "test task".to_string(),
     );
     session.phase = SessionPhase::Planned;

@@ -2,8 +2,9 @@
 # Centralizes the environment variables the cruise CLI itself reads for this
 # run: the model overrides and the user-supplied extra env vars.
 #
-# Model *credentials* are deliberately not here: they live in cruise's own
-# jcode home, written by provision-jcode.sh once both binaries are installed.
+# Model *credentials* are deliberately not here: they live in the jcode home
+# pinned below, written by provision-jcode.sh once both binaries are
+# installed.
 #
 # Everything is exported via $GITHUB_ENV conditionally (skipping empty
 # values) rather than declared as static `env:` entries in action.yml,
@@ -27,37 +28,42 @@ export_env() { # $1=name $2=value
   echo "$1=$2" >> "$GITHUB_ENV"
 }
 
-# --- cruise's XDG dirs, identical for EVERY later step. cruise's jcode home
-# sits under XDG_DATA_HOME (src/paths.rs falls back to
-# $HOME/.local/share/cruise when it is unset), so provision-jcode.sh writing
-# credentials and the run step reading them must resolve the same path --
-# and the RUNNER_TEMP base keeps those credentials off a self-hosted
-# runner's real $HOME. $GITHUB_ENV written here, ahead of the install and
-# provision steps, is the only channel that reaches all of them. ---
+# --- cruise's XDG dirs and the jcode home, identical for EVERY later step.
+# XDG_* places cruise's own data (its session store lives under
+# XDG_DATA_HOME; src/paths.rs falls back to $HOME/.local/share/cruise when it
+# is unset). JCODE_HOME is what keeps the model credentials -- and the jcode
+# sessions the runs produce -- off a self-hosted runner's real $HOME: cruise
+# no longer relocates jcode itself, it just inherits whatever home the
+# ambient environment names, so pinning that home is this action's job.
+# $GITHUB_ENV written here, ahead of the install and provision steps, is the
+# only channel that reaches all of them, so provision-jcode.sh writing the
+# credentials and the run step reading them resolve the same paths. ---
 CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
-mkdir -p "$CRUISE_DIR/data" "$CRUISE_DIR/xdg-config" "$CRUISE_DIR/xdg-state"
+mkdir -p "$CRUISE_DIR/data" "$CRUISE_DIR/xdg-config" "$CRUISE_DIR/xdg-state" "$CRUISE_DIR/jcode-home"
 export_env XDG_DATA_HOME "$CRUISE_DIR/data"
 export_env XDG_CONFIG_HOME "$CRUISE_DIR/xdg-config"
 export_env XDG_STATE_HOME "$CRUISE_DIR/xdg-state"
+export_env JCODE_HOME "$CRUISE_DIR/jcode-home"
 
 # --- force_exec is never honored here: action commands decide the mode. ---
 export_env CRUISE_FORCE_EXEC false
 
 # --- model references: cruise's jcode format ("provider/model[:effort]" or a
 # bare model id); empty means "use the default provider/model configured in
-# cruise's jcode home". cruise's own env-override reader already ignores an
-# empty CRUISE_MODEL/CRUISE_PLAN_MODEL, but we still skip the export entirely
-# for clarity. ---
+# the jcode home this action pins". cruise's own env-override reader already
+# ignores an empty CRUISE_MODEL/CRUISE_PLAN_MODEL, but we still skip the
+# export entirely for clarity. ---
 [ -n "$MODEL_INPUT" ] && export_env CRUISE_MODEL "$MODEL_INPUT"
 [ -n "$PLAN_MODEL_INPUT" ] && export_env CRUISE_PLAN_MODEL "$PLAN_MODEL_INPUT"
 
 # --- user-supplied extra env vars ("KEY=VALUE" per line, blank lines and
 # "#"-prefixed lines ignored). Reserved names are skipped (with a warning)
 # instead of silently letting a workflow author override token/auth/path
-# plumbing this action depends on. XDG_DATA_HOME is reserved because it is
-# what places cruise's jcode home, which provision-jcode.sh has already
-# populated by the time the run starts. ---
-RESERVED_KEYS="GITHUB_TOKEN GH_TOKEN PATH HOME SHELL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME"
+# plumbing this action depends on. JCODE_HOME is reserved because it is what
+# places the credentials provision-jcode.sh has already written by the time
+# the run starts, and XDG_DATA_HOME because it places cruise's own session
+# store. ---
+RESERVED_KEYS="GITHUB_TOKEN GH_TOKEN PATH HOME SHELL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL JCODE_HOME XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME"
 
 # Prints a non-empty reason if $1 is reserved (and should be skipped), empty
 # otherwise. CRUISE_* gets its own message pointing at the dedicated inputs

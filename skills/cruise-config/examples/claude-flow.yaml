@@ -1,6 +1,6 @@
 # claude SDK backend example: the claude CLI is driven in-process via
 # claude-agent-sdk. Authentication is the claude CLI's own (its stored
-# credentials or ANTHROPIC_API_KEY); `cruise login` does not apply here.
+# credentials or ANTHROPIC_API_KEY); `jcode login` does not apply here.
 sdk: claude
 
 description: claude-backed TDD flow
