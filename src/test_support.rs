@@ -117,40 +117,88 @@ pub fn prepend_to_path(dir: &Path) -> EnvGuard {
     EnvGuard::set("PATH", joined)
 }
 
-/// Write `script` to `path` as a `0o755` executable, publishing it only after
-/// the writing handle is closed.
+/// Argument that makes a stub written by [`write_executable_script`] exit
+/// immediately, so the installer can prove the image is executable without
+/// triggering any of the stub's real behaviour.
+#[cfg(unix)]
+const EXEC_PROBE_FLAG: &str = "--cruise-exec-probe";
+
+/// Write `script` to `path` as a `0o755` executable and return only once the
+/// file can actually be executed.
 ///
 /// On Linux, `execve` fails with `ETXTBSY` ("Text file busy") while any
-/// process holds the image open for writing. Tests run as parallel threads of
-/// one process, so a thread that forks while a stub is mid-write inherits that
-/// writable descriptor, and an `exec` of the same inode then fails. Writing a
-/// temporary sibling and renaming it into place means the executable path is
-/// only ever published after the handle is closed, which shrinks the window to
-/// the staging file's own lifetime: a standalone C reproduction of this race
-/// measured roughly 900 failures per run when writing in place versus roughly
-/// 50 when renaming. The residual comes from a fork landing inside that
-/// staging write, which no purely file-side change can remove.
+/// process holds the image open for writing. Tests are parallel threads of one
+/// process, so a thread that forks while another thread is writing a stub
+/// inherits that writable descriptor, and the exec of that stub fails until
+/// the forked child reaches its own exec. That is why a stub test can fail
+/// with "Text file busy" even though nothing shares the stub.
+///
+/// Publishing by rename is not sufficient on its own: a standalone C
+/// reproduction of the real pattern (each thread installs its own stub, then
+/// forks and execs it) still recorded failures with rename, because the
+/// inherited descriptor follows the inode rather than the name. Retrying the
+/// exec is what converges, so this installs the stub and then probes it with
+/// [`EXEC_PROBE_FLAG`] until the kernel accepts the image. In that
+/// reproduction the probe took `ETXTBSY` from roughly 6 failures per 2400
+/// spawns to zero.
+///
+/// The probe is side-effect free: a guard clause inserted after the shebang
+/// exits before the body runs, so callers can assert on whatever the stub
+/// records for its real invocations.
 ///
 /// # Panics
 ///
-/// Panics if writing, setting permissions, or renaming the script fails.
+/// Panics if writing, setting permissions, or renaming the script fails, or if
+/// the stub is still unexecutable after the retry budget.
 #[cfg(unix)]
 pub fn write_executable_script(path: &Path, script: &str) {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
+    // Insert the probe guard directly after the shebang so it runs before any
+    // of the stub's own behaviour (recording argv, reading stdin, sleeping).
+    let guarded = match script.split_once('\n') {
+        Some((shebang, body)) if shebang.starts_with("#!") => {
+            format!("{shebang}\ncase \"${{1:-}}\" in {EXEC_PROBE_FLAG}) exit 0 ;; esac\n{body}")
+        }
+        _ => panic!("stub script must start with a shebang line: {script:?}"),
+    };
+
     let staging = path.with_extension(format!("tmp{}", std::process::id()));
     {
         let mut file = std::fs::File::create(&staging).unwrap_or_else(|e| panic!("{e:?}"));
-        file.write_all(script.as_bytes())
+        file.write_all(guarded.as_bytes())
             .unwrap_or_else(|e| panic!("{e:?}"));
         file.sync_all().unwrap_or_else(|e| panic!("{e:?}"));
-        // Dropping the handle here is the point: the rename below must publish
-        // a file that no descriptor still holds open for writing.
+        // The handle must be closed before the rename publishes the path.
     }
     std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
         .unwrap_or_else(|e| panic!("{e:?}"));
     std::fs::rename(&staging, path).unwrap_or_else(|e| panic!("{e:?}"));
+
+    // ETXTBSY is transient: it lasts only until every forked child that
+    // inherited the writable descriptor reaches its own exec.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let probe = Command::new(path)
+            .arg(EXEC_PROBE_FLAG)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match probe {
+            Ok(_) => return,
+            Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{} stayed unexecutable (ETXTBSY) past the retry budget",
+                    path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(err) => panic!("probing {} failed: {err:?}", path.display()),
+        }
+    }
 }
 
 /// Install a minimal `gh` stub that exits 0 for `--version` and 1 for
