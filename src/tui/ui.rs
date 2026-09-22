@@ -2206,6 +2206,7 @@ mod tests {
                     app,
                     DetailTab::Plan,
                     0,
+                    // sakoku-ignore-next-line
                     "first line\r\nsecond line\n日本語の質問と長い説明を折り返す",
                 );
             });
@@ -2222,6 +2223,7 @@ mod tests {
                     panic!("missing second question line at width {width}: {lines:?}")
                 });
             assert_eq!(second_row, first_row + 1, "question lines must be adjacent");
+            // sakoku-ignore-next-line
             assert!(lines.join("\n").contains("日本語の質問"));
             assert!(lines.join("\n").contains("Answer"));
             assert!(lines.join("\n").contains("Enter"));
