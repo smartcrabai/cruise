@@ -1258,6 +1258,22 @@ pub struct CruiseApplication {
     runtime: Arc<ApplicationRuntime>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static NEXT_APP_CONFIG_SAVE_ERROR: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_app_config_save() {
+    NEXT_APP_CONFIG_SAVE_ERROR.with(|should_fail| should_fail.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_app_config_save_failure() {
+    NEXT_APP_CONFIG_SAVE_ERROR.with(|should_fail| should_fail.set(false));
+}
+
 impl std::fmt::Debug for CruiseApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CruiseApplication").finish_non_exhaustive()
@@ -2074,6 +2090,12 @@ impl CruiseApplication {
     ///
     /// Returns an error when the application configuration cannot be saved.
     pub fn save_app_config(&self, config: &crate::app_config::AppConfig) -> Result<()> {
+        #[cfg(test)]
+        if NEXT_APP_CONFIG_SAVE_ERROR.with(|should_fail| should_fail.replace(false)) {
+            return Err(CruiseError::Other(
+                "injected application config save failure".to_string(),
+            ));
+        }
         config.save()
     }
 
@@ -3864,6 +3886,13 @@ impl OptionHandler for RuntimeOptionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_failure_hooks_are_resettable() {
+        clear_app_config_save_failure();
+        fail_next_app_config_save();
+        clear_app_config_save_failure();
+    }
 
     #[test]
     fn config_reloader_rejects_invalid_updated_config() {

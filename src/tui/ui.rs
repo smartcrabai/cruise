@@ -6,9 +6,6 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
 };
 
-#[cfg(test)]
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
 
@@ -141,7 +138,12 @@ fn footer_spans<'a>(app: &TuiApp, mut spans: Vec<Span<'a>>) -> Vec<Span<'a>> {
             ("Ctrl+P/G/U", "start now"),
             ("?", "help"),
         ],
-        View::RunAll => &[("Enter", "run/stop"), ("?", "help"), ("q", "quit")],
+        View::RunAll => &[
+            ("a / Enter", "run/stop"),
+            ("p", "parallelism"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
     };
     spans.reserve(hints.len() * 4);
     for &(shortcut, description) in hints {
@@ -893,6 +895,11 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     }
     .spacing(1)
     .split(area);
+    let parallelism_span = if app.batch_parallelism_error.is_some() {
+        Span::styled("unavailable", error_style(app))
+    } else {
+        Span::styled(app.batch_parallelism.to_string(), warning(app))
+    };
     let mut lines = vec![
         Line::from(vec![
             Span::styled("SESSIONS  ", label(app)),
@@ -905,10 +912,17 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("PARALLELISM  ", label(app)),
-            Span::styled(app.batch_parallelism.to_string(), warning(app)),
+            parallelism_span,
+            Span::styled("  [p] change", key(app)),
         ]),
         Line::from(""),
     ];
+    if let Some(error) = app.batch_parallelism_error.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("Unable to load shared Run All setting: {error}"),
+            error_style(app),
+        )));
+    }
     if app.batch_rows.is_empty() {
         let message = if app
             .status
@@ -917,7 +931,7 @@ fn render_run_all(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         {
             "No Planned or Suspended sessions were ready."
         } else {
-            "Press a to start Run All."
+            "Press a / Enter to start Run All."
         };
         lines.push(Line::from(Span::styled(message, muted(app))));
     }
@@ -1006,6 +1020,9 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             regenerate,
             ..
         } => render_input_modal(frame, app, area, title, editor, *regenerate),
+        Modal::RunAllParallelism { editor, error } => {
+            render_run_all_parallelism_modal(frame, app, area, editor, error.as_deref());
+        }
     }
 }
 
@@ -1018,9 +1035,9 @@ Enter  next question; newline in the task and image editors
 Ctrl+Enter  next question from a multiline editor
 ↑↓ / j/k  choose, recall history, or navigate
 Space  toggle the current choice     PgUp/PgDn/Home/End  jump
-←→ / [ ]  detail tabs
+←→ / [ ]  detail tabs   p  Run All parallelism   f  follow log
 a / Enter  actions   o  selected Ask → Plan; Option modal or URL
-c  clean sessions (Sessions only; asks for confirmation)
+c  clean sessions (Sessions only; asks for confirmation)   r  refresh
 Ctrl+Enter  save multiline input in action dialogs
 Ctrl+R  toggle save/regenerate
 Plan Ask: Enter edit/submit   Esc leave editing; Option stays modal
@@ -1142,6 +1159,45 @@ fn render_input_modal(
         }),
         split[1],
     );
+}
+
+fn render_run_all_parallelism_modal(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    editor: &Editor,
+    error: Option<&str>,
+) {
+    let rect = centered(area, 76, 12);
+    frame.render_widget(Clear, rect);
+    let block = modal_block(app, "Run All parallelism");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(editor.widget(), sections[0]);
+
+    let mut guidance = vec![
+        Line::from("Enter a whole number (integer) of at least 1."),
+        Line::from("Saved to the shared WebUI/TUI application setting."),
+        Line::from("While Run All is active, changes apply from the next scheduling point."),
+    ];
+    if let Some(error) = error {
+        guidance.insert(
+            0,
+            Line::from(Span::styled(format!("Error: {error}"), error_style(app))),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(guidance).wrap(Wrap { trim: false }),
+        sections[1],
+    );
+    frame.render_widget(Paragraph::new("Enter save   Esc cancel"), sections[2]);
 }
 
 fn render_text_modal<'a>(
@@ -1330,6 +1386,11 @@ fn truncate_sidebar_title(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::app_config::AppConfig;
+    use crate::test_support::{EnvGuard, lock_process};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tempfile::TempDir;
+
     use super::*;
     use crate::session::SessionState;
 
@@ -1417,6 +1478,46 @@ mod tests {
         configure: impl FnOnce(&mut TuiApp),
     ) -> String {
         rendered_lines_with(width, height, no_color, view, configure).join("\n")
+    }
+
+    fn rendered_view_with_invalid_parallelism_config(width: u16, height: u16) -> String {
+        let process_lock = lock_process();
+        let config_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_home.path().join("cruise/config.json");
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|error| panic!("{error}"));
+        }
+        std::fs::write(&config_path, r#"{"runAllParallelism": 0}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let session_dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = crate::application::CruiseApplication::new(
+            crate::session::SessionManager::new(session_dir.path().to_path_buf()),
+        );
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(4);
+        let mut app =
+            TuiApp::new_for_test_with_lock(application, events, logs_sender, Some(process_lock));
+        app.display.no_color = true;
+        app.view = View::RunAll;
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn rendered_persisted_session(phase: SessionPhase, plan: Option<&str>) -> (String, DetailTab) {
@@ -2213,6 +2314,127 @@ mod tests {
     }
 
     #[test]
+    fn run_all_shows_parallelism_editing_hint_at_supported_sizes_and_color_modes() {
+        for width in [80, 120] {
+            for no_color in [false, true] {
+                let lines = rendered_lines_with(width, 24, no_color, View::RunAll, |app| {
+                    app.batch_parallelism = 4;
+                });
+                let parallelism_line = lines
+                    .iter()
+                    .find(|line| line.contains("PARALLELISM"))
+                    .unwrap_or_else(|| panic!("missing parallelism line: {lines:?}"));
+                assert!(parallelism_line.contains('4'));
+                assert!(
+                    parallelism_line.contains('p') && parallelism_line.contains("change"),
+                    "parallelism line lacks its editing hint at width {width}, no_color={no_color}: {parallelism_line}"
+                );
+                assert!(
+                    lines.iter().any(|line| line.contains("p parallelism")),
+                    "footer lacks the parallelism shortcut at width {width}, no_color={no_color}: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_modal_describes_the_run_all_parallelism_shortcut() {
+        let help = rendered_view_with(80, 24, true, View::RunAll, |app| {
+            app.modal = Some(Modal::Help);
+        });
+        let lower = help.to_ascii_lowercase();
+        assert!(lower.contains("parallelism"));
+        assert!(lower.contains('p'));
+        assert!(lower.contains("run all"));
+    }
+
+    #[test]
+    fn parallelism_editor_modal_explains_validation_persistence_and_scheduling() {
+        for width in [80, 120] {
+            let view = rendered_view_with(width, 24, true, View::RunAll, |app| {
+                assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE,)));
+            });
+            let lower = view.to_ascii_lowercase();
+            for expected in ["enter save", "esc cancel", "integer", "shared", "webui"] {
+                assert!(
+                    lower.contains(expected),
+                    "missing parallelism editor guidance {expected:?} at width {width}: {view}"
+                );
+            }
+            assert!(
+                lower.contains("schedul"),
+                "missing next-scheduling guidance at width {width}: {view}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_all_confirmation_includes_the_current_parallelism_limit() {
+        let process_lock = lock_process();
+        let config_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_home.path().join("cruise/config.json");
+        AppConfig {
+            run_all_parallelism: 4,
+        }
+        .save_to(&config_path)
+        .unwrap_or_else(|error| panic!("failed to save test app config: {error}"));
+        let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let lines =
+            rendered_lines_with_lock(120, 24, true, View::RunAll, Some(process_lock), |app| {
+                assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE,)));
+            });
+        let confirmation_row = lines
+            .iter()
+            .position(|line| line.contains("Run all Planned"))
+            .unwrap_or_else(|| panic!("missing Run All confirmation: {lines:?}"));
+        let start = confirmation_row.saturating_sub(2);
+        let end = (confirmation_row + 3).min(lines.len());
+        let confirmation = lines[start..end].join("\n").to_ascii_lowercase();
+        assert!(confirmation.contains("parallelism"));
+        assert!(confirmation.contains('4'));
+    }
+
+    #[test]
+    fn run_all_parallelism_hint_remains_visible_beside_long_status_and_logs() {
+        let lines = rendered_lines_with(80, 24, true, View::RunAll, |app| {
+            app.batch_parallelism = 4;
+            app.status = Some(
+                "a status message that is intentionally much longer than the footer viewport"
+                    .to_string(),
+            );
+            app.batch_logs.extend(
+                (0..64).map(|index| format!("batch log line {index} with additional detail")),
+            );
+        });
+        let parallelism_line = lines
+            .iter()
+            .find(|line| line.contains("PARALLELISM"))
+            .unwrap_or_else(|| panic!("missing parallelism line: {lines:?}"));
+        assert!(parallelism_line.contains('4'));
+        assert!(parallelism_line.contains('p'));
+    }
+
+    #[test]
+    fn invalid_parallelism_config_is_visible_without_a_valid_default_limit() {
+        let screen = rendered_view_with_invalid_parallelism_config(80, 24);
+        let lower = screen.to_ascii_lowercase();
+        assert!(lower.contains("parallelism"));
+        assert!(
+            ["invalid", "at least", "unable", "failed", "error"]
+                .iter()
+                .any(|fragment| lower.contains(fragment)),
+            "missing configuration error guidance: {screen}"
+        );
+        let shows_default_as_valid = screen.lines().any(|line| {
+            line.contains("PARALLELISM") && line.split_whitespace().any(|word| word == "1")
+        });
+        assert!(
+            !shows_default_as_valid,
+            "invalid configuration was rendered as the valid default: {screen}"
+        );
+    }
+
+    #[test]
     fn narrow_run_all_stacks_summary_above_logs() {
         let lines = rendered_lines_with(80, 24, false, View::RunAll, |_| {});
         let summary_row = lines
@@ -2420,7 +2642,7 @@ mod tests {
         });
 
         assert!(run_all.contains("No Planned or Suspended sessions were ready."));
-        assert!(!run_all.contains("Press a to start Run All."));
+        assert!(!run_all.contains("Press a / Enter to start Run All."));
     }
 
     #[test]

@@ -152,7 +152,7 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
 }
 
 /// Where a plan-related prompt is allowed to render transient terminal
-/// progress. CLI callers opt in; event-driven GUI/TUI callers keep it hidden.
+/// progress. CLI callers opt in; event-driven WebUI/TUI callers keep it hidden.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanProgress {
     /// Render the planning loader when stderr is an interactive terminal.
