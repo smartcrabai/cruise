@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::session::{SessionPhase, SessionState};
+use crate::session_config::SessionConfigRef;
 
 pub static GLOBAL_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -116,19 +117,99 @@ pub fn prepend_to_path(dir: &Path) -> EnvGuard {
     EnvGuard::set("PATH", joined)
 }
 
+/// Argument that makes a stub written by [`write_executable_script`] exit
+/// immediately, so the installer can prove the image is executable without
+/// triggering any of the stub's real behaviour.
+#[cfg(unix)]
+const EXEC_PROBE_FLAG: &str = "--cruise-exec-probe";
+
+/// Write `script` to `path` as a `0o755` executable and return only once the
+/// file can actually be executed.
+///
+/// On Linux, `execve` fails with `ETXTBSY` ("Text file busy") while any
+/// process holds the image open for writing. Tests are parallel threads of one
+/// process, so a thread that forks while another thread is writing a stub
+/// inherits that writable descriptor, and the exec of that stub fails until
+/// the forked child reaches its own exec. That is why a stub test can fail
+/// with "Text file busy" even though nothing shares the stub.
+///
+/// Publishing by rename is not sufficient on its own: a standalone C
+/// reproduction of the real pattern (each thread installs its own stub, then
+/// forks and execs it) still recorded failures with rename, because the
+/// inherited descriptor follows the inode rather than the name. Retrying the
+/// exec is what converges, so this installs the stub and then probes it with
+/// [`EXEC_PROBE_FLAG`] until the kernel accepts the image. In that
+/// reproduction the probe took `ETXTBSY` from roughly 6 failures per 2400
+/// spawns to zero.
+///
+/// The probe is side-effect free: a guard clause inserted after the shebang
+/// exits before the body runs, so callers can assert on whatever the stub
+/// records for its real invocations.
+///
+/// # Panics
+///
+/// Panics if writing, setting permissions, or renaming the script fails, or if
+/// the stub is still unexecutable after the retry budget.
+#[cfg(unix)]
+pub fn write_executable_script(path: &Path, script: &str) {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Insert the probe guard directly after the shebang so it runs before any
+    // of the stub's own behaviour (recording argv, reading stdin, sleeping).
+    let guarded = match script.split_once('\n') {
+        Some((shebang, body)) if shebang.starts_with("#!") => {
+            format!("{shebang}\ncase \"${{1:-}}\" in {EXEC_PROBE_FLAG}) exit 0 ;; esac\n{body}")
+        }
+        _ => panic!("stub script must start with a shebang line: {script:?}"),
+    };
+
+    let staging = path.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&staging).unwrap_or_else(|e| panic!("{e:?}"));
+        file.write_all(guarded.as_bytes())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        file.sync_all().unwrap_or_else(|e| panic!("{e:?}"));
+        // The handle must be closed before the rename publishes the path.
+    }
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    std::fs::rename(&staging, path).unwrap_or_else(|e| panic!("{e:?}"));
+
+    // ETXTBSY is transient: it lasts only until every forked child that
+    // inherited the writable descriptor reaches its own exec.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let probe = Command::new(path)
+            .arg(EXEC_PROBE_FLAG)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match probe {
+            Ok(_) => return,
+            Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{} stayed unexecutable (ETXTBSY) past the retry budget",
+                    path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(err) => panic!("probing {} failed: {err:?}", path.display()),
+        }
+    }
+}
+
 /// Install a minimal `gh` stub that exits 0 for `--version` and 1 for
 /// everything else.  Used to simulate an installed `gh` CLI that passes the
 /// preflight check.
 ///
 /// # Panics
 ///
-/// Panics if writing the script file, reading its metadata, or setting
-/// permissions fails.
+/// Panics if writing the script file or setting permissions fails.
 #[cfg(unix)]
 pub fn install_version_only_gh(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let script_path = bin_dir.join("gh");
     let script = concat!(
         "#!/bin/sh\n",
         "if [ \"$1\" = \"--version\" ]; then\n",
@@ -137,12 +218,7 @@ pub fn install_version_only_gh(bin_dir: &Path) {
         "fi\n",
         "exit 1\n",
     );
-    std::fs::write(&script_path, script).unwrap_or_else(|e| panic!("{e:?}"));
-    let mut perms = std::fs::metadata(&script_path)
-        .unwrap_or_else(|e| panic!("{e:?}"))
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
+    write_executable_script(&bin_dir.join("gh"), script);
 }
 
 /// Extract the error message from a `Result`, panicking if it was `Ok`.
@@ -216,7 +292,9 @@ pub fn make_session(id: &str, base_dir: &Path) -> SessionState {
     let mut session = SessionState::new(
         id.to_string(),
         PathBuf::from(base_dir),
-        "cruise.yaml".to_string(),
+        SessionConfigRef::File {
+            path: PathBuf::from(base_dir).join("cruise.yaml"),
+        },
         "test task".to_string(),
     );
     session.phase = SessionPhase::Planned;

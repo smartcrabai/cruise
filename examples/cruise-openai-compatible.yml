@@ -41,7 +41,8 @@ jobs:
       - uses: smartcrabai/cruise@v1
         with:
           # A generated jcode provider profile: each `providers` entry becomes
-          # a `[providers.<name>]` table in cruise's jcode home via
+          # a `[providers.<name>]` table in the jcode home the action pins
+          # for the job (JCODE_HOME under $RUNNER_TEMP), written via
           # `jcode provider add` (see docs/github-actions.md#providers).
           # `default: true` makes the profile jcode's startup default
           # provider/model -- required here because a profile is only

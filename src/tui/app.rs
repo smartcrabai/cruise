@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10,9 +10,10 @@ use super::prompts::{PlanPromptStore, PromptQueue};
 use super::registry::{OperationRegistry, UiEvent};
 use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
-    PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
+    OperationKind, PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
 };
-use crate::session::{SessionState, WorkspaceMode};
+use crate::platform::open_url;
+use crate::session::{SessionPhase, SessionState, WorkspaceMode};
 use std::path::{Path, PathBuf};
 const SESSION_LOG_LIMIT: usize = 10_000;
 const BATCH_LOG_LIMIT: usize = 2_000;
@@ -59,6 +60,112 @@ impl DetailTab {
             Self::Plan => "Plan",
             Self::Log => "Log",
         }
+    }
+}
+
+/// Presentation-only status used by the Sessions sidebar.
+///
+/// The persisted [`SessionPhase`] remains the source of lifecycle state. This
+/// enum is intentionally kept separate so that transient user-action and
+/// planning states do not become part of the saved session format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarStatus {
+    AwaitingInput,
+    AwaitingApproval,
+    Running,
+    Planning,
+    Draft,
+    Planned,
+    Completed,
+    Failed,
+    PlanFailed,
+    Suspended,
+}
+
+impl SidebarStatus {
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingInput => "Awaiting Input",
+            Self::AwaitingApproval => "Awaiting Approval",
+            Self::Running => "Running",
+            Self::Planning => "Planning",
+            Self::Draft => "Draft",
+            Self::Planned => "Planned",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::PlanFailed => "Plan Failed",
+            Self::Suspended => "Suspended",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            Self::Draft => "◯",
+            _ => "●",
+        }
+    }
+}
+
+fn classify_sidebar_status(
+    session: &SessionState,
+    operation: Option<OperationKind>,
+    has_prompt: bool,
+    plan_available: bool,
+    planning: bool,
+) -> SidebarStatus {
+    if has_prompt {
+        return SidebarStatus::AwaitingInput;
+    }
+
+    match operation {
+        Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
+            return SidebarStatus::Planning;
+        }
+        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+            return SidebarStatus::Running;
+        }
+        Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
+    }
+
+    // A planning run that has not yet produced a live question keeps the row
+    // on `Planning` even though the persisted phase is already
+    // `Awaiting Input`.
+    if planning && matches!(&session.phase, SessionPhase::AwaitingInput) {
+        return SidebarStatus::Planning;
+    }
+
+    let status = match &session.phase {
+        SessionPhase::Completed => SidebarStatus::Completed,
+        SessionPhase::Failed(_) => SidebarStatus::Failed,
+        SessionPhase::Suspended => SidebarStatus::Suspended,
+        SessionPhase::Draft
+        | SessionPhase::AwaitingInput
+        | SessionPhase::AwaitingApproval
+        | SessionPhase::Planned
+            if session.plan_error.is_some() =>
+        {
+            SidebarStatus::PlanFailed
+        }
+        SessionPhase::Draft => SidebarStatus::Draft,
+        SessionPhase::AwaitingInput => SidebarStatus::AwaitingInput,
+        SessionPhase::AwaitingApproval if plan_available => SidebarStatus::AwaitingApproval,
+        SessionPhase::AwaitingApproval => SidebarStatus::Planning,
+        SessionPhase::Planned => SidebarStatus::Planned,
+        SessionPhase::Running => SidebarStatus::Running,
+    };
+    if matches!(
+        status,
+        SidebarStatus::Draft
+            | SidebarStatus::AwaitingApproval
+            | SidebarStatus::Running
+            | SidebarStatus::Planned
+    ) && (session.awaiting_input || session.pending_ask_question.is_some())
+    {
+        SidebarStatus::AwaitingInput
+    } else {
+        status
     }
 }
 
@@ -141,6 +248,7 @@ pub struct TuiApp {
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
+    pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
@@ -203,6 +311,7 @@ impl TuiApp {
             ask_responses: HashMap::new(),
             ask_active: std::collections::HashSet::new(),
             plan_cache: HashMap::new(),
+            sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
             plan_scroll: 0,
             log_scroll: 0,
@@ -425,6 +534,15 @@ impl TuiApp {
                 } else {
                     self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
                 }
+                self.sidebar_plan_available = self
+                    .sessions
+                    .iter()
+                    .filter(|state| {
+                        matches!(&state.phase, SessionPhase::AwaitingApproval)
+                            && self.application.session_plan_available(state)
+                    })
+                    .map(|state| state.id.clone())
+                    .collect();
                 self.evict_inactive_caches();
                 if self.status.is_none() || !self.is_busy() {
                     self.status = Some(format!(
@@ -460,6 +578,19 @@ impl TuiApp {
         }
     }
 
+    #[must_use]
+    pub(crate) fn sidebar_status(&self, session: &SessionState) -> SidebarStatus {
+        let has_prompt =
+            self.prompts.has_session(&session.id) || self.plan_prompts.has_session(&session.id);
+        classify_sidebar_status(
+            session,
+            self.application.runtime().active_operation(&session.id),
+            has_prompt,
+            self.sidebar_plan_available.contains(&session.id),
+            self.active_planning.contains(&session.id) && !has_prompt,
+        )
+    }
+
     fn evict_inactive_caches(&mut self) {
         let selected = self.active_session().map(|session| session.id.clone());
         self.plan_cache
@@ -486,6 +617,27 @@ impl TuiApp {
     #[must_use]
     pub fn is_busy(&self) -> bool {
         !self.registry.tasks_empty() || self.registry.batch_busy() || self.application_has_claims()
+    }
+
+    /// The lifecycle state herdr should show for this pane.
+    ///
+    /// A plan awaiting approval is *not* blocked: nothing is waiting on the
+    /// user, herdr derives `done` from the working→idle transition instead.
+    #[must_use]
+    pub fn herdr_state(&self) -> (crate::herdr::AgentState, Option<&str>) {
+        use crate::herdr::AgentState;
+
+        if !self.prompts.is_empty() {
+            (AgentState::Blocked, self.prompts.front_question())
+        } else if let Some(question) = self.plan_prompts.front_question() {
+            // An `ask_user` question now waits in a session's Plan tab rather
+            // than in the modal queue, but it still blocks the agent.
+            (AgentState::Blocked, Some(question))
+        } else if self.is_busy() {
+            (AgentState::Working, None)
+        } else {
+            (AgentState::Idle, None)
+        }
     }
 
     fn application_has_claims(&self) -> bool {
@@ -517,6 +669,9 @@ impl TuiApp {
             return false;
         };
         matches!(session.phase, crate::session::SessionPhase::AwaitingInput)
+            // A planning run this process owns is never "external", even in the
+            // window between answering a question and the phase being updated.
+            && !self.active_planning.contains(&session.id)
             && !self.plan_prompts.has_session(&session.id)
             && self.application.pending_prompts(&session.id).is_empty()
     }
@@ -733,16 +888,14 @@ impl TuiApp {
                         .unwrap_or(self.selected);
                     self.evict_inactive_caches();
                     self.start_plan(state.id, plan);
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
             },
             UiEvent::DraftCreated { result } => match result {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                     self.view = View::Sessions;
                     self.tab = DetailTab::Info;
                     self.plan_prompts.clear_focus();
@@ -939,6 +1092,7 @@ impl TuiApp {
                 self.finish_batch_session(id, phase, error);
             }
             ApplicationEvent::BatchFinished { cancelled } => self.finish_batch(cancelled),
+            ApplicationEvent::BatchFailed { error } => self.set_error_and_refresh(error),
             ApplicationEvent::LogChunk {
                 session_id,
                 stream,
@@ -1211,8 +1365,23 @@ impl TuiApp {
         }
     }
 
+    fn new_session_creation_pending(&self) -> bool {
+        self.view == View::NewSession && self.registry.busy("__create")
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.operation_state.quit_requested {
+            return false;
+        }
+        let action = input::action_for(key);
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            if matches!(action, Action::Quit) && !self.is_form_editor_key(key) {
+                let should_quit = self.handle_action(action);
+                if should_quit {
+                    self.operation_state.quit_requested = true;
+                }
+                return should_quit;
+            }
             return false;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
@@ -1259,7 +1428,6 @@ impl TuiApp {
                 }
             }
         }
-        let action = input::action_for(key);
         if self.is_form_editor_key(key) {
             self.form.input(key);
             return false;
@@ -1364,6 +1532,9 @@ impl TuiApp {
     pub fn handle_action(&mut self, action: Action) -> bool {
         if matches!(action, Action::Quit) {
             return self.request_quit();
+        }
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            return false;
         }
         if let Some(modal) = self.modal.take() {
             return self.handle_modal_action(modal, action);
@@ -2223,15 +2394,7 @@ impl TuiApp {
                     .next()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.active_session().and_then(|session| {
-                            session
-                                .config_path
-                                .as_ref()
-                                .map(|path| path.to_string_lossy().into_owned())
-                        })
-                    });
+                    .map(ToString::to_string);
                 let skipped_steps = lines
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
@@ -2769,33 +2932,24 @@ pub fn action_label(action: SessionAction) -> &'static str {
     }
 }
 
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let command = "open";
-    #[cfg(not(target_os = "macos"))]
-    let command = "xdg-open";
-    std::process::Command::new(command)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionPhase;
     use tempfile::TempDir;
+
+    fn app_for(application: CruiseApplication) -> TuiApp {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new(application, events, logs_sender)
+    }
 
     fn app_with_lock(test_process_lock: Option<crate::test_support::ProcessLock>) -> TuiApp {
         let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = CruiseApplication::new(crate::session::SessionManager::new(
             temp.path().to_path_buf(),
         ));
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
-        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
-        let mut app = TuiApp::new(application, events, logs_sender);
+        let mut app = app_for(application);
         app.test_process_lock = test_process_lock;
         app
     }
@@ -2812,7 +2966,9 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             PathBuf::from("."),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             format!("task {id}"),
         );
         state.phase = phase;
@@ -2847,6 +3003,345 @@ mod tests {
         }
     }
 
+    fn sidebar_session(id: &str, phase: crate::session::SessionPhase) -> SessionState {
+        let mut state = SessionState::new(
+            id.to_string(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            format!("task {id}"),
+        );
+        state.phase = phase;
+        state
+    }
+
+    fn queued_prompt(session_id: &str, request_id: &str) -> crate::tui::prompts::PromptItem {
+        crate::tui::prompts::PromptItem {
+            request_id: request_id.to_string(),
+            session_id: session_id.to_string(),
+            question: "What should happen next?".to_string(),
+            choices: vec![],
+        }
+    }
+
+    fn app_for_manager(manager: crate::session::SessionManager) -> TuiApp {
+        let application = CruiseApplication::new(manager);
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        )
+    }
+
+    fn first_sidebar_status(app: &TuiApp) -> SidebarStatus {
+        let session = app
+            .sessions
+            .first()
+            .unwrap_or_else(|| panic!("expected one session"));
+        app.sidebar_status(session)
+    }
+
+    #[test]
+    fn sidebar_status_has_stable_labels_and_symbols() {
+        let cases = [
+            (SidebarStatus::AwaitingInput, "Awaiting Input", "●"),
+            (SidebarStatus::AwaitingApproval, "Awaiting Approval", "●"),
+            (SidebarStatus::Running, "Running", "●"),
+            (SidebarStatus::Planning, "Planning", "●"),
+            (SidebarStatus::Draft, "Draft", "◯"),
+            (SidebarStatus::Planned, "Planned", "●"),
+            (SidebarStatus::Completed, "Completed", "●"),
+            (SidebarStatus::Failed, "Failed", "●"),
+            (SidebarStatus::PlanFailed, "Plan Failed", "●"),
+            (SidebarStatus::Suspended, "Suspended", "●"),
+        ];
+
+        for (status, label, symbol) in cases {
+            assert_eq!(status.label(), label);
+            assert_eq!(status.symbol(), symbol);
+        }
+    }
+
+    #[test]
+    fn sidebar_status_maps_persisted_lifecycle_phases() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Draft, SidebarStatus::Draft),
+            (SessionPhase::AwaitingInput, SidebarStatus::AwaitingInput),
+            (SessionPhase::Planned, SidebarStatus::Planned),
+            (SessionPhase::Running, SidebarStatus::Running),
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("failure".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let state = sidebar_session(&format!("phase-{index}"), phase);
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn same_session_prompt_wins_over_running_and_prompt_scope_is_per_session() {
+        let mut app = app_without_lock();
+        let target_id = "target";
+        let other_id = "other";
+        let target = sidebar_session(target_id, SessionPhase::Running);
+        let other = sidebar_session(other_id, SessionPhase::Draft);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(target_id, crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim target session: {error}"));
+
+        app.prompts
+            .enqueue(queued_prompt(target_id, "target-request"));
+        assert_eq!(app.sidebar_status(&target), SidebarStatus::AwaitingInput);
+
+        app.prompts
+            .enqueue(queued_prompt(other_id, "other-request"));
+        assert_eq!(app.sidebar_status(&other), SidebarStatus::AwaitingInput);
+
+        let unrelated = sidebar_session("unrelated", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&unrelated), SidebarStatus::Draft);
+
+        drop(claim);
+    }
+
+    #[test]
+    fn active_prompt_and_queued_prompt_both_count_as_awaiting_input() {
+        let mut app = app_without_lock();
+        let state = sidebar_session("prompt-session", SessionPhase::Planned);
+        app.prompts
+            .enqueue(queued_prompt(&state.id, "queued-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn planning_operations_override_saved_phase_and_existing_plan() {
+        let app = app_without_lock();
+        for (index, operation) in [
+            crate::application::OperationKind::Generate,
+            crate::application::OperationKind::Fix,
+            crate::application::OperationKind::Replan,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (phase_index, phase) in [
+                SessionPhase::Draft,
+                SessionPhase::AwaitingApproval,
+                SessionPhase::Planned,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("planning-{index}-{phase_index}");
+                let state = sidebar_session(&id, phase);
+                let claim = app
+                    .application
+                    .runtime()
+                    .try_begin(&id, operation)
+                    .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+                assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+                drop(claim);
+            }
+        }
+    }
+
+    #[test]
+    fn ask_operation_is_running_and_mutations_do_not_imply_running() {
+        let app = app_without_lock();
+        let ask_id = "ask-session";
+        let ask_state = sidebar_session(ask_id, SessionPhase::AwaitingApproval);
+        let ask_claim = app
+            .application
+            .runtime()
+            .try_begin(ask_id, crate::application::OperationKind::Ask)
+            .unwrap_or_else(|error| panic!("failed to claim ask session: {error}"));
+        assert_eq!(app.sidebar_status(&ask_state), SidebarStatus::Running);
+        drop(ask_claim);
+
+        for (index, operation) in [
+            crate::application::OperationKind::BatchQueued,
+            crate::application::OperationKind::Mutate,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("mutation-{index}");
+            let state = sidebar_session(&id, SessionPhase::Completed);
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, operation)
+                .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::Completed);
+            drop(claim);
+        }
+    }
+
+    #[test]
+    fn a_claim_for_another_session_does_not_make_this_session_running() {
+        let app = app_without_lock();
+        let claim = app
+            .application
+            .runtime()
+            .try_begin("other-session", crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim other session: {error}"));
+        let state = sidebar_session("this-session", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Draft);
+        drop(claim);
+    }
+
+    #[test]
+    fn plan_error_is_plan_failed_for_all_plan_phases_and_retry_is_planning() {
+        let app = app_without_lock();
+        for (index, phase) in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut state = sidebar_session(&format!("plan-error-{index}"), phase);
+            state.plan_error = Some("planner failed".to_string());
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::PlanFailed);
+        }
+
+        let id = "plan-retry";
+        let mut state = sidebar_session(id, SessionPhase::AwaitingApproval);
+        state.plan_error = Some("stale planner failure".to_string());
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim retry session: {error}"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn terminal_phases_are_not_hidden_by_stale_prompt_flags_or_plan_errors() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("run failed".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let mut state = sidebar_session(&format!("terminal-{index}"), phase);
+            state.awaiting_input = true;
+            state.pending_ask_question = Some("old question".to_string());
+            state.plan_error = Some("old plan failure".to_string());
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn saved_input_waiting_data_is_used_without_a_local_operation() {
+        let app = app_without_lock();
+
+        let mut option_wait = sidebar_session("option-wait", SessionPhase::Planned);
+        option_wait.awaiting_input = true;
+        assert_eq!(
+            app.sidebar_status(&option_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let mut question_wait = sidebar_session("question-wait", SessionPhase::Planned);
+        question_wait.pending_ask_question = Some("question".to_string());
+        assert_eq!(
+            app.sidebar_status(&question_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let phase_fallback = sidebar_session("phase-fallback", SessionPhase::AwaitingInput);
+        assert_eq!(
+            app.sidebar_status(&phase_fallback),
+            SidebarStatus::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn planning_claim_wins_after_a_question_is_answered_but_phase_is_stale() {
+        let mut app = app_without_lock();
+        let id = "answered-question";
+        let state = sidebar_session(id, SessionPhase::AwaitingInput);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim answered-question session: {error}"));
+        app.prompts.enqueue(queued_prompt(id, "question-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.close_active();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn awaiting_approval_uses_plan_file_availability_and_refresh_rebuilds_the_cache() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("data"));
+        let id = crate::session::SessionManager::new_session_id();
+        let mut state = sidebar_session(&id, SessionPhase::AwaitingApproval);
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        let mut app = app_for_manager(manager.clone());
+
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "# usable plan\n")
+            .unwrap_or_else(|error| panic!("failed to write plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        std::fs::write(&plan_path, " \n\t")
+            .unwrap_or_else(|error| panic!("failed to write whitespace plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "restored plan")
+            .unwrap_or_else(|error| panic!("failed to restore plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        manager
+            .delete(&id)
+            .unwrap_or_else(|error| panic!("failed to delete session: {error}"));
+        app.refresh();
+        assert!(app.sessions.is_empty());
+
+        state.plan_error = None;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to recreate session: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+    }
+
     #[test]
     fn detail_tabs_cycle_in_both_directions() {
         assert_eq!(DetailTab::Info.next(), DetailTab::Dag);
@@ -2862,6 +3357,54 @@ mod tests {
         assert_eq!(app.form.step, Step::Task);
     }
 
+    #[test]
+    fn sessions_clean_shortcut_opens_confirmation_without_starting_cleanup() {
+        for sessions_present in [false, true] {
+            let mut app = app();
+            if sessions_present {
+                add_session(
+                    &mut app,
+                    "session-1",
+                    crate::session::SessionPhase::AwaitingApproval,
+                );
+            }
+
+            assert!(!app.handle_key(key(KeyCode::Char('c'))));
+            assert!(matches!(
+                app.modal,
+                Some(Modal::Confirm {
+                    command: PendingCommand::Clean,
+                    ..
+                })
+            ));
+            assert!(app.registry.tasks_empty());
+        }
+    }
+
+    #[test]
+    fn clean_confirmation_can_be_cancelled_without_starting_cleanup() {
+        let mut app = app();
+        assert!(!app.handle_key(key(KeyCode::Char('c'))));
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(app.modal.is_none());
+        assert!(app.registry.tasks_empty());
+    }
+
+    #[test]
+    fn c_is_scoped_to_sessions_and_remains_text_or_noop_elsewhere() {
+        let mut new_session = app();
+        assert!(!new_session.handle_action(Action::NewSession));
+        assert!(!new_session.handle_key(key(KeyCode::Char('c'))));
+        assert_eq!(new_session.form.input.text(), "c");
+        assert!(new_session.modal.is_none());
+        drop(new_session);
+
+        let mut run_all = app();
+        run_all.view = View::RunAll;
+        assert!(!run_all.handle_key(key(KeyCode::Char('c'))));
+        assert!(run_all.modal.is_none());
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -2875,6 +3418,397 @@ mod tests {
     fn write_workflow(path: &std::path::Path, step: &str) {
         let yaml = format!("command: [echo]\nsteps:\n  {step}:\n    command: echo {step}\n");
         std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn populate_creation_form(app: &mut TuiApp) {
+        app.view = View::NewSession;
+        app.form.input.set_text("old task");
+        app.form.attachments.set_text("old-image.png");
+        app.form.working_dir.set_text("/tmp/project");
+        app.form.repository.set_text("acme/cruise");
+        app.form.config.set_text("workflow.yaml");
+        app.form.skipped.set_text("build, test");
+        app.form.step = Step::Launch;
+        app.form.source = SourceKind::GitHub;
+        app.form.workspace_mode = WorkspaceMode::CurrentBranch;
+        app.form.launch = Launch::SaveDraft;
+        app.form.options.allow_dirty_working_tree = true;
+        app.form.options.planning.grill = true;
+        app.form.options.planning.formal_spec = true;
+        app.form.options.planning.skip_planning = true;
+        app.form.skipped_explicit = true;
+        app.form.dirty = true;
+    }
+
+    fn stored_draft(manager: &crate::session::SessionManager, input: &str) -> SessionState {
+        let mut state = SessionState::new_draft(
+            crate::session::SessionManager::new_session_id(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            input.to_string(),
+        );
+        state.attachments = vec![PathBuf::from("/tmp/persisted-image.png")];
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to store test session: {error}"));
+        state
+    }
+
+    fn no_planning_request() -> PlanRequest {
+        PlanRequest {
+            skip_planning: true,
+            ..PlanRequest::default()
+        }
+    }
+
+    fn assert_creation_form_reset(app: &TuiApp) {
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(app.form.attachment_paths().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+    }
+
+    fn assert_creation_error(app: &TuiApp, expected_error: &str, last_change: Instant) {
+        assert_eq!(app.form.input.text(), "old task");
+        assert_eq!(app.form.attachments.text(), "old-image.png");
+        assert_eq!(app.form.working_dir.text(), "/tmp/project");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.step, Step::Launch);
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert_eq!(app.form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(app.form.launch, Launch::SaveDraft);
+        assert!(app.form.options.allow_dirty_working_tree);
+        assert!(app.form.options.planning.grill);
+        assert!(app.form.options.planning.formal_spec);
+        assert!(app.form.options.planning.skip_planning);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.dirty);
+        assert_eq!(app.form.last_change, last_change);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message)) if message.contains(expected_error)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_creation_ignores_new_session_input_and_navigation() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new(application, events, logs_sender);
+
+        app.view = View::NewSession;
+        app.form.input.set_text("first task");
+        app.form.dirty = true;
+        let last_change = app.form.last_change;
+        let state = stored_draft(&manager, "created while blocked");
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        assert!(app.registry.block_creation_for_test(
+            release_receiver,
+            app.events.clone(),
+            Ok(state),
+        ));
+        assert!(app.registry.busy("__create"));
+        type_text(&mut app, " newer input");
+        assert_eq!(app.form.input.text(), "first task");
+        assert_eq!(app.form.last_change, last_change);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+        assert_eq!(app.form.input.text(), "first task");
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm {
+                command: PendingCommand::Quit,
+                ..
+            })
+        ));
+        app.modal = None;
+
+        release_sender
+            .send(())
+            .unwrap_or_else(|()| panic!("failed to release blocked creation"));
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("timed out waiting for creation: {error}"))
+            .unwrap_or_else(|| panic!("creation event channel closed"));
+        let UiEvent::DraftCreated { result } = &event else {
+            panic!("unexpected creation event: {event:?}");
+        };
+        assert!(result.is_ok(), "creation failed: {result:?}");
+        app.apply_event(event);
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+        app.registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_created_success_clears_new_session_input_but_keeps_persisted_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "created task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Ok(state),
+            plan: no_planning_request(),
+        });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load created session: {error}"));
+        assert_eq!(persisted.input, "created task");
+        assert_eq!(persisted.attachments, attachments);
+
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+
+        app.registry.shutdown().await;
+    }
+
+    #[test]
+    fn draft_created_success_clears_new_session_input_but_keeps_draft_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "saved draft task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load saved draft: {error}"));
+        assert_eq!(persisted.input, "saved draft task");
+        assert_eq!(persisted.attachments, attachments);
+    }
+
+    #[test]
+    fn successful_draft_creation_does_not_recreate_the_cleared_autosave() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "old autosave".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/project".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to seed autosave: {error}"));
+        let mut app = app_for(application.clone());
+        app.form.attachments.set_text("old-image.png");
+        app.form.dirty = true;
+        let state = stored_draft(&manager, "saved session");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read cleared autosave: {error}"))
+                .is_none()
+        );
+        app.autosave_draft(Instant::now() + Duration::from_secs(1));
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read autosave after success: {error}"))
+                .is_none()
+        );
+
+        let restarted = app_for(application);
+        assert!(restarted.form.input.text().is_empty());
+        assert!(restarted.form.attachments.text().is_empty());
+    }
+
+    #[test]
+    fn session_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-session draft: {error}"));
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Err("session creation failed".to_string()),
+            plan: no_planning_request(),
+        });
+
+        assert_eq!(app.view, View::NewSession);
+        assert_creation_error(&app, "session creation failed", last_change);
+        let draft = application
+            .draft()
+            .unwrap_or_else(|error| panic!("failed to read failed-session draft: {error}"))
+            .unwrap_or_else(|| panic!("failed-session draft was cleared"));
+        assert_eq!(draft.input, "old task");
+        assert_eq!(draft.working_dir, "/tmp/project");
+        assert_eq!(draft.repo.as_deref(), Some("acme/cruise"));
+    }
+
+    #[test]
+    fn draft_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-draft draft: {error}"));
+
+        app.apply_event(UiEvent::DraftCreated {
+            result: Err("draft creation failed".to_string()),
+        });
+
+        assert_creation_error(&app, "draft creation failed", last_change);
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read failed-draft draft: {error}"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unsent_new_session_round_trip_preserves_task_and_attachments() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let mut app = app_without_lock();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("unsent task");
+        app.form.attachments.set_text("unsent-image.png");
+        app.form.step = Step::Attachments;
+        app.form.dirty = true;
+
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+    }
+
+    #[test]
+    fn restarting_tui_restores_an_unsent_new_session_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "restored task".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/restored".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string(), "test".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to save restart draft: {error}"));
+
+        let app = app_for(application);
+
+        assert_eq!(app.form.input.text(), "restored task");
+        assert_eq!(app.form.working_dir.text(), "/tmp/restored");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.form.dirty);
+    }
+
+    #[tokio::test]
+    async fn successful_creation_rejects_an_empty_next_submission() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        app.form.options.planning.grill = false;
+        app.form.options.planning.formal_spec = false;
+        let state = stored_draft(&manager, "created task");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+        app.handle_action(Action::NewSession);
+        app.create_session();
+        let rejected = matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message.contains("Task description or an image attachment is required")
+        );
+        app.registry.shutdown().await;
+        assert!(rejected, "the next empty submission was not rejected");
     }
 
     #[test]
@@ -3477,7 +4411,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                "__builtin__".to_string(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
                 format!("task {id}"),
             );
             state.phase = crate::session::SessionPhase::Planned;
@@ -3711,7 +4645,9 @@ mod tests {
         let new_state = SessionState::new(
             "new-session".to_string(),
             PathBuf::from("."),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "new task".to_string(),
         );
         app.apply_event(UiEvent::DraftCreated {
@@ -3731,7 +4667,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                "__builtin__".to_string(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
                 format!("task {id}"),
             );
             state.phase = crate::session::SessionPhase::Planned;
@@ -3758,7 +4694,7 @@ mod tests {
         let mut inserted = SessionState::new(
             inserted_id.to_string(),
             temp.path().to_path_buf(),
-            "__builtin__".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "inserted task".to_string(),
         );
         inserted.phase = crate::session::SessionPhase::Planned;
@@ -3784,7 +4720,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                "__builtin__".to_string(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
                 format!("task {id}"),
             );
             state.phase = crate::session::SessionPhase::Planned;
@@ -4127,6 +5063,55 @@ mod tests {
         notifications
             .next()
             .unwrap_or_else(|| panic!("expected one queued notification"))
+    }
+
+    #[test]
+    fn herdr_state_is_blocked_only_while_a_prompt_is_queued() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+
+        // `ask_user` now waits in the session's Plan tab rather than the modal
+        // prompt queue, but it still blocks the agent.
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-1".to_string(),
+            "Which provider should be used?".to_string(),
+        );
+        assert_eq!(
+            app.herdr_state(),
+            (
+                crate::herdr::AgentState::Blocked,
+                Some("Which provider should be used?")
+            )
+        );
+
+        app.plan_prompts.remove("session", "ask-1");
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+    }
+
+    #[test]
+    fn herdr_state_is_blocked_while_an_option_prompt_is_queued() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Running);
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+
+        app.prompts.enqueue(queued_prompt("session", "option-1"));
+        assert_eq!(
+            app.herdr_state(),
+            (
+                crate::herdr::AgentState::Blocked,
+                Some("What should happen next?")
+            )
+        );
+
+        app.prompts.open_next();
+        app.prompts.close_active();
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
     }
 
     #[test]

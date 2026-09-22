@@ -21,7 +21,7 @@ pub struct NewSessionHistoryEntry {
     /// User-typed task description. Empty string for legacy entries.
     #[serde(default)]
     pub input: String,
-    /// The raw config selection shown in the GUI dropdown.
+    /// The raw config selection shown in the `WebUI` dropdown.
     ///
     /// `None` means "auto resolve".
     #[serde(default)]
@@ -431,6 +431,7 @@ pub fn expand_tilde(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_config::SessionConfigRef;
     #[cfg(unix)]
     use std::ffi::OsString;
     #[cfg(unix)]
@@ -1283,5 +1284,35 @@ mod tests {
                 .skipped_steps,
             vec!["step-x"]
         );
+    }
+
+    #[test]
+    fn test_repo_snapshot_identity_reuses_skip_history_across_repo_case() {
+        let reference = SessionConfigRef::RepoSnapshot {
+            relative_path: PathBuf::from(".cruise/review.yaml"),
+        };
+        let mixed_case_key = reference.stable_identity(Some("Owner/Repo"), "session-upper");
+        let lower_case_key = reference.stable_identity(Some("owner/repo"), "session-lower");
+
+        assert_eq!(mixed_case_key, lower_case_key);
+
+        let mut history = NewSessionHistory::default();
+        history.record_skip_selection_for_scope(
+            HistoryScope::Repo("Owner/Repo"),
+            &mixed_case_key,
+            vec!["step-old".to_string()],
+        );
+        history.record_skip_selection_for_scope(
+            HistoryScope::Repo("owner/repo"),
+            &lower_case_key,
+            vec!["step-new".to_string()],
+        );
+
+        assert_eq!(history.entries.len(), 1);
+        let entry = history
+            .latest_entry_for_scope(HistoryScope::Repo("owner/repo"), &lower_case_key)
+            .unwrap_or_else(|| panic!("expected a reused repo snapshot history entry"));
+        assert_eq!(entry.skipped_steps, vec!["step-new"]);
+        assert_eq!(entry.repo.as_deref(), Some("Owner/Repo"));
     }
 }

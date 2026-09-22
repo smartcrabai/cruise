@@ -78,7 +78,7 @@ EOF
 
 Use the `stdin` sentinel + heredoc for multiline plans (no shell-quoting hazards; the quoted `'EOF'` keeps backticks and `$` intact). Inline also works: `cruise --plan "<plan>" --skip-planning`. `--image <PATH>` is repeatable and appends the copied attachment paths to the plan text. No LLM is called on this path; the command prints the session ID and returns immediately. The session lands directly in `Planned` — `cruise run` can pick it up with no human approval step. Exception: for a local target whose resolved workflow has `force_exec: true`, add `--no-force-exec` (or attach an image), otherwise the workflow executes directly instead of creating a session; a `--repo` target never takes that shortcut.
 
-**Default to this form** — it lets you queue work from any context (GUI, agent, shell). The session lands in `Planned` and `cruise run` (or `cruise run --all`) will pick it up automatically; no human approval step is required.
+**Default to this form** — it lets you queue work from any context (WebUI, agent, shell). The session lands in `Planned` and `cruise run` (or `cruise run --all`) will pick it up automatically; no human approval step is required.
 
 ### Foreground non-TTY — auto-approved straight to `Planned`
 

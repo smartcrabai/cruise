@@ -7,8 +7,10 @@
 #
 # The upstream installer is a Bash script and writes its launcher state below
 # `$HOME` (and shell startup files) even when `JCODE_INSTALL_DIR` is set. Keep
-# that state in the runner temp area: the action must not touch the runner
-# user's jcode installation or shell configuration.
+# that state in a throwaway home in the runner temp area: the action must not
+# touch the runner user's jcode installation or shell configuration, and the
+# installer's own scratch home must not be confused with the JCODE_HOME the
+# run's credentials go into.
 #
 # JCODE_NO_TELEMETRY=1 is a requirement, not a preference: an embedded jcode
 # must not report anything, for the install or for the runs cruise makes

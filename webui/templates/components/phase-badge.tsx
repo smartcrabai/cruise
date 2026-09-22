@@ -1,0 +1,8 @@
+export default function PhaseBadge(props) {
+  return (
+    <span class={props.badge.tone === "draft" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-100/50 dark:bg-gray-800/50 text-gray-600 dark:text-gray-400" : props.badge.tone === "approval" || props.badge.tone === "approvalReady" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-yellow-100/50 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300" : props.badge.tone === "input" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100/50 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300" : props.badge.tone === "planned" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-100/50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300" : props.badge.tone === "running" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100/50 dark:bg-green-900/50 text-green-700 dark:text-green-300" : props.badge.tone === "completed" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-200/50 dark:bg-gray-700/50 text-gray-800 dark:text-gray-300" : props.badge.tone === "failed" ? "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100/50 dark:bg-red-900/50 text-red-700 dark:text-red-300" : "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-orange-100/50 dark:bg-orange-900/50 text-orange-700 dark:text-orange-300"}>
+      {props.badge.dot && <span role="img" aria-label={props.badge.dotLabel} class="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"></span>}
+      {props.badge.label}
+    </span>
+  );
+}

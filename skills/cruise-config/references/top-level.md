@@ -63,7 +63,7 @@ step fails the load (see [steps.md](steps.md)).
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against cruise's own jcode home (sign in with `cruise login`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
+- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against jcode's own home (`$JCODE_HOME`, else `~/.jcode`; sign in with `jcode login <provider>`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
@@ -83,12 +83,22 @@ the remaining entries as fallbacks. Arrays with fallback entries automatically
 enable model fallback; an explicit `retry.fallback_chains` entry for a primary
 model wins over its array tail. Rate limits retry the current model while its
 retry budget and delay permit, then switch to the next usable fallback when
-one exists. 5xx and
+one exists. 5xx, HTTP 4xx other than 429, 401, 403, 407, and 408, and
 network failures switch immediately to a usable fallback when
-`--rate-limit-retries` is above zero and no visible text was streamed. Models
-skipped after retryable failures are cooled down for 30 minutes in the current
-process. In command mode, only the first array entry is used and the
-historical same-model retry behavior remains unchanged.
+`--rate-limit-retries` is above zero and no visible text was streamed; such a
+4xx is never resent to the same model, so it switches or fails as-is. 401,
+403, and 407 are auth or permission failures no other model can answer and
+fail the step at once; a 408 counts as a network failure, switching first like
+a 5xx and resent to the same model only when no usable fallback is left,
+visible text was already streamed, or `--rate-limit-retries` is `0`. Models
+skipped after a 429, a 5xx, or a network failure including a 408 are cooled
+down for 30 minutes in the current process, and so is one left behind because
+the provider's text named the model itself as absent (`model_not_supported`,
+`model_not_found`, `unknown model`): there the model is the defect, so later
+turns and later steps stop selecting it. Only a refused request -- a plain
+client error -- keeps its model immediately selectable, since such a status says
+nothing about the model's health. In command mode, only the first array entry
+is used and the historical same-model retry behavior remains unchanged.
 
 ```yaml
 command:
@@ -111,7 +121,7 @@ Model used by the built-in plan step (driven by `cruise plan`). Falls back to `m
 
 ## `description`
 
-Free-form text shown alongside the file name in the CLI/GUI config selectors. Purely informational; no effect on execution.
+Free-form text shown alongside the file name in the CLI/WebUI config selectors. Purely informational; no effect on execution.
 
 ```yaml
 description: Full TDD flow with review loop
@@ -187,12 +197,41 @@ Without a retry policy, cruise retries the same model with exponential backoff w
 
 The `retry:` block is accepted by configuration validation for any backend but affects retry behavior only for SDK backends. In SDK mode, declaring it,
 or using a workflow-level model array with fallback entries, widens rate-limit
-handling into a fallback policy: 5xx and network failures become retryable too,
+handling into a fallback policy: 5xx, HTTP 4xx other than 429, 401, 403, 407,
+and 408, and network failures become retryable too,
 the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and those
 failures switch immediately to the next usable fallback when
 `--rate-limit-retries` is above zero and no visible text was streamed. A 429
 retries the current model while its retry budget and delay permit, then
-switches to the next usable fallback when one exists. Setting
+switches to the next usable fallback when one exists. A retryable 4xx only
+ever switches -- never a same-model retry -- and surfaces the original error
+when no usable fallback is left. What it implies about the model decides the
+cooldown: a refused request skips its model without cooling it, since a client
+error describes the request rather than the model's health, while text naming
+the model as absent (`model_not_supported`, `model_not_found`, `model not
+found`, `model not supported`, `model is not supported`, `unknown model`, `no
+such model`, `model does not exist`, `not a valid model`) is classified as a
+missing model and cools the skipped model for the same 30 minutes, so later
+turns and later steps stop choosing a model the provider does not have. Only
+the provider's own error text is read for this, not the child-process stderr
+tail appended after it. A 400 still switches when its message reads permanent
+(`invalid request`, `context length`, `max_tokens`); `invalid_request_error:
+model not found` is a missing model instead of a permanent failure, because
+the reference rather than the request is at fault. A failure naming no status
+code (`unknown option '--effort'`) stays permanent and fails at once. A
+number is read as a status only when it is a standalone three-digit number
+with one of `http`, `status`, `code`, `error`, `returned`, or `upstream`
+within the preceding 24 bytes; source locations (`src/lib.rs:404:17`) and URL
+ports (`https://host:443/path`) never are. Rate-limit wording is classified
+first and 5xx second, so a 429 or a 503 keeps its class even when appended
+stderr carries a 4xx-looking number; the missing-model wordings are read
+after the rate-limit, 408, 5xx, and network markers and before the bare-4xx
+client-error fallthrough. 401, 403, and 407 fail the step at once --
+authentication and permission failures no other model can answer. A 408 is
+classified as a network failure: immediate switch like a 5xx, resent to the
+same model only when no usable fallback is left, visible text was already
+streamed, or `--rate-limit-retries` is `0`, and it cools down its skipped
+model. Setting
 `model_fallback: false` (or leaving the chains empty) only turns the *switching*
 off for scalar model configurations; model arrays with fallback entries always
 enable switching. The
@@ -216,4 +255,4 @@ retry:                    # Optional; accepted by validation for any backend, ho
       - openai-api/gpt-5.5
 ```
 
-Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a retryable failure remains skipped for 30 minutes in this process (in-memory, not persisted across processes). The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the graph loop-protection ceiling, not a retry budget for prompts.
+Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a 429, a 5xx, a network failure, or an error naming it as missing remains skipped for 30 minutes in this process (in-memory, not persisted across processes), while a client-error switch keeps its model immediately selectable. The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the graph loop-protection ceiling, not a retry budget for prompts.

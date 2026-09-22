@@ -49,6 +49,17 @@ impl PromptQueue {
         }
     }
 
+    #[must_use]
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|prompt| prompt.session_id == session_id)
+            || self
+                .items
+                .iter()
+                .any(|prompt| prompt.session_id == session_id)
+    }
+
     pub fn sync_session(
         &mut self,
         session_id: &str,
@@ -96,6 +107,15 @@ impl PromptQueue {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// The question the user is being asked, if any: the open prompt first,
+    /// otherwise the next one in the queue.
+    #[must_use]
+    pub fn front_question(&self) -> Option<&str> {
+        self.active
+            .as_ref()
+            .map(|item| item.question.as_str())
+            .or_else(|| self.items.first().map(|item| item.question.as_str()))
     }
     pub fn open_next(&mut self) {
         if self.active.is_some() || self.items.is_empty() {
@@ -253,6 +273,12 @@ impl PlanPromptStore {
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.items.iter().any(|item| item.session_id == session_id)
+    }
+
+    /// The question of the oldest waiting Plan-tab `ask_user` request.
+    #[must_use]
+    pub fn front_question(&self) -> Option<&str> {
+        self.items.first().map(|item| item.question.as_str())
     }
 
     #[must_use]
@@ -608,5 +634,31 @@ mod tests {
                 .map(|prompt| prompt.question.as_str()),
             Some("Updated A")
         );
+    }
+
+    #[test]
+    fn has_session_detects_active_and_queued_option_prompts_but_not_other_sessions() {
+        let mut queue = PromptQueue::default();
+        queue.enqueue(option("queued", "queued-request").into());
+        queue.enqueue(option("active", "active-request").into());
+
+        assert!(queue.has_session("queued"));
+        assert!(queue.has_session("active"));
+        assert!(!queue.has_session("missing"));
+
+        queue.open_next();
+        assert!(queue.has_session("queued"));
+        assert!(queue.has_session("active"));
+    }
+
+    #[test]
+    fn has_session_stops_reporting_a_prompt_after_session_sync_removes_it() {
+        let mut queue = PromptQueue::default();
+        queue.enqueue(option("session", "request").into());
+        queue.open_next();
+        assert!(queue.has_session("session"));
+
+        queue.sync_session("session", std::iter::empty());
+        assert!(!queue.has_session("session"));
     }
 }

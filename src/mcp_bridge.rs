@@ -1,10 +1,10 @@
 //! `cruise mcp-bridge`: the stdio MCP server jcode spawns for cruise's tools.
 //!
 //! jcode has no in-process tool registration, so cruise registers itself in
-//! `$JCODE_HOME/mcp.json` as an MCP server whose command is this very binary
-//! (see [`crate::backend::jcode`]). jcode launches it per session, speaks MCP
-//! JSON-RPC 2.0 over its stdin/stdout, and exposes whatever it lists as
-//! `mcp__cruise__<tool>`.
+//! the `mcp.json` of jcode's own home as an MCP server whose command is this
+//! very binary (see [`crate::backend::jcode`]). jcode launches it per session,
+//! speaks MCP JSON-RPC 2.0 over its stdin/stdout, and exposes whatever it lists
+//! as `mcp__cruise__<tool>`.
 //!
 //! The tools themselves cannot run here: their handlers live in the cruise
 //! process that started the run (the terminal `ask_user` prompt, the session's

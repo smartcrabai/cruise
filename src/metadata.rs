@@ -298,7 +298,9 @@ mod tests {
         SessionState::new(
             "20260321130000".to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             "raw task input".to_string(),
         )
     }
