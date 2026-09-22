@@ -25,6 +25,7 @@ fn cli_plan_entrypoint_continues_with_notification_opt_out_enabled() {
             "test notification opt-out",
         ])
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env_remove("HERDR_ENV")
         .output()
         .unwrap_or_else(|error| panic!("failed to run cruise plan: {error}"));
 

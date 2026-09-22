@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -6,13 +6,14 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use super::forms::{Editor, Launch, NewSessionForm, SourceKind, Step};
 use super::input::{self, Action};
-use super::prompts::PromptQueue;
+use super::prompts::{PlanPromptStore, PromptQueue};
 use super::registry::{OperationRegistry, UiEvent};
 use crate::application::{
     ApplicationEvent, CruiseApplication, CurrentStepUpdateDto, EventStream, Interactive,
-    PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
+    OperationKind, PendingPromptKind, PlanRequest, SessionAction, SessionSettingsRequest,
 };
-use crate::session::{SessionState, WorkspaceMode};
+use crate::platform::open_url;
+use crate::session::{SessionPhase, SessionState, WorkspaceMode};
 use std::path::{Path, PathBuf};
 const SESSION_LOG_LIMIT: usize = 10_000;
 const BATCH_LOG_LIMIT: usize = 2_000;
@@ -59,6 +60,126 @@ impl DetailTab {
             Self::Plan => "Plan",
             Self::Log => "Log",
         }
+    }
+}
+
+fn default_detail_tab(phase: &SessionPhase, operation: Option<OperationKind>) -> DetailTab {
+    if matches!(
+        operation,
+        Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan)
+    ) || matches!(
+        phase,
+        SessionPhase::AwaitingInput | SessionPhase::AwaitingApproval | SessionPhase::Planned
+    ) {
+        DetailTab::Plan
+    } else {
+        DetailTab::Info
+    }
+}
+
+/// Presentation-only status used by the Sessions sidebar.
+///
+/// The persisted [`SessionPhase`] remains the source of lifecycle state. This
+/// enum is intentionally kept separate so that transient user-action and
+/// planning states do not become part of the saved session format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarStatus {
+    AwaitingInput,
+    AwaitingApproval,
+    Running,
+    Planning,
+    Draft,
+    Planned,
+    Completed,
+    Failed,
+    PlanFailed,
+    Suspended,
+}
+
+impl SidebarStatus {
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingInput => "Awaiting Input",
+            Self::AwaitingApproval => "Awaiting Approval",
+            Self::Running => "Running",
+            Self::Planning => "Planning",
+            Self::Draft => "Draft",
+            Self::Planned => "Planned",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::PlanFailed => "Plan Failed",
+            Self::Suspended => "Suspended",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            Self::Draft => "◯",
+            _ => "●",
+        }
+    }
+}
+
+fn classify_sidebar_status(
+    session: &SessionState,
+    operation: Option<OperationKind>,
+    has_prompt: bool,
+    plan_available: bool,
+    planning: bool,
+) -> SidebarStatus {
+    if has_prompt {
+        return SidebarStatus::AwaitingInput;
+    }
+
+    match operation {
+        Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
+            return SidebarStatus::Planning;
+        }
+        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+            return SidebarStatus::Running;
+        }
+        Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
+    }
+
+    // A planning run that has not yet produced a live question keeps the row
+    // on `Planning` even though the persisted phase is already
+    // `Awaiting Input`.
+    if planning && matches!(&session.phase, SessionPhase::AwaitingInput) {
+        return SidebarStatus::Planning;
+    }
+
+    let status = match &session.phase {
+        SessionPhase::Completed => SidebarStatus::Completed,
+        SessionPhase::Failed(_) => SidebarStatus::Failed,
+        SessionPhase::Suspended => SidebarStatus::Suspended,
+        SessionPhase::Draft
+        | SessionPhase::AwaitingInput
+        | SessionPhase::AwaitingApproval
+        | SessionPhase::Planned
+            if session.plan_error.is_some() =>
+        {
+            SidebarStatus::PlanFailed
+        }
+        SessionPhase::Draft => SidebarStatus::Draft,
+        SessionPhase::AwaitingInput => SidebarStatus::AwaitingInput,
+        SessionPhase::AwaitingApproval if plan_available => SidebarStatus::AwaitingApproval,
+        SessionPhase::AwaitingApproval => SidebarStatus::Planning,
+        SessionPhase::Planned => SidebarStatus::Planned,
+        SessionPhase::Running => SidebarStatus::Running,
+    };
+    if matches!(
+        status,
+        SidebarStatus::Draft
+            | SidebarStatus::AwaitingApproval
+            | SidebarStatus::Running
+            | SidebarStatus::Planned
+    ) && (session.awaiting_input || session.pending_ask_question.is_some())
+    {
+        SidebarStatus::AwaitingInput
+    } else {
+        status
     }
 }
 
@@ -137,13 +258,17 @@ pub struct TuiApp {
     pub tab: DetailTab,
     pub sessions: Vec<SessionState>,
     pub selected: usize,
+    manual_detail_tabs: HashMap<String, DetailTab>,
+    detail_session_id: Option<String>,
     pub dag_selected: usize,
     pub form: NewSessionForm,
     pub modal: Option<Modal>,
     pub prompts: PromptQueue,
+    pub plan_prompts: PlanPromptStore,
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
+    pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
@@ -159,6 +284,7 @@ pub struct TuiApp {
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
     active_planning: std::collections::HashSet<String>,
+    plan_ready_eligible: std::collections::HashSet<String>,
     pending_notifications: VecDeque<crate::desktop_notifications::NotificationPayload>,
     pub skip_cursor: usize,
     pub spinner_frame: usize,
@@ -195,15 +321,19 @@ impl TuiApp {
             tab: DetailTab::Info,
             sessions: Vec::new(),
             selected: 0,
+            manual_detail_tabs: HashMap::new(),
+            detail_session_id: None,
             dag_selected: 0,
             form,
             modal: None,
             prompts: PromptQueue::default(),
+            plan_prompts: PlanPromptStore::default(),
             logs: HashMap::new(),
             batch_logs: VecDeque::new(),
             ask_responses: HashMap::new(),
             ask_active: std::collections::HashSet::new(),
             plan_cache: HashMap::new(),
+            sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
             plan_scroll: 0,
             log_scroll: 0,
@@ -217,6 +347,7 @@ impl TuiApp {
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
             active_planning: std::collections::HashSet::new(),
+            plan_ready_eligible: std::collections::HashSet::new(),
             pending_notifications: VecDeque::new(),
             skip_cursor: 0,
             spinner_frame: 0,
@@ -419,6 +550,7 @@ impl TuiApp {
         self.history_summary = self.application.new_session_history_summary().ok();
         match self.application.list_sessions() {
             Ok(mut sessions) => {
+                let selected_id = self.active_session().map(|session| session.id.clone());
                 for state in &mut sessions {
                     if let Ok(reconciled) = self.application.reconcile_session(&state.id) {
                         *state = reconciled;
@@ -439,8 +571,41 @@ impl TuiApp {
                     }
                 }
                 self.sessions = sessions;
-                self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
-                self.evict_inactive_caches();
+                if let Some(selected_id) = selected_id {
+                    if let Some(index) = self
+                        .sessions
+                        .iter()
+                        .position(|session| session.id == selected_id)
+                    {
+                        self.selected = index;
+                    } else {
+                        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+                        self.tab = DetailTab::Info;
+                        self.plan_prompts.clear_focus();
+                        self.plan_scroll = 0;
+                        self.log_scroll = 0;
+                        self.dag_selected = 0;
+                    }
+                } else {
+                    self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+                }
+                self.sidebar_plan_available = self
+                    .sessions
+                    .iter()
+                    .filter(|state| {
+                        matches!(&state.phase, SessionPhase::AwaitingApproval)
+                            && self.application.session_plan_available(state)
+                    })
+                    .map(|state| state.id.clone())
+                    .collect();
+                let session_ids = self
+                    .sessions
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<HashSet<_>>();
+                self.manual_detail_tabs
+                    .retain(|id, _| session_ids.contains(id.as_str()));
+                self.sync_selected_detail();
                 if self.status.is_none() || !self.is_busy() {
                     self.status = Some(format!(
                         "{} session{}",
@@ -454,6 +619,38 @@ impl TuiApp {
             Err(error) => self.set_error(error.to_string()),
         }
         self.registry.reap();
+    }
+
+    fn refresh_session_row(&mut self, session_id: &str) {
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let Ok(state) = self.application.reconcile_session(session_id) else {
+            return;
+        };
+        if self.sessions[index] != state {
+            self.plan_cache.remove(session_id);
+            self.dag_cache.remove(session_id);
+            self.logs.remove(session_id);
+            self.sessions[index] = state;
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn sidebar_status(&self, session: &SessionState) -> SidebarStatus {
+        let has_prompt =
+            self.prompts.has_session(&session.id) || self.plan_prompts.has_session(&session.id);
+        classify_sidebar_status(
+            session,
+            self.application.runtime().active_operation(&session.id),
+            has_prompt,
+            self.sidebar_plan_available.contains(&session.id),
+            self.active_planning.contains(&session.id) && !has_prompt,
+        )
     }
 
     fn evict_inactive_caches(&mut self) {
@@ -484,6 +681,27 @@ impl TuiApp {
         !self.registry.tasks_empty() || self.registry.batch_busy() || self.application_has_claims()
     }
 
+    /// The lifecycle state herdr should show for this pane.
+    ///
+    /// A plan awaiting approval is *not* blocked: nothing is waiting on the
+    /// user, herdr derives `done` from the working→idle transition instead.
+    #[must_use]
+    pub fn herdr_state(&self) -> (crate::herdr::AgentState, Option<&str>) {
+        use crate::herdr::AgentState;
+
+        if !self.prompts.is_empty() {
+            (AgentState::Blocked, self.prompts.front_question())
+        } else if let Some(question) = self.plan_prompts.front_question() {
+            // An `ask_user` question now waits in a session's Plan tab rather
+            // than in the modal queue, but it still blocks the agent.
+            (AgentState::Blocked, Some(question))
+        } else if self.is_busy() {
+            (AgentState::Working, None)
+        } else {
+            (AgentState::Idle, None)
+        }
+    }
+
     fn application_has_claims(&self) -> bool {
         self.sessions.iter().any(|session| {
             self.application
@@ -498,10 +716,68 @@ impl TuiApp {
         self.sessions.get(self.selected)
     }
 
+    fn is_selected_session(&self, id: &str) -> bool {
+        self.active_session()
+            .is_some_and(|session| session.id.as_str() == id)
+    }
+
+    fn plan_prompt_session_id(&self) -> Option<String> {
+        if self.view != View::Sessions || self.tab != DetailTab::Plan {
+            return None;
+        }
+        let session_id = self.active_session()?.id.clone();
+        self.plan_prompts
+            .has_session(&session_id)
+            .then_some(session_id)
+    }
+
+    fn selected_session_has_external_plan_input(&self) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        matches!(session.phase, crate::session::SessionPhase::AwaitingInput)
+            // A planning run this process owns is never "external", even in the
+            // window between answering a question and the phase being updated.
+            && !self.active_planning.contains(&session.id)
+            && !self.plan_prompts.has_session(&session.id)
+            && self.application.pending_prompts(&session.id).is_empty()
+    }
+
+    pub(crate) fn active_external_plan_input(&self) -> Option<&SessionState> {
+        if self.selected_session_has_external_plan_input() {
+            self.active_session()
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn active_plan_prompt(&self) -> Option<&super::prompts::PlanPromptItem> {
+        let session_id = self.plan_prompt_session_id()?;
+        self.plan_prompts.for_session(&session_id)
+    }
+
+    fn plan_prompt_is_editing(&self) -> bool {
+        self.plan_prompt_session_id()
+            .is_some_and(|session_id| self.plan_prompts.is_editing(&session_id))
+    }
+
+    pub(crate) fn display_phase<'a>(&self, session: &'a SessionState) -> &'a str {
+        if matches!(session.phase, crate::session::SessionPhase::AwaitingInput)
+            && self.active_planning.contains(&session.id)
+            && !self.plan_prompts.has_session(&session.id)
+        {
+            "Planning"
+        } else {
+            session.phase.label()
+        }
+    }
+
     pub fn select_move(&mut self, delta: isize) {
         if self.sessions.is_empty() {
             return;
         }
+        self.plan_prompts.clear_focus();
         let len = self.sessions.len().cast_signed();
         self.selected = (self.selected.cast_signed() + delta)
             .rem_euclid(len)
@@ -509,22 +785,77 @@ impl TuiApp {
         self.log_scroll = 0;
         self.display.follow_log = true;
         self.dag_selected = 0;
-        self.evict_inactive_caches();
+        self.sync_selected_detail();
         self.load_tab_data();
     }
     pub fn select_home(&mut self) {
         if !self.sessions.is_empty() {
+            self.plan_prompts.clear_focus();
             self.selected = 0;
-            self.evict_inactive_caches();
+            self.sync_selected_detail();
             self.load_tab_data();
         }
     }
     pub fn select_end(&mut self) {
         if !self.sessions.is_empty() {
+            self.plan_prompts.clear_focus();
             self.selected = self.sessions.len() - 1;
-            self.evict_inactive_caches();
+            self.sync_selected_detail();
             self.load_tab_data();
         }
+    }
+
+    fn sync_detail_tab(&mut self) {
+        let operation = self
+            .active_session()
+            .and_then(|session| self.application.runtime().active_operation(&session.id));
+        self.sync_detail_tab_for_operation(operation);
+    }
+
+    fn sync_detail_tab_for_operation(&mut self, operation: Option<OperationKind>) {
+        let Some(session) = self.active_session() else {
+            self.detail_session_id = None;
+            self.tab = DetailTab::Info;
+            return;
+        };
+        let id = session.id.clone();
+        let phase = session.phase.clone();
+        let session_changed = self.detail_session_id.as_deref() != Some(id.as_str());
+        let manual_tab = self.manual_detail_tabs.get(&id).copied();
+        let tab = manual_tab.unwrap_or_else(|| default_detail_tab(&phase, operation));
+        let enters_plan_automatically =
+            manual_tab.is_none() && tab == DetailTab::Plan && self.tab != DetailTab::Plan;
+
+        self.tab = tab;
+        self.detail_session_id = Some(id);
+        if session_changed || enters_plan_automatically {
+            self.plan_scroll = 0;
+        }
+    }
+
+    fn sync_selected_detail(&mut self) {
+        self.evict_inactive_caches();
+        self.sync_detail_tab();
+    }
+
+    fn sync_terminal_detail_tab(&mut self, session_id: &str) {
+        if self.is_selected_session(session_id) {
+            self.sync_detail_tab_for_operation(None);
+        }
+    }
+
+    fn set_detail_tab(&mut self, tab: DetailTab) {
+        if self.view == View::Sessions && self.active_session().is_none() {
+            self.tab = DetailTab::Info;
+            return;
+        }
+        self.tab = tab;
+        if self.view == View::Sessions
+            && let Some(id) = self.active_session().map(|session| session.id.clone())
+        {
+            self.manual_detail_tabs.insert(id, tab);
+        }
+        self.load_tab_data();
     }
     pub fn move_detail(&mut self, delta: isize) {
         let Some(id) = self.active_session().map(|s| s.id.clone()) else {
@@ -644,6 +975,10 @@ impl TuiApp {
         self.refresh();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central event routing keeps TUI lifecycle handling together"
+    )]
     pub fn apply_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::Control(event) => self.apply_control(event),
@@ -663,32 +998,34 @@ impl TuiApp {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
                     self.view = View::Sessions;
+                    self.tab = DetailTab::Info;
+                    self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
                         .sessions
                         .iter()
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
-                    self.evict_inactive_caches();
+                    self.sync_selected_detail();
                     self.start_plan(state.id, plan);
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
             },
             UiEvent::DraftCreated { result } => match result {
                 Ok(state) => {
                     let _ = self.application.clear_draft();
-                    self.form.mark_saved();
-                    self.form.rewind();
+                    self.form.reset_after_creation();
                     self.view = View::Sessions;
+                    self.tab = DetailTab::Info;
+                    self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
                         .sessions
                         .iter()
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
-                    self.evict_inactive_caches();
+                    self.sync_selected_detail();
                     self.status = Some(format!("Saved draft {}", state.id));
                 }
                 Err(error) => self.set_error(error),
@@ -762,9 +1099,14 @@ impl TuiApp {
                         | crate::application::OperationKind::Fix
                         | crate::application::OperationKind::Replan
                 ) {
-                    self.active_planning.insert(session_id);
+                    self.active_planning.insert(session_id.clone());
+                    self.plan_ready_eligible.insert(session_id.clone());
                 } else if operation == crate::application::OperationKind::Ask {
-                    self.active_planning.remove(&session_id);
+                    self.active_planning.insert(session_id.clone());
+                    self.plan_ready_eligible.remove(&session_id);
+                }
+                if self.is_selected_session(&session_id) {
+                    self.sync_detail_tab();
                 }
                 self.status = Some(format!("{} started", operation_label(operation)));
             }
@@ -778,20 +1120,24 @@ impl TuiApp {
                 request_id,
                 question,
             } => {
+                self.refresh_session_row(&session_id);
+                let pending = self.application.pending_prompts(&session_id);
+                let request_is_pending = pending.iter().any(|prompt| {
+                    prompt.request_id == request_id
+                        && matches!(&prompt.kind, PendingPromptKind::Ask)
+                });
                 self.enqueue_action_required(&session_id, &question);
-                self.queue_prompt(
-                    request_id,
-                    session_id,
-                    PendingPromptKind::Ask,
-                    question,
-                    Vec::new(),
-                );
+                if request_is_pending {
+                    self.plan_prompts.enqueue(session_id, request_id, question);
+                }
             }
             ApplicationEvent::PlanFinished { session_id, phase } => {
                 let was_planning = self.active_planning.remove(&session_id);
+                let plan_ready_eligible = self.plan_ready_eligible.remove(&session_id);
                 if (phase == crate::session::SessionPhase::AwaitingApproval.label()
                     || phase == crate::session::SessionPhase::Planned.label())
                     && was_planning
+                    && plan_ready_eligible
                 {
                     self.enqueue_notification(
                         crate::desktop_notifications::WorkflowNotificationKind::PlanReady,
@@ -803,6 +1149,7 @@ impl TuiApp {
             }
             ApplicationEvent::PlanFailed { session_id, error } => {
                 self.active_planning.remove(&session_id);
+                self.plan_ready_eligible.remove(&session_id);
                 self.enqueue_notification(
                     crate::desktop_notifications::WorkflowNotificationKind::Failed,
                     &session_id,
@@ -812,6 +1159,7 @@ impl TuiApp {
             }
             ApplicationEvent::PlanCancelled { session_id } => {
                 self.active_planning.remove(&session_id);
+                self.plan_ready_eligible.remove(&session_id);
                 self.cancel_plan(&session_id);
             }
             ApplicationEvent::RunStarted { session_id } => {
@@ -831,13 +1179,7 @@ impl TuiApp {
                 choices,
             } => {
                 self.enqueue_action_required(&session_id, &prompt);
-                self.queue_prompt(
-                    request_id,
-                    session_id,
-                    PendingPromptKind::Option,
-                    prompt,
-                    choices,
-                );
+                self.queue_option(request_id, session_id, prompt, choices);
             }
             ApplicationEvent::PrCreated { url, .. } => {
                 self.status = Some(format!("Pull request created: {url}"));
@@ -873,6 +1215,7 @@ impl TuiApp {
                 self.finish_batch_session(id, phase, error);
             }
             ApplicationEvent::BatchFinished { cancelled } => self.finish_batch(cancelled),
+            ApplicationEvent::BatchFailed { error } => self.set_error_and_refresh(error),
             ApplicationEvent::LogChunk {
                 session_id,
                 stream,
@@ -895,12 +1238,14 @@ impl TuiApp {
         self.status = Some("Planning failed".to_string());
         self.set_error(error);
         self.refresh();
+        self.sync_terminal_detail_tab(session_id);
     }
 
     fn cancel_plan(&mut self, session_id: &str) {
         self.ask_active.remove(session_id);
         self.status = Some("Planning cancelled".to_string());
         self.refresh();
+        self.sync_terminal_detail_tab(session_id);
     }
 
     fn finish_run(&mut self, session_id: &str, phase: &str) {
@@ -921,18 +1266,16 @@ impl TuiApp {
         self.refresh();
     }
 
-    fn queue_prompt(
+    fn queue_option(
         &mut self,
         request_id: String,
         session_id: String,
-        kind: PendingPromptKind,
         question: String,
         choices: Vec<crate::application::OptionChoicePayload>,
     ) {
         self.prompts.enqueue(super::prompts::PromptItem {
             request_id,
             session_id,
-            kind,
             question,
             choices,
         });
@@ -1030,6 +1373,17 @@ impl TuiApp {
     }
 
     fn sync_prompts(&mut self) {
+        self.sync_prompt_state();
+        if self.prompts.active.is_none() && matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
+            self.modal = None;
+        }
+        if self.prompts.active.is_none() {
+            self.modal_state.prompt_modal_pending = false;
+        }
+        self.open_prompt_if_allowed();
+    }
+
+    fn sync_prompt_state(&mut self) {
         let ids = self
             .sessions
             .iter()
@@ -1040,17 +1394,21 @@ impl TuiApp {
             .cloned()
             .collect::<std::collections::HashSet<_>>();
         self.prompts.retain_sessions(&known);
+        self.plan_prompts.retain_sessions(&known);
         for id in ids {
-            self.prompts
-                .sync_session(&id, self.application.pending_prompts(&id));
+            let pending = self.application.pending_prompts(&id);
+            let mut options = Vec::new();
+            let mut asks = Vec::new();
+            for prompt in pending {
+                if matches!(&prompt.kind, PendingPromptKind::Ask) {
+                    asks.push(prompt);
+                } else {
+                    options.push(prompt);
+                }
+            }
+            self.prompts.sync_session(&id, options);
+            self.plan_prompts.sync_session(&id, asks);
         }
-        if self.prompts.active.is_none() && matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
-            self.modal = None;
-        }
-        if self.prompts.active.is_none() {
-            self.modal_state.prompt_modal_pending = false;
-        }
-        self.open_prompt_if_allowed();
     }
 
     fn open_prompt_if_allowed(&mut self) {
@@ -1069,12 +1427,92 @@ impl TuiApp {
             self.modal = Some(Modal::Prompt);
         }
     }
+
+    fn handle_plan_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if self.modal.is_some() {
+            return None;
+        }
+        let session_id = self.plan_prompt_session_id()?;
+        if self.plan_prompt_is_editing() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.submit_plan_prompt();
+                    Some(false)
+                }
+                KeyCode::Esc => {
+                    self.plan_prompts.end_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::PageUp | KeyCode::PageDown => Some(false),
+                _ if PlanPromptStore::is_editor_key(key) => {
+                    self.plan_prompts.input(&session_id, key);
+                    Some(false)
+                }
+                _ => None,
+            }
+        } else {
+            match key.code {
+                KeyCode::Enter => {
+                    self.plan_prompts.begin_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::Esc => {
+                    self.plan_prompts.end_editing(&session_id);
+                    Some(false)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.plan_prompts.scroll(&session_id, -1);
+                    Some(false)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.plan_prompts.scroll(&session_id, 1);
+                    Some(false)
+                }
+                KeyCode::PageUp => {
+                    self.plan_prompts.scroll(&session_id, -8);
+                    Some(false)
+                }
+                KeyCode::PageDown => {
+                    self.plan_prompts.scroll(&session_id, 8);
+                    Some(false)
+                }
+                KeyCode::Home => {
+                    self.plan_prompts.scroll_home(&session_id);
+                    Some(false)
+                }
+                KeyCode::End => {
+                    self.plan_prompts.scroll_end(&session_id);
+                    Some(false)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    fn new_session_creation_pending(&self) -> bool {
+        self.view == View::NewSession && self.registry.busy("__create")
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.operation_state.quit_requested {
             return false;
         }
+        let action = input::action_for(key);
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            if matches!(action, Action::Quit) && !self.is_form_editor_key(key) {
+                let should_quit = self.handle_action(action);
+                if should_quit {
+                    self.operation_state.quit_requested = true;
+                }
+                return should_quit;
+            }
+            return false;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
             return false;
+        }
+        if let Some(handled) = self.handle_plan_prompt_key(key) {
+            return handled;
         }
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             if matches!(self.modal.as_ref(), Some(Modal::Prompt)) {
@@ -1129,7 +1567,6 @@ impl TuiApp {
                 }
             }
         }
-        let action = input::action_for(key);
         if self.is_form_editor_key(key) {
             self.form.input(key);
             return false;
@@ -1235,29 +1672,90 @@ impl TuiApp {
         if matches!(action, Action::Quit) {
             return self.request_quit();
         }
+        if self.modal.is_none() && self.new_session_creation_pending() {
+            return false;
+        }
         if let Some(modal) = self.modal.take() {
             return self.handle_modal_action(modal, action);
+        }
+        if self.handle_plan_prompt_action(action) {
+            return false;
         }
         self.handle_primary_action(action)
     }
 
+    fn handle_plan_prompt_action(&mut self, action: Action) -> bool {
+        let Some(session_id) = self.plan_prompt_session_id() else {
+            return false;
+        };
+        if self.plan_prompt_is_editing() {
+            match action {
+                Action::Enter => self.submit_plan_prompt(),
+                Action::Escape => self.plan_prompts.end_editing(&session_id),
+                Action::Character(c) => self.plan_prompts.input(
+                    &session_id,
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                ),
+                Action::Backspace => self.plan_prompts.input(
+                    &session_id,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                ),
+                Action::Left | Action::Right | Action::Home | Action::End => {
+                    let code = match action {
+                        Action::Left => KeyCode::Left,
+                        Action::Right => KeyCode::Right,
+                        Action::Home => KeyCode::Home,
+                        Action::End => KeyCode::End,
+                        _ => unreachable!(),
+                    };
+                    self.plan_prompts
+                        .input(&session_id, KeyEvent::new(code, KeyModifiers::NONE));
+                }
+                Action::Up | Action::Down | Action::PageUp | Action::PageDown => return true,
+                _ => return false,
+            }
+            true
+        } else {
+            match action {
+                Action::Enter => self.plan_prompts.begin_editing(&session_id),
+                Action::Escape => self.plan_prompts.end_editing(&session_id),
+                Action::Up => self.plan_prompts.scroll(&session_id, -1),
+                Action::Down => self.plan_prompts.scroll(&session_id, 1),
+                Action::PageUp => self.plan_prompts.scroll(&session_id, -8),
+                Action::PageDown => self.plan_prompts.scroll(&session_id, 8),
+                Action::Home => self.plan_prompts.scroll_home(&session_id),
+                Action::End => self.plan_prompts.scroll_end(&session_id),
+                _ => return false,
+            }
+            true
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central action routing keeps view and navigation behavior together"
+    )]
     fn handle_primary_action(&mut self, action: Action) -> bool {
         match action {
             Action::ViewSessions => {
+                self.plan_prompts.clear_focus();
                 self.view = View::Sessions;
                 self.refresh();
                 false
             }
             Action::ViewNewSession => {
+                self.plan_prompts.clear_focus();
                 self.view = View::NewSession;
                 false
             }
             Action::NewSession => {
+                self.plan_prompts.clear_focus();
                 self.view = View::NewSession;
                 self.form.rewind();
                 false
             }
             Action::ViewRunAll => {
+                self.plan_prompts.clear_focus();
                 self.view = View::RunAll;
                 self.refresh();
                 false
@@ -1279,13 +1777,13 @@ impl TuiApp {
             Action::Home => self.navigate_home(),
             Action::End => self.navigate_end(),
             Action::DetailPrevious | Action::Left => {
-                self.tab = self.tab.previous();
-                self.load_tab_data();
+                self.plan_prompts.clear_focus();
+                self.set_detail_tab(self.tab.previous());
                 false
             }
             Action::DetailNext | Action::Right => {
-                self.tab = self.tab.next();
-                self.load_tab_data();
+                self.plan_prompts.clear_focus();
+                self.set_detail_tab(self.tab.next());
                 false
             }
             Action::Palette => {
@@ -1293,7 +1791,16 @@ impl TuiApp {
                 false
             }
             Action::Open => {
-                if self.prompts.active.is_none() && !self.prompts.is_empty() {
+                let selected_has_ask = self.view == View::Sessions
+                    && self
+                        .active_session()
+                        .is_some_and(|session| self.plan_prompts.has_session(&session.id));
+                let selected_has_external_plan_input =
+                    self.view == View::Sessions && self.selected_session_has_external_plan_input();
+                if selected_has_ask || selected_has_external_plan_input {
+                    self.plan_prompts.clear_focus();
+                    self.set_detail_tab(DetailTab::Plan);
+                } else if self.prompts.active.is_none() && !self.prompts.is_empty() {
                     self.open_queued_prompt();
                 } else {
                     self.open_context_url();
@@ -1349,12 +1856,13 @@ impl TuiApp {
                 self.advance_step();
             }
         } else {
-            self.tab = if next {
+            self.plan_prompts.clear_focus();
+            let tab = if next {
                 self.tab.next()
             } else {
                 self.tab.previous()
             };
-            self.load_tab_data();
+            self.set_detail_tab(tab);
         }
         false
     }
@@ -1994,7 +2502,7 @@ impl TuiApp {
         self.last_error = None;
         self.modal = None;
         self.status = Some(format!(
-            "Saved shared GUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
+            "Saved shared WebUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
         ));
     }
 
@@ -2121,15 +2629,7 @@ impl TuiApp {
                     .next()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.active_session().and_then(|session| {
-                            session
-                                .config_path
-                                .as_ref()
-                                .map(|path| path.to_string_lossy().into_owned())
-                        })
-                    });
+                    .map(ToString::to_string);
                 let skipped_steps = lines
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
@@ -2218,8 +2718,18 @@ impl TuiApp {
                 self.start_plan(id, request);
             }
             SessionAction::Answer => {
-                self.sync_prompts();
-                self.open_queued_prompt();
+                self.sync_prompt_state();
+                let selected_has_plan_input = self
+                    .active_session()
+                    .is_some_and(|session| self.plan_prompts.has_session(&session.id))
+                    || self.selected_session_has_external_plan_input();
+                if selected_has_plan_input {
+                    self.plan_prompts.clear_focus();
+                    self.tab = DetailTab::Plan;
+                    self.load_tab_data();
+                } else {
+                    self.open_queued_prompt();
+                }
             }
             SessionAction::Cancel => {
                 if !self.application.cancel_session(&id) {
@@ -2352,33 +2862,17 @@ impl TuiApp {
             self.modal = None;
             return;
         };
-        let result = match prompt.kind {
-            PendingPromptKind::Ask => self.prompts.answer_text().map_or_else(
-                || {
-                    Err(crate::error::CruiseError::Other(
-                        "answer must not be empty".to_string(),
-                    ))
-                },
-                |answer| {
-                    self.application
-                        .respond_to_ask(&prompt.session_id, &prompt.request_id, answer)
-                },
-            ),
-            PendingPromptKind::Option => self.prompts.selected_option().map_or_else(
-                || {
-                    Err(crate::error::CruiseError::Other(
-                        "select a non-empty option".to_string(),
-                    ))
-                },
-                |result| {
-                    self.application.respond_to_option(
-                        &prompt.session_id,
-                        &prompt.request_id,
-                        result,
-                    )
-                },
-            ),
-        };
+        let result = self.prompts.selected_option().map_or_else(
+            || {
+                Err(crate::error::CruiseError::Other(
+                    "select a non-empty option".to_string(),
+                ))
+            },
+            |result| {
+                self.application
+                    .respond_to_option(&prompt.session_id, &prompt.request_id, result)
+            },
+        );
         match result {
             Ok(()) => {
                 self.prompts.close_active();
@@ -2389,6 +2883,36 @@ impl TuiApp {
             Err(error) => {
                 self.modal_state.prompt_modal_pending = true;
                 self.set_error(error.to_string());
+            }
+        }
+    }
+
+    fn submit_plan_prompt(&mut self) {
+        let Some(session_id) = self.plan_prompt_session_id() else {
+            return;
+        };
+        let Some((_, request_id)) = self.plan_prompts.request_for_session(&session_id) else {
+            return;
+        };
+        let Some(answer) = self.plan_prompts.answer_text(&session_id) else {
+            self.plan_prompts
+                .set_error(&session_id, "Answer must not be empty".to_string());
+            return;
+        };
+        match self
+            .application
+            .respond_to_ask(&session_id, &request_id, answer)
+        {
+            Ok(()) => {
+                self.plan_prompts.remove(&session_id, &request_id);
+                self.sync_prompt_state();
+                self.refresh_session_row(&session_id);
+            }
+            Err(error) => {
+                self.sync_prompt_state();
+                if self.plan_prompts.has_session(&session_id) {
+                    self.plan_prompts.set_error(&session_id, error.to_string());
+                }
             }
         }
     }
@@ -2660,35 +3184,26 @@ pub fn action_label(action: SessionAction) -> &'static str {
     }
 }
 
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let command = "open";
-    #[cfg(not(target_os = "macos"))]
-    let command = "xdg-open";
-    std::process::Command::new(command)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_config::AppConfig;
+    use crate::session::SessionPhase;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    fn app_for(application: CruiseApplication) -> TuiApp {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new(application, events, logs_sender)
+    }
 
     fn app_with_lock(test_process_lock: Option<crate::test_support::ProcessLock>) -> TuiApp {
         let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let application = CruiseApplication::new(crate::session::SessionManager::new(
             temp.path().to_path_buf(),
         ));
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
-        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
-        let mut app = TuiApp::new(application, events, logs_sender);
+        let mut app = app_for(application);
         app.test_process_lock = test_process_lock;
         app
     }
@@ -2771,21 +3286,433 @@ mod tests {
         let mut state = SessionState::new(
             id.to_string(),
             PathBuf::from("."),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
             format!("task {id}"),
         );
         state.phase = phase;
         app.sessions.push(state);
     }
 
-    fn pending_ask(request_id: &str) -> crate::application::PendingPrompt {
+    struct PersistedTuiFixture {
+        _temp: TempDir,
+        manager: crate::session::SessionManager,
+        app: TuiApp,
+    }
+
+    fn test_session_id(index: u8) -> String {
+        format!("2026092100000000{index}_{index:032x}")
+    }
+
+    fn persisted_state(
+        manager: &crate::session::SessionManager,
+        index: u8,
+        phase: crate::session::SessionPhase,
+    ) -> SessionState {
+        let state = {
+            let mut state = SessionState::new(
+                test_session_id(index),
+                manager.sessions_dir(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                format!("task {index}"),
+            );
+            state.phase = phase;
+            state
+        };
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to persist test session: {error}"));
+        state
+    }
+
+    fn persisted_fixture(sessions: &[(u8, crate::session::SessionPhase)]) -> PersistedTuiFixture {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("cruise"));
+        for (index, phase) in sessions {
+            persisted_state(&manager, *index, phase.clone());
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        PersistedTuiFixture {
+            _temp: temp,
+            manager,
+            app,
+        }
+    }
+
+    fn pending_option(request_id: &str) -> crate::application::PendingPrompt {
         crate::application::PendingPrompt {
             request_id: request_id.to_string(),
             session_id: "session".to_string(),
-            kind: PendingPromptKind::Ask,
-            question: Some("What should happen next?".to_string()),
+            kind: PendingPromptKind::Option,
+            question: Some("Choose a deployment target".to_string()),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "staging".to_string(),
+                kind: crate::application::OptionChoiceKind::Selector,
+                next_step: None,
+            }],
+        }
+    }
+
+    fn pending_text_option(request_id: &str) -> crate::application::PendingPrompt {
+        crate::application::PendingPrompt {
+            request_id: request_id.to_string(),
+            session_id: "session".to_string(),
+            kind: PendingPromptKind::Option,
+            question: Some("Choose a deployment target".to_string()),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "Other".to_string(),
+                kind: crate::application::OptionChoiceKind::TextInput,
+                next_step: None,
+            }],
+        }
+    }
+
+    fn sidebar_session(id: &str, phase: crate::session::SessionPhase) -> SessionState {
+        let mut state = SessionState::new(
+            id.to_string(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            format!("task {id}"),
+        );
+        state.phase = phase;
+        state
+    }
+
+    fn queued_prompt(session_id: &str, request_id: &str) -> crate::tui::prompts::PromptItem {
+        crate::tui::prompts::PromptItem {
+            request_id: request_id.to_string(),
+            session_id: session_id.to_string(),
+            question: "What should happen next?".to_string(),
             choices: vec![],
         }
+    }
+
+    fn app_for_manager(manager: crate::session::SessionManager) -> TuiApp {
+        let application = CruiseApplication::new(manager);
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        )
+    }
+
+    fn first_sidebar_status(app: &TuiApp) -> SidebarStatus {
+        let session = app
+            .sessions
+            .first()
+            .unwrap_or_else(|| panic!("expected one session"));
+        app.sidebar_status(session)
+    }
+
+    #[test]
+    fn sidebar_status_has_stable_labels_and_symbols() {
+        let cases = [
+            (SidebarStatus::AwaitingInput, "Awaiting Input", "●"),
+            (SidebarStatus::AwaitingApproval, "Awaiting Approval", "●"),
+            (SidebarStatus::Running, "Running", "●"),
+            (SidebarStatus::Planning, "Planning", "●"),
+            (SidebarStatus::Draft, "Draft", "◯"),
+            (SidebarStatus::Planned, "Planned", "●"),
+            (SidebarStatus::Completed, "Completed", "●"),
+            (SidebarStatus::Failed, "Failed", "●"),
+            (SidebarStatus::PlanFailed, "Plan Failed", "●"),
+            (SidebarStatus::Suspended, "Suspended", "●"),
+        ];
+
+        for (status, label, symbol) in cases {
+            assert_eq!(status.label(), label);
+            assert_eq!(status.symbol(), symbol);
+        }
+    }
+
+    #[test]
+    fn sidebar_status_maps_persisted_lifecycle_phases() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Draft, SidebarStatus::Draft),
+            (SessionPhase::AwaitingInput, SidebarStatus::AwaitingInput),
+            (SessionPhase::Planned, SidebarStatus::Planned),
+            (SessionPhase::Running, SidebarStatus::Running),
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("failure".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let state = sidebar_session(&format!("phase-{index}"), phase);
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn same_session_prompt_wins_over_running_and_prompt_scope_is_per_session() {
+        let mut app = app_without_lock();
+        let target_id = "target";
+        let other_id = "other";
+        let target = sidebar_session(target_id, SessionPhase::Running);
+        let other = sidebar_session(other_id, SessionPhase::Draft);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(target_id, crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim target session: {error}"));
+
+        app.prompts
+            .enqueue(queued_prompt(target_id, "target-request"));
+        assert_eq!(app.sidebar_status(&target), SidebarStatus::AwaitingInput);
+
+        app.prompts
+            .enqueue(queued_prompt(other_id, "other-request"));
+        assert_eq!(app.sidebar_status(&other), SidebarStatus::AwaitingInput);
+
+        let unrelated = sidebar_session("unrelated", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&unrelated), SidebarStatus::Draft);
+
+        drop(claim);
+    }
+
+    #[test]
+    fn active_prompt_and_queued_prompt_both_count_as_awaiting_input() {
+        let mut app = app_without_lock();
+        let state = sidebar_session("prompt-session", SessionPhase::Planned);
+        app.prompts
+            .enqueue(queued_prompt(&state.id, "queued-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn planning_operations_override_saved_phase_and_existing_plan() {
+        let app = app_without_lock();
+        for (index, operation) in [
+            crate::application::OperationKind::Generate,
+            crate::application::OperationKind::Fix,
+            crate::application::OperationKind::Replan,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (phase_index, phase) in [
+                SessionPhase::Draft,
+                SessionPhase::AwaitingApproval,
+                SessionPhase::Planned,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("planning-{index}-{phase_index}");
+                let state = sidebar_session(&id, phase);
+                let claim = app
+                    .application
+                    .runtime()
+                    .try_begin(&id, operation)
+                    .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+                assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+                drop(claim);
+            }
+        }
+    }
+
+    #[test]
+    fn ask_operation_is_running_and_mutations_do_not_imply_running() {
+        let app = app_without_lock();
+        let ask_id = "ask-session";
+        let ask_state = sidebar_session(ask_id, SessionPhase::AwaitingApproval);
+        let ask_claim = app
+            .application
+            .runtime()
+            .try_begin(ask_id, crate::application::OperationKind::Ask)
+            .unwrap_or_else(|error| panic!("failed to claim ask session: {error}"));
+        assert_eq!(app.sidebar_status(&ask_state), SidebarStatus::Running);
+        drop(ask_claim);
+
+        for (index, operation) in [
+            crate::application::OperationKind::BatchQueued,
+            crate::application::OperationKind::Mutate,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("mutation-{index}");
+            let state = sidebar_session(&id, SessionPhase::Completed);
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, operation)
+                .unwrap_or_else(|error| panic!("failed to claim {id}: {error}"));
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::Completed);
+            drop(claim);
+        }
+    }
+
+    #[test]
+    fn a_claim_for_another_session_does_not_make_this_session_running() {
+        let app = app_without_lock();
+        let claim = app
+            .application
+            .runtime()
+            .try_begin("other-session", crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim other session: {error}"));
+        let state = sidebar_session("this-session", SessionPhase::Draft);
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Draft);
+        drop(claim);
+    }
+
+    #[test]
+    fn plan_error_is_plan_failed_for_all_plan_phases_and_retry_is_planning() {
+        let app = app_without_lock();
+        for (index, phase) in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut state = sidebar_session(&format!("plan-error-{index}"), phase);
+            state.plan_error = Some("planner failed".to_string());
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::PlanFailed);
+        }
+
+        let id = "plan-retry";
+        let mut state = sidebar_session(id, SessionPhase::AwaitingApproval);
+        state.plan_error = Some("stale planner failure".to_string());
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim retry session: {error}"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn terminal_phases_are_not_hidden_by_stale_prompt_flags_or_plan_errors() {
+        let app = app_without_lock();
+        let cases = [
+            (SessionPhase::Completed, SidebarStatus::Completed),
+            (
+                SessionPhase::Failed("run failed".to_string()),
+                SidebarStatus::Failed,
+            ),
+            (SessionPhase::Suspended, SidebarStatus::Suspended),
+        ];
+
+        for (index, (phase, expected)) in cases.into_iter().enumerate() {
+            let mut state = sidebar_session(&format!("terminal-{index}"), phase);
+            state.awaiting_input = true;
+            state.pending_ask_question = Some("old question".to_string());
+            state.plan_error = Some("old plan failure".to_string());
+            assert_eq!(app.sidebar_status(&state), expected);
+        }
+    }
+
+    #[test]
+    fn saved_input_waiting_data_is_used_without_a_local_operation() {
+        let app = app_without_lock();
+
+        let mut option_wait = sidebar_session("option-wait", SessionPhase::Planned);
+        option_wait.awaiting_input = true;
+        assert_eq!(
+            app.sidebar_status(&option_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let mut question_wait = sidebar_session("question-wait", SessionPhase::Planned);
+        question_wait.pending_ask_question = Some("question".to_string());
+        assert_eq!(
+            app.sidebar_status(&question_wait),
+            SidebarStatus::AwaitingInput
+        );
+
+        let phase_fallback = sidebar_session("phase-fallback", SessionPhase::AwaitingInput);
+        assert_eq!(
+            app.sidebar_status(&phase_fallback),
+            SidebarStatus::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn planning_claim_wins_after_a_question_is_answered_but_phase_is_stale() {
+        let mut app = app_without_lock();
+        let id = "answered-question";
+        let state = sidebar_session(id, SessionPhase::AwaitingInput);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim answered-question session: {error}"));
+        app.prompts.enqueue(queued_prompt(id, "question-request"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.open_next();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::AwaitingInput);
+        app.prompts.close_active();
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Planning);
+        drop(claim);
+    }
+
+    #[test]
+    fn awaiting_approval_uses_plan_file_availability_and_refresh_rebuilds_the_cache() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("data"));
+        let id = crate::session::SessionManager::new_session_id();
+        let mut state = sidebar_session(&id, SessionPhase::AwaitingApproval);
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        let mut app = app_for_manager(manager.clone());
+
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "# usable plan\n")
+            .unwrap_or_else(|error| panic!("failed to write plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        std::fs::write(&plan_path, " \n\t")
+            .unwrap_or_else(|error| panic!("failed to write whitespace plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
+
+        std::fs::write(&plan_path, "restored plan")
+            .unwrap_or_else(|error| panic!("failed to restore plan: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::AwaitingApproval);
+
+        manager
+            .delete(&id)
+            .unwrap_or_else(|error| panic!("failed to delete session: {error}"));
+        app.refresh();
+        assert!(app.sessions.is_empty());
+
+        state.plan_error = None;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to recreate session: {error}"));
+        app.refresh();
+        assert_eq!(first_sidebar_status(&app), SidebarStatus::Planning);
     }
 
     #[test]
@@ -2795,12 +3722,678 @@ mod tests {
     }
 
     #[test]
+    fn planning_phases_default_to_the_plan_tab_on_startup() {
+        for phase in [
+            crate::session::SessionPhase::AwaitingInput,
+            crate::session::SessionPhase::AwaitingApproval,
+            crate::session::SessionPhase::Planned,
+        ] {
+            let fixture = persisted_fixture(&[(1, phase.clone())]);
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Plan,
+                "{phase:?} should open on Plan"
+            );
+        }
+    }
+
+    #[test]
+    fn non_planning_phases_default_to_the_info_tab_on_startup() {
+        for phase in [
+            crate::session::SessionPhase::Draft,
+            crate::session::SessionPhase::Completed,
+            crate::session::SessionPhase::Failed("failed".to_string()),
+            crate::session::SessionPhase::Suspended,
+        ] {
+            let fixture = persisted_fixture(&[(1, phase.clone())]);
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Info,
+                "{phase:?} should open on Info"
+            );
+        }
+    }
+
+    #[test]
+    fn awaiting_input_flag_does_not_promote_a_draft_to_the_plan_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.awaiting_input = true;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+
+        fixture.app.refresh();
+
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn an_empty_session_list_keeps_the_info_tab_and_existing_empty_view() {
+        for key_code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+        ] {
+            let mut fixture = persisted_fixture(&[]);
+
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert!(fixture.app.sessions.is_empty());
+            assert_eq!(fixture.app.view, View::Sessions);
+            assert_eq!(fixture.app.tab, DetailTab::Info, "key {key_code:?}");
+            assert!(fixture.app.manual_detail_tabs.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_running_session_with_an_active_run_claim_defaults_to_info() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("cruise"));
+        let state = persisted_state(&manager, 1, crate::session::SessionPhase::Running);
+        let application = CruiseApplication::new(manager);
+        let _claim = application
+            .runtime()
+            .try_begin(state.id.clone(), crate::application::OperationKind::Run)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+
+        assert_eq!(app.tab, DetailTab::Info);
+        assert_eq!(
+            app.active_session().map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::Running)
+        );
+    }
+
+    #[test]
+    fn planning_operation_events_select_plan_for_a_draft_without_running_an_llm() {
+        for operation in [
+            crate::application::OperationKind::Generate,
+            crate::application::OperationKind::Fix,
+            crate::application::OperationKind::Replan,
+        ] {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+            let id = test_session_id(1);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), operation)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id,
+                    operation,
+                }));
+
+            assert_eq!(
+                fixture.app.tab,
+                DetailTab::Plan,
+                "{operation:?} should open a draft on Plan"
+            );
+        }
+    }
+
+    #[test]
+    fn ask_on_a_planning_phase_keeps_the_default_on_plan_without_becoming_active_planning() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::AwaitingApproval)]);
+        let id = test_session_id(1);
+
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Ask,
+            }));
+
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+    }
+
+    #[test]
+    fn every_detail_navigation_key_registers_manual_selection_across_refresh() {
+        let cases = [
+            (KeyCode::Tab, DetailTab::Log),
+            (KeyCode::BackTab, DetailTab::Dag),
+            (KeyCode::Left, DetailTab::Dag),
+            (KeyCode::Right, DetailTab::Log),
+            (KeyCode::Char('['), DetailTab::Dag),
+            (KeyCode::Char(']'), DetailTab::Log),
+        ];
+
+        for (key_code, expected) in cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert_eq!(fixture.app.tab, expected, "key {key_code:?}");
+
+            fixture.app.refresh();
+
+            assert_eq!(
+                fixture.app.tab, expected,
+                "manual tab selected with {key_code:?} was lost on refresh"
+            );
+        }
+    }
+
+    #[test]
+    fn manually_selected_info_survives_refresh_plan_start_and_plan_completion() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+        fixture.app.last_refresh = Instant::now()
+            .checked_sub(Duration::from_secs(4))
+            .unwrap_or_else(Instant::now);
+        fixture.app.refresh_if_due();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id.clone(), crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Generate,
+            }));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let mut completed = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        completed.phase = crate::session::SessionPhase::Completed;
+        fixture
+            .manager
+            .save(&completed)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+                session_id: id,
+                phase: crate::session::SessionPhase::Completed.label().to_string(),
+            }));
+
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn selection_move_home_and_end_use_each_session_id_default_and_restore_manual_tabs() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+            (3, crate::session::SessionPhase::AwaitingApproval),
+        ]);
+        let first_id = test_session_id(1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        fixture.app.select_move(1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        fixture.app.select_move(-1);
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        fixture.app.select_end();
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(3).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        fixture.app.select_home();
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+    }
+
+    #[test]
+    fn external_phase_updates_choose_plan_only_for_unmodified_sessions() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.phase = crate::session::SessionPhase::AwaitingApproval;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        state.phase = crate::session::SessionPhase::Planned;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn draft_created_does_not_inherit_the_previous_sessions_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let state = persisted_state(&fixture.manager, 2, crate::session::SessionPhase::Draft);
+        fixture
+            .app
+            .apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[tokio::test]
+    async fn session_created_does_not_inherit_the_previous_sessions_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let state = persisted_state(
+            &fixture.manager,
+            2,
+            crate::session::SessionPhase::AwaitingApproval,
+        );
+        let id = state.id.clone();
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture.app.apply_event(UiEvent::SessionCreated {
+            result: Ok(state),
+            plan: PlanRequest::default(),
+        });
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(test_session_id(2).as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        fixture.app.registry.shutdown().await;
+    }
+
+    #[test]
+    fn a_non_selected_session_plan_start_does_not_change_the_current_tab_or_selection() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+        ]);
+        let selected_id = test_session_id(1);
+        let other_id = test_session_id(2);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        let _claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(
+                other_id.clone(),
+                crate::application::OperationKind::Generate,
+            )
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: other_id,
+                operation: crate::application::OperationKind::Generate,
+            }));
+
+        assert_eq!(
+            fixture
+                .app
+                .active_session()
+                .map(|session| session.id.as_str()),
+            Some(selected_id.as_str())
+        );
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+    }
+
+    #[test]
+    fn repeated_refresh_preserves_scroll_and_removed_session_tabs_are_not_reused() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Draft),
+        ]);
+        let first_id = test_session_id(1);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        fixture.app.plan_scroll = 7;
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert_eq!(fixture.app.plan_scroll, 7);
+
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.plan_scroll, 7);
+
+        fixture
+            .manager
+            .delete(&first_id)
+            .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+        assert_eq!(fixture.app.sessions.len(), 1);
+
+        fixture
+            .manager
+            .delete(&test_session_id(2))
+            .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
+        fixture.app.refresh();
+        assert!(fixture.app.sessions.is_empty());
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+
+        persisted_state(&fixture.manager, 1, crate::session::SessionPhase::Draft);
+        fixture.app.refresh();
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn refreshing_a_failed_session_list_keeps_the_current_manual_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+
+        let sessions_dir = fixture.manager.sessions_dir();
+        std::fs::remove_dir_all(&sessions_dir)
+            .unwrap_or_else(|error| panic!("failed to remove test sessions directory: {error}"));
+        std::fs::write(&sessions_dir, "not a directory")
+            .unwrap_or_else(|error| panic!("failed to corrupt test sessions directory: {error}"));
+        fixture.app.refresh();
+
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn tab_in_new_session_advances_the_form_without_registering_a_detail_tab() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+        assert!(!fixture.app.handle_action(Action::NewSession));
+        assert!(!fixture.app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(fixture.app.view, View::NewSession);
+        assert_eq!(fixture.app.form.step, Step::Attachments);
+
+        assert!(!fixture.app.handle_action(Action::ViewSessions));
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+    }
+
+    #[test]
+    fn terminal_plan_events_return_to_the_latest_phase_default_and_ignore_stale_planning_state() {
+        let cases = [
+            (
+                crate::session::SessionPhase::Planned,
+                ApplicationEvent::PlanFinished {
+                    session_id: test_session_id(1),
+                    phase: crate::session::SessionPhase::Planned.label().to_string(),
+                },
+                DetailTab::Plan,
+            ),
+            (
+                crate::session::SessionPhase::Failed("failed".to_string()),
+                ApplicationEvent::PlanFailed {
+                    session_id: test_session_id(1),
+                    error: "failed".to_string(),
+                },
+                DetailTab::Info,
+            ),
+            (
+                crate::session::SessionPhase::Draft,
+                ApplicationEvent::PlanCancelled {
+                    session_id: test_session_id(1),
+                },
+                DetailTab::Info,
+            ),
+        ];
+
+        for (phase, event, expected) in cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+            let id = test_session_id(1);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), crate::application::OperationKind::Generate)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id.clone(),
+                    operation: crate::application::OperationKind::Generate,
+                }));
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+
+            let mut state = fixture
+                .manager
+                .load(&id)
+                .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+            state.phase = phase;
+            fixture
+                .manager
+                .save(&state)
+                .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+            fixture.app.apply_event(UiEvent::Control(event));
+
+            assert_eq!(fixture.app.tab, expected);
+        }
+    }
+
+    #[test]
+    fn terminal_plan_events_keep_a_manually_selected_tab() {
+        let manual_cases = [
+            (
+                crate::session::SessionPhase::Failed("failed".to_string()),
+                ApplicationEvent::PlanFailed {
+                    session_id: test_session_id(1),
+                    error: "failed".to_string(),
+                },
+            ),
+            (
+                crate::session::SessionPhase::Draft,
+                ApplicationEvent::PlanCancelled {
+                    session_id: test_session_id(1),
+                },
+            ),
+        ];
+        for (phase, event) in manual_cases {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            let id = test_session_id(1);
+            assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+            let _claim = fixture
+                .app
+                .application
+                .runtime()
+                .try_begin(id.clone(), crate::application::OperationKind::Generate)
+                .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+            fixture
+                .app
+                .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                    session_id: id.clone(),
+                    operation: crate::application::OperationKind::Generate,
+                }));
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+
+            let mut state = fixture
+                .manager
+                .load(&id)
+                .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+            state.phase = phase;
+            fixture
+                .manager
+                .save(&state)
+                .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+            fixture.app.apply_event(UiEvent::Control(event));
+
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+        }
+    }
+
+    #[test]
+    fn a_worker_error_after_a_dropped_claim_returns_to_the_latest_phase_default() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Draft)]);
+        let id = test_session_id(1);
+        let claim = fixture
+            .app
+            .application
+            .runtime()
+            .try_begin(id.clone(), crate::application::OperationKind::Generate)
+            .unwrap_or_else(|error| panic!("failed to claim test session: {error}"));
+        fixture
+            .app
+            .apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+                session_id: id.clone(),
+                operation: crate::application::OperationKind::Generate,
+            }));
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("failed to load test session: {error}"));
+        state.phase = crate::session::SessionPhase::Completed;
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("failed to update test session: {error}"));
+        drop(claim);
+        fixture
+            .app
+            .apply_event(UiEvent::Error("worker stopped unexpectedly".to_string()));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+    }
+
+    #[test]
     fn new_session_shortcut_starts_the_dialogue_at_the_task_question() {
         let mut app = app();
         app.form.step = Step::Config;
         assert!(!app.handle_action(Action::NewSession));
         assert_eq!(app.view, View::NewSession);
         assert_eq!(app.form.step, Step::Task);
+    }
+
+    #[test]
+    fn sessions_clean_shortcut_opens_confirmation_without_starting_cleanup() {
+        for sessions_present in [false, true] {
+            let mut app = app();
+            if sessions_present {
+                add_session(
+                    &mut app,
+                    "session-1",
+                    crate::session::SessionPhase::AwaitingApproval,
+                );
+            }
+
+            assert!(!app.handle_key(key(KeyCode::Char('c'))));
+            assert!(matches!(
+                app.modal,
+                Some(Modal::Confirm {
+                    command: PendingCommand::Clean,
+                    ..
+                })
+            ));
+            assert!(app.registry.tasks_empty());
+        }
+    }
+
+    #[test]
+    fn clean_confirmation_can_be_cancelled_without_starting_cleanup() {
+        let mut app = app();
+        assert!(!app.handle_key(key(KeyCode::Char('c'))));
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(app.modal.is_none());
+        assert!(app.registry.tasks_empty());
+    }
+
+    #[test]
+    fn c_is_scoped_to_sessions_and_remains_text_or_noop_elsewhere() {
+        let mut new_session = app();
+        assert!(!new_session.handle_action(Action::NewSession));
+        assert!(!new_session.handle_key(key(KeyCode::Char('c'))));
+        assert_eq!(new_session.form.input.text(), "c");
+        assert!(new_session.modal.is_none());
+        drop(new_session);
+
+        let mut run_all = app();
+        run_all.view = View::RunAll;
+        assert!(!run_all.handle_key(key(KeyCode::Char('c'))));
+        assert!(run_all.modal.is_none());
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2816,6 +4409,397 @@ mod tests {
     fn write_workflow(path: &std::path::Path, step: &str) {
         let yaml = format!("command: [echo]\nsteps:\n  {step}:\n    command: echo {step}\n");
         std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn populate_creation_form(app: &mut TuiApp) {
+        app.view = View::NewSession;
+        app.form.input.set_text("old task");
+        app.form.attachments.set_text("old-image.png");
+        app.form.working_dir.set_text("/tmp/project");
+        app.form.repository.set_text("acme/cruise");
+        app.form.config.set_text("workflow.yaml");
+        app.form.skipped.set_text("build, test");
+        app.form.step = Step::Launch;
+        app.form.source = SourceKind::GitHub;
+        app.form.workspace_mode = WorkspaceMode::CurrentBranch;
+        app.form.launch = Launch::SaveDraft;
+        app.form.options.allow_dirty_working_tree = true;
+        app.form.options.planning.grill = true;
+        app.form.options.planning.formal_spec = true;
+        app.form.options.planning.skip_planning = true;
+        app.form.skipped_explicit = true;
+        app.form.dirty = true;
+    }
+
+    fn stored_draft(manager: &crate::session::SessionManager, input: &str) -> SessionState {
+        let mut state = SessionState::new_draft(
+            crate::session::SessionManager::new_session_id(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            input.to_string(),
+        );
+        state.attachments = vec![PathBuf::from("/tmp/persisted-image.png")];
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to store test session: {error}"));
+        state
+    }
+
+    fn no_planning_request() -> PlanRequest {
+        PlanRequest {
+            skip_planning: true,
+            ..PlanRequest::default()
+        }
+    }
+
+    fn assert_creation_form_reset(app: &TuiApp) {
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(app.form.attachment_paths().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+    }
+
+    fn assert_creation_error(app: &TuiApp, expected_error: &str, last_change: Instant) {
+        assert_eq!(app.form.input.text(), "old task");
+        assert_eq!(app.form.attachments.text(), "old-image.png");
+        assert_eq!(app.form.working_dir.text(), "/tmp/project");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.step, Step::Launch);
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert_eq!(app.form.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert_eq!(app.form.launch, Launch::SaveDraft);
+        assert!(app.form.options.allow_dirty_working_tree);
+        assert!(app.form.options.planning.grill);
+        assert!(app.form.options.planning.formal_spec);
+        assert!(app.form.options.planning.skip_planning);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.dirty);
+        assert_eq!(app.form.last_change, last_change);
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Error(message)) if message.contains(expected_error)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_creation_ignores_new_session_input_and_navigation() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new(application, events, logs_sender);
+
+        app.view = View::NewSession;
+        app.form.input.set_text("first task");
+        app.form.dirty = true;
+        let last_change = app.form.last_change;
+        let state = stored_draft(&manager, "created while blocked");
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        assert!(app.registry.block_creation_for_test(
+            release_receiver,
+            app.events.clone(),
+            Ok(state),
+        ));
+        assert!(app.registry.busy("__create"));
+        type_text(&mut app, " newer input");
+        assert_eq!(app.form.input.text(), "first task");
+        assert_eq!(app.form.last_change, last_change);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+        assert_eq!(app.form.input.text(), "first task");
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm {
+                command: PendingCommand::Quit,
+                ..
+            })
+        ));
+        app.modal = None;
+
+        release_sender
+            .send(())
+            .unwrap_or_else(|()| panic!("failed to release blocked creation"));
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("timed out waiting for creation: {error}"))
+            .unwrap_or_else(|| panic!("creation event channel closed"));
+        let UiEvent::DraftCreated { result } = &event else {
+            panic!("unexpected creation event: {event:?}");
+        };
+        assert!(result.is_ok(), "creation failed: {result:?}");
+        app.apply_event(event);
+        assert_eq!(app.view, View::Sessions);
+        assert!(app.form.input.text().is_empty());
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.form.dirty);
+        app.registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_created_success_clears_new_session_input_but_keeps_persisted_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "created task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Ok(state),
+            plan: no_planning_request(),
+        });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load created session: {error}"));
+        assert_eq!(persisted.input, "created task");
+        assert_eq!(persisted.attachments, attachments);
+
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.view, View::NewSession);
+        assert!(app.form.input.text().is_empty());
+        assert!(app.form.attachments.text().is_empty());
+
+        app.registry.shutdown().await;
+    }
+
+    #[test]
+    fn draft_created_success_clears_new_session_input_but_keeps_draft_content() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        let state = stored_draft(&manager, "saved draft task");
+        let state_id = state.id.clone();
+        let attachments = state.attachments.clone();
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert_creation_form_reset(&app);
+        let persisted = manager
+            .load(&state_id)
+            .unwrap_or_else(|error| panic!("failed to load saved draft: {error}"));
+        assert_eq!(persisted.input, "saved draft task");
+        assert_eq!(persisted.attachments, attachments);
+    }
+
+    #[test]
+    fn successful_draft_creation_does_not_recreate_the_cleared_autosave() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "old autosave".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/project".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to seed autosave: {error}"));
+        let mut app = app_for(application.clone());
+        app.form.attachments.set_text("old-image.png");
+        app.form.dirty = true;
+        let state = stored_draft(&manager, "saved session");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read cleared autosave: {error}"))
+                .is_none()
+        );
+        app.autosave_draft(Instant::now() + Duration::from_secs(1));
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read autosave after success: {error}"))
+                .is_none()
+        );
+
+        let restarted = app_for(application);
+        assert!(restarted.form.input.text().is_empty());
+        assert!(restarted.form.attachments.text().is_empty());
+    }
+
+    #[test]
+    fn session_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-session draft: {error}"));
+
+        app.apply_event(UiEvent::SessionCreated {
+            result: Err("session creation failed".to_string()),
+            plan: no_planning_request(),
+        });
+
+        assert_eq!(app.view, View::NewSession);
+        assert_creation_error(&app, "session creation failed", last_change);
+        let draft = application
+            .draft()
+            .unwrap_or_else(|error| panic!("failed to read failed-session draft: {error}"))
+            .unwrap_or_else(|| panic!("failed-session draft was cleared"));
+        assert_eq!(draft.input, "old task");
+        assert_eq!(draft.working_dir, "/tmp/project");
+        assert_eq!(draft.repo.as_deref(), Some("acme/cruise"));
+    }
+
+    #[test]
+    fn draft_created_error_preserves_input_settings_and_saved_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        let mut app = app_for(application.clone());
+        populate_creation_form(&mut app);
+        let last_change = app.form.last_change;
+        application
+            .save_draft(&app.form.draft())
+            .unwrap_or_else(|error| panic!("failed to seed failed-draft draft: {error}"));
+
+        app.apply_event(UiEvent::DraftCreated {
+            result: Err("draft creation failed".to_string()),
+        });
+
+        assert_creation_error(&app, "draft creation failed", last_change);
+        assert!(
+            application
+                .draft()
+                .unwrap_or_else(|error| panic!("failed to read failed-draft draft: {error}"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unsent_new_session_round_trip_preserves_task_and_attachments() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let mut app = app_without_lock();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("unsent task");
+        app.form.attachments.set_text("unsent-image.png");
+        app.form.step = Step::Attachments;
+        app.form.dirty = true;
+
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Task);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Sessions);
+        assert!(!app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.form.input.text(), "unsent task");
+        assert_eq!(app.form.attachments.text(), "unsent-image.png");
+    }
+
+    #[test]
+    fn restarting_tui_restores_an_unsent_new_session_draft() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = CruiseApplication::new(crate::session::SessionManager::new(
+            sessions.path().to_path_buf(),
+        ));
+        application
+            .save_draft(&crate::new_session_draft::NewSessionDraft {
+                input: "restored task".to_string(),
+                requested_config_path: Some("workflow.yaml".to_string()),
+                working_dir: "/tmp/restored".to_string(),
+                repo: Some("acme/cruise".to_string()),
+                skipped_steps: vec!["build".to_string(), "test".to_string()],
+                updated_at: String::new(),
+            })
+            .unwrap_or_else(|error| panic!("failed to save restart draft: {error}"));
+
+        let app = app_for(application);
+
+        assert_eq!(app.form.input.text(), "restored task");
+        assert_eq!(app.form.working_dir.text(), "/tmp/restored");
+        assert_eq!(app.form.repository.text(), "acme/cruise");
+        assert_eq!(app.form.config.text(), "workflow.yaml");
+        assert_eq!(app.form.skipped.text(), "build, test");
+        assert_eq!(app.form.source, SourceKind::GitHub);
+        assert!(app.form.skipped_explicit);
+        assert!(app.form.attachments.text().is_empty());
+        assert!(!app.form.dirty);
+    }
+
+    #[tokio::test]
+    async fn successful_creation_rejects_an_empty_next_submission() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let sessions = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(sessions.path().to_path_buf());
+        let application = CruiseApplication::new(manager.clone());
+        let mut app = app_for(application);
+        populate_creation_form(&mut app);
+        app.form.options.planning.grill = false;
+        app.form.options.planning.formal_spec = false;
+        let state = stored_draft(&manager, "created task");
+
+        app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
+        app.handle_action(Action::NewSession);
+        app.create_session();
+        let rejected = matches!(
+            &app.modal,
+            Some(Modal::Error(message))
+                if message.contains("Task description or an image attachment is required")
+        );
+        app.registry.shutdown().await;
+        assert!(rejected, "the next empty submission was not rejected");
     }
 
     #[test]
@@ -3253,9 +5237,9 @@ mod tests {
     }
 
     #[test]
-    fn planning_and_draft_shortcuts_do_not_edit_open_prompts() {
+    fn planning_and_draft_shortcuts_do_not_edit_open_options() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         for key in ['p', 'g', 'u', 's'] {
             assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
@@ -3277,16 +5261,16 @@ mod tests {
     }
 
     #[test]
-    fn open_key_opens_next_queued_prompt() {
+    fn open_key_opens_next_queued_option() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         assert!(!app.handle_action(Action::Open));
         assert_eq!(
             app.prompts
                 .active
                 .as_ref()
                 .map(|prompt| prompt.request_id.as_str()),
-            Some("ask-1")
+            Some("option-1")
         );
         assert!(matches!(app.modal, Some(Modal::Prompt)));
     }
@@ -3325,9 +5309,454 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_answer_stays_queued_and_reopens_after_error() {
+    fn ask_user_event_does_not_interrupt_the_current_tui_context() {
+        let contexts = [
+            (View::Sessions, DetailTab::Info, 0),
+            (View::Sessions, DetailTab::Dag, 0),
+            (View::Sessions, DetailTab::Log, 0),
+            (View::NewSession, DetailTab::Info, 0),
+            (View::RunAll, DetailTab::Info, 0),
+            (View::Sessions, DetailTab::Plan, 1),
+        ];
+
+        for (index, (view, tab, selected)) in contexts.into_iter().enumerate() {
+            let mut app = app();
+            add_session(
+                &mut app,
+                "session",
+                crate::session::SessionPhase::AwaitingInput,
+            );
+            add_session(&mut app, "other", crate::session::SessionPhase::Planned);
+            app.view = view;
+            app.tab = tab;
+            app.selected = selected;
+            app.form.input.set_text("unfinished new-session input");
+
+            app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+                session_id: "session".to_string(),
+                request_id: format!("ask-{index}"),
+                question: "Which provider should be used?".to_string(),
+            }));
+
+            assert_eq!(app.view, view, "Ask changed the active view for {view:?}");
+            assert_eq!(app.tab, tab, "Ask changed the detail tab for {tab:?}");
+            assert_eq!(app.selected, selected, "Ask changed the selected session");
+            assert_eq!(app.form.input.text(), "unfinished new-session input");
+            assert!(
+                app.modal.is_none(),
+                "Ask opened a modal in {view:?}/{tab:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ask_user_event_preserves_an_existing_modal() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.modal = Some(Modal::Help);
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-help".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+
+        assert!(matches!(app.modal, Some(Modal::Help)));
+    }
+
+    #[test]
+    fn delayed_ask_event_after_request_removal_does_not_restore_plan_prompt() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-cancelled".to_string(),
+            "Old question".to_string(),
+        );
+        app.plan_prompts.remove("session", "ask-cancelled");
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-cancelled".to_string(),
+            question: "Delayed question".to_string(),
+        }));
+
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+        assert!(app.active_plan_prompt().is_none());
+        assert!(!app.plan_prompts.has_session("session"));
+        assert!(app.application.pending_prompts("session").is_empty());
+        assert!(app.handle_plan_prompt_key(key(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn ask_user_event_refreshes_only_the_target_session_immediately() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let target_id = "20260921000000000_00000000000000000000000000000001";
+        let other_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [target_id, other_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                format!("task {id}"),
+            );
+            state.phase = crate::session::SessionPhase::Planned;
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Log;
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == other_id)
+            .unwrap_or_else(|| panic!("target session was not loaded"));
+        let selected_id = app.active_session().map_or_else(
+            || panic!("no selected session"),
+            |session| session.id.clone(),
+        );
+
+        let mut target = manager
+            .load(target_id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        target.phase = crate::session::SessionPhase::AwaitingInput;
+        target.awaiting_input = true;
+        target.pending_ask_question = Some("Which provider should be used?".to_string());
+        manager
+            .save(&target)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: target_id.to_string(),
+            request_id: "ask-immediate".to_string(),
+            question: "Which provider should be used?".to_string(),
+        }));
+
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|session| session.id == target_id)
+                .map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::AwaitingInput)
+        );
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|session| session.id == other_id)
+                .map(|session| &session.phase),
+            Some(&crate::session::SessionPhase::Planned)
+        );
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(selected_id.as_str())
+        );
+        assert_eq!(app.tab, DetailTab::Log);
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_session_open_routes_ask_to_its_plan_not_global_fifo() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        add_session(
+            &mut app,
+            "session-b",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Info;
+        app.selected = 1;
+        let application = app.application.clone();
+        let events = app.events.clone();
+        let logs_sender = app.logs_sender.clone();
+        assert!(app.registry.run_all(application, events, logs_sender));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-a".to_string(),
+            request_id: "ask-a".to_string(),
+            question: "Question for A".to_string(),
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-b".to_string(),
+            request_id: "ask-b".to_string(),
+            question: "Question for B".to_string(),
+        }));
+        app.registry.shutdown().await;
+
+        app.handle_action(Action::Open);
+
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+        assert!(app.prompts.active.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_session_open_keeps_option_modal_scoped_when_another_session_has_ask() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        add_session(&mut app, "session-b", crate::session::SessionPhase::Running);
+        app.view = View::Sessions;
+        app.selected = 1;
+        let application = app.application.clone();
+        let events = app.events.clone();
+        let logs_sender = app.logs_sender.clone();
+        assert!(app.registry.run_all(application, events, logs_sender));
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session-a".to_string(),
+            request_id: "ask-a".to_string(),
+            question: "Question for A".to_string(),
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::OptionRequired {
+            session_id: "session-b".to_string(),
+            request_id: "option-b".to_string(),
+            prompt: "Choose for B".to_string(),
+            choices: vec![crate::application::OptionChoicePayload {
+                label: "staging".to_string(),
+                kind: crate::application::OptionChoiceKind::Selector,
+                next_step: None,
+            }],
+        }));
+        app.registry.shutdown().await;
+
+        app.handle_action(Action::Open);
+
+        assert!(matches!(app.modal, Some(Modal::Prompt)));
+        assert_eq!(
+            app.prompts
+                .active
+                .as_ref()
+                .map(|prompt| prompt.request_id.as_str()),
+            Some("option-b")
+        );
+    }
+
+    #[test]
+    fn persisted_awaiting_input_without_local_prompt_routes_open_and_answer_to_plan() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.sessions[0].awaiting_input = true;
+        app.sessions[0].pending_ask_question = Some("Question owned elsewhere".to_string());
+        app.view = View::Sessions;
+        app.tab = DetailTab::Info;
+
+        app.handle_action(Action::Open);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+
+        app.tab = DetailTab::Info;
+        app.apply_action(SessionAction::Answer);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(app.modal.is_none());
+        assert!(app.active_plan_prompt().is_none());
+        assert!(app.application.pending_prompts("session").is_empty());
+        assert!(app.plan_prompts.answer_text("session").is_none());
+    }
+
+    #[test]
+    fn ask_user_is_not_restored_as_a_modal_after_resize() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.tab = DetailTab::Plan;
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-resize".to_string(),
+            question: "Question".to_string(),
+        }));
+
+        app.on_resize(79, 24);
+        assert!(matches!(app.modal, Some(Modal::Resize)));
+        app.on_resize(80, 24);
+
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn ask_user_is_not_restored_after_an_error_modal_closes() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.apply_event(UiEvent::Control(ApplicationEvent::AskUserRequired {
+            session_id: "session".to_string(),
+            request_id: "ask-error".to_string(),
+            question: "Question".to_string(),
+        }));
+
+        app.set_error("transient error".to_string());
+        app.handle_action(Action::Enter);
+
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn newly_created_session_does_not_inherit_the_previous_plan_tab() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "old-session",
+            crate::session::SessionPhase::Planned,
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+
+        let new_state = SessionState::new(
+            "new-session".to_string(),
+            PathBuf::from("."),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "new task".to_string(),
+        );
+        app.apply_event(UiEvent::DraftCreated {
+            result: Ok(new_state),
+        });
+
+        assert_eq!(app.tab, DetailTab::Info);
+    }
+
+    #[test]
+    fn refresh_preserves_the_selected_session_id_when_rows_are_inserted_before_it() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let first_id = "20260921000000000_00000000000000000000000000000001";
+        let selected_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [first_id, selected_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                format!("task {id}"),
+            );
+            state.phase = crate::session::SessionPhase::Planned;
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == selected_id)
+            .unwrap_or_else(|| panic!("selected session was not loaded"));
+
+        let inserted_id = "20260921000000000_00000000000000000000000000000000";
+        let mut inserted = SessionState::new(
+            inserted_id.to_string(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            "inserted task".to_string(),
+        );
+        inserted.phase = crate::session::SessionPhase::Planned;
+        manager
+            .create(&inserted)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.refresh();
+
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(selected_id)
+        );
+    }
+
+    #[test]
+    fn refresh_returns_to_info_when_the_selected_session_disappears() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().to_path_buf());
+        let selected_id = "20260921000000000_00000000000000000000000000000001";
+        let other_id = "20260921000000000_00000000000000000000000000000002";
+        for id in [selected_id, other_id] {
+            let mut state = SessionState::new(
+                id.to_string(),
+                temp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                format!("task {id}"),
+            );
+            // The surviving session is not a planning phase, so the detail pane
+            // falls back to its Info default once the selection moves.
+            state.phase = if id == selected_id {
+                crate::session::SessionPhase::Planned
+            } else {
+                crate::session::SessionPhase::Completed
+            };
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let application = CruiseApplication::new(manager.clone());
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
+        let mut app = TuiApp::new_for_test_with_lock(
+            application,
+            events,
+            logs_sender,
+            Some(crate::test_support::lock_process()),
+        );
+        app.selected = app
+            .sessions
+            .iter()
+            .position(|session| session.id == selected_id)
+            .unwrap_or_else(|| panic!("selected session was not loaded"));
+        app.tab = DetailTab::Plan;
+        manager
+            .delete(selected_id)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        app.refresh();
+
+        assert_eq!(app.tab, DetailTab::Info);
+        assert_eq!(
+            app.active_session().map(|session| session.id.as_str()),
+            Some(other_id)
+        );
+    }
+
+    #[test]
+    fn empty_option_answer_stays_queued_and_reopens_after_error() {
+        let mut app = app();
+        app.prompts.enqueue(pending_text_option("option-1").into());
         app.handle_action(Action::Open);
 
         assert!(!app.handle_action(Action::Enter));
@@ -3340,9 +5769,9 @@ mod tests {
     }
 
     #[test]
-    fn resize_replaces_but_then_restores_prompt_modal() {
+    fn resize_replaces_but_then_restores_option_prompt_modal() {
         let mut app = app();
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         app.prompts.answer.set_text("keep this answer");
         app.on_resize(79, 24);
@@ -3354,14 +5783,14 @@ mod tests {
     }
 
     #[test]
-    fn syncing_a_resolved_active_prompt_closes_every_prompt_ui_state() {
+    fn syncing_a_resolved_active_option_closes_every_option_ui_state() {
         let mut app = app();
         add_session(
             &mut app,
             "session",
             crate::session::SessionPhase::AwaitingInput,
         );
-        app.prompts.enqueue(pending_ask("ask-1").into());
+        app.prompts.enqueue(pending_option("option-1").into());
         app.handle_action(Action::Open);
         app.modal_state.prompt_modal_pending = true;
 
@@ -3841,6 +6270,55 @@ mod tests {
     }
 
     #[test]
+    fn herdr_state_is_blocked_only_while_a_prompt_is_queued() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+
+        // `ask_user` now waits in the session's Plan tab rather than the modal
+        // prompt queue, but it still blocks the agent.
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-1".to_string(),
+            "Which provider should be used?".to_string(),
+        );
+        assert_eq!(
+            app.herdr_state(),
+            (
+                crate::herdr::AgentState::Blocked,
+                Some("Which provider should be used?")
+            )
+        );
+
+        app.plan_prompts.remove("session", "ask-1");
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+    }
+
+    #[test]
+    fn herdr_state_is_blocked_while_an_option_prompt_is_queued() {
+        let mut app = app();
+        add_session(&mut app, "session", crate::session::SessionPhase::Running);
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+
+        app.prompts.enqueue(queued_prompt("session", "option-1"));
+        assert_eq!(
+            app.herdr_state(),
+            (
+                crate::herdr::AgentState::Blocked,
+                Some("What should happen next?")
+            )
+        );
+
+        app.prompts.open_next();
+        app.prompts.close_active();
+        assert_eq!(app.herdr_state(), (crate::herdr::AgentState::Idle, None));
+    }
+
+    #[test]
     fn ask_user_required_enqueues_one_action_required_notification() {
         let mut app = app();
         add_session(
@@ -3951,6 +6429,37 @@ mod tests {
         app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
             session_id: "session".to_string(),
             phase: "Awaiting Approval".to_string(),
+        }));
+
+        assert!(app.take_notifications().next().is_none());
+    }
+
+    #[test]
+    fn answered_ask_stays_in_planning_until_plan_finished() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.plan_prompts.enqueue(
+            "session".to_string(),
+            "ask-1".to_string(),
+            "Which provider should be used?".to_string(),
+        );
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "session".to_string(),
+            operation: crate::application::OperationKind::Ask,
+        }));
+        app.plan_prompts.remove("session", "ask-1");
+
+        assert_eq!(app.display_phase(&app.sessions[0]), "Planning");
+        assert!(app.take_notifications().next().is_none());
+
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "session".to_string(),
+            phase: "Awaiting Input".to_string(),
         }));
 
         assert!(app.take_notifications().next().is_none());

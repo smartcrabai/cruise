@@ -1,7 +1,7 @@
 # cruise
 
 <p align="center">
-  <img src="src-tauri/icons/icon.png" alt="cruise logo" width="160" height="160">
+  <img src="docs/icon.png" alt="cruise logo" width="160" height="160">
 </p>
 
 A CLI tool that orchestrates coding agent workflows defined in a YAML config file.
@@ -13,8 +13,8 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 ## Prerequisites
 
 - [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.82.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `cruise login` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, not `cruise login`.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.82.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
+- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
@@ -32,24 +32,22 @@ cargo install cruise
 brew install smartcrabai/tap/cruise
 ```
 
-### GUI (Desktop App)
+### WebUI
 
-A desktop GUI is also available. Download the latest installer from [GitHub Releases](https://github.com/smartcrabai/cruise/releases):
-
-| Platform | Format |
-|----------|--------|
-| macOS (Apple Silicon) | `.dmg` |
-| Linux (x86_64) | `.deb`, `.AppImage` |
-
-#### macOS GUI Installation
-
-After downloading the DMG and copying `cruise.app` to `/Applications`, run the following in Terminal before the first launch:
+Start the server-rendered browser UI with:
 
 ```sh
-xattr -cr /Applications/cruise.app
+cruise webui
 ```
 
-This removes the Gatekeeper quarantine attribute, allowing the app to launch.
+The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
+
+- `--host <ADDR>` -- interface to bind (default `127.0.0.1`; the WebUI has no authentication, so do not bind it to an untrusted network).
+- `--port <PORT>` -- TCP port to listen on (default `8484`).
+- `--no-open` -- do not open the browser automatically.
+- `--webui-dir <DIR>` -- serve `templates/` and `static/` from disk for development. For example, `cruise webui --webui-dir webui`; templates are re-read on every request, so edit and reload without restarting.
+
+The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline.
 
 ## Usage
 
@@ -115,9 +113,20 @@ permission never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_NOTIFICATIONS=1` in CI, headless environments, or tests to
 disable them.
 
+### herdr integration
+
+Inside a [herdr](https://herdr.dev) pane (`HERDR_ENV=1` with `HERDR_PANE_ID` and
+`HERDR_BIN_PATH` set), the TUI, `cruise plan`, `cruise run`, and `cruise exec`
+report their lifecycle state through `"$HERDR_BIN_PATH" pane report-agent` as
+source `custom:cruise` / agent `cruise`: `working` while planning or executing
+steps, `blocked` while waiting for an answer, an option selection, or plan
+review, and `idle` otherwise. Authority is released on exit. Reporting is
+best-effort and never changes workflow success, failure, or exit status. Set
+`CRUISE_DISABLE_HERDR=1` to disable it.
+
 ### TUI (Interactive Keyboard Client)
 
-Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and desktop GUI. It preserves the existing CLI behavior while bringing the GUI's session-management workflows to a terminal.
+Running `cruise` with no arguments opens cruise's official interactive keyboard client: the third client beside the CLI and WebUI. It preserves the existing CLI behavior while bringing the WebUI's session-management workflows to a terminal.
 
 ```sh
 # Open the interactive client
@@ -134,13 +143,15 @@ The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
-- **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared GUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
+- **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
-PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `login` and `exec` operations remain available through their CLI commands rather than TUI screens.
+PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
-The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration. Required prompts are queued; a single-run prompt opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
-For `ask_user`, a question containing line breaks is rendered as adjacent prompt lines, and `Enter` submits the answer.
+For `ask_user`, a question containing line breaks is rendered as adjacent lines in the selected session's Plan tab. Its answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
+
+The Sessions sidebar shows a presentation status, which can differ from the persisted session **Phase** while planning, running, or waiting for a user action. A filled `●` marks **Awaiting Input** and **Awaiting Approval** in light blue, **Running** and **Planning** in yellow, **Planned** in blue, **Completed** in green, **Failed** and **Plan Failed** in red, and **Suspended** in purple. A draft uses a green `◯`. The status text remains visible when `NO_COLOR` is set.
 
 #### Keyboard map
 
@@ -162,14 +173,14 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
-| `o` | Handle the prompt queue or open a dedicated PR/Issue URL, as the current context dictates |
+| `o` | In Sessions, open the selected session's Ask in its Plan tab; otherwise handle the Option queue or open a dedicated PR/Issue URL |
 | `f` | Follow the log |
 | `c` | On Sessions, ask for confirmation to Clean reclaimable and closed-PR sessions |
 | `Ctrl-R` | In the multiline Edit Settings dialog, toggle between save only and save and regenerate |
-| `Enter` | Accept the answer and move to the next question; on the launch question, start or draft the session; in the task and image editors, insert a newline |
+| `Enter` | In a Plan Ask, start editing or submit the answer; otherwise accept the New Session answer and move to the next question, start or draft the session, or insert a task/image newline |
 | `Ctrl-Enter` | Advance the current New Session question (required in the task and image editors, where `Enter` inserts a newline); in multiline Edit Settings, save (and regenerate if selected) |
 | `Space` | Toggle the current choice or the highlighted skipped step |
-| `Esc` | Back one question; at the first question, return to Sessions |
+| `Esc` | Leave Plan Ask editing without discarding the draft; otherwise back one question or, at the first question, return to Sessions |
 
 #### Layout, logs, and process behavior
 
@@ -198,8 +209,8 @@ Commands:
   clean        Remove sessions with closed/merged PRs
   config       Show or update application-level configuration (`~/.config/cruise/config.json`)
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
-  login        Sign in to a model provider for the `jcode` SDK backend
   ssh          Run a cruise command on a remote host through OpenSSH
+  webui        Serve the browser UI from this machine and open it in the default browser
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -230,7 +241,7 @@ Options:
 
 Everything after `--` is passed to the remote cruise in the same order and is parsed there. In `auto` mode, a local TTY requests a PTY; piped or redirected streams do not, which keeps commands such as `cruise ssh host -- list --json` suitable for scripts. `--tty always` and `--tty never` override that choice.
 
-The remote host is the execution boundary: its sessions, config, jcode authentication, worktrees, and repository clones are stored under its XDG directories and are not shared with local `cruise` commands. `--cwd`, `--config`, `--image`, and other path arguments are interpreted on the remote host. Cruise does not upload local files, copy credentials or environment variables, install the remote binary, or synchronize repositories. The desktop GUI remains a local session client and does not browse remote sessions.
+The remote host is the execution boundary: its sessions, config, jcode authentication, worktrees, and repository clones are stored under its XDG directories and are not shared with local `cruise` commands. `--cwd`, `--config`, `--image`, and other path arguments are interpreted on the remote host. Cruise does not upload local files, copy credentials or environment variables, install the remote binary, or synchronize repositories. The WebUI remains a local session client and does not browse remote sessions.
 
 #### `cruise`
 
@@ -257,7 +268,7 @@ Options:
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          GitHub repository to clone into a temporary directory for planning and execution
-      --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --image <PATH>               Attach an image file to the planning input; can be repeated
 ```
 
@@ -265,15 +276,15 @@ Options:
 
 Successful plan generation sends a best-effort **Plan ready** desktop notification. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
 
-With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead; pass `--no-force-exec`.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The desktop GUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button changes from "Generate plan" to "Create session").
+With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead; pass `--no-force-exec`.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The WebUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button remains "Create & plan").
 
-With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal and `interactive_planning: true`; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The desktop GUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
+With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal and `interactive_planning: true`; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The WebUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
 
-With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend (with `force_exec: true` the flag is not an opt-out; see below). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The desktop GUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
+With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend (with `force_exec: true` the flag is not an opt-out; see below). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The WebUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
-With `--formal-spec`, the initial implementation plan keeps its normal Markdown requirements and additionally asks the agent for both Quint and Alloy formal specifications. The formal blocks must use valid syntax, preserve the requirements' meaning, model relevant states, transitions, invariants, temporal requirements, ownership, and cardinality, and include standalone semantic comments in the configured plan language. The prompt also requires internally consistent models and reachable final states. The mode is off by default, works with `--grill`, `--no-interactive-planning`, and command or SDK backends, and conflicts with `--skip-planning` because that mode does not invoke an LLM. The desktop GUI and TUI expose the same toggle on New Session. The CLI and standard desktop/TUI workflows expose it only for the initial foreground plan request, not background `cruise --plan`, Fix, Ask, Replan, or existing-draft plan generation. The lower-level application API carries `formalSpec` on `Generate` requests and honors it for callers that invoke that operation directly, including eligible existing-draft Generate calls. An explicit `--formal-spec` also overrides `force_exec: true` for that invocation so the plan is generated normally.
+With `--formal-spec`, the initial implementation plan keeps its normal Markdown requirements and additionally asks the agent for both Quint and Alloy formal specifications. The formal blocks must use valid syntax, preserve the requirements' meaning, model relevant states, transitions, invariants, temporal requirements, ownership, and cardinality, and include standalone semantic comments in the configured plan language. The prompt also requires internally consistent models and reachable final states. The mode is off by default, works with `--grill`, `--no-interactive-planning`, and command or SDK backends, and conflicts with `--skip-planning` because that mode does not invoke an LLM. The TUI provides this toggle, but the WebUI New Session form does not. The CLI and standard TUI flows expose it only for the initial foreground plan request, not background `cruise --plan`, Fix, Ask, Replan, or existing-draft plan generation. The lower-level application API carries `formalSpec` on `Generate` requests and honors it for callers that invoke that operation directly, including eligible existing-draft Generate calls. An explicit `--formal-spec` also overrides `force_exec: true` for that invocation so the plan is generated normally.
 
-With `--repo <owner>/<repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone, the planning worktree, and its local branch are removed once the plan is approved (only the branch name is kept in session state), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config that lives inside the clone (or the built-in default when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed (including inlined `prompt_file` contents); an external `-c` path or `CRUISE_CONFIG` file is referenced in place instead. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The desktop GUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
+With `--repo <owner/repository>`, the session targets a GitHub repository instead of the current directory. The repository is cloned via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory, so the existing worktree and PR machinery work on the clone unchanged. The clone, the planning worktree, and its local branch are removed once the plan is approved (only the branch name is kept in session state), re-created by `cruise run`, and removed again after the PR has been created; on failure or suspend it is kept so the session can be resumed or retried (PR-creation failure marks the session `Failed`, not `Completed`). Repo sessions always run in Worktree mode — the no-PR current-branch mode is not available — and a workflow config that lives inside the clone (or the built-in default when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after the clone is removed (including inlined `prompt_file` contents); an external `-c` path or `CRUISE_CONFIG` file is referenced in place instead. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The WebUI exposes the same behavior via the **Directory / GitHub Repository** source toggle on the New Session form, with a repository picker backed by `gh repo list` (free-form `owner/repository` input is accepted too).
 
 #### `cruise draft`
 
@@ -301,7 +312,7 @@ Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (no flag default; 1 when omitted, must be >= 1, requires `--all`)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
-      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
@@ -311,7 +322,7 @@ Options:
 
 Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and `ask_user` questions send **Action required** immediately before waiting for input.
 
-`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted GUI/TUI setting (`cruise config --set-parallelism`).
+`--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted WebUI/TUI setting (`cruise config --set-parallelism`).
 
 When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
@@ -326,7 +337,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
-      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for 5xx/network failures and fallback switching) [default: 5]
+      --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
@@ -365,28 +376,12 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the desktop GUI and TUI run concurrently in `run --all` mode.
+          Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **desktop GUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
-
-#### `cruise login`
-
-```
-cruise login [OPTIONS] [PROVIDER]
-
-Arguments:
-  [PROVIDER]  Provider to sign in to directly; omit when stdin, stdout, and stderr are TTYs for Cruise's action menu and jcode's picker
-
-Options:
-      --api-key  Store an API key for PROVIDER instead of running the OAuth flow
-                 (also available when all three standard streams are TTYs; key read from `CRUISE_LOGIN_API_KEY`, an echo-less prompt, or piped stdin; conflicts with `--status`)
-      --status   List the providers configured in cruise's jcode home and the models available to them
-```
-
-Manages credentials for the default `sdk: jcode` backend. Everything is stored in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), never in your `~/.jcode` and never in a cruise config file. When stdin, stdout, and stderr are all TTYs, argument-free `cruise login` shows a Cruise action menu: provider login hands the terminal to `jcode login`, API-key entry asks for a provider and, unless `CRUISE_LOGIN_API_KEY` is set, a hidden key, status shows authenticated providers and models, and Exit closes the menu. Explicit `cruise login <provider>`, `cruise login <provider> --api-key`, and `cruise login --status` remain one-shot shortcuts for automation. TTY colors honor `NO_COLOR`; if any standard stream is redirected, argument-free invocation delegates without the menu or ANSI decoration. The API key is never a command-line argument and is handed to jcode through stdin. See [SDK Mode](#sdk-mode).
+Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 #### `cruise clean`
 
@@ -400,7 +395,21 @@ Checks each Completed session's PR status via `gh pr view`. Sessions whose PR is
 
 ## Session Management
 
-Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Sessions whose workflow has no filesystem config path—including an explicit `-c __builtin__` selection—store the resolved YAML in `sessions/<session-id>/config.yaml` so they remain runnable without rediscovery.
+Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Each `state.json` has one tagged `config` reference:
+
+```json
+{"config":{"kind":"file","path":"/absolute/path/cruise.yaml"}}
+```
+
+The other supported kinds are `builtin_snapshot`, `repo_snapshot` (with a
+clone-relative `relative_path`), and `inline_snapshot`. A `file` reference is
+live: edits to the file are picked up on the next load or execution reload.
+Snapshot references read only the session-owned `sessions/<session-id>/config.yaml`
+and never rediscover or silently fall back to another config. Built-in, inline,
+and temporary-clone workflows are serialized there as resolved YAML so they
+remain runnable after their source or clone disappears. Older `state.json`
+files containing `config_source` and `config_path` are not migrated or loaded;
+create a new session when using this format.
 
 ### Runtime File Layout
 
@@ -434,6 +443,41 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create`, then runs any configured `after-pr` steps. If `gh pr create` fails, a `--repo` session becomes `Failed`; a plain worktree session logs a warning and completes without a PR, skipping `after-pr`.
 
 Sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` will remove them.
+
+### Model and Fallback Notices
+
+When a visible status or info channel is available, each prompt execution
+reports the Cruise-selected model there; every notice is also written to
+the session's `run.log`:
+
+```text
+Model: provider/model:free:xhigh
+```
+
+When retry policy switches models, Cruise reports the transition and then the
+replacement model:
+
+```text
+Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
+Model: provider/fallback
+```
+
+The parenthesized detail is the reason the model was left behind -- the HTTP
+status the provider returned (`503`, `429`, `400`, `404`, ...) when the failure
+text names one, otherwise the failure class (`rate limit`, `server error`,
+`client error`, `missing model`, `network error`, or `unusable model` for a
+reference the backend refused before sending anything).
+
+The complete model reference is retained, including its provider, path, and
+effort suffixes. When no model is configured, the notice identifies the
+backend instead, for example `Model: default model (jcode)`. Notices are sent
+to foreground CLI stderr when status output is enabled, the TUI's existing
+info log, and the session's `run.log`. Detached `cruise --plan` workers and
+the CLI's interactive `cruise run --all` dashboard suppress terminal notices,
+so those notices must be read from the session's `run.log`. They are not
+mixed into stdout or plan/Ask response content. The existing session
+lifecycle and log retention rules remain unchanged. In particular, transient
+`cruise exec` sessions are still removed after completion.
 
 > **`cruise exec`** is a separate path with a transient lifecycle: it executes in the current directory without planning, worktree creation, or PR creation, and removes its session after terminal completion. Paused or interrupted exec sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](#cruise-exec).
 
@@ -480,7 +524,7 @@ cruise resolves the workflow config as follows:
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. A **Built-in default** entry is always offered at the end of the list, so the built-in default remains selectable even when config files are found; with only that entry present, it is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the GUI, making it easier to tell similar files apart. The GUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
+The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
 
 ## Config File Reference
 
@@ -576,7 +620,7 @@ plan_model: openai-api/gpt-5.5:high    # model for the built-in plan step (falls
 
 In both SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). The optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
 
-At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the first entry is the primary model and later entries form an implicit fallback chain. A model array with fallback entries enables model fallback automatically; an explicit `retry.fallback_chains` entry for the primary model takes precedence over the array tail. A 429 retries the current model while its retry budget and delay permit, then switches to the next usable fallback when one exists. A 5xx or network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed. A model skipped after a retryable failure is cooled down for 30 minutes in the current process. In command mode, only the first entry is used and the historical same-model retry behavior remains unchanged.
+At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the first entry is the primary model and later entries form an implicit fallback chain. A model array with fallback entries enables model fallback automatically; an explicit `retry.fallback_chains` entry for the primary model takes precedence over the array tail. A 429 retries the current model while its retry budget and delay permit, then switches to the next usable fallback when one exists. A 5xx, an HTTP 4xx other than 429, 401, 403, 407, and 408, or a network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed; such a 4xx is never resent to the same model, since an identical request would fail the same way. 401, 403, and 407 are authentication or permission failures no other model can answer, so they fail the step at once instead of walking the chain. A 408 is a transport timeout classified as a network failure, so it takes the same immediate-switch path as a 5xx: it moves to a usable fallback first, and is only resent to the same model when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. A model skipped after a 429, a 5xx, or a network failure (a 408 included) is cooled down for 30 minutes in the current process, and so is one whose provider reported it as missing (`400 model_not_supported`, `404 model_not_found`), because there the model rather than the request is the defect; only a model left behind by a plain client-error switch is not cooled, since that status describes the request, not the model's health. In command mode, only the first entry is used and the historical same-model retry behavior remains unchanged.
 
 - `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- under `sdk: jcode` this names the provider and the model separately; a `/` with an empty side (`"/model"`, `"provider/"`) fails the step with a clear error when the prompt runs, not at config-validation time. Under `sdk: claude` there is no provider part: everything except the `:effort` suffix goes to `claude --model` verbatim, so a `provider/model` value reaches the CLI as one model id and is rejected by it.
 - `"model"` (no `/`) -- the provider is left to the backend's own resolution.
@@ -584,15 +628,15 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 
 #### `sdk: jcode` -- the jcode CLI (default)
 
-`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.82.0 or newer is required; an older binary is rejected with a clear error. This floor provides both the `run --ndjson` event contract and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `cruise login --status` shows the ones cruise can already authenticate as. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
+`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.82.0 or newer is required; an older binary is rejected with a clear error. This floor provides both the `run --ndjson` event contract and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `jcode auth status` shows the ones you are already signed in to. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
 
-Credentials, sessions, and configuration live in cruise's own jcode home (`$XDG_DATA_HOME/cruise/jcode-home`, default `~/.local/share/cruise/jcode-home`), kept completely separate from your own `~/.jcode` -- cruise never reads or writes it. Sign in with [`cruise login`](#cruise-login); running `sdk: jcode` with no authenticated provider fails with an error pointing at `cruise login`.
+Credentials, sessions, `config.toml`, and the MCP registration all live in jcode's own home -- `$JCODE_HOME` when that variable is set and non-empty, otherwise `~/.jcode` -- exactly the home your interactive `jcode` sessions use. Cruise has no home of its own and never injects `JCODE_HOME` into the jcode child, so exporting it before starting cruise relocates credentials, sessions, and config together -- that is how the [GitHub Action](docs/github-actions.md) keeps a job's credentials out of a persistent runner's `~/.jcode`. Sign in with `jcode login <provider>` and check the result with `jcode auth status`; running `sdk: jcode` with no authenticated provider fails with an error pointing at `jcode login`. Sharing that home cuts both ways: the `cruise` MCP server cruise registers in `mcp.json` (see below) stays registered afterwards, so `mcp__cruise__*` tools also show up in your own interactive jcode sessions, and the MCP servers you configured there load inside cruise runs.
 
 Because jcode cannot register custom tools in-process, cruise's tools (`ask_user`, `submit_plan`, ...) reach the model through a stdio MCP server and appear as `mcp__cruise__<tool>`. Cruise registers that server with jcode's upstream `timeout_secs` set to 86,400 seconds (24 hours), so an interactive `ask_user` question can wait up to 24 hours at the MCP layer, subject to any shorter workflow step timeout. One caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), which takes precedence over cruise's registration. A project-local MCP server named `cruise` is rejected with an error (it would shadow cruise's tools); other project-local servers are loaded but pointed out with a warning.
 
 #### `sdk: claude` -- the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unaffected by `cruise login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
 
 #### Tool-less (non-interactive) planning
 
@@ -627,9 +671,9 @@ The effective values are available to built-in templates as `{pr.language}` and 
 
 ### Session Title Generation
 
-After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the GUI sidebar instead of the raw task input. The behavior depends on the backend:
+After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise invokes the agent with the `generate_title` SDK tool (approval from `cruise list`, the GUI/TUI, and background planning derive the title from `plan.md` instead), using the same model resolution as the plan step (`plan_model` -> `model`, then the backend's own default). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise invokes the agent with the `generate_title` SDK tool (approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead), using the same model resolution as the plan step (`plan_model` -> `model`, then the backend's own default). If the call fails, cruise falls back to extracting the title from `plan.md`.
 - **Command mode (`command:` set)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 No additional configuration is required.
@@ -638,7 +682,7 @@ No additional configuration is required.
 
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
-The CLI and desktop GUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
+The CLI and WebUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode's OpenAI service tier. When neither the workflow `env:` nor the parent process environment defines this key, cruise injects `off` into the jcode child; if either defines it, cruise preserves the supplied value. The key's presence, not its value, determines whether cruise injects the default.
 
@@ -646,7 +690,9 @@ The CLI and desktop GUI also apply these process-level workflow overrides when l
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
 
-Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_HOME` (cruise's own jcode home, which keeps your `~/.jcode` untouched) and `JCODE_NO_TELEMETRY=1`. When a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` are set to that effort as well; jcode ignores them for providers and models without reasoning-effort support.
+`CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
+
+Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_NO_TELEMETRY=1`, and, when a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` set to that effort (jcode ignores them for providers and models without reasoning-effort support). `JCODE_HOME` is *not* among them -- see [`sdk: jcode`](#sdk-jcode----the-jcode-cli-default) for how the child inherits the ambient jcode home.
 
 ```yaml
 env:                        # top-level: applied to all steps
@@ -1153,7 +1199,7 @@ When `cruise run` starts a new session, it prompts you to choose a workspace mod
 | **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation. |
 | **Current branch** | Executes directly in the current repository on the active branch. No worktree is created, and no PR is created automatically. |
 
-With `--all`, worktree mode is always used; a single `cruise run` keeps the workspace mode already recorded on the session, and in non-interactive environments (piped stdin) fresh sessions default to worktree mode. Sessions created with `--repo` (or the GUI repository picker) are always pinned to Worktree mode — the prompt is skipped and current-branch mode is not available, since a PR is the only way the work leaves the temporary clone.
+With `--all`, worktree mode is always used; a single `cruise run` keeps the workspace mode already recorded on the session, and in non-interactive environments (piped stdin) fresh sessions default to worktree mode. Sessions created with `--repo` (or the WebUI repository picker) are always pinned to Worktree mode — the prompt is skipped and current-branch mode is not available, since a PR is the only way the work leaves the temporary clone.
 
 ### Current-branch mode constraints
 
@@ -1346,13 +1392,13 @@ retry:
       - openrouter/*
 ```
 
-With an SDK retry policy, whether declared by `retry:` or implied by a model array with fallback entries, HTTP 5xx and network failures become retryable too, and they switch to the next chain entry immediately when `--rate-limit-retries` is above zero, a usable fallback exists, and no visible text was streamed, with a fresh budget and a fresh session. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit or a 5xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A model skipped because of a retryable failure remains skipped for the next 30 minutes in this process (in-memory state, not persisted across processes). A turn that already streamed visible text is never retried on another model. For a 429, the same-model retry can instead be bypassed when its computed or server-requested delay exceeds `retry.max_delay_ms`.
+With an SDK retry policy, whether declared by `retry:` or implied by a model array with fallback entries, HTTP 5xx, HTTP 4xx other than 429, 401, 403, 407, and 408, and network failures become retryable too, and they switch to the next chain entry immediately when `--rate-limit-retries` is above zero, a usable fallback exists, and no visible text was streamed, with a fresh budget and a fresh session. Such a 4xx is answered by a switch only: the same request is never resent to the same model, and a 400 counts even when its message reads like a permanent error (`invalid request`, `context length`, `max_tokens`), because another model may accept the very same request. A message that instead names the model as absent -- `model_not_supported`, `model_not_found`, `model not found`, `model not supported`, `model is not supported`, `unknown model`, `no such model`, `model does not exist`, `not a valid model`, read from the provider's own error rather than the child-process stderr appended after it -- is classified as a missing model instead: it still only switches, but the reference rather than the request is at fault, so `invalid_request_error: model not found` is a switch rather than a permanent failure and the abandoned model is cooled down. When no usable chain entry is left, the original 4xx surfaces unchanged. The excluded statuses keep their own handling: 401, 403, and 407 are authentication or permission failures that no other model can answer, so they fail the step immediately with the provider's own error rather than hiding it behind a walk through the chain, and a 408 Request Timeout is classified as a network failure, so it follows the 5xx/network path instead: it switches to a usable fallback first and is resent to the same model only when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. Classification reads rate-limit wording first, 5xx and the network markers next, and the missing-model wordings before any bare 4xx-looking number, so a `429` or a `503` keeps its own class even when the surrounding text -- a stack trace or a URL appended from the CLI's stderr, say -- also contains something that looks like a 4xx. A failure with no recognizable status code (`unknown option '--effort'`, say) stays permanent and fails the step immediately; a number is read as an HTTP status only when it is a standalone three-digit number with one of `http`, `status`, `code`, `error`, `returned`, or `upstream` within the preceding 24 bytes, and source locations (`src/lib.rs:404:17`) and URL ports (`https://host:443/path`) are never treated as statuses. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit, a 5xx, or a 4xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A model skipped because of a 429, a 5xx, or a network failure -- a 408 included -- remains skipped for the next 30 minutes in this process (in-memory state, not persisted across processes), as does one the provider reported as missing, so later turns and later steps stop re-selecting a model it does not have; only a model left behind by a 4xx client-error switch escapes the cooldown, because a client error says something about the request, not about the model's health. A turn that already streamed visible text is never retried on another model. For a 429, the same-model retry can instead be bypassed when its computed or server-requested delay exceeds `retry.max_delay_ms`.
 
-Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: false` and empty chains included: those only switch model switching off for scalar model configurations, while 5xx/network classification and the `base_delay_ms`/8s-ceiling backoff schedule stay in force. Workflow-level model arrays with fallback entries always enable switching and generate their fallback chains. Omit the block entirely, and use scalar or unset model fields, to keep the historical behavior -- limit errors only, same model, 2s doubling to a 60s cap. The `command:` backend always uses the historical behavior and ignores `retry:`.
+Declaring `retry:` at all changes the no-`retry:` behavior, `model_fallback: false` and empty chains included: those only switch model switching off for scalar model configurations, while the 4xx/5xx/network classification and the `base_delay_ms`/8s-ceiling backoff schedule stay in force. Workflow-level model arrays with fallback entries always enable switching and generate their fallback chains. Omit the block entirely, and use scalar or unset model fields, to keep the historical behavior -- limit errors only, same model, 2s doubling to a 60s cap. The `command:` backend always uses the historical behavior and ignores `retry:`.
 
 ## Stale Session Detection
 
-When `cruise list`, the TUI (`cruise`), or the desktop GUI loads sessions, any session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
+When `cruise list`, the TUI (`cruise`), or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process (identified by PID and start time) is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
 Suspended sessions can be resumed from `cruise list` or the TUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
@@ -1364,10 +1410,10 @@ The compatibility filename `dag.json` and IPC name `get_session_dag` remain. Unv
 
 ## Parallel Session Execution
 
-The desktop GUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
+The WebUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
 
-- **GUI/TUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
-- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted GUI/TUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
+- **WebUI/TUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+- **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted WebUI/TUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
@@ -1377,9 +1423,9 @@ The batch scheduler:
 
 ## New Session Form Persistence
 
-The desktop GUI and TUI persist two pieces of state across sessions:
+The WebUI and TUI persist two pieces of state across sessions:
 
-- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path—including the `__builtin__` sentinel for **Built-in default**—, working directory, repository, skipped steps). Automatically saved on changes and restored when the form is reopened, so unsent input is not lost.
+- **Draft** (`$XDG_STATE_HOME/cruise/new_session_draft.json`): The current contents of the New Session form (task description, config path—including the `__builtin__` sentinel for **Built-in default**—, working directory, repository, skipped steps). The TUI saves changes automatically. The WebUI saves them when **Save draft** is clicked. The draft is restored when the form is reopened, so unsent input is preserved after that save.
 - **History** (`$XDG_STATE_HOME/cruise/history.json`): A log of past New Session selections. Used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.
 
 ## GitHub Actions

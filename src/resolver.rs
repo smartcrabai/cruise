@@ -28,13 +28,6 @@ impl ConfigSource {
         }
     }
 
-    /// Returns whether a persisted source string represents the built-in default.
-    #[must_use]
-    pub fn is_builtin_source(source: &str) -> bool {
-        source == crate::new_session_history::BUILTIN_CONFIG_KEY
-            || source == "config: (builtin default)"
-    }
-
     /// Returns the path to the config file, or `None` for the built-in default.
     #[must_use]
     pub fn path(&self) -> Option<&PathBuf> {
@@ -117,7 +110,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// Like [`resolve_config`] but uses `cwd` for local-file discovery instead of the
 /// process working directory.
 ///
-/// This is safe to call from concurrent Tauri request handlers because it does not
+/// This is safe to call from concurrent `WebUI` request handlers because it does not
 /// mutate `std::env::current_dir()`.  Resolution order is identical to [`resolve_config`]:
 /// 1. `explicit` -- error if file does not exist; `__builtin__` selects the built-in default.
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
@@ -322,7 +315,7 @@ fn resolve_config_in_dir_with_interactive(
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
         // Built-in sentinel (`__builtin__`): select the built-in default without any
-        // filesystem access. Resolved here once so every caller (CLI `-c`, GUI
+        // filesystem access. Resolved here once so every caller (CLI `-c`, `WebUI`
         // create_session / repo mode / session edit) gets the same behaviour.
         if path == crate::new_session_history::BUILTIN_CONFIG_KEY {
             return Ok((

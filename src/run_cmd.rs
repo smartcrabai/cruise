@@ -57,13 +57,19 @@ struct NotificationOptionHandler<'a> {
 }
 
 impl NotificationOptionHandler<'_> {
-    fn notify(&self) {
+    /// Announce a menu the user must answer: desktop notification plus a
+    /// `blocked` herdr report for as long as the returned guard lives.
+    fn announce(&self, showing_menu: bool) -> Option<crate::herdr::BlockedGuard> {
+        if !showing_menu {
+            return None;
+        }
         crate::desktop_notifications::send_best_effort(
             crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
             Some(&self.subject),
             Some(OPTION_NOTIFICATION_DETAIL),
             &self.session_id,
         );
+        Some(crate::herdr::blocked(OPTION_NOTIFICATION_DETAIL))
     }
 }
 
@@ -73,9 +79,7 @@ impl OptionHandler for NotificationOptionHandler<'_> {
         choices: &[crate::step::OptionChoice],
         plan: Option<&str>,
     ) -> Result<crate::step::option::OptionResult> {
-        if !choices.is_empty() {
-            self.notify();
-        }
+        let _blocked = self.announce(!choices.is_empty());
         self.inner.select_option(choices, plan)
     }
 
@@ -85,9 +89,9 @@ impl OptionHandler for NotificationOptionHandler<'_> {
         plan: Option<&str>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<crate::step::option::OptionResult> {
-        if !choices.is_empty() && !cancel_token.is_some_and(CancellationToken::is_cancelled) {
-            self.notify();
-        }
+        let _blocked = self.announce(
+            !choices.is_empty() && !cancel_token.is_some_and(CancellationToken::is_cancelled),
+        );
         self.inner
             .select_option_with_cancellation(choices, plan, cancel_token)
     }
@@ -198,6 +202,7 @@ fn prompt_for_session_state_conflict(message: &str) -> Result<SessionStateConfli
     // Serialize against option-step prompts so parallel batch workers
     // never draw overlapping terminal menus.
     let _guard = crate::option_handler::prompt_lock_guard();
+    let _blocked = crate::herdr::blocked("How should cruise proceed?");
 
     eprintln!("{} {}", style("!").yellow().bold(), message);
     let options = vec![
@@ -239,6 +244,7 @@ fn prompt_workspace_mode() -> Result<WorkspaceMode> {
     // Serialize against option-step prompts so parallel batch workers
     // never draw overlapping terminal menus.
     let _guard = crate::option_handler::prompt_lock_guard();
+    let _blocked = crate::herdr::blocked("Where should cruise execute?");
 
     let options = vec![WORKSPACE_WORKTREE_LABEL, WORKSPACE_CURRENT_BRANCH_LABEL];
     crate::platform::reclaim_terminal_foreground();
@@ -316,6 +322,7 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    let _herdr = crate::herdr::start();
     // Validate --parallelism before any session is selected or executed.
     if let Some(parallelism) = args.parallelism {
         if parallelism == 0 {
@@ -512,27 +519,10 @@ async fn run_single(
     vars.set_named_file(PLAN_VAR, plan_path);
     vars.set_artifacts_root(session.artifacts_path(&manager.sessions_dir()));
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
-    let config_reloader: Option<
-        Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>,
-    > = session.config_path.as_deref().map(|path| {
-        let path = path.to_path_buf();
-        let last_mtime = Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok());
-        Box::new(move || {
-            let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-            let mut last = lock_unpoisoned(&last_mtime);
-            if current_mtime == *last {
-                return Ok(None);
-            }
-            let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
-            let retry_policy = crate::retry::policy_for_config(config.retry.clone());
-            let compiled = crate::workflow::compile(config)?;
-            *last = current_mtime;
-            Ok(Some(crate::engine::ReloadedWorkflow {
-                compiled,
-                retry_policy,
-            }))
-        }) as Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>
-    });
+    let config_reloader = crate::session_config::config_reloader_for_reference(
+        &session.config,
+        effective_max_retries,
+    );
     let log_path = manager.run_log_path(&session_id);
     let logger = Arc::new(SessionLogger::new(log_path));
     logger.write("--- run started ---");
@@ -947,6 +937,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
 
+    let _blocked = crate::herdr::blocked("Select a session to run");
     let selected = match inquire::Select::new("Select a session to run:", label_refs).prompt() {
         Ok(s) => s,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
@@ -1294,7 +1285,7 @@ mod tests {
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1424,7 +1415,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo,
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1476,7 +1467,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         session.phase = SessionPhase::Completed;
@@ -1502,7 +1493,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3289,7 +3280,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "run all conflict".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3353,7 +3344,9 @@ steps:
         let mut s = SessionState::new(
             "20260101000000".to_string(),
             std::path::PathBuf::from("/tmp"),
-            "test.yaml".to_string(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("test.yaml"),
+            },
             input.to_string(),
         );
         s.phase = phase;
@@ -3851,7 +3844,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "run in place".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3906,7 +3899,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "save mode test".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4056,7 +4049,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "default to worktree".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4117,7 +4110,7 @@ steps:
         let mut session_1 = SessionState::new(
             session_id_1.to_string(),
             repo.clone(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "first task".to_string(),
         );
         session_1.phase = SessionPhase::Planned;
@@ -4151,7 +4144,7 @@ steps:
             let mut session_2 = SessionState::new(
                 session_id_2.to_string(),
                 repo.clone(),
-                "cruise.yaml".to_string(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
                 "second task added mid-run".to_string(),
             );
             session_2.phase = SessionPhase::Planned;
@@ -4213,7 +4206,7 @@ steps:
         let session = SessionState::new(
             "20260826000000".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "unreadable state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4252,7 +4245,7 @@ steps:
         let session = SessionState::new(
             "20260826000001".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "deleted state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4282,7 +4275,7 @@ steps:
         let session = SessionState::new(
             "20260826000002".to_string(),
             tmp.path().to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             "invalid state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4312,7 +4305,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            "cruise.yaml".to_string(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot,
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;

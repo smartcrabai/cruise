@@ -21,7 +21,7 @@ Config files are resolved in this priority order:
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: test-first steps + verify-review group + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the GUI's **Built-in default** option
+6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: test-first steps + verify-review group + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
 
@@ -62,7 +62,7 @@ The full spec is split into the files below. Load only the sections you need.
 | Doc | Contents |
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
-| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `cruise login` auth) and `sdk: claude` (in-process claude CLI), differences from command mode |
+| [references/sdk.md](references/sdk.md) | SDK backends: `sdk: jcode` (default; jcode CLI subprocess, model references, `jcode login` auth in jcode's own home) and `sdk: claude` (in-process claude CLI), differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |

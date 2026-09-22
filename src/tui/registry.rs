@@ -232,6 +232,27 @@ impl OperationRegistry {
         true
     }
 
+    #[cfg(test)]
+    pub fn block_creation_for_test(
+        &mut self,
+        release: tokio::sync::oneshot::Receiver<()>,
+        tx: UnboundedSender<UiEvent>,
+        result: std::result::Result<SessionState, String>,
+    ) -> bool {
+        if self.busy("__create") {
+            return false;
+        }
+        self.notifications = Some(tx.clone());
+        self.tasks.insert(
+            "__create".to_string(),
+            tokio::spawn(async move {
+                let _ = release.await;
+                let _ = tx.send(UiEvent::DraftCreated { result });
+            }),
+        );
+        true
+    }
+
     pub fn plan(
         &mut self,
         app: CruiseApplication,

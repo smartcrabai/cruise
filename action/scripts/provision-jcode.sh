@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# Puts this run's model credentials into cruise's own jcode home: the
-# dedicated `anthropic_api_key` / `openai_api_key` inputs become jcode
-# provider logins, and every `providers` entry becomes a
-# `[providers.<name>]` OpenAI-compatible profile in that home's config.toml.
+# Puts this run's model credentials into the jcode home this action pins
+# (setup-env.sh exports JCODE_HOME under $RUNNER_TEMP, and every later step
+# inherits it through $GITHUB_ENV): the dedicated `anthropic_api_key` /
+# `openai_api_key` inputs become jcode provider logins, and every `providers`
+# entry becomes a `[providers.<name>]` OpenAI-compatible profile in that
+# home's config.toml.
 #
-# Both halves are delegated rather than re-implemented:
-#   - `cruise login --api-key <provider>` is cruise's own non-interactive
-#     credential entry point. It hands the key to `jcode login`, so the
-#     storage location and file mode are jcode's, and the key travels in
-#     CRUISE_LOGIN_API_KEY instead of an argument list.
+# Both halves are delegated to jcode rather than re-implemented:
+#   - `jcode login <provider> --no-validate` takes the key on stdin, which is
+#     where jcode prompts for it (its own `--api-key` flag is for
+#     OpenAI-compatible profiles only), so the storage location and file mode
+#     are jcode's and the key never reaches an argument list.
 #   - `jcode provider add` writes the `[providers.<name>]` table and stores
 #     the profile's key in a private, owner-only env file, referenced from
 #     config.toml by `api_key_env` only.
 # Nothing here writes TOML or a credential file itself, so this action cannot
 # drift from the schema jcode actually reads, and no key is ever written to a
 # cruise config file.
-#
-# The home is whatever cruise reports (`cruise login --status` prints it on
-# its first line): cruise derives it from its own data directory, and a
-# second, hand-computed copy of that path here would silently desync from it.
 set -euo pipefail
 
 ANTHROPIC_API_KEY_INPUT="${ANTHROPIC_API_KEY_INPUT:-}"
@@ -48,25 +46,25 @@ new_tmp() {
   printf '%s' "$f"
 }
 
-# --- cruise's jcode home ---------------------------------------------------
-if ! status_out="$(cruise login --status 2>&1)"; then
-  echo "::error::cruise: could not read cruise's jcode home via \`cruise login --status\`: $status_out" >&2
+# --- the jcode home --------------------------------------------------------
+# Whatever JCODE_HOME the environment names, which is what jcode -- and so
+# the cruise run in the next steps -- resolves too. setup-env.sh pins it
+# under $RUNNER_TEMP; refusing to run without it keeps a misconfigured
+# workflow from writing this job's credentials into the runner user's real
+# home.
+if [ -z "${JCODE_HOME:-}" ]; then
+  echo "::error::cruise: JCODE_HOME is not set, so there is no isolated jcode home to provision (setup-env.sh exports it for every step of this action)" >&2
   exit 1
 fi
-JCODE_HOME_DIR="$(printf '%s\n' "$status_out" | sed -n '1s/^cruise jcode home: //p')"
-if [ -z "$JCODE_HOME_DIR" ]; then
-  echo "::error::cruise: \`cruise login --status\` did not report a jcode home: $status_out" >&2
-  exit 1
-fi
-echo "cruise: provisioning credentials in $JCODE_HOME_DIR"
+echo "cruise: provisioning credentials in $JCODE_HOME"
 
-# Every jcode invocation runs against that home with telemetry and the
+# Every jcode invocation inherits that home and runs with telemetry and the
 # auto-update check off, matching how cruise itself drives jcode.
 # run_jcode places --no-update first, the same position cruise's own
 # jcode_command uses (src/backend/jcode.rs), instead of relying on jcode's
 # parser accepting a global flag after the subcommand arguments.
 run_jcode() {
-  JCODE_HOME="$JCODE_HOME_DIR" JCODE_NO_TELEMETRY=1 jcode --no-update "$@"
+  JCODE_NO_TELEMETRY=1 jcode --no-update "$@"
 }
 
 # Same implementation as install.sh's version_at_least -- these step scripts
@@ -115,11 +113,15 @@ fi
 store_dedicated_key() { # $1=jcode provider id $2=key
   local login_out
   echo "::add-mask::$2"
-  if ! login_out="$(CRUISE_LOGIN_API_KEY="$2" cruise login --api-key "$1" 2>&1)"; then
-    echo "::error::cruise: \`cruise login --api-key $1\` failed: $login_out" >&2
+  # The key is piped, never passed as an argument where a process listing
+  # would expose it. `--no-validate` stores it without jcode's post-login
+  # live provider check, which would re-prompt on a stdin this pipe has
+  # already closed.
+  if ! login_out="$(printf '%s\n' "$2" | run_jcode login "$1" --no-validate 2>&1)"; then
+    echo "::error::cruise: \`jcode login $1\` failed: $login_out" >&2
     exit 1
   fi
-  echo "cruise: stored the $1 API key in cruise's jcode home"
+  echo "cruise: stored the $1 API key"
 }
 
 # --- provider profiles ----------------------------------------------------
@@ -317,9 +319,7 @@ if [ -n "$OPENAI_API_KEY_INPUT" ]; then
 fi
 configure_provider_profiles
 
-# What the run will actually see: the provider list cruise resolves from the
-# home this step just populated.
 # Observational only: with pipefail, a failing status print would otherwise
 # fail the step after the credentials were already written, and a retried
 # job would re-run every `jcode provider add` above.
-cruise login --status 2>&1 | sed -n '2,$p' || true
+run_jcode auth status || true

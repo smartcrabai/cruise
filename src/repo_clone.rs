@@ -72,35 +72,6 @@ pub fn clone_repo(repo: &str, clone_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Config path to persist on a repo-backed session.
-///
-/// Configs that live inside the temporary clone return `None`: the caller is
-/// expected to serialize the resolved workflow into the session directory
-/// instead, so it stays readable after the clone is removed.
-#[must_use]
-pub fn persistent_config_path(
-    source: &crate::resolver::ConfigSource,
-    clone_path: &Path,
-) -> Option<PathBuf> {
-    source
-        .path()
-        .filter(|p| !p.starts_with(clone_path))
-        .cloned()
-}
-
-/// Serialize a resolved workflow for storage after its source clone is removed.
-///
-/// # Errors
-///
-/// Returns an error if the workflow cannot be represented as YAML.
-pub fn serialize_resolved_config(config: &crate::config::WorkflowConfig) -> Result<String> {
-    serde_yaml::to_string(config).map_err(|e| {
-        CruiseError::Other(format!(
-            "failed to serialize resolved workflow config for session: {e}"
-        ))
-    })
-}
-
 /// Ensure the session's temporary clone exists at
 /// `<data_dir>/clones/{session_id}/`, cloning it if necessary.
 ///

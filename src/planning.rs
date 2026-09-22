@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +20,7 @@ use crate::variable::VariableStore;
 // Built-in plan/fix/ask prompt templates, embedded at compile time. The `*_SDK`
 // variants drive the agent via the `submit_plan` / `update_plan` / `ask_user`
 // tools instead of writing the plan file directly. Shared by the CLI
-// (`plan_cmd`) and the GUI (`src-tauri`) so the two never drift.
+// (`plan_cmd`) and the WebUI (`src/webui`) so the two never drift.
 pub const PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/plan.md");
 pub const FIX_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/fix-plan.md");
 pub const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md");
@@ -69,7 +70,7 @@ fn clarification_guidance(interactive: bool) -> &'static str {
 ///
 /// Registers both `{plan}` (the session plan file path) and `{plan.language}`
 /// (the effective `languages.plan` value, including environment/locale
-/// resolution applied before planning) so CLI and GUI planning prompts resolve
+/// resolution applied before planning) so CLI and `WebUI` planning prompts resolve
 /// the same variables.
 #[must_use]
 pub fn setup_plan_vars(
@@ -150,6 +151,16 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
     }
 }
 
+/// Where a plan-related prompt is allowed to render transient terminal
+/// progress. CLI callers opt in; event-driven WebUI/TUI callers keep it hidden.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanProgress {
+    /// Render the planning loader when stderr is an interactive terminal.
+    Console,
+    /// Do not render a terminal loader.
+    Hidden,
+}
+
 /// Backend-stable context for a plan-related prompt.
 ///
 /// Bundles the workflow config, the interactive UI handler (used by the SDK
@@ -159,13 +170,15 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
 pub struct PlanPromptCtx<'a> {
     /// Workflow configuration (selects command vs SDK backend, model refs).
     pub config: &'a WorkflowConfig,
-    /// UI handler backing the SDK `ask_user` tool (CLI or GUI).
+    /// UI handler backing the SDK `ask_user` tool (CLI or `WebUI`).
     pub ask: Arc<dyn AskHandler>,
     /// Session `plan.md` path (where SDK plan tools read/write).
     pub plan_path: &'a Path,
     /// Whether the user can be reached interactively (controls which SDK tools
     /// are registered). Non-TTY runs pass `false`.
     pub interactive: bool,
+    /// Explicit policy for transient planning progress output.
+    pub progress: PlanProgress,
     /// Maximum rate-limit retries.
     pub rate_limit_retries: usize,
     /// Working directory for the command / agent.
@@ -178,6 +191,9 @@ pub struct PlanPromptCtx<'a> {
     pub formal_spec: bool,
     /// Called when an SDK backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
+    /// Additional destination for model and fallback notices, separate from
+    /// the terminal output used by this planning layer.
+    pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     /// Cooperative cancellation token forwarded to the executor.
     pub cancel_token: Option<&'a CancellationToken>,
 }
@@ -187,6 +203,49 @@ impl PlanPromptCtx<'_> {
     #[must_use]
     fn executor(&self) -> Executor {
         Executor::new(self.config.sdk.as_deref(), &self.config.command)
+    }
+}
+
+/// Ask-handler decorator used only while a planning loader is active.
+///
+/// The loader's control handle is shared without owning the render thread. A
+/// pause therefore covers the blocking input operation without holding the
+/// terminal lock, and both successful and failing handler results resume the
+/// loader before returning to the SDK tool dispatcher.
+struct PlanningAskHandler {
+    inner: Arc<dyn AskHandler>,
+    control: crate::spinner::SpinnerControl,
+}
+
+impl PlanningAskHandler {
+    fn new(inner: Arc<dyn AskHandler>, control: crate::spinner::SpinnerControl) -> Self {
+        Self { inner, control }
+    }
+
+    fn run<F>(&self, operation: F) -> Result<String>
+    where
+        F: FnOnce(&dyn AskHandler) -> Result<String>,
+    {
+        let pause = self.control.pause();
+        let result = operation(self.inner.as_ref());
+        drop(pause);
+        self.control
+            .flush_deferred(|notice| crate::status_eprintln!("{}", style(notice).dim()));
+        result
+    }
+}
+
+impl AskHandler for PlanningAskHandler {
+    fn ask_user(&self, question: &str) -> Result<String> {
+        self.run(|inner| inner.ask_user(question))
+    }
+
+    fn ask_user_with_cancellation(
+        &self,
+        question: &str,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<String> {
+        self.run(|inner| inner.ask_user_with_cancellation(question, cancel_token))
     }
 }
 
@@ -251,24 +310,51 @@ pub async fn run_plan_prompt_template(
     // plan is written to `{plan}` directly via the file-writing templates and no
     // custom tools are registered.
     let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
+    let env = crate::engine::resolve_env(&ctx.config.env, &HashMap::new(), vars)?;
+    crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
+    let spinner = if ctx.progress == PlanProgress::Console
+        && std::io::stderr().is_terminal()
+        && !crate::console_mode::is_quiet()
+    {
+        Some(crate::spinner::Spinner::start("Planning..."))
+    } else {
+        None
+    };
+    let spinner_control = spinner
+        .as_ref()
+        .filter(|spinner| spinner.is_running())
+        .map(crate::spinner::Spinner::control);
+    let planning_ask: Arc<dyn AskHandler> = spinner_control.as_ref().map_or_else(
+        || Arc::clone(&ctx.ask),
+        |control| {
+            Arc::new(PlanningAskHandler::new(
+                Arc::clone(&ctx.ask),
+                control.clone(),
+            ))
+        },
+    );
     let (tools, plan_persisted) = if plan_tools_enabled && register_plan_tools {
         let set = crate::sdk_tools::planning_tools(
             ctx.plan_path.to_path_buf(),
-            Arc::clone(&ctx.ask),
+            planning_ask,
             ctx.interactive,
         );
         (set.tools, Some(set.plan_persisted))
     } else {
         (Vec::new(), None)
     };
-
-    let env = crate::engine::resolve_env(&ctx.config.env, &HashMap::new(), vars)?;
-    crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
-    // The SDK backend surfaces progress through streamed deltas and `ask_user`
-    // prompts, so a spinner would clobber interactive input; only spin for the
-    // command backend.
-    let spinner = (!executor.is_sdk()).then(|| crate::spinner::Spinner::start("Cruising..."));
-    let on_notice = move |msg: &str| crate::status_eprintln!("{}", style(msg).dim());
+    let on_notice = |msg: &str| {
+        if let Some(control) = &spinner_control {
+            control.notify_or_defer(msg.to_string(), |notice| {
+                crate::status_eprintln!("{}", style(notice).dim());
+            });
+        } else {
+            crate::status_eprintln!("{}", style(msg).dim());
+        }
+        if let Some(cb) = ctx.on_notice {
+            cb(msg);
+        }
+    };
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
@@ -408,18 +494,6 @@ pub fn plan_conversation_key(config: &WorkflowConfig, config_identity: &str) -> 
     key
 }
 
-/// Resolve a config identity from a path and compute its conversation key.
-/// The path is part of the key even if two files happen to have identical
-/// bytes, preventing accidental cross-config conversation reuse.
-#[must_use]
-pub fn plan_conversation_key_for_path(config: &WorkflowConfig, path: Option<&Path>) -> String {
-    let identity = path.map_or_else(
-        || "__builtin__".to_string(),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    plan_conversation_key(config, &identity)
-}
-
 /// Write bytes to a path by replacing it atomically.
 ///
 /// The parent directory is created when necessary, and a temporary file is
@@ -522,7 +596,7 @@ pub fn resolve_generated_plan_content(
 /// Backend transcript for `session_id`, when the backend publishes one that
 /// records terminal errors. Always `None` today.
 ///
-/// - `sdk: jcode` writes `$JCODE_HOME/sessions/<session_id>.json`, but that
+/// - `sdk: jcode` writes `<jcode home>/sessions/<session_id>.json`, but that
 ///   document holds only the session's messages. A turn killed by a provider
 ///   error (429, `context_length_exceeded`, a transport failure) leaves no error
 ///   field there — not even the partial assistant reply (verified against jcode
@@ -533,7 +607,7 @@ pub fn resolve_generated_plan_content(
 /// - `sdk: claude` transcripts are not read by cruise.
 ///
 /// The two consumers (`ensure_plan_persisted` and
-/// [`resolve_generated_plan_content`], the latter also called by the GUI) treat
+/// [`resolve_generated_plan_content`], the latter also called by the `WebUI`) treat
 /// `None` as "no extra diagnosis available" and keep their generic message.
 #[must_use]
 pub fn read_sdk_transcript(_working_dir: Option<&Path>, _session_id: &str) -> Option<String> {
@@ -775,11 +849,13 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: None,
         }
     }
@@ -813,11 +889,13 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
 
@@ -874,11 +952,13 @@ mod tests {
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,
             interactive: false,
+            progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
             formal_spec: false,
             on_session_id: None,
+            on_notice: None,
             cancel_token: Some(&token),
         };
         let mut vars = VariableStore::new("test input".to_string());
@@ -1074,6 +1154,9 @@ mod tests {
         let _guard = lock_process();
         let tmp = make_temp_dir();
         let _home = crate::test_support::set_fake_home(tmp.path());
+        // `jcode_home()` reads `JCODE_HOME` first; clear it so the fixture
+        // lands under the fake home rather than the developer's real one.
+        let _jcode_home = crate::test_support::EnvGuard::remove("JCODE_HOME");
         let sessions = crate::backend::jcode::jcode_home()
             .unwrap_or_else(|e| panic!("jcode home: {e}"))
             .join("sessions");
