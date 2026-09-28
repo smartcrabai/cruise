@@ -104,7 +104,7 @@ Multiple mentions on the same issue queue rather than race each other: a `plan` 
 
 The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't spin up a runner); the action independently re-checks the trigger phrase with a strict word-boundary match, verifies the commenter's permissions, and rejects PR comments before doing anything, so it is safe even if the pre-filter is removed.
 
-**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`; cruise requires jcode v0.88.0 or newer and enforces that floor at run time). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
+**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`); the action's provisioning step checks the v0.88.0 floor, and Cruise validates the SDK API handshake and required capabilities at runtime. The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
 
 ## Providers
 
@@ -356,7 +356,7 @@ The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named 
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
-- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer and that its SDK has access to a configured provider and model. This action's generated default does not set `model`/`plan_model`; set the inputs or your workflow config if a specific model reference is required.
+- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer, that its API bridge supports the session capabilities Cruise needs, and that a configured provider/model is available. This action's generated default does not set `model`/`plan_model`; set the inputs or your workflow config if a specific model reference is required.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).
 

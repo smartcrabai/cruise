@@ -18,12 +18,15 @@
 
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::ask_handler::AskHandler;
 use crate::backend::tool::{CruiseTool, ToolHandler};
+use crate::cancellation::CancellationToken;
 
 /// Tool name for the clarifying-question tool.
 pub const ASK_USER_TOOL: &str = "ask_user";
@@ -37,6 +40,155 @@ pub const GENERATE_TITLE_TOOL: &str = "generate_title";
 pub const SUBMIT_PR_METADATA_TOOL: &str = "submit_pr_metadata";
 /// Tool name for the intentional no-changes declaration tool.
 pub const SKIP_STEP_TOOL: &str = "skip_step";
+
+/// Return control to the SDK before its 120-second synchronous callback expires.
+const ASK_USER_CONTINUATION_DEADLINE: Duration = Duration::from_secs(110);
+const ASK_USER_CANCELLATION_POLL: Duration = Duration::from_millis(50);
+
+struct PendingAsk {
+    question: String,
+    result: Option<Result<String, String>>,
+}
+
+struct AskUserContinuationState {
+    pending: Mutex<Option<PendingAsk>>,
+    ready: Condvar,
+}
+
+/// Keeps one user prompt alive across repeated synchronous SDK tool callbacks.
+struct AskUserContinuation {
+    ask: Arc<dyn AskHandler>,
+    cancel_token: Option<CancellationToken>,
+    deadline: Duration,
+    state: Arc<AskUserContinuationState>,
+}
+
+impl AskUserContinuation {
+    fn new(
+        ask: Arc<dyn AskHandler>,
+        cancel_token: Option<CancellationToken>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            ask,
+            cancel_token,
+            deadline,
+            state: Arc::new(AskUserContinuationState {
+                pending: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        }
+    }
+
+    fn tool(self: &Arc<Self>) -> CruiseTool {
+        let continuation = Arc::clone(self);
+        let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
+            let question = require_str(&input, "question")?;
+            continuation.ask_user(question)
+        });
+        CruiseTool::new(
+            ASK_USER_TOOL,
+            "Ask the user a clarifying question and get their answer. If the user has not \
+             answered yet, retry with the exact same question; the original prompt stays \
+             pending. Use this whenever a requirement is ambiguous instead of guessing.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user."
+                    }
+                },
+                "required": ["question"]
+            }),
+            handler,
+        )
+    }
+
+    fn ask_user(&self, question: &str) -> Result<String, String> {
+        let deadline = Instant::now() + self.deadline;
+        if self
+            .cancel_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(crate::error::CruiseError::Interrupted.to_string());
+        }
+
+        let mut pending = self
+            .state
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .as_ref()
+            .is_some_and(|existing| existing.question != question)
+        {
+            return Err(
+                "An ask_user prompt is already pending; retry with the exact same question."
+                    .to_string(),
+            );
+        }
+        if pending.is_none() {
+            let worker_question = question.to_string();
+            *pending = Some(PendingAsk {
+                question: worker_question.clone(),
+                result: None,
+            });
+            let ask = Arc::clone(&self.ask);
+            let state = Arc::clone(&self.state);
+            let cancel_token = self.cancel_token.clone();
+            let spawn_result = thread::Builder::new().spawn(move || {
+                let result = ask
+                    .ask_user_with_cancellation(&worker_question, cancel_token.as_ref())
+                    .map_err(|error| error.to_string());
+                let mut pending = state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = pending.as_mut()
+                    && existing.question == worker_question
+                {
+                    existing.result = Some(result);
+                    state.ready.notify_all();
+                }
+            });
+            if let Err(error) = spawn_result {
+                *pending = None;
+                return Err(format!("Could not start ask_user prompt: {error}"));
+            }
+        }
+
+        loop {
+            if self
+                .cancel_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(crate::error::CruiseError::Interrupted.to_string());
+            }
+            if let Some(result) = pending.as_mut().and_then(|ask| ask.result.take()) {
+                *pending = None;
+                return result;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(
+                    "The user has not answered yet. Retry `ask_user` with the exact same \
+                     question; the original prompt is still pending."
+                        .to_string(),
+                );
+            }
+            let wait = remaining.min(ASK_USER_CANCELLATION_POLL);
+            pending = self
+                .state
+                .ready
+                .wait_timeout(pending, wait)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+}
 
 /// Shared flag recording whether the planning agent persisted the plan during
 /// the current turn. Set to `true` only by a *successful* `submit_plan` /
@@ -67,11 +219,12 @@ pub fn planning_tools(
     plan_path: PathBuf,
     ask: Arc<dyn AskHandler>,
     interactive: bool,
+    cancel_token: Option<CancellationToken>,
 ) -> PlanningToolSet {
     let plan_persisted: PlanPersistFlag = Arc::new(AtomicBool::new(false));
     let mut tools = Vec::new();
     if interactive {
-        tools.push(ask_user_tool(ask));
+        tools.push(ask_user_tool(ask, cancel_token));
     }
     tools.push(submit_plan_tool(
         plan_path.clone(),
@@ -86,27 +239,19 @@ pub fn planning_tools(
 
 /// `ask_user` — delegates the agent's question to the [`AskHandler`].
 #[must_use]
-pub fn ask_user_tool(ask: Arc<dyn AskHandler>) -> CruiseTool {
-    let handler: ToolHandler = Arc::new(move |input: serde_json::Value| {
-        let question = require_str(&input, "question")?;
-        ask.ask_user(question).map_err(|e| e.to_string())
-    });
-    CruiseTool::new(
-        ASK_USER_TOOL,
-        "Ask the user a clarifying question and get their answer. Use this whenever a \
-         requirement is ambiguous instead of guessing.",
-        json!({
-            "type": "object",
-            "properties": {
-                "question": {
-                    "type": "string",
-                    "description": "The question to ask the user."
-                }
-            },
-            "required": ["question"]
-        }),
-        handler,
-    )
+pub fn ask_user_tool(
+    ask: Arc<dyn AskHandler>,
+    cancel_token: Option<CancellationToken>,
+) -> CruiseTool {
+    ask_user_tool_with_deadline(ask, cancel_token, ASK_USER_CONTINUATION_DEADLINE)
+}
+
+fn ask_user_tool_with_deadline(
+    ask: Arc<dyn AskHandler>,
+    cancel_token: Option<CancellationToken>,
+    deadline: Duration,
+) -> CruiseTool {
+    Arc::new(AskUserContinuation::new(ask, cancel_token, deadline)).tool()
 }
 
 /// `submit_plan` — writes the full plan markdown to `plan_path`.
@@ -506,15 +651,80 @@ mod tests {
     #[test]
     fn ask_user_delegates_to_handler() {
         let ask = Arc::new(ScriptedAskHandler::new(["the answer".to_string()]));
-        let tool = ask_user_tool(ask);
+        let tool = ask_user_tool(ask, None);
         let res = invoke(&tool, json!({"question": "what?"}));
         assert_eq!(res.unwrap_or_else(|e| panic!("{e}")), "the answer");
     }
 
     #[test]
+    fn ask_user_continues_and_returns_buffered_answer_once() {
+        struct WaitingAsk {
+            answer: Mutex<std::sync::mpsc::Receiver<String>>,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        impl AskHandler for WaitingAsk {
+            fn ask_user(&self, _question: &str) -> crate::error::Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.answer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .map_err(|error| crate::error::CruiseError::Other(error.to_string()))
+            }
+        }
+
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+        let ask = Arc::new(WaitingAsk {
+            answer: Mutex::new(answer_rx),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let continuation = Arc::new(AskUserContinuation::new(
+            ask.clone(),
+            None,
+            Duration::from_millis(20),
+        ));
+        let tool = continuation.tool();
+        let input = json!({"question": "what?"});
+
+        let first = invoke(&tool, input.clone()).unwrap_or_else(|error| panic!("{error}"));
+        assert!(first.contains("exact same question"), "got: {first}");
+        assert_eq!(ask.calls.load(Ordering::SeqCst), 1);
+        assert!(invoke(&tool, json!({"question": "different?"})).is_err());
+        assert_eq!(ask.calls.load(Ordering::SeqCst), 1);
+
+        answer_tx
+            .send("the answer".to_string())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let pending = continuation
+            .state
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (pending, _) = continuation
+            .state
+            .ready
+            .wait_timeout_while(pending, Duration::from_secs(1), |pending| {
+                pending.as_ref().is_some_and(|ask| ask.result.is_none())
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            pending.as_ref().is_some_and(|ask| ask.result.is_some()),
+            "the answer should be buffered between callbacks"
+        );
+        drop(pending);
+
+        assert_eq!(
+            invoke(&tool, input).unwrap_or_else(|error| panic!("{error}")),
+            "the answer"
+        );
+        assert_eq!(ask.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn ask_user_errors_without_question() {
         let ask = Arc::new(ScriptedAskHandler::new(["x".to_string()]));
-        let tool = ask_user_tool(ask);
+        let tool = ask_user_tool(ask, None);
         assert!(invoke(&tool, json!({})).is_err());
     }
 
@@ -523,7 +733,7 @@ mod tests {
     #[test]
     fn planning_tools_interactive_has_three() {
         let ask = Arc::new(ScriptedAskHandler::new(std::iter::empty()));
-        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, true);
+        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, true, None);
         let names: Vec<&str> = set.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -538,7 +748,7 @@ mod tests {
         // interaction and the fix-plan template relies on it for targeted
         // edits, so non-interactive runs register both plan-writing tools.
         let ask = Arc::new(ScriptedAskHandler::new(std::iter::empty()));
-        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, false);
+        let set = planning_tools(PathBuf::from("/tmp/plan.md"), ask, false, None);
         let names: Vec<&str> = set.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec![SUBMIT_PLAN_TOOL, UPDATE_PLAN_TOOL]);
     }

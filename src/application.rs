@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -1511,6 +1511,14 @@ fn restore_planning_plan(context: &PlanContext) -> Result<()> {
     Ok(())
 }
 
+fn preserve_plan_checkpoint(manager: &SessionManager, state: &mut SessionState) -> Result<()> {
+    let checkpoint = manager.load(&state.id)?;
+    state.plan_conversation_id = checkpoint.plan_conversation_id;
+    state.plan_conversation_key = checkpoint.plan_conversation_key;
+    state.plan_conversation_home = checkpoint.plan_conversation_home;
+    Ok(())
+}
+
 fn cancel_plan(
     manager: &SessionManager,
     id: &str,
@@ -1521,6 +1529,7 @@ fn cancel_plan(
     restore_planning_plan(context)?;
     context.state = context.before_state.clone();
     context.state.base_dir = base_dir;
+    preserve_plan_checkpoint(manager, &mut context.state)?;
     manager.save(&context.state)?;
     sink.send(ApplicationEvent::PlanCancelled {
         session_id: id.to_string(),
@@ -1544,6 +1553,7 @@ fn fail_plan(
     restore_planning_plan(context)?;
     context.state = context.before_state.clone();
     context.state.base_dir = base_dir;
+    preserve_plan_checkpoint(manager, &mut context.state)?;
     if operation != OperationKind::Ask {
         context.state.plan_error = Some(message.clone());
     }
@@ -1655,6 +1665,7 @@ fn plan_checkpoint_callback(
     manager: SessionManager,
     id: String,
     key: String,
+    source_home: Option<PathBuf>,
     token: CancellationToken,
 ) -> impl Fn(&str) -> Result<()> + Send + Sync + 'static {
     move |backend_id: &str| {
@@ -1664,6 +1675,7 @@ fn plan_checkpoint_callback(
         let mut state = manager.load(&id)?;
         state.plan_conversation_id = Some(backend_id.to_string());
         state.plan_conversation_key = Some(key.clone());
+        state.plan_conversation_home.clone_from(&source_home);
         manager.save(&state)
     }
 }
@@ -1722,10 +1734,16 @@ async fn run_plan_prompt(
         on_stderr: Some(&on_stderr),
     };
     let token = context.claim.token();
+    let jcode_source_home = matches!(
+        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
+        crate::executor::Executor::Jcode
+    )
+    .then(|| crate::backend::jcode::resolve_source_home(Some(&context.state.base_dir)));
     let on_session_id = plan_checkpoint_callback(
         manager.clone(),
         context.state.id.clone(),
         context.key.clone().unwrap_or_default(),
+        jcode_source_home,
         token.clone(),
     );
     let ctx = crate::planning::PlanPromptCtx {
@@ -1917,10 +1935,17 @@ fn finish_plan(
     }
     if request.skip_planning {
         if let Some(session_id) = context.state.plan_conversation_id.as_deref() {
-            crate::backend::jcode::cleanup_session_home(session_id)?;
+            let source_home = context.state.plan_conversation_home.as_deref().map_or_else(
+                || crate::backend::jcode::resolve_source_home(Some(&context.state.base_dir)),
+                Path::to_path_buf,
+            );
+            crate::backend::jcode::cleanup_session_home_at(&source_home, session_id).map_err(
+                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            )?;
         }
         context.state.plan_conversation_id = None;
         context.state.plan_conversation_key = None;
+        context.state.plan_conversation_home = None;
     } else {
         context.state.phase = if matches!(
             operation,
@@ -1933,8 +1958,22 @@ fn finish_plan(
         } else {
             SessionPhase::AwaitingApproval
         };
+        let checkpoint = manager.load(&id)?;
+        let checkpoint_matches =
+            checkpoint.plan_conversation_key.as_deref() == context.key.as_deref();
+        context.state.plan_conversation_id = context.resume.clone().or_else(|| {
+            if checkpoint_matches {
+                checkpoint.plan_conversation_id.clone()
+            } else {
+                None
+            }
+        });
+        context.state.plan_conversation_home = if checkpoint_matches {
+            checkpoint.plan_conversation_home
+        } else {
+            None
+        };
         context.state.plan_conversation_key = context.key.clone();
-        context.state.plan_conversation_id = context.resume.clone();
         context.state.clear_pending_input();
     }
     context.state.plan_error = None;

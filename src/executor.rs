@@ -550,7 +550,6 @@ async fn run_with_fallback(
 /// aborted attempt's session id: re-sending the same prompt into a
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    jcode::check_runtime_version()?;
     run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
         let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
         let config = JcodeRunnerConfig {

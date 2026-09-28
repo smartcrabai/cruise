@@ -338,6 +338,7 @@ pub async fn run_plan_prompt_template(
             ctx.plan_path.to_path_buf(),
             planning_ask,
             ctx.interactive,
+            ctx.cancel_token.cloned(),
         );
         (set.tools, Some(set.plan_persisted))
     } else {

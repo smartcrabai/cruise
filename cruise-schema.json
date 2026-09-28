@@ -21,7 +21,7 @@
     "sdk": {
       "type": "string",
       "enum": ["jcode", "claude"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode`, the default backend. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer for its API bridge; `sdk: claude` uses claude-agent-sdk. SDK model references support `provider/model[:effort]` or a bare model."
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode`, the default backend. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. SDK model references support `provider/model[:effort]` or a bare model."
     },
     "model": {
       "oneOf": [

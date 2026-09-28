@@ -119,6 +119,9 @@ pub struct SessionState {
     /// Configuration/backend identity that produced `plan_conversation_id`.
     #[serde(default)]
     pub plan_conversation_key: Option<String>,
+    /// Absolute jcode source-home path for cleaning the saved conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_conversation_home: Option<PathBuf>,
     /// Durable background-planning failure detail, if plan generation failed before approval.
     #[serde(default)]
     pub plan_error: Option<String>,
@@ -229,6 +232,7 @@ impl SessionState {
             pending_ask_question: None,
             plan_conversation_id: None,
             plan_conversation_key: None,
+            plan_conversation_home: None,
             plan_error: None,
             skipped_steps: vec![],
             runner_pid: None,
@@ -332,10 +336,21 @@ impl SessionState {
         self.awaiting_input = false;
         self.pending_ask_question = None;
         if let Some(session_id) = self.plan_conversation_id.as_deref() {
-            crate::backend::jcode::cleanup_session_home(session_id)?;
+            let source_home = self.plan_conversation_home.as_deref().map_or_else(
+                || {
+                    crate::backend::jcode::resolve_source_home(
+                        self.worktree_path.as_deref().or(Some(&self.base_dir)),
+                    )
+                },
+                std::path::Path::to_path_buf,
+            );
+            crate::backend::jcode::cleanup_session_home_at(&source_home, session_id).map_err(
+                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            )?;
         }
         self.plan_conversation_id = None;
         self.plan_conversation_key = None;
+        self.plan_conversation_home = None;
         self.plan_error = None;
         Ok(())
     }
@@ -858,7 +873,18 @@ impl SessionManager {
             if let Ok(state) = self.load(id)
                 && let Some(jcode_session_id) = state.plan_conversation_id.as_deref()
             {
-                crate::backend::jcode::cleanup_session_home(jcode_session_id)?;
+                let source_home = state.plan_conversation_home.as_deref().map_or_else(
+                    || {
+                        crate::backend::jcode::resolve_source_home(
+                            state.worktree_path.as_deref().or(Some(&state.base_dir)),
+                        )
+                    },
+                    std::path::Path::to_path_buf,
+                );
+                crate::backend::jcode::cleanup_session_home_at(&source_home, jcode_session_id)
+                    .map_err(|error| {
+                        CruiseError::Other(format!("could not clean jcode session home: {error}"))
+                    })?;
             }
             std::fs::remove_dir_all(&session_dir)?;
         }
@@ -1617,6 +1643,43 @@ mod tests {
         assert!(sessions.is_empty());
     }
 
+    #[test]
+    fn deleting_plan_session_uses_its_persisted_jcode_home_path() {
+        let _process_lock = crate::test_support::lock_process();
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error:?}"));
+        let _jcode_home = crate::test_support::EnvGuard::set("JCODE_HOME", "relative-jcode-home");
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = "20260306100001".to_string();
+        let base_dir = temp.path().join("repo");
+        std::fs::create_dir_all(&base_dir).unwrap_or_else(|error| panic!("{error:?}"));
+        let source_home = crate::backend::jcode::resolve_source_home(Some(&base_dir));
+        let mut state = SessionState::new(
+            id.clone(),
+            base_dir,
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        state.plan_conversation_id = Some("saved-plan-session".to_string());
+        state.plan_conversation_home = Some(source_home.clone());
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let private_home = source_home.join(".cruise-sdk-sessions").join("owned");
+        std::fs::create_dir_all(&private_home).unwrap_or_else(|error| panic!("{error:?}"));
+        std::fs::write(
+            private_home.join(".cruise-session-id"),
+            "saved-plan-session",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+
+        manager
+            .delete(&id)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert!(!private_home.exists());
+    }
     #[test]
     fn test_session_state_pr_url_roundtrip() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));

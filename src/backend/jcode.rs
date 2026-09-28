@@ -20,8 +20,13 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::process::Command;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -31,9 +36,9 @@ use crate::backend::stream::{LimitError, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
-
 const JCODE_HOME_ENV: &str = "JCODE_HOME";
 const NO_TELEMETRY_ENV: &str = "JCODE_NO_TELEMETRY";
+const JCODE_CHECK_UPDATES_ENV: &str = "JCODE_CHECK_UPDATES";
 const OPENAI_SERVICE_TIER_ENV: &str = "JCODE_OPENAI_SERVICE_TIER";
 const JCODE_PROVIDER_ENV: &str = "JCODE_PROVIDER";
 const JCODE_MODEL_ENV: &str = "JCODE_MODEL";
@@ -41,10 +46,10 @@ const OPENAI_SERVICE_TIER_DEFAULT: &str = "off";
 const SESSION_HOME_DIR: &str = ".cruise-sdk-sessions";
 const SESSION_ID_FILE: &str = ".cruise-session-id";
 const LEGACY_CRUISE_MCP_NAME: &str = "cruise";
-const MIN_JCODE_VERSION: (u64, u64, u64) = (0, 88, 0);
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
-
 const STALE_SESSION_HOME_AGE: Duration = Duration::from_hours(24);
+const HOME_LOCK_FILE: &str = ".cruise-session.lock";
+const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// One `sdk: jcode` prompt attempt. Deliberately not `Debug`: `env` may contain
 /// provider credentials.
 #[derive(Default)]
@@ -58,63 +63,6 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) env: HashMap<String, String>,
     pub(crate) cancel: Option<CancellationToken>,
     pub(crate) keep_session_home: bool,
-}
-
-/// Check the binary floor. The SDK handshake only reports the API bridge crate
-/// version (`jcode-harness-api-bridge/...`), not the jcode binary version, so
-/// this one CLI probe has no SDK equivalent.
-pub(crate) fn check_runtime_version() -> Result<()> {
-    let output = Command::new("jcode")
-        .args(["--no-update", "version", "--json"])
-        .env(NO_TELEMETRY_ENV, "1")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| {
-            CruiseError::Other(format!(
-                "`sdk: jcode` requires jcode {} or newer, but `jcode version --json` failed: {error}",
-                format_version(MIN_JCODE_VERSION)
-            ))
-        })?;
-    let version = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .ok()
-        .and_then(|value| value.get("semver")?.as_str().map(str::to_string))
-        .ok_or_else(|| {
-            CruiseError::Other(format!(
-                "could not read jcode's version from `jcode version --json`; `sdk: jcode` requires jcode {} or newer",
-                format_version(MIN_JCODE_VERSION)
-            ))
-        })?;
-    let parsed = parse_version(&version).ok_or_else(|| {
-        CruiseError::Other(format!(
-            "jcode version --json reported an unparseable version '{version}'; `sdk: jcode` requires jcode {} or newer",
-            format_version(MIN_JCODE_VERSION)
-        ))
-    })?;
-    if parsed < MIN_JCODE_VERSION {
-        return Err(CruiseError::Other(format!(
-            "jcode {version} is too old for `sdk: jcode`, which requires {} or newer; upgrade jcode and retry",
-            format_version(MIN_JCODE_VERSION)
-        )));
-    }
-    Ok(())
-}
-
-fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let core = text
-        .trim()
-        .trim_start_matches('v')
-        .split(['-', '+', ' '])
-        .next()?;
-    let mut parts = core.split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next().unwrap_or("0").parse().ok()?,
-        parts.next().unwrap_or("0").parse().ok()?,
-    ))
-}
-
-fn format_version((major, minor, patch): (u64, u64, u64)) -> String {
-    format!("{major}.{minor}.{patch}")
 }
 
 /// Cruise's `provider/model[:effort]` syntax, parsed once for each fallback
@@ -183,7 +131,17 @@ fn run_attempt(
         Ok(client) => {
             let result = run_client_turn(&client, config, prompt, tx, &mut home, &mut session_id);
             drop(client);
-            result
+            let cleanup_result = clear_private_daemon(&home.storage_home);
+            match (result, cleanup_result) {
+                (Ok(terminal), Ok(())) => Ok(terminal),
+                (Err(message), Ok(())) => Err(message),
+                (Ok(_), Err(error)) => {
+                    Err(format!("could not stop private jcode runtime: {error}"))
+                }
+                (Err(message), Err(error)) => Err(format!(
+                    "{message}; could not stop private jcode runtime: {error}"
+                )),
+            }
         }
         Err(error) => Err(error),
     };
@@ -203,6 +161,8 @@ fn launch_client(
     config: &JcodeRunnerConfig,
     home: &SessionHome,
 ) -> std::result::Result<JcodeClient, String> {
+    clear_private_daemon(&home.storage_home)
+        .map_err(|error| format!("could not clean up stale private jcode runtime: {error}"))?;
     let mut options = LaunchOptions {
         jcode_home: Some(home.sdk_home.clone()),
         working_dir: config.cwd.clone(),
@@ -214,7 +174,9 @@ fn launch_client(
         config.provider.as_deref(),
         config.model.as_deref(),
     );
-    JcodeClient::launch(options).map_err(|error| error.to_string())
+    JcodeClient::launch(options).map_err(|error| {
+        format!("could not start the jcode SDK runtime; install or upgrade jcode to 0.88.0 or newer: {error}")
+    })
 }
 
 fn launch_environment(
@@ -228,6 +190,7 @@ fn launch_environment(
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
         .collect();
     env.insert(OsString::from(NO_TELEMETRY_ENV), OsString::from("1"));
+    env.insert(OsString::from(JCODE_CHECK_UPDATES_ENV), OsString::from("0"));
     if !workflow_env.contains_key(OPENAI_SERVICE_TIER_ENV)
         && std::env::var_os(OPENAI_SERVICE_TIER_ENV).is_none()
     {
@@ -260,22 +223,34 @@ fn run_client_turn(
     home: &mut SessionHome,
     session_id: &mut Option<String>,
 ) -> std::result::Result<StreamChunk, String> {
+    if !client.supports("sessions") {
+        return Err(
+            "the jcode harness does not support sessions; upgrade jcode to 0.88.0 or newer"
+                .to_string(),
+        );
+    }
     if !config.tools.is_empty() && !client.supports("session_tools") {
         return Err(
             "the jcode harness does not support session tools; upgrade jcode to 0.88.0 or newer"
                 .to_string(),
         );
     }
+    let working_dir = config
+        .cwd
+        .as_deref()
+        .map(|path| path.to_string_lossy().into_owned());
     let session = match config.resume_session_id.as_deref() {
-        Some(id) => client.attach_session(id),
-        None => client.create_session(
-            config
-                .cwd
-                .as_deref()
-                .map(|path| path.to_string_lossy().into_owned()),
-        ),
-    }
-    .map_err(|error| error.to_string())?;
+        Some(id) => match client.attach_session(id) {
+            Ok(session) => session,
+            Err(error) if !home.resume_session_found && error.code() == "unknown_session" => client
+                .create_session(working_dir)
+                .map_err(|error| error.to_string())?,
+            Err(error) => return Err(error.to_string()),
+        },
+        None => client
+            .create_session(working_dir)
+            .map_err(|error| error.to_string())?,
+    };
     *session_id = Some(session.session_id.clone());
     write_session_id(home, &session.session_id).map_err(|error| error.to_string())?;
     tx.send(StreamChunk::Session(session.session_id.clone()))
@@ -300,9 +275,8 @@ fn run_client_turn(
             .configure_tools(
                 &session.session_id,
                 ToolConfiguration {
-                    enabled: None,
-                    disabled: Vec::new(),
                     custom,
+                    ..Default::default()
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -361,7 +335,13 @@ fn run_client_turn(
                 ..
             } => {
                 text.append(message_id, &delta);
-                let _ = tx.send(StreamChunk::Delta(delta));
+                if tx.send(StreamChunk::Delta(delta)).is_err() {
+                    let _ = client.cancel(&session.session_id);
+                    return Err(
+                        "jcode output stream was closed; the active session was cancelled"
+                            .to_string(),
+                    );
+                }
             }
             ApiEvent::TextReplace {
                 text: replacement,
@@ -404,19 +384,23 @@ fn run_client_turn(
                 });
             }
             ApiEvent::Error { code, message } => {
-                if let Some((reason, stop_message)) = stopped
-                    && (reason == TurnStopReason::LimitReached
-                        || crate::retry::is_limit_message(&stop_message))
-                {
-                    let detail = if message.trim().is_empty() {
-                        stop_message
+                if let Some((reason, stop_message)) = stopped {
+                    let detail = if stop_message.trim().is_empty() {
+                        message.clone()
                     } else {
-                        message
+                        stop_message
                     };
-                    return Ok(StreamChunk::Limit(LimitError {
-                        provider: config.provider.as_deref().unwrap_or("jcode").to_string(),
-                        detail,
-                    }));
+                    if crate::retry::is_limit_message(&detail) {
+                        return Ok(StreamChunk::Limit(LimitError {
+                            provider: config.provider.as_deref().unwrap_or("jcode").to_string(),
+                            detail,
+                        }));
+                    }
+                    if reason == TurnStopReason::LimitReached {
+                        return Ok(StreamChunk::Error(format!(
+                            "jcode turn stopped ({reason:?}): {detail}"
+                        )));
+                    }
                 }
                 return Ok(error_chunk(
                     format!("{code:?}: {message}"),
@@ -429,7 +413,7 @@ fn run_client_turn(
 }
 
 fn stop_chunk(reason: TurnStopReason, message: String, provider: Option<&str>) -> StreamChunk {
-    if reason == TurnStopReason::LimitReached || crate::retry::is_limit_message(&message) {
+    if crate::retry::is_limit_message(&message) {
         StreamChunk::Limit(LimitError {
             provider: provider.unwrap_or("jcode").to_string(),
             detail: message,
@@ -583,6 +567,8 @@ struct SessionHome {
     temporary_alias: Option<PathBuf>,
     stable_alias_root: Option<PathBuf>,
     fresh: bool,
+    resume_session_found: bool,
+    _active_lock: Option<std::fs::File>,
 }
 
 fn prepare_session_home(
@@ -592,19 +578,26 @@ fn prepare_session_home(
 ) -> std::result::Result<SessionHome, String> {
     let storage_root = source_home.join(SESSION_HOME_DIR);
     ensure_private_dir(&storage_root).map_err(|error| error.to_string())?;
-    prune_unclaimed_session_homes(&storage_root).map_err(|error| error.to_string())?;
+    let root_lock = lock_session_root(&storage_root).map_err(|error| error.to_string())?;
+    prune_unclaimed_session_homes_locked(&storage_root, SystemTime::now())
+        .map_err(|error| error.to_string())?;
     let expected_home = resume_session_id.map(|_| storage_root.join(session_key));
-    let storage_home = match (resume_session_id, expected_home.as_ref()) {
-        (Some(id), Some(expected)) => {
-            find_session_home(&storage_root, expected, id).unwrap_or_else(|| expected.clone())
-        }
-        _ => storage_root.join(session_key),
+    let existing_home = match (resume_session_id, expected_home.as_ref()) {
+        (Some(id), Some(expected)) => find_session_home(&storage_root, expected, id),
+        _ => None,
     };
+    let resume_session_found = existing_home.is_some();
+    let storage_home = existing_home.unwrap_or_else(|| {
+        expected_home
+            .clone()
+            .unwrap_or_else(|| storage_root.join(session_key))
+    });
     let fresh = !storage_home.exists();
     ensure_private_dir(&storage_home).map_err(|error| error.to_string())?;
+    let active_lock = lock_session_home(&storage_home).map_err(|error| error.to_string())?;
+    drop(root_lock);
     jcode_sdk::inherit_credentials(&source_home, &storage_home)
         .map_err(|error| error.to_string())?;
-    disable_private_updates(&storage_home).map_err(|error| error.to_string())?;
     copy_global_mcp(&source_home, &storage_home).map_err(|error| error.to_string())?;
 
     #[cfg(unix)]
@@ -631,6 +624,8 @@ fn prepare_session_home(
         temporary_alias,
         stable_alias_root,
         fresh,
+        resume_session_found,
+        _active_lock: active_lock,
     })
 }
 
@@ -673,29 +668,28 @@ fn finish_session_home(
     Ok(())
 }
 
-/// Remove a persistent SDK home when its owning Cruise session is deleted.
-pub(crate) fn cleanup_session_home(session_id: &str) -> Result<()> {
-    let source_home = resolve_source_home(None);
-    cleanup_session_home_at(&source_home, session_id)
-        .map_err(|error| CruiseError::Other(format!("could not clean jcode session home: {error}")))
-}
-
-fn cleanup_session_home_at(source_home: &Path, session_id: &str) -> std::io::Result<()> {
+pub(crate) fn cleanup_session_home_at(source_home: &Path, session_id: &str) -> std::io::Result<()> {
     let root = source_home.join(SESSION_HOME_DIR);
     let expected = root.join(session_storage_key(session_id));
     let Some(home) = find_session_home(&root, &expected, session_id) else {
         return Ok(());
     };
+    let _active_lock = lock_session_home(&home)?;
     stop_private_daemon(&home)?;
     remove_home_aliases_for_target(&home)?;
     fs::remove_dir_all(home)
 }
 
-fn prune_unclaimed_session_homes(root: &Path) -> std::io::Result<()> {
-    prune_unclaimed_session_homes_at(root, SystemTime::now())
+#[cfg(all(test, unix))]
+fn prune_unclaimed_session_homes_at(root: &Path, now: SystemTime) -> std::io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let _root_lock = lock_session_root(root)?;
+    prune_unclaimed_session_homes_locked(root, now)
 }
 
-fn prune_unclaimed_session_homes_at(root: &Path, now: SystemTime) -> std::io::Result<()> {
+fn prune_unclaimed_session_homes_locked(root: &Path, now: SystemTime) -> std::io::Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -715,13 +709,87 @@ fn prune_unclaimed_session_homes_at(root: &Path, now: SystemTime) -> std::io::Re
         let stale = metadata.modified().is_ok_and(|modified| {
             now.duration_since(modified).unwrap_or_default() >= STALE_SESSION_HOME_AGE
         });
-        if stale {
+        if stale && let Some(_home_lock) = lock_existing_session_home(&home)? {
             stop_private_daemon(&home)?;
             remove_home_aliases_for_target(&home)?;
             fs::remove_dir_all(home)?;
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn lock_session_root(root: &Path) -> std::io::Result<Option<File>> {
+    let path = root.join(ROOT_LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    set_private_file(&path)?;
+    lock_file(&file, libc::LOCK_EX)?;
+    Ok(Some(file))
+}
+
+#[cfg(not(unix))]
+fn lock_session_root(_root: &Path) -> std::io::Result<Option<std::fs::File>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn lock_session_home(home: &Path) -> std::io::Result<Option<File>> {
+    let path = home.join(HOME_LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    set_private_file(&path)?;
+    match lock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "jcode session home is already active",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_session_home(_home: &Path) -> std::io::Result<Option<std::fs::File>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn lock_existing_session_home(home: &Path) -> std::io::Result<Option<File>> {
+    let path = home.join(HOME_LOCK_FILE);
+    let file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match lock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_existing_session_home(_home: &Path) -> std::io::Result<Option<std::fs::File>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn lock_file(file: &File, operation: i32) -> std::io::Result<()> {
+    // SAFETY: flock uses only the live file descriptor borrowed from `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn find_session_home(root: &Path, expected: &Path, session_id: &str) -> Option<PathBuf> {
@@ -743,23 +811,28 @@ fn find_session_home(root: &Path, expected: &Path, session_id: &str) -> Option<P
         })
 }
 
+#[cfg(unix)]
+fn home_aliases_for_target(home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(short_home_alias_root()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(entries
+        .flatten()
+        .filter_map(|entry| {
+            let alias = entry.path();
+            (fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && fs::read_link(&alias).is_ok_and(|target| target == home))
+            .then_some(alias)
+        })
+        .collect())
+}
+
 fn remove_home_aliases_for_target(home: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    {
-        let root = short_home_alias_root();
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        for entry in entries.flatten() {
-            let alias = entry.path();
-            if fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && fs::read_link(&alias).is_ok_and(|target| target == home)
-            {
-                fs::remove_file(alias)?;
-            }
-        }
+    for alias in home_aliases_for_target(home)? {
+        fs::remove_file(alias)?;
     }
     #[cfg(not(unix))]
     let _ = home;
@@ -768,48 +841,94 @@ fn remove_home_aliases_for_target(home: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn stop_private_daemon(home: &Path) -> std::io::Result<()> {
-    let registry_path = home.join("servers.json");
-    let raw = match fs::read(&registry_path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let Ok(registry) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-        return Ok(());
-    };
-    let Ok(runtime_dir) = fs::canonicalize(home.join("run")) else {
-        return Ok(());
-    };
-    let Some(pid) = registry
-        .as_object()
-        .and_then(|entries| {
-            entries.values().find_map(|entry| {
-                let entry = entry.as_object()?;
-                let socket = Path::new(entry.get("socket")?.as_str()?);
-                let socket_runtime = socket.parent()?;
-                if fs::canonicalize(socket_runtime).ok()?.as_path() != runtime_dir.as_path() {
-                    return None;
+    stop_private_daemons(&private_daemon_sockets(home)?)
+}
+
+#[cfg(unix)]
+fn private_daemon_sockets(home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut sockets = Vec::new();
+    let physical_socket = home.join("run/jcode.sock");
+    sockets.push(physical_socket);
+    if let Ok(runtime_dir) = fs::canonicalize(home.join("run")) {
+        let raw = match fs::read(home.join("servers.json")) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(raw) = raw
+            && let Ok(registry) = serde_json::from_slice::<serde_json::Value>(&raw)
+            && let Some(entries) = registry.as_object()
+        {
+            for entry in entries.values() {
+                let Some(socket) = entry
+                    .get("socket")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                else {
+                    continue;
+                };
+                if socket.file_name().and_then(|name| name.to_str()) == Some("jcode.sock")
+                    && socket.parent().is_some_and(|parent| {
+                        fs::canonicalize(parent).is_ok_and(|p| p == runtime_dir)
+                    })
+                    && !sockets.contains(&socket)
+                {
+                    sockets.push(socket);
                 }
-                i32::try_from(entry.get("pid")?.as_i64()?).ok()
-            })
-        })
-        .filter(|pid| *pid > 1)
-    else {
-        return Ok(());
-    };
-    signal_private_process_group(pid, libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && private_process_exists(pid) {
-        std::thread::sleep(Duration::from_millis(50));
+            }
+        }
     }
-    if private_process_exists(pid) {
-        signal_private_process_group(pid, libc::SIGKILL);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && private_process_exists(pid) {
-            std::thread::sleep(Duration::from_millis(50));
+    let aliases = home_aliases_for_target(home)?;
+    for alias in aliases {
+        let socket = alias.join("run/jcode.sock");
+        if !sockets.contains(&socket) {
+            sockets.push(socket);
+        }
+    }
+    Ok(sockets)
+}
+
+#[cfg(unix)]
+fn stop_private_daemons(sockets: &[PathBuf]) -> std::io::Result<()> {
+    for socket in sockets {
+        for pid in private_daemon_pids(socket)? {
+            signal_private_process(pid, socket, libc::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && private_daemon_matches(pid, socket) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if private_daemon_matches(pid, socket) {
+                signal_private_process(pid, socket, libc::SIGKILL);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && private_daemon_matches(pid, socket) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn private_daemon_pids(socket: &Path) -> std::io::Result<Vec<i32>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other("could not inspect jcode processes"));
+    }
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|pid| pid.parse::<i32>().ok()) else {
+            continue;
+        };
+        let command = fields.collect::<Vec<_>>().join(" ");
+        if jcode_server_command(&command) && private_daemon_matches(pid, socket) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
 }
 
 #[cfg(not(unix))]
@@ -817,20 +936,93 @@ fn stop_private_daemon(_home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn signal_private_process_group(pid: i32, signal: i32) {
-    // The PID comes from this Cruise-owned private home's jcode server registry.
-    unsafe {
-        if libc::kill(-pid, signal) != 0 {
-            libc::kill(pid, signal);
-        }
-    }
+/// Stop only daemons whose command and private runtime identify the Cruise home.
+fn clear_private_daemon(home: &Path) -> std::io::Result<()> {
+    let stopped = stop_private_daemon(home);
+    let cleared = match fs::remove_file(home.join("servers.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    };
+    stopped.and(cleared)
 }
 
 #[cfg(unix)]
-fn private_process_exists(pid: i32) -> bool {
-    // Signal 0 only probes whether the private daemon PID is still live.
-    unsafe { libc::kill(pid, 0) == 0 }
+fn signal_private_process(pid: i32, socket: &Path, signal: i32) {
+    if !private_daemon_matches(pid, socket) {
+        return;
+    }
+    // SAFETY: the process was identified as the jcode daemon serving this
+    // private socket immediately before signaling.
+    unsafe {
+        libc::kill(pid, signal);
+    }
+}
+
+/// `servers.json` can retain a recycled PID, so verify the running process is
+/// jcode serving this private socket before signaling it.
+#[cfg(unix)]
+fn private_daemon_matches(pid: i32, socket: &Path) -> bool {
+    let pid = pid.to_string();
+    let command = Command::new("ps")
+        .args(["-p", &pid, "-o", "command="])
+        .output();
+    let environment = Command::new("ps").args(["eww", "-p", &pid]).output();
+    let (Ok(command), Ok(environment)) = (command, environment) else {
+        return false;
+    };
+    if !command.status.success() || !environment.status.success() {
+        return false;
+    }
+    private_daemon_identity_matches(
+        &String::from_utf8_lossy(&command.stdout),
+        &String::from_utf8_lossy(&environment.stdout),
+        socket,
+    )
+}
+
+#[cfg(unix)]
+fn private_daemon_identity_matches(command: &str, environment: &str, socket: &Path) -> bool {
+    if !jcode_server_command(command) {
+        return false;
+    }
+    let socket_arg =
+        command.contains("--socket") && socket.to_str().is_some_and(|path| command.contains(path));
+    let Some(runtime_dir) = socket.parent() else {
+        return false;
+    };
+    let Some(home) = runtime_dir.parent() else {
+        return false;
+    };
+    socket_arg
+        || (environment_has_path(environment, "JCODE_HOME", home)
+            && environment_has_path(environment, "JCODE_RUNTIME_DIR", runtime_dir)
+            && environment_has_path(environment, "JCODE_SOCKET", socket))
+}
+
+#[cfg(unix)]
+fn jcode_server_command(command: &str) -> bool {
+    let mut arguments = command.split_whitespace();
+    arguments.next().is_some_and(|executable| {
+        Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("jcode")
+    }) && arguments.any(|argument| argument == "serve")
+}
+
+#[cfg(unix)]
+fn environment_has_path(environment: &str, key: &str, value: &Path) -> bool {
+    let assignment = format!("{key}={}", value.display());
+    environment.match_indices(&assignment).any(|(start, _)| {
+        let before_matches = start == 0 || environment.as_bytes()[start - 1].is_ascii_whitespace();
+        let end = start + assignment.len();
+        let after_matches = environment
+            .as_bytes()
+            .get(end)
+            .is_none_or(u8::is_ascii_whitespace);
+        before_matches && after_matches
+    })
 }
 
 fn write_session_id(home: &SessionHome, session_id: &str) -> std::io::Result<()> {
@@ -873,30 +1065,7 @@ fn copy_global_mcp(source_home: &Path, storage_home: &Path) -> std::io::Result<(
     set_private_file(&destination)
 }
 
-fn disable_private_updates(storage_home: &Path) -> std::io::Result<()> {
-    let path = storage_home.join("config.toml");
-    let mut config = match fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str::<toml::Value>(&contents).map_err(std::io::Error::other)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::map::Map::new())
-        }
-        Err(error) => return Err(error),
-    };
-    let config = config
-        .as_table_mut()
-        .ok_or_else(|| std::io::Error::other("jcode config.toml must contain a table"))?;
-    let features = config
-        .entry("features")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .ok_or_else(|| std::io::Error::other("jcode config [features] must be a table"))?;
-    features.insert("check_updates".to_string(), toml::Value::Boolean(false));
-    let contents = toml::to_string(&config).map_err(std::io::Error::other)?;
-    fs::write(&path, contents)?;
-    set_private_file(&path)
-}
-
-fn resolve_source_home(cwd: Option<&Path>) -> PathBuf {
+pub(crate) fn resolve_source_home(cwd: Option<&Path>) -> PathBuf {
     let configured = std::env::var_os(JCODE_HOME_ENV).filter(|value| !value.is_empty());
     let path = configured.map_or_else(
         || {
@@ -909,10 +1078,17 @@ fn resolve_source_home(cwd: Option<&Path>) -> PathBuf {
     if path.is_absolute() {
         return path;
     }
-    let base = cwd
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let base = cwd.map_or_else(
+        || current_dir.clone(),
+        |cwd| {
+            if cwd.is_absolute() {
+                cwd.to_path_buf()
+            } else {
+                current_dir.join(cwd)
+            }
+        },
+    );
     base.join(path)
 }
 
@@ -953,7 +1129,8 @@ fn session_lock(path: &Path) -> Arc<Mutex<()>> {
 
 #[cfg(unix)]
 fn short_home_alias_root() -> PathBuf {
-    PathBuf::from("/tmp/cruise-jcode")
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir().join(format!("cruise-jcode-{uid}"))
 }
 
 #[cfg(not(unix))]

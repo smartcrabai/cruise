@@ -84,8 +84,9 @@ EOF
 }
 
 jcode_version_json="$(run_jcode version --json)"
-# cruise itself reads the bare `semver` field for its floor check; the
-# The decorated `version` string ("v0.88.0 (<hash)") is for humans.
+# The shell-based Action setup has no SDK client: reject old binaries before
+# invoking its CLI-only provider/login operations. Cruise itself checks SDK
+# capabilities after launch; the SDK does not expose the CLI's version string.
 jcode_semver="$(printf '%s' "$jcode_version_json" | jq -r '.semver // empty')"
 if [ -z "$jcode_semver" ]; then
   echo "::error::cruise: \`jcode version --json\` reported no 'semver' field: $jcode_version_json" >&2
@@ -313,7 +314,6 @@ if [ -n "$OPENAI_API_KEY_INPUT" ]; then
 fi
 configure_provider_profiles
 
-# Observational only: with pipefail, a failing status print would otherwise
-# fail the step after the credentials were already written, and a retried
-# job would re-run every `jcode provider add` above.
-run_jcode auth status || true
+# Observational only: the SDK has no auth-status operation, and with pipefail a
+# failing status print must not fail after credentials were already written.
+# A retry would otherwise re-run every `jcode provider add` above.

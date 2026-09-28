@@ -78,11 +78,25 @@ const PERMANENT_MARKERS: &[&str] = &[
     "forbidden",
     "permission denied",
     "not found",
+    "insufficient",
+];
+
+/// Provider stop messages for exhausted context/output budgets are not
+/// transient rate limits, even when the backend reports `LimitReached`.
+const NON_RETRYABLE_LIMIT_MARKERS: &[&str] = &[
+    "context limit",
     "context length",
     "context window",
     "too long",
     "max_tokens",
-    "insufficient",
+    "max_output_tokens",
+    "max_completion_tokens",
+    "max output tokens",
+    "maximum output tokens",
+    "output token limit",
+    "output tokens exhausted",
+    "provider stopped with length",
+    "output may be incomplete",
 ];
 
 /// Wordings that name the *model* as the defect rather than the request: the
@@ -100,6 +114,8 @@ const MODEL_MISSING_MARKERS: &[&str] = &[
     "unsupported openai model",
     "model_not_found",
     "model not found",
+    "not_found_error",
+    "requested entity was not found",
     "unknown model",
     "model does not exist",
     "no such model",
@@ -293,7 +309,8 @@ impl RetryClass {
 /// How a turn failed, as reported by the backend.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Failure<'a> {
-    /// The backend classified the failure as a rate/usage limit.
+    /// The backend tagged this as a limit; context/output exhaustion must not
+    /// be mistaken for a transient provider limit.
     Limited(&'a str),
     /// Any other failure; retryable only when [`classify_retryable`] says so.
     Failed(&'a str),
@@ -301,7 +318,6 @@ pub(crate) enum Failure<'a> {
     /// unparseable `provider/model[:effort]`, an unknown effort suffix).
     Unusable(&'a str),
 }
-
 impl<'a> Failure<'a> {
     /// The reported failure text.
     fn message(self) -> &'a str {
@@ -341,10 +357,21 @@ pub(crate) enum RetryAction {
     GiveUp,
 }
 
+/// Whether `lower` carries a provider context/output exhaustion stop.
+///
+/// Checked against [`provider_head`] for backend-reported limits so an
+/// unrelated child stderr line cannot suppress a genuine rate-limit retry.
+fn is_non_retryable_limit(lower: &str) -> bool {
+    NON_RETRYABLE_LIMIT_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// Whether `lower` (already lowercased) carries a permanent-failure wording.
 fn is_permanent(lower: &str) -> bool {
-    PERMANENT_MARKERS
+    NON_RETRYABLE_LIMIT_MARKERS
         .iter()
+        .chain(PERMANENT_MARKERS)
         .any(|marker| lower.contains(marker))
 }
 
@@ -399,8 +426,8 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 }
 
 /// Classify an error message, returning `None` for permanent failures
-/// (authentication, invalid request, context overflow) which name no HTTP
-/// status code and must never be retried.
+/// (authentication, invalid request, context/output exhaustion) which name no
+/// HTTP status code and must never be retried.
 ///
 /// Unifies the command backend's [`crate::step::command::is_rate_limited`] and
 /// the SDK backends' limit wordings ([`is_limit_message`]), and extends them
@@ -433,27 +460,31 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 /// re-sends. The unambiguous wordings therefore win first, and only text that
 /// names nothing else falls through to the client-error class.
 ///
-/// A named 4xx status still wins over the permanent wordings: `400
+/// A named 4xx status still wins over permanent request wordings: `400
 /// invalid_request: context length exceeded` is the provider refusing *this*
 /// model's request, which the next entry of the fallback chain may well
 /// accept. A permanent wording without a status code (`unknown option
 /// '--effort'`) stays `None`, unless it also names the model as absent.
 #[must_use]
 pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
-    let lower = text.to_lowercase();
-    let client_status = first_client_status_code(&lower);
-    let model_missing = is_model_missing(provider_head(&lower));
-    if is_permanent(&lower) && client_status.is_none() && !model_missing {
+    classify_retryable_lower(&text.to_lowercase())
+}
+
+/// Classify `lower`, which must already be lowercased.
+fn classify_retryable_lower(lower: &str) -> Option<RetryClass> {
+    let client_status = first_client_status_code(lower);
+    let model_missing = is_model_missing(provider_head(lower));
+    if is_permanent(lower) && client_status.is_none() && !model_missing {
         return None;
     }
-    if is_limit_wording(&lower) {
+    if is_limit_wording(lower) {
         return Some(RetryClass::RateLimit);
     }
-    if has_status_code(&lower, "408") {
+    if has_status_code(lower, "408") {
         return Some(RetryClass::Network);
     }
     if SERVER_MARKERS.iter().any(|marker| lower.contains(marker))
-        || first_server_status_code(&lower).is_some()
+        || first_server_status_code(lower).is_some()
     {
         return Some(RetryClass::ServerError);
     }
@@ -464,6 +495,16 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
         return Some(RetryClass::ModelMissing);
     }
     client_status.map(|_| RetryClass::ClientError)
+}
+
+/// Classify a backend-reported limit without retrying exhausted context/output
+/// stops as rate limits.
+fn classify_limited_message(text: &str) -> Option<RetryClass> {
+    let lower = text.to_lowercase();
+    if is_non_retryable_limit(provider_head(&lower)) {
+        return None;
+    }
+    Some(classify_retryable_lower(&lower).unwrap_or(RetryClass::RateLimit))
 }
 
 /// Return the first standalone HTTP status code named in `lower` that starts
@@ -850,12 +891,10 @@ impl FallbackEngine {
     /// existed.
     fn classify(&self, failure: Failure<'_>) -> Option<RetryClass> {
         match failure {
-            // The backend already decided this is retryable; its text only
-            // picks the label, so `overloaded` reads as a server error on both
-            // SDK backends.
-            Failure::Limited(message) => {
-                Some(classify_retryable(message).unwrap_or(RetryClass::RateLimit))
-            }
+            // The backend tagged this as a limit; context/output exhaustion
+            // must not inherit the retryable default. Otherwise classify the
+            // provider wording so overloaded errors retain their server label.
+            Failure::Limited(message) => classify_limited_message(message),
             Failure::Failed(message) => self
                 .policy
                 .as_deref()
@@ -1171,12 +1210,57 @@ mod tests {
     }
 
     #[test]
+    fn context_and_output_exhaustion_limits_are_not_retried_as_rate_limits() {
+        for message in [
+            "Context limit exceeded after 3 compaction retries",
+            "The provider stopped with max_tokens after automatic continuation attempts were exhausted. Output may be incomplete.",
+            "The provider stopped with length after automatic continuation attempts were exhausted. Output may be incomplete.",
+            "max_output_tokens exhausted",
+        ] {
+            assert!(!is_limit_message(message), "expected non-limit: {message}");
+            assert_eq!(classify_retryable(message), None, "for {message}");
+            let mut engine = engine(policy(&[]), "test-limit-exhaustion/model", 1);
+            assert_eq!(
+                engine.next(Failure::Limited(message), false),
+                RetryAction::GiveUp,
+                "for {message}"
+            );
+        }
+
+        let mut engine = engine(policy(&[]), "test-genuine-rate-limit/model", 1);
+        assert!(matches!(
+            engine.next(Failure::Limited("HTTP 429 Too Many Requests"), false),
+            RetryAction::Backoff {
+                class: RetryClass::RateLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_missing_model_errors_use_v088_formats() {
+        for message in [
+            "anthropic api error (404 not found): {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"claude fable 5 is not available. please use opus 4.8.\"}}",
+            "OpenAI-compatible chat request failed\n  model: openai/gpt-missing\n  status: 404 Not Found\n  response: {\"error\":{\"code\":\"model_not_found\",\"message\":\"The requested model was not found\"}}",
+            "Gemini request generateContent failed (HTTP 404 Not Found): {\"error\":{\"status\":\"NOT_FOUND\",\"message\":\"Requested entity was not found.\"}}",
+        ] {
+            assert_eq!(
+                classify_retryable(message),
+                Some(RetryClass::ModelMissing),
+                "for {message}"
+            );
+        }
+    }
+
+    #[test]
     fn retry_classification_rejects_permanent_failures() {
         for message in [
             "authentication_error: invalid API key",
             "invalid_request_error: unsupported parameter 'reasoning'",
             "context length exceeded: 500000 tokens > limit",
             "max_tokens must be <= 5000",
+            "Context limit exceeded after 3 compaction retries",
+            "The provider stopped with length after automatic continuation attempts were exhausted. Output may be incomplete.",
             "insufficient credit balance",
             // A permanent failure whose text also carries a status code and a
             // transport-looking word must stay permanent.
