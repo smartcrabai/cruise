@@ -8,6 +8,10 @@ repository = "https://github.com/smartcrabai/cruise"
 rust-version = "1.95"
 version.workspace = true
 
+# `publish = false` would otherwise make dist skip this package.
+[package.metadata.dist]
+dist = true
+
 [workspace]
 members = ["."]
 resolver = "2"
