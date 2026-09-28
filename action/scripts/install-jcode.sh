@@ -12,16 +12,10 @@
 # installer's own scratch home must not be confused with the JCODE_HOME the
 # run's credentials go into.
 #
-# JCODE_NO_TELEMETRY=1 is a requirement, not a preference: an embedded jcode
-# must not report anything, for the install or for the runs cruise makes
-# afterwards (cruise sets it again for every jcode invocation of its own).
-# JCODE_SKIP_SERVER_RELOAD=1 keeps the installer from signalling a jcode
-# daemon: there is none on a runner, and reloading a self-hosted runner's own
-# daemon is not this action's business.
-#
-# jcode's minimum version is enforced by cruise itself at run time (it
-# verifies the `jcode run --ndjson` event shape and the `timeout_secs` MCP
-# setting it was built against), so this step only pins and installs.
+# JCODE_NO_TELEMETRY=1 disables telemetry for the install, and
+# JCODE_SKIP_SERVER_RELOAD=1 avoids signaling a daemon on the runner.
+# Cruise's jcode SDK requires jcode CLI v0.88.0 or newer; the action also
+# checks this floor before provisioning credentials.
 set -euo pipefail
 
 JCODE_VERSION_INPUT="${JCODE_VERSION:-latest}"
@@ -41,7 +35,7 @@ else
     pinned_version=""
   else
     # jcode's installer validates the pin against its release-tag form
-    # ("v0.81.1"); a bare semver would die on its tag check with an opaque
+    # ("v0.88.0"); a bare semver would die on its tag check with an opaque
     # "Failed to determine latest version", so normalize it here.
     case "$JCODE_VERSION_INPUT" in
       v*) pinned_version="$JCODE_VERSION_INPUT" ;;

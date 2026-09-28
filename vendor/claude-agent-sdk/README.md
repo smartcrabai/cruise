@@ -1,18 +1,14 @@
 # vendor/claude-agent-sdk — vendored copy of `seher-claude-agent-sdk`
 
-Referenced from the root `Cargo.toml` via `[patch.crates-io]` so local and
-cargo-dist builds use this copy, while `cargo publish` keeps resolving
-`seher-claude-agent-sdk = "=0.0.59"` from crates.io. Verified on the packaged
-`.crate`: no `[patch]` table survives, the `=0.0.59` registry requirement and
-the checksum below are both preserved (manifest and lockfile), and no `vendor/`
-source ships (cargo skips nested packages), so `cargo install cruise` is
-unaffected. This directory is intentionally **not** a workspace member.
+The root `Cargo.toml` applies `[patch.crates-io]` so workspace builds resolve
+this checked-in copy of `seher-claude-agent-sdk = "=0.0.59"`. Cruise workspace
+packages are not published to crates.io. This directory is intentionally
+**not** a workspace member.
 
-`scripts/verify_vendored_crate.sh` re-checks every claim on this page — pin /
-patch / vendored version agreement, actual resolution through this path,
-sparse-index checksum, byte-identity, and the publish behaviour above. It runs
-in CI (`PR Auto-merge` → `lint`). The version pin and this copy can only move
-together, so Renovate is disabled for this dependency (`renovate.json5`).
+`scripts/verify_vendored_crate.sh` checks the dependency pin, patch resolution,
+upstream archive checksum, and byte identity. It runs in CI (`PR Auto-merge` →
+`lint`). The version pin and this copy can only move together, so Renovate is
+disabled for this dependency (`renovate.json5`).
 
 ## Provenance
 

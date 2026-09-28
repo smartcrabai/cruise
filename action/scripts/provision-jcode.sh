@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Puts this run's model credentials into the jcode home this action pins
-# (setup-env.sh exports JCODE_HOME under $RUNNER_TEMP, and every later step
-# inherits it through $GITHUB_ENV): the dedicated `anthropic_api_key` /
-# `openai_api_key` inputs become jcode provider logins, and every `providers`
-# entry becomes a `[providers.<name>]` OpenAI-compatible profile in that
-# home's config.toml.
+# Provisions CLI credentials and provider profiles in the action's source
+# JCODE_HOME. Cruise copies this config and its credentials into isolated
+# SDK homes for sessions. setup-env.sh pins the source under $RUNNER_TEMP:
+# the dedicated key inputs become provider logins and `providers` entries
+# become `[providers.<name>]` profiles.
 #
 # Both halves are delegated to jcode rather than re-implemented:
 #   - `jcode login <provider> --no-validate` takes the key on stdin, which is
@@ -47,22 +46,19 @@ new_tmp() {
 }
 
 # --- the jcode home --------------------------------------------------------
-# Whatever JCODE_HOME the environment names, which is what jcode -- and so
-# the cruise run in the next steps -- resolves too. setup-env.sh pins it
-# under $RUNNER_TEMP; refusing to run without it keeps a misconfigured
-# workflow from writing this job's credentials into the runner user's real
-# home.
+# JCODE_HOME is the source home used by these jcode CLI provisioning calls
+# and by Cruise when creating private SDK session homes. setup-env.sh pins it
+# under $RUNNER_TEMP; refuse a missing value rather than writing credentials
+# into the runner user's real home.
 if [ -z "${JCODE_HOME:-}" ]; then
   echo "::error::cruise: JCODE_HOME is not set, so there is no isolated jcode home to provision (setup-env.sh exports it for every step of this action)" >&2
   exit 1
 fi
 echo "cruise: provisioning credentials in $JCODE_HOME"
 
-# Every jcode invocation inherits that home and runs with telemetry and the
-# auto-update check off, matching how cruise itself drives jcode.
-# run_jcode places --no-update first, the same position cruise's own
-# jcode_command uses (src/backend/jcode.rs), instead of relying on jcode's
-# parser accepting a global flag after the subcommand arguments.
+# These jcode CLI setup calls inherit the source home, with telemetry and the
+# auto-update check off. `--no-update` is a global flag and must precede each
+# subcommand.
 run_jcode() {
   JCODE_NO_TELEMETRY=1 jcode --no-update "$@"
 }
@@ -89,21 +85,19 @@ EOF
 
 jcode_version_json="$(run_jcode version --json)"
 # cruise itself reads the bare `semver` field for its floor check; the
-# decorated `version` string ("v0.82.0 (<hash)") is for humans.
+# The decorated `version` string ("v0.88.0 (<hash)") is for humans.
 jcode_semver="$(printf '%s' "$jcode_version_json" | jq -r '.semver // empty')"
 if [ -z "$jcode_semver" ]; then
   echo "::error::cruise: \`jcode version --json\` reported no 'semver' field: $jcode_version_json" >&2
   exit 1
 fi
 echo "cruise: jcode $jcode_semver"
-# The floor cruise enforces at run time (MIN_JCODE_VERSION in
-# src/backend/jcode.rs). Check it now: install-jcode.sh skips the install
-# entirely when a jcode is already on PATH, so a self-hosted runner's older
-# binary would otherwise fail later as a raw jcode error from
-# `provider add`.
-MIN_JCODE_VERSION="0.82.0"
+# Enforce the same runtime floor before provisioning: install-jcode.sh skips
+# installation when jcode is already on PATH, so older self-hosted binaries
+# must be rejected here rather than failing later during provisioning.
+MIN_JCODE_VERSION="0.88.0"
 if ! version_at_least "$jcode_semver" "$MIN_JCODE_VERSION"; then
-  echo "::error::cruise: jcode $jcode_semver is too old for this version of the action (requires jcode v$MIN_JCODE_VERSION or newer, the version cruise's \`sdk: jcode\` backend is verified against) -- pin a newer 'jcode_version', or update the jcode on this runner" >&2
+  echo "::error::cruise: jcode $jcode_semver is too old for this version of the action (requires jcode v$MIN_JCODE_VERSION or newer, the jcode SDK backend is verified against) -- pin a newer 'jcode_version', or update the jcode on this runner" >&2
   exit 1
 fi
 

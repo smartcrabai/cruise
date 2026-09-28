@@ -7,8 +7,8 @@ command:                  # LLM invocation command (array). Mutually exclusive w
   - "{model}"
   - -p
 
-# sdk: jcode              # Alternative backend: drive the jcode CLI (this is the
-                          # default when neither `command` nor `sdk` is set; see sdk.md).
+# sdk: jcode              # Alternative backend: use jcode-sdk (the default
+                          # when neither `command` nor `sdk` is set; see sdk.md).
 # sdk: claude             # Alternative backend: drive the claude CLI in-process
                           # via claude-agent-sdk (see sdk.md).
 
@@ -63,7 +63,7 @@ step fails the load (see [steps.md](steps.md)).
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: jcode` — drive the `jcode` CLI as a subprocess, against jcode's own home (`$JCODE_HOME`, else `~/.jcode`; sign in with `jcode login <provider>`). **Default** when neither `command` nor `sdk` is set. `model` / `plan_model` / per-step `model` are plain **model references** (`"provider/model[:effort]"` or a bare `"model"`). See [sdk.md](sdk.md) for details.
+- `sdk: jcode` — use the jcode SDK; the default when neither `command` nor `sdk` is set. Requires jcode CLI v0.88.0 or newer. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
 ## `command` and the `{model}` placeholder
@@ -251,8 +251,8 @@ retry:                    # Optional; accepted by validation for any backend, ho
   fallback_chains:        # Keys: "provider/model", "provider/*", a bare "model", or "default"
                           # (most specific wins)
     default:
-      - anthropic-api/claude-opus-4-6
-      - openai-api/gpt-5.5
+      - provider-a/model-a
+      - provider-b/model-b
 ```
 
 Chain entries are `"provider/model"`, `"provider/*"` (keeps the failing model id, swaps only the provider), or a bare model name. A switched-to model gets a fresh retry budget and no delay; every retry starts a fresh session; a turn that already streamed visible text is never retried on another model; a model skipped because of a 429, a 5xx, a network failure, or an error naming it as missing remains skipped for 30 minutes in this process (in-memory, not persisted across processes), while a client-error switch keeps its model immediately selectable. The attempt budget stays `--rate-limit-retries` — `retry:` adds no second count. Top-level `max_retries` is unrelated: it is the graph loop-protection ceiling, not a retry budget for prompts.

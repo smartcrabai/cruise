@@ -373,14 +373,7 @@ pub async fn run_plan_prompt_template(
     drop(spinner);
 
     let outcome = outcome?;
-    // The transcript is fetched lazily, on the failure path only. See
-    // `read_sdk_transcript` for what the current backends actually publish.
-    ensure_plan_persisted(plan_persisted.as_deref(), || {
-        outcome
-            .session_id
-            .as_deref()
-            .and_then(|session_id| read_sdk_transcript(ctx.working_dir, session_id))
-    })?;
+    ensure_plan_persisted(plan_persisted.as_deref())?;
     // Carry the backend session id forward only for SDK turns that return one.
     // Assigning `None` also clears any stale session id from a prior backend.
     if plan_tools_enabled {
@@ -389,42 +382,28 @@ pub async fn run_plan_prompt_template(
     Ok(outcome.result)
 }
 
-/// Guard against a tool-based planning turn that ended without the agent
-/// persisting the plan.
+/// Guard against tool-based planning that ended without persisting its plan.
 ///
-/// When the plan tools were registered (`submit_plan` / `update_plan`), the
-/// agent must persist the plan through them before its turn ends. If neither
-/// tool completed, the agent's captured output is usually not a plan at all —
-/// clarifying questions it could never get answered, or a "handoff" note — and
-/// adopting it as `plan.md` posts that non-plan to the user. Fail the turn
-/// instead. `transcript` is invoked only on this failure path and, when the
-/// backend transcript records a terminal error, it is appended for diagnosis.
+/// When `submit_plan` / `update_plan` are registered, the agent must complete
+/// one before ending its turn. Clarification requests and handoff notes are not
+/// plans and must not be adopted as `plan.md`.
 ///
-/// Turns without plan tools (command backend, `interactive_planning: false`,
-/// or the read-only Ask flow) pass `None` and are never guarded: the
-/// captured-output fallback remains valid there.
-fn ensure_plan_persisted(
-    plan_persisted: Option<&AtomicBool>,
-    transcript: impl FnOnce() -> Option<String>,
-) -> Result<()> {
+/// Turns without plan tools pass `None` and keep the captured-output fallback.
+fn ensure_plan_persisted(plan_persisted: Option<&AtomicBool>) -> Result<()> {
     let Some(flag) = plan_persisted else {
         return Ok(());
     };
     if flag.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let mut msg = "planning agent ended its turn without persisting the plan: tool-based \
-        planning requires a successful `submit_plan` (or `update_plan`) call before the turn \
-        ends, but neither tool completed. Refusing to adopt the agent's final message as the \
-        plan. This typically means the model stopped to wait for clarification it could not \
-        receive, or it does not support the planning tools."
-        .to_string();
-    if let Some(text) = transcript()
-        && let Some(backend_error) = extract_terminal_error_from_transcript(&text)
-    {
-        let _ = write!(msg, " Backend transcript error: {backend_error}");
-    }
-    Err(crate::error::CruiseError::Other(msg))
+    Err(crate::error::CruiseError::Other(
+        "planning agent ended its turn without persisting the plan: tool-based planning \
+         requires a successful `submit_plan` (or `update_plan`) call before the turn ends, \
+         but neither tool completed. Refusing to adopt the agent's final message as the plan. \
+         This typically means the model stopped to wait for clarification it could not receive, \
+         or it does not support the planning tools."
+            .to_string(),
+    ))
 }
 
 /// Write the user input directly as plan.md, bypassing LLM generation.
@@ -518,100 +497,17 @@ pub fn write_plan_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Extract the last terminal error message from a JSONL transcript.
-///
-/// Scans line-by-line for JSON objects where `.message.stopReason == "error"`
-/// and `.message.errorMessage` is non-empty. Returns the last such message
-/// found, or `None` if no terminal error exists.
-///
-/// Pure (no I/O): the transcript text comes from the caller, which for cruise's
-/// own flows means [`read_sdk_transcript`].
-#[must_use]
-pub fn extract_terminal_error_from_transcript(jsonl: &str) -> Option<String> {
-    let mut last_error = None;
-    for line in jsonl.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Defensive parsing: skip malformed lines without failing
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        // Look for message.stopReason == "error" and message.errorMessage present
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        let Some(stop_reason) = message.get("stopReason").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if stop_reason != "error" {
-            continue;
-        }
-        let Some(error_message) = message.get("errorMessage").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if !error_message.is_empty() {
-            last_error = Some(error_message.to_string());
-        }
-    }
-    last_error
-}
-
-/// Resolve plan content with backend transcript error fallback.
-///
-/// First attempts the standard `metadata::resolve_plan_content` fallback chain
-/// (plan file → stdout → stderr). If all sources are empty and a transcript is
-/// provided, checks for a terminal error in the backend transcript and returns
-/// that as a descriptive error instead of the generic "no output" message.
+/// Resolve plan content from the plan file, then stdout and stderr.
 ///
 /// # Errors
 ///
-/// Returns an error if no source produced content. When a transcript with a
-/// terminal error is available, the error message includes the backend's error
-/// (e.g., `context_length_exceeded`).
+/// Returns an error if no source produced content.
 pub fn resolve_generated_plan_content(
     plan_path: &Path,
     stdout: &str,
     stderr: &str,
-    transcript: Option<&str>,
 ) -> Result<String> {
-    match crate::metadata::resolve_plan_content(plan_path, stdout, stderr) {
-        Ok(content) => Ok(content),
-        Err(original_err) => {
-            // Original error means plan/stdout/stderr were all empty.
-            // Try to extract a more useful error from the transcript.
-            if let Some(text) = transcript
-                && let Some(backend_error) = extract_terminal_error_from_transcript(text)
-            {
-                return Err(crate::error::CruiseError::Other(format!(
-                    "planning backend failed after producing no plan output: {backend_error}"
-                )));
-            }
-            Err(original_err)
-        }
-    }
-}
-
-/// Backend transcript for `session_id`, when the backend publishes one that
-/// records terminal errors. Always `None` today.
-///
-/// - `sdk: jcode` writes `<jcode home>/sessions/<session_id>.json`, but that
-///   document holds only the session's messages. A turn killed by a provider
-///   error (429, `context_length_exceeded`, a transport failure) leaves no error
-///   field there — not even the partial assistant reply (verified against jcode
-///   0.81.2). jcode reports such failures on its NDJSON `error` event instead,
-///   which the `jcode` backend already turns into the run's own error, so
-///   reading the document would add nothing and cost a file read on every
-///   failed planning turn.
-/// - `sdk: claude` transcripts are not read by cruise.
-///
-/// The two consumers (`ensure_plan_persisted` and
-/// [`resolve_generated_plan_content`], the latter also called by the `WebUI`) treat
-/// `None` as "no extra diagnosis available" and keep their generic message.
-#[must_use]
-pub fn read_sdk_transcript(_working_dir: Option<&Path>, _session_id: &str) -> Option<String> {
-    None
+    crate::metadata::resolve_plan_content(plan_path, stdout, stderr)
 }
 
 #[cfg(test)]
@@ -983,81 +879,6 @@ mod tests {
         );
     }
 
-    // -- extract_terminal_error_from_transcript ---------------------------------
-
-    #[test]
-    fn extract_terminal_error_returns_error_from_valid_jsonl() {
-        let jsonl = r#"{"message":{"stopReason":"ok","content":"hello"}}
-{"message":{"stopReason":"error","errorMessage":"context_length_exceeded: token limit 100000 exceeded"}}"#;
-        let result = extract_terminal_error_from_transcript(jsonl);
-        assert_eq!(
-            result,
-            Some("context_length_exceeded: token limit 100000 exceeded".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_last_error_when_multiple_exist() {
-        let jsonl = r#"{"message":{"stopReason":"error","errorMessage":"first error"}}
-{"message":{"stopReason":"ok","content":"some output"}}
-{"message":{"stopReason":"error","errorMessage":"final context_length_exceeded error"}}"#;
-        let result = extract_terminal_error_from_transcript(jsonl);
-        assert_eq!(
-            result,
-            Some("final context_length_exceeded error".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_for_empty_input() {
-        assert_eq!(extract_terminal_error_from_transcript(""), None);
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_for_no_error_lines() {
-        let jsonl = r#"{"message":{"stopReason":"ok","content":"hello"}}
-{"message":{"stopReason":"ok","content":"world"}}"#;
-        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_for_malformed_json() {
-        let jsonl = r#"not valid json
-{"message":{"stopReason":"error","errorMessage":"this is valid but after bad line"}}"#;
-        // The valid line should still be parsed
-        let result = extract_terminal_error_from_transcript(jsonl);
-        assert_eq!(result, Some("this is valid but after bad line".to_string()));
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_when_error_message_missing() {
-        let jsonl = r#"{"message":{"stopReason":"error"}}"#;
-        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_when_error_message_empty() {
-        let jsonl = r#"{"message":{"stopReason":"error","errorMessage":""}}"#;
-        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
-    }
-
-    #[test]
-    fn extract_terminal_error_returns_none_when_stop_reason_not_error() {
-        let jsonl = r#"{"message":{"stopReason":"max_tokens","errorMessage":"truncated"}}"#;
-        assert_eq!(extract_terminal_error_from_transcript(jsonl), None);
-    }
-
-    #[test]
-    fn extract_terminal_error_ignores_non_message_lines() {
-        let jsonl = r#"{"type":"start","session":"abc123"}
-{"message":{"stopReason":"error","errorMessage":"API error: context_length_exceeded"}}"#;
-        let result = extract_terminal_error_from_transcript(jsonl);
-        assert_eq!(
-            result,
-            Some("API error: context_length_exceeded".to_string())
-        );
-    }
-
     // -- resolve_generated_plan_content ----------------------------------------
 
     #[test]
@@ -1067,8 +888,8 @@ mod tests {
         std::fs::write(&plan_path, "# Existing Plan\n\nSteps here.")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        let result = resolve_generated_plan_content(&plan_path, "", "", None)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result =
+            resolve_generated_plan_content(&plan_path, "", "").unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(result, "# Existing Plan\n\nSteps here.");
     }
@@ -1078,41 +899,18 @@ mod tests {
         let tmp = make_temp_dir();
         let plan_path = tmp.path().join("plan.md");
 
-        let result = resolve_generated_plan_content(&plan_path, "# Plan from stdout", "", None)
+        let result = resolve_generated_plan_content(&plan_path, "# Plan from stdout", "")
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(result, "# Plan from stdout");
     }
 
     #[test]
-    fn resolve_generated_plan_content_falls_back_to_transcript_error_when_all_empty() {
-        let tmp = make_temp_dir();
-        let plan_path = tmp.path().join("plan.md");
-        let transcript = r#"{"message":{"stopReason":"error","errorMessage":"API error: context_length_exceeded: token limit 200000 exceeded"}}"#;
-
-        let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
-
-        assert!(result.is_err(), "expected Err, got: {result:?}");
-        let Err(err) = result else {
-            panic!("expected Err, got: {result:?}")
-        };
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("context_length_exceeded"),
-            "error should mention context_length_exceeded: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("planning backend failed"),
-            "error should identify the source: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_generated_plan_content_preserves_original_error_when_no_transcript() {
+    fn resolve_generated_plan_content_preserves_original_error_when_sources_are_empty() {
         let tmp = make_temp_dir();
         let plan_path = tmp.path().join("plan.md");
 
-        let result = resolve_generated_plan_content(&plan_path, "", "", None);
+        let result = resolve_generated_plan_content(&plan_path, "", "");
 
         assert!(result.is_err(), "expected Err, got: {result:?}");
         let Err(err) = result else {
@@ -1121,69 +919,8 @@ mod tests {
         let err_msg = err.to_string();
         assert!(
             err_msg.contains("plan generation produced no output"),
-            "should keep original error when no transcript: {err_msg}"
+            "should keep original error when no sources produce content: {err_msg}"
         );
-    }
-
-    #[test]
-    fn resolve_generated_plan_content_preserves_original_error_when_transcript_has_no_error() {
-        let tmp = make_temp_dir();
-        let plan_path = tmp.path().join("plan.md");
-        let transcript = r#"{"message":{"stopReason":"ok","content":"some output"}}"#;
-
-        let result = resolve_generated_plan_content(&plan_path, "", "", Some(transcript));
-
-        assert!(result.is_err(), "expected Err, got: {result:?}");
-        let Err(err) = result else {
-            panic!("expected Err, got: {result:?}")
-        };
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("plan generation produced no output"),
-            "should keep original error when transcript has no error: {err_msg}"
-        );
-    }
-
-    // -- read_sdk_transcript ---------------------------------------------------
-
-    /// Neither backend publishes a transcript that records terminal errors, so
-    /// the diagnostics consumers must always fall back to their own message —
-    /// including when a jcode session document for that id does exist.
-    #[test]
-    fn read_sdk_transcript_yields_no_diagnostics() {
-        let _guard = lock_process();
-        let tmp = make_temp_dir();
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        // `jcode_home()` reads `JCODE_HOME` first; clear it so the fixture
-        // lands under the fake home rather than the developer's real one.
-        let _jcode_home = crate::test_support::EnvGuard::remove("JCODE_HOME");
-        let sessions = crate::backend::jcode::jcode_home()
-            .unwrap_or_else(|e| panic!("jcode home: {e}"))
-            .join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap_or_else(|e| panic!("create sessions dir: {e}"));
-        std::fs::write(
-            sessions.join("sess-1.json"),
-            r#"{"id":"sess-1","messages":[],"status":"Closed"}"#,
-        )
-        .unwrap_or_else(|e| panic!("write session: {e}"));
-
-        assert_eq!(read_sdk_transcript(Some(tmp.path()), "sess-1"), None);
-        assert_eq!(read_sdk_transcript(None, "no-such-session"), None);
-    }
-
-    #[test]
-    fn resolve_generated_plan_content_ignores_transcript_when_content_available() {
-        let tmp = make_temp_dir();
-        let plan_path = tmp.path().join("plan.md");
-        let transcript =
-            r#"{"message":{"stopReason":"error","errorMessage":"context_length_exceeded"}}"#;
-
-        let result =
-            resolve_generated_plan_content(&plan_path, "# Plan from stdout", "", Some(transcript))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Transcript error should be ignored since we got valid content
-        assert_eq!(result, "# Plan from stdout");
     }
 
     // -- clarification guidance ------------------------------------------------
@@ -1281,60 +1018,25 @@ mod tests {
     fn ensure_plan_persisted_passes_without_plan_tools() {
         // Turns without registered plan tools (command backend, tool-less
         // planning, read-only Ask flow) are never guarded.
-        assert!(ensure_plan_persisted(None, || panic!("transcript must not be read")).is_ok());
+        assert!(ensure_plan_persisted(None).is_ok());
     }
 
     #[test]
     fn ensure_plan_persisted_passes_when_plan_was_persisted() {
         let flag = AtomicBool::new(true);
-        assert!(
-            ensure_plan_persisted(Some(&flag), || panic!("transcript must not be read")).is_ok()
-        );
+        assert!(ensure_plan_persisted(Some(&flag)).is_ok());
     }
 
     #[test]
     fn ensure_plan_persisted_errors_when_agent_never_persisted() {
         let flag = AtomicBool::new(false);
-        let result = ensure_plan_persisted(Some(&flag), || None);
+        let result = ensure_plan_persisted(Some(&flag));
         let Err(err) = result else {
             panic!("expected Err, got: {result:?}")
         };
         let msg = err.to_string();
         assert!(msg.contains("submit_plan"), "got: {msg}");
         assert!(msg.contains("without persisting"), "got: {msg}");
-    }
-
-    #[test]
-    fn ensure_plan_persisted_appends_transcript_terminal_error() {
-        let flag = AtomicBool::new(false);
-        let transcript = r#"{"message":{"stopReason":"error","errorMessage":"context_length_exceeded: token limit exceeded"}}"#;
-        let result = ensure_plan_persisted(Some(&flag), || Some(transcript.to_string()));
-        let Err(err) = result else {
-            panic!("expected Err, got: {result:?}")
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("context_length_exceeded"),
-            "should include the backend terminal error: {msg}"
-        );
-    }
-
-    #[test]
-    fn ensure_plan_persisted_omits_backend_suffix_when_transcript_has_no_error() {
-        // A transcript present but without a terminal error must still yield
-        // the plain missing-persistence error, with no backend suffix.
-        let flag = AtomicBool::new(false);
-        let transcript = r#"{"message":{"stopReason":"ok","content":"handoff note"}}"#;
-        let result = ensure_plan_persisted(Some(&flag), || Some(transcript.to_string()));
-        let Err(err) = result else {
-            panic!("expected Err, got: {result:?}")
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("without persisting"), "got: {msg}");
-        assert!(
-            !msg.contains("Backend transcript error"),
-            "must not append a backend suffix: {msg}"
-        );
     }
 
     fn formal_spec_ctx<'a>(

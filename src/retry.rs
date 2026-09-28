@@ -89,15 +89,15 @@ const PERMANENT_MARKERS: &[&str] = &[
 /// provider has no such model, so every later turn must avoid it too.
 ///
 /// Matched against [`provider_head`] only, never the appended child stderr,
-/// and deliberately narrow: `unsupported model` is excluded because it also
-/// spells a refused *parameter* (`unsupported model parameter:
-/// 'temperature'`), and `invalid model` because it is cruise's own wording for
-/// a reference the backend could not parse, which is already
-/// [`RetryClass::ModelUnusable`].
+/// Generic `unsupported model` is excluded because it can also spell a
+/// refused parameter (`unsupported model parameter: 'temperature'`). The
+/// `OpenAI` provider's more specific `unsupported OpenAI model` wording is
+/// unambiguous and may be classified as a missing model.
 const MODEL_MISSING_MARKERS: &[&str] = &[
     "model_not_supported",
     "model not supported",
     "model is not supported",
+    "unsupported openai model",
     "model_not_found",
     "model not found",
     "unknown model",
@@ -1519,6 +1519,12 @@ mod tests {
         // permanent wordings would otherwise swallow it.
         assert_eq!(
             classify_retryable("unknown model: gpt-5.6-luna"),
+            Some(RetryClass::ModelMissing)
+        );
+        assert_eq!(
+            classify_retryable(
+                "invalid_request: Unsupported OpenAI model 'does-not-exist-9'. Use /model to choose from the models available to your account."
+            ),
             Some(RetryClass::ModelMissing)
         );
         // A missing model also beats the permanent wordings it travels with:

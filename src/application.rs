@@ -1784,7 +1784,6 @@ async fn run_plan_prompt(
         &context.staged_plan_path,
         &output.output,
         &output.stderr,
-        None,
     )?;
     crate::planning::write_plan_atomically(&context.staged_plan_path, plan_content.as_bytes())
         .map_err(|error| CruiseError::Other(format!("failed to stage generated plan: {error}")))
@@ -1917,6 +1916,9 @@ fn finish_plan(
         return cancel_plan(manager, &id, sink, context);
     }
     if request.skip_planning {
+        if let Some(session_id) = context.state.plan_conversation_id.as_deref() {
+            crate::backend::jcode::cleanup_session_home(session_id)?;
+        }
         context.state.plan_conversation_id = None;
         context.state.plan_conversation_key = None;
     } else {

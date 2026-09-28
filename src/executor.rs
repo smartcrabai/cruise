@@ -1,9 +1,9 @@
 //! Prompt-execution backend abstraction.
 //!
 //! Cruise drives prompts through one of three backends: an external `command`
-//! (the classic `claude -p` path), the **`jcode` CLI** (`sdk: jcode`, also the
-//! default when a workflow names neither `sdk` nor `command`), or the
-//! **`claude` CLI** (`sdk: claude`). [`Executor`] hides that choice behind a
+//! (the classic `claude -p` path), the official **jcode Rust SDK** (`sdk: jcode`,
+//! also the default when a workflow names neither `sdk` nor `command`), or the
+//! **Claude SDK** (`sdk: claude`). [`Executor`] hides that choice behind a
 //! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
 //! `WebUI` command layer don't need to branch on the backend.
 //!
@@ -11,10 +11,8 @@
 //! fields as a plain model reference:
 //!
 //! - `command` — the model name substituted into the command line.
-//! - `sdk: jcode` — a `provider/model[:effort]` reference in jcode's own
-//!   provider/model namespace, driven as a `jcode run --ndjson` subprocess in
-//!   jcode's own home -- see [`run_jcode`] and
-//!   [`crate::backend::jcode`].
+//! - `sdk: jcode` — a `provider/model[:effort]` reference driven through
+//!   `jcode-sdk`; see [`run_jcode`] and [`crate::backend::jcode`].
 //! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
 //!   [`run_claude`] and [`crate::backend::claude`].
@@ -33,7 +31,6 @@ use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
-use crate::tool_bridge::ToolBridge;
 
 /// Callback invoked when an SDK backend reports its session identifier.
 pub type SessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
@@ -94,8 +91,8 @@ pub struct PromptOutcome {
 pub enum Executor {
     /// Spawn an external command (the classic `claude -p` path).
     Command { command: Vec<String> },
-    /// Drive the `jcode` CLI as an NDJSON subprocess (`sdk: jcode`) in jcode's
-    /// own home, exposing cruise's tools over the [`ToolBridge`]. See
+    /// Drive `jcode` through the official Rust SDK (`sdk: jcode`) in an
+    /// isolated runtime, exposing cruise's tools as session tools. See
     /// [`run_jcode`].
     Jcode,
     /// Drive the `claude` CLI in-process through `claude-agent-sdk`
@@ -261,8 +258,8 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 /// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (the
 /// SDK backends emit token-level deltas; `StreamCallbacks::on_stdout` is
 /// line-oriented like the command backend). Cancellation returns
-/// `Err(Interrupted)` only after the backend closes its channel following
-/// subprocess shutdown, so a successor cannot overlap an interrupted attempt.
+/// `Err(Interrupted)` only after the backend worker closes its stream following
+/// runtime shutdown, so a successor cannot overlap an interrupted attempt.
 async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
@@ -537,15 +534,12 @@ async fn run_with_fallback(
     }
 }
 
-/// `Jcode`-backend execution: run the prompt as a `jcode run --ndjson`
-/// subprocess ([`crate::backend::jcode`]) in jcode's own home.
+/// Run one prompt through the jcode SDK backend ([`crate::backend::jcode`]).
 ///
-/// jcode has no in-process tool registration, so cruise's tools are served to
-/// it over a per-run Unix socket by a [`ToolBridge`]: the `cruise mcp-bridge`
-/// server jcode spawns relays every call back here, which is what keeps the
-/// handlers' in-process state (the terminal `ask_user` prompt, the plan-persist
-/// flag, the title / PR-metadata stores) authoritative. The bridge is started
-/// once for the whole run, including its retries, and torn down on return.
+/// The SDK is synchronous; its backend worker owns a private runtime and
+/// dispatches custom session tools to the in-process handlers supplied by the
+/// caller. The runtime inherits this prompt's environment so workflow variables
+/// and commit-guard settings reach jcode's bash child.
 ///
 /// Retryable failures go through [`run_with_fallback`], so a rate limit backs
 /// off on the same model — and a 4xx (except 429), 5xx or network failure moves
@@ -556,9 +550,7 @@ async fn run_with_fallback(
 /// aborted attempt's session id: re-sending the same prompt into a
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    jcode::preflight(None, req.working_dir, req.env, req.on_notice)?;
-    let bridge = ToolBridge::start(req.tools.clone())?;
-
+    jcode::check_runtime_version()?;
     run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
         let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
         let config = JcodeRunnerConfig {
@@ -567,10 +559,17 @@ async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
             effort,
             cwd: req.working_dir.map(Path::to_path_buf),
             resume_session_id: req.resume.clone(),
-            tool_socket: bridge.socket_path().to_path_buf(),
+            tools: req.tools.clone(),
             env: req.env.clone(),
             cancel: req.cancel_token.cloned(),
-            binary: None,
+            keep_session_home: req.resume.is_some()
+                || req.on_session_id.is_some()
+                || req.tools.iter().any(|tool| {
+                    matches!(
+                        tool.name.as_str(),
+                        crate::sdk_tools::SUBMIT_PLAN_TOOL | crate::sdk_tools::UPDATE_PLAN_TOOL
+                    )
+                }),
         };
         Ok(stream_jcode_agent(config, req.prompt.to_string()))
     })

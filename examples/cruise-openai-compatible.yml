@@ -44,9 +44,8 @@ jobs:
           # a `[providers.<name>]` table in the jcode home the action pins
           # for the job (JCODE_HOME under $RUNNER_TEMP), written via
           # `jcode provider add` (see docs/github-actions.md#providers).
-          # `default: true` makes the profile jcode's startup default
-          # provider/model -- required here because a profile is only
-          # reachable as the default, so `model`/`plan_model` stay empty.
+          # This example marks the generated profile as jcode's startup
+          # default and leaves model inputs empty.
           providers: |
             {
               "my-gateway": {

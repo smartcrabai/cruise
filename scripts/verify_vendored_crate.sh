@@ -1,24 +1,18 @@
 #!/usr/bin/env bash
-# Verify vendor/claude-agent-sdk against the published `seher-claude-agent-sdk`
-# .crate, and prove that [patch.crates-io] is what local/dist builds resolve
-# while `cargo publish` still resolves crates.io.
+# Verify vendor/claude-agent-sdk against the upstream `seher-claude-agent-sdk`
+# .crate archive and prove that [patch.crates-io] makes local builds resolve
+# the checked-in source copy.
 #
-# The vendored tree must stay source-identical to the published crate, and
-# `cargo install cruise` must keep working. Neither was machine-checked: the
-# Cargo.lock `checksum` that pinned the registry tarball disappears from the
-# root lockfile once the patch applies.
+# The vendored tree must stay source-identical to the upstream archive. The
+# Cargo.lock registry checksum disappears from the root lockfile once the
+# patch applies, so this script checks the archive checksum separately.
 #
 # Checks:
-#   1. the [dependencies] pin, the [patch.crates-io] path and the vendored
-#      package version agree, and cargo resolves the crate through the path
-#      (a version bump without re-extracting vendor/ leaves the patch unused,
-#      which cargo reports only as a warning)
-#   2. the published .crate matches the sparse-index checksum
-#   3. the vendored tree is byte-identical to that .crate, except for the files
-#      added on purpose (LICENSE, README.md)
-#   4. `cargo package` drops [patch], keeps the `=<version>` crates.io pin, and
-#      ships no vendor/ sources; the packaged lockfile still pins the checksum
-#      verified in step 2
+#   1. the [dependencies] pin, the [patch.crates-io] path and vendored package
+#      version agree, and cargo resolves the crate through the path
+#   2. the upstream .crate matches the sparse-index checksum
+#   3. the vendored tree is byte-identical to that archive, except for the
+#      files added on purpose (LICENSE, README.md)
 #
 # Requirements: cargo, curl, jq, tar, diff, sha256sum or shasum
 # Usage: bash scripts/verify_vendored_crate.sh
@@ -46,8 +40,8 @@ sha256() {
 }
 
 # Value of `<key> = "<value>"` inside a TOML table, without pulling in a parser.
-# The vendored manifest and the packaged manifest/lockfile are cargo-normalized,
-# so the one-key-per-line layout is stable.
+# The vendored manifest is cargo-normalized, so the one-key-per-line layout
+# is stable.
 toml_value() {
   local table="$1" key="$2"
   awk -v table="$table" -v key="$key" '
@@ -94,32 +88,7 @@ for file in "${ADDED_FILES[@]}"; do
     || die "$VENDOR_DIR/$file is missing (Apache-2.0 license text and provenance note are required)"
 done
 diff -r "$tmp/$CRATE-$version" "$tmp/vendored" \
-  || die "$VENDOR_DIR is not byte-identical to the published .crate (the vendored source must stay unmodified)"
+  || die "$VENDOR_DIR is not byte-identical to the upstream .crate (the vendored source must stay unmodified)"
 
-cruise_version="$(cargo metadata --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.name == "cruise") | .version')"
-cargo package --quiet --no-verify --allow-dirty -p cruise
-packaged="target/package/cruise-$cruise_version.crate"
 
-manifest="$(tar xzOf "$packaged" "cruise-$cruise_version/Cargo.toml")"
-if grep -q '^\[patch' <<< "$manifest"; then
-  die "the packaged manifest still carries a [patch] table"
-fi
-packaged_pin="$(toml_value "[dependencies.$CRATE]" version <<< "$manifest")"
-[[ "$packaged_pin" == "=$version" ]] \
-  || die "the packaged manifest requests $CRATE '${packaged_pin:-<missing>}', expected '=$version' from crates.io"
-
-lock="$(tar xzOf "$packaged" "cruise-$cruise_version/Cargo.lock")"
-packaged_cksum="$(awk -v name="name = \"$CRATE\"" '
-  $0 == name { inside = 1; next }
-  /^\[\[package\]\]/ { inside = 0 }
-  inside && $1 == "checksum" { gsub(/"/, "", $3); print $3; exit }
-' <<< "$lock")"
-[[ "$packaged_cksum" == "$expected_cksum" ]] \
-  || die "the packaged lockfile pins $CRATE checksum '${packaged_cksum:-<missing>}', expected $expected_cksum"
-
-if tar tzf "$packaged" | grep -q '/vendor/'; then
-  die "the packaged .crate ships vendor/ sources (Apache-2.0 code under the MIT package license)"
-fi
-
-echo "OK: $VENDOR_DIR matches $CRATE $version ($expected_cksum), patch applied, publish resolves crates.io"
+echo "OK: $VENDOR_DIR matches upstream $CRATE $version ($expected_cksum), and [patch.crates-io] resolves to the checked-in copy"

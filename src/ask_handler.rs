@@ -5,11 +5,9 @@
 //! - CLI: [`CliAskHandler`] using the reedline multiline prompt.
 //! - `WebUI`: a server-rendered browser handler using events + a channel.
 //!
-//! The handler is invoked from inside a [`crate::sdk_tools`] tool closure, which
-//! runs on a backend worker thread: the `claude-agent-sdk` MCP tool dispatcher,
-//! or the per-connection thread the [`crate::tool_bridge`] serves `jcode`'s
-//! calls on. Implementations may therefore block (read stdin, wait on a
-//! channel) — they are never called on the async runtime thread.
+//! The handler is invoked from inside a [`crate::sdk_tools`] tool closure on an
+//! SDK backend worker thread. Implementations may therefore block (read stdin,
+//! wait on a channel) — they are never called on the async runtime thread.
 
 use crate::cancellation::CancellationToken;
 use crate::error::Result;

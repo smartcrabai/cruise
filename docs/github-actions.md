@@ -104,7 +104,7 @@ Multiple mentions on the same issue queue rather than race each other: a `plan` 
 
 The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't spin up a runner); the action independently re-checks the trigger phrase with a strict word-boundary match, verifies the commenter's permissions, and rejects PR comments before doing anything, so it is safe even if the pre-filter is removed.
 
-**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`; cruise requires jcode v0.82.0 or newer and enforces that floor at run time). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
+**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`; cruise requires jcode v0.88.0 or newer and enforces that floor at run time). The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
 
 ## Providers
 
@@ -146,65 +146,60 @@ Each key of `providers` is a profile name (ASCII letters, numbers, `-` and `_`, 
 
 Any key not on this list is rejected with an error naming it -- a typo would otherwise be silently dropped. Value domains (URL scheme, the `auth`/`auth_header` pairing, ...) are validated by `jcode provider add` itself.
 
-A profile is reachable **only as jcode's startup default**, and that is a cruise limitation rather than a jcode one: jcode selects a profile with `jcode run --provider-profile <name>`, but cruise only ever emits `--provider`/`--model`, which name jcode's built-in providers. So set `default: true` on the profile and leave the `model`/`plan_model` inputs empty -- and note that one run can therefore reach only one profile, which rules out separate plan and implement profiles in a single workflow.
 
 ### Built-in providers
 
-| Provider | jcode provider id | Env var(s) | Example model reference |
-|---|---|---|---|
-| Anthropic | `anthropic-api` | `ANTHROPIC_API_KEY` (dedicated `anthropic_api_key` input) | `anthropic-api/claude-sonnet-4-6` |
-| OpenAI | `openai-api` | `OPENAI_API_KEY` (dedicated `openai_api_key` input) | `openai-api/gpt-5.5` |
-| Kimi for Coding | `kimi` | `KIMI_API_KEY` (via `env`) | `kimi/kimi-for-coding` -- see the [inline example](#kimi-for-coding-example) below |
-| Google Gemini | `gemini-api` | `GEMINI_API_KEY` (via `env`) | `gemini-api/gemini-3-pro-preview` |
-| Groq | `groq` | `GROQ_API_KEY` (via `env`) | `groq/llama-3.3-70b-versatile` |
-| Mistral AI | `mistral` | `MISTRAL_API_KEY` (via `env`) | `mistral/mistral-large-latest` |
-| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` (via `env`) | `deepseek/deepseek-chat` |
-| xAI (Grok) | `xai` | `XAI_API_KEY` (via `env`) | `xai/grok-4` |
-| Moonshot AI | `moonshot-ai` | `MOONSHOT_API_KEY` (via `env`) | `moonshot-ai/kimi-k2-turbo-preview` |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` (via `env`) | `openrouter/anthropic/claude-sonnet-4-6` |
+| Provider | jcode CLI credential provider | Env var(s) |
+|---|---|---|
+| Anthropic | `anthropic-api` | `ANTHROPIC_API_KEY` (dedicated `anthropic_api_key` input) |
+| OpenAI | `openai-api` | `OPENAI_API_KEY` (dedicated `openai_api_key` input) |
+| Kimi for Coding | `kimi` | `KIMI_API_KEY` (via `env`) |
+| Google Gemini | `gemini-api` | `GEMINI_API_KEY` (via `env`) |
+| Groq | `groq` | `GROQ_API_KEY` (via `env`) |
+| Mistral AI | `mistral` | `MISTRAL_API_KEY` (via `env`) |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` (via `env`) |
+| xAI (Grok) | `xai` | `XAI_API_KEY` (via `env`) |
+| Moonshot AI | `moonshot-ai` | `MOONSHOT_API_KEY` (via `env`) |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` (via `env`) |
 
-Model IDs move fast -- treat the examples above as illustrative and check the provider's own docs (or `jcode model list` / `jcode auth status`) if a reference stops resolving. More providers work the same way with no extra config at all -- `jcode login --help` lists every id `--provider` accepts (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`). Use the `providers`/`provider_api_keys` inputs above for an endpoint jcode doesn't already know about, such as a self-hosted OpenAI-compatible gateway -- see [`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml) for a full drop-in workflow.
+The identifiers in this table are for CLI credential provisioning; `jcode login --help` lists accepted IDs. Custom endpoint profiles are provisioned through `providers` / `provider_api_keys` with `jcode provider add`.
 
 ### Kimi for Coding example
 
-[Kimi for Coding](https://api.kimi.com/coding/) is a jcode built-in provider (id `kimi`) that needs nothing but its API key. See [`examples/cruise-kimi.yml`](../examples/cruise-kimi.yml) for the full drop-in workflow; the cruise-specific part is just:
+[Kimi for Coding](https://api.kimi.com/coding/) uses the jcode CLI credential provider `kimi`, authenticated with `KIMI_API_KEY`. The example provisions that credential through the action and leaves model selection to the SDK default; it does not specify a model route.
 
 ```yaml
 - uses: smartcrabai/cruise@v1
   with:
-    model: kimi/kimi-for-coding
-    plan_model: kimi/kimi-for-coding
+    # This example provisions credentials only; model inputs are omitted.
     env: |
       KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
 ```
 
-(`kimi-for-coding` is a virtual model id the Kimi backend remaps to its latest coding model.)
 
 ## sdk: jcode -- how execution works
 
-The action no longer forces a backend: it exports no `CRUISE_SDK`, so cruise's own resolution decides. A config that names neither `sdk:` nor `command:` -- including the default config this action generates -- runs on `sdk: jcode`, which is what everything below provisions. A repository config that sets `command:` or `sdk: claude` still wins, and nothing here installs or authenticates that CLI: supply it yourself (an extra install step, plus `env` for its credentials) or drop the field from the config.
+The action does not set `CRUISE_SDK`, so Cruise resolves the backend from the repository config. The generated default config omits `sdk`, selecting Cruise's default `sdk: jcode` backend. A repository config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
 
-This action installs both binaries itself: cruise (`cruise_version`) and the `jcode` CLI (`jcode_version`). cruise itself has no jcode home of its own -- it uses whatever `JCODE_HOME` the environment provides, falling back to `~/.jcode` -- so the action exports `JCODE_HOME` under the runner's temp dir (`$RUNNER_TEMP/cruise/jcode-home`) and provisions credentials there: the dedicated `anthropic_api_key`/`openai_api_key` inputs become jcode `anthropic-api`/`openai-api` logins (`jcode login <provider>`, key on stdin), and every `providers` entry becomes a `[providers.<name>]` profile via `jcode provider add`. Every cruise and `jcode` invocation in the job inherits that variable, so none of them reads or writes a persistent self-hosted runner's `~/.jcode`; `jcode auth status` reports what ended up there. jcode's own installer is isolated too: the upstream installer writes launcher state and shell startup files below `$HOME` even when `JCODE_INSTALL_DIR` is set, so the install step runs it with `HOME`, `XDG_CONFIG_HOME`, and `JCODE_HOME` all pointed under `$RUNNER_TEMP/jcode-install-home`, leaving the runner user's real home and shell configuration untouched.
+This action installs the `cruise` binary (`cruise_version`) and the `jcode` CLI (`jcode_version`). It uses the CLI for setup and credential provisioning: `anthropic_api_key` and `openai_api_key` are stored with `jcode login`, and each `providers` entry is written with `jcode provider add`. The action pins the source `JCODE_HOME` under `$RUNNER_TEMP/cruise/jcode-home`.
 
-- **Backend** is cruise's default `sdk: jcode` unless a repository config overrides it (see above).
-- **Authentication** comes from that home plus the environment: the stored dedicated-key and profile credentials, and any provider API key passed through `env` (`KIMI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, ...), which jcode picks up directly. The gate step fails clearly when `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, and `env` are all empty -- an all-`no_auth` `providers` config legitimately needs no key.
-- **OpenAI service tier** defaults to `off` for child jcode: if neither the workflow's `env:` nor the parent process environment defines `JCODE_OPENAI_SERVICE_TIER`, cruise injects `JCODE_OPENAI_SERVICE_TIER=off`. An explicitly present key is respected as-is; the key's presence, not a particular value, controls this override.
-- **Cruise MCP registration** uses a fixed `timeout_secs = 86,400` (24 hours) for `initialize`, `tools/list`, and `tools/call` requests. If a step's `timeout:` is shorter, that step timeout wins.
-- **Model selection** (`model`/`plan_model` inputs, mapped to `CRUISE_MODEL`/`CRUISE_PLAN_MODEL`) uses jcode's model-reference format:
-  - `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- selects that provider and model explicitly; `provider` is one of the ids `jcode login --help` lists, and `effort` is one of `low|medium|high|xhigh|max` (plus the `minimal`/`min`/`med` aliases and the numeric `1`..`4` spellings; tierless suffixes `off|none|0|5` are also recognized and stripped from the model id without selecting an effort tier; ignored by models without reasoning effort).
-  - `"model"` (no `/`) -- the provider is left to jcode's own resolution.
-  - Empty (default) -- whatever provider/model the job's jcode home has configured as its default is used (see below).
-- **Custom endpoints / providers**: the `providers`/`provider_api_keys` inputs generate jcode `[providers.<name>]` profiles for you -- see [Providers](#providers) above, including a worked example ([`examples/cruise-openai-compatible.yml`](../examples/cruise-openai-compatible.yml)). A profile is reachable only as jcode's startup default (cruise never emits jcode's `--provider-profile`), so set `default: true` on it and leave `model`/`plan_model` empty -- one run can reach only one profile.
+For SDK execution, Cruise creates a private session home from that source home and inherits its credentials and config. Plan homes persist until the Cruise session is deleted or cleaned; ordinary non-resumable prompt homes are removed after the turn. Pre-session homes left by a crash are pruned after 24 hours, stopping the owned daemon first. The action's temporary source home keeps provisioned credentials away from a persistent runner home. The separate jcode installer home is also isolated under `$RUNNER_TEMP`, including the installer process's `HOME` and shell configuration.
 
-### Zero-config default: the provisioned home picks the model
+- **Backend** is Cruise's default `sdk: jcode` unless a repository config overrides it.
+- **Authentication** can come from the dedicated key inputs, `providers` / `provider_api_keys`, or provider keys supplied through `env`. The action gate fails if all supported credential inputs are empty; a `no_auth` profile does not require a key.
+- **OpenAI service tier** defaults to `off` when neither the workflow nor process environment defines `JCODE_OPENAI_SERVICE_TIER`; an explicit value is respected.
+- **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. The jcode SDK accepts `provider/model[:effort]`, a bare model, or no model. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](../README.md#sdk-mode).
+- **Custom providers** are provisioned as jcode profiles through the CLI; see [Providers](#providers) for their input schema and credentials.
 
-The default (no `model`/`plan_model` input) is whatever provider/model the job's jcode home resolves to -- with a dedicated `anthropic_api_key`/`openai_api_key` input and no `default: true` profile, jcode selects among the authenticated providers itself. To make this work without any repository configuration, when `config` is empty **and** the repository has no config of its own, this action generates a default config itself (see [config resolution](#config-resolution) below) providing a minimal `write-tests -> implement` workflow that sets neither `sdk` (omitting it selects cruise's default `jcode` backend) nor `model`/`plan_model`.
+### Zero-config default
+
+When `config` is empty and the repository has no config, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Cruise selects its default `sdk: jcode` backend; no model is specified by the generated config.
 
 ## config resolution
 
 - **`config` input set** -- resolved to an absolute path and exported as `CRUISE_CONFIG`. Used by the `run`/`plan`/`fix` commands.
 - **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or any YAML file under `.cruise/`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up, including whichever backend it names (see [above](#sdk-jcode----how-execution-works)). See [`examples/repo-cruise.yaml`](../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
-- **`config` input empty, and the repository has no config of its own** -- this action generates a default config (`write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `sdk`/`model`/`plan_model`) and exports it as `CRUISE_CONFIG` -- omitting `sdk` selects cruise's default `jcode` backend. See [above](#zero-config-default-the-provisioned-home-picks-the-model) for why the model fields are omitted.
+- **`config` input empty, and the repository has no config of its own** -- this action generates a default config (`write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `sdk`/`model`/`plan_model`) and exports it as `CRUISE_CONFIG`; omitting `sdk` selects Cruise's default `jcode` backend. See [Zero-config default](#zero-config-default).
 - **`exec` always uses its own generated config**, regardless of `config` or the two cases above: a minimal config with a single `implement` step whose prompt is `"{input}"` (also without `sdk`/`model`/`plan_model`). `cruise exec` binds the whole plan text to `{input}` and never runs a planning step (`plan.md` stays empty), so a `{plan}`-based config would silently receive an empty prompt.
 - The action always exports `CRUISE_FORCE_EXEC=false`, so a repository's `force_exec: true` never changes the action's explicit `run`/`plan`/`fix` command flow.
 
@@ -284,9 +279,9 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `token_exchange_url` | `https://cruise-token-exchange.smartcrab.ai/token` | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
 | `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) to trigger a run. For the `issues` event, matching uses the issue title and body concatenated, so a phrase in the title is effective. |
 | `cruise_version` | `latest` | cruise release to install (`latest` or a tag like `v0.2.0`). Requires v0.2.0+; the install step rejects an older binary with a clear error. |
-| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.82.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.82.0 or newer regardless. |
+| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.88.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.88.0 or newer regardless. |
 | `config` | *(empty)* | Path to a cruise workflow config YAML in your repo, used by `run`/`plan`/`fix` (sets `CRUISE_CONFIG`). Empty lets cruise's own resolver pick a config from the checkout, or its built-in default. No effect on `exec`. |
-| `model` | *(empty)* | Overrides `CRUISE_MODEL`, in jcode's model-reference format: `provider/model[:effort]` (`provider` is a jcode provider id; `effort` is one of `low|medium|high|xhigh|max`), a bare model id, or empty for the jcode home's configured default. |
+| `model` | *(empty)* | Overrides `CRUISE_MODEL`; for `sdk: jcode`, use `provider/model[:effort]`, a bare model, or leave empty. The jcode SDK resolves the provider route. |
 | `plan_model` | *(empty)* | Overrides `CRUISE_PLAN_MODEL` (the `plan`/`fix` commands' planning step), same format as `model`. |
 | `providers` | *(empty)* | JSON object keyed by jcode provider-profile name. Each entry requires `base_url` and `model`; optional `context_window`, `auth`, `auth_header`, `provider_routing`, `no_auth`, `default`. Each entry becomes a `[providers.<name>]` profile via `jcode provider add`. See [Providers](#providers) for the full schema. |
 | `provider_api_keys` | *(empty)* | One `profile-name=API key` per line for `providers`; blank/comment lines ignored and the first `=` separates the key. Each key is handed to `jcode provider add --api-key-stdin`. Required for every `providers` entry that isn't `no_auth: true`; may be left empty when every entry is `no_auth`. |
@@ -361,7 +356,7 @@ The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named 
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
-- **Model resolution errors.** With no `config` input and no repository config, this action already generates a `sdk`/`model`/`plan_model`-free default, so cruise runs on the default `jcode` backend with the provisioned home's default provider/model (see [zero-config default](#zero-config-default-the-provisioned-home-picks-the-model)). If you *do* have your own `config` and see this, set the `model`/`plan_model` inputs explicitly in jcode's reference format, or drop your config's `model:`/`plan_model:` to use the home default.
+- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer and that its SDK has access to a configured provider and model. This action's generated default does not set `model`/`plan_model`; set the inputs or your workflow config if a specific model reference is required.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).
 

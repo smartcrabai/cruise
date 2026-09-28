@@ -331,6 +331,9 @@ impl SessionState {
         self.phase = SessionPhase::Planned;
         self.awaiting_input = false;
         self.pending_ask_question = None;
+        if let Some(session_id) = self.plan_conversation_id.as_deref() {
+            crate::backend::jcode::cleanup_session_home(session_id)?;
+        }
         self.plan_conversation_id = None;
         self.plan_conversation_key = None;
         self.plan_error = None;
@@ -852,6 +855,11 @@ impl SessionManager {
         validate_session_id(id)?;
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
+            if let Ok(state) = self.load(id)
+                && let Some(jcode_session_id) = state.plan_conversation_id.as_deref()
+            {
+                crate::backend::jcode::cleanup_session_home(jcode_session_id)?;
+            }
             std::fs::remove_dir_all(&session_dir)?;
         }
         Ok(())

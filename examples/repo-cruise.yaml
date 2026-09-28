@@ -18,14 +18,11 @@
 # `cruise plan`/`cruise run` on a workstation, against your own jcode
 # credentials (`jcode login <provider>`).
 
-# `model`/`plan_model` are left unset so the jcode home's configured default
-# provider/model is used -- the recommended default when this config is used
-# from the Action (see "Zero-config default" in ../docs/github-actions.md).
-# Uncomment to pin a specific model instead (jcode model references,
-# "provider/model[:effort]" -- see
-# ../docs/github-actions.md#sdk-jcode----how-execution-works):
-# model: anthropic-api/claude-sonnet-4-6
-# plan_model: anthropic-api/claude-sonnet-4-6
+# `model`/`plan_model` are left unset so the backend can use its configured defaults.
+# To pin a model, replace these placeholders with references supported by your
+# jcode SDK setup (`provider/model[:effort]` or a bare model):
+# model: provider/model[:effort]
+# plan_model: provider/model[:effort]
 
 steps:
   # Planning already produced {plan} (cruise run) before this step runs.

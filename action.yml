@@ -2,8 +2,8 @@ name: "Cruise"
 description: >-
   Trigger the cruise coding agent from a GitHub Issue (@cruise plan / run /
   exec / fix). Runs cruise's plan -> implement -> PR workflow (or a direct
-  exec push) inside GitHub Actions, driving the jcode CLI through cruise's
-  default backend, and reports progress back as a comment.
+  exec push) inside GitHub Actions using cruise's default jcode SDK backend,
+  and reports progress back as a comment.
 author: "smartcrabai"
 
 branding:
@@ -66,10 +66,9 @@ inputs:
   jcode_version:
     description: >-
       jcode release to install, using jcode's own installer. "latest"
-      (default) or a specific tag such as "v0.82.0". cruise drives this
-      binary for `sdk: jcode` and enforces its own verified minimum jcode
-      version at run time. Ignored when a `jcode` is already on PATH (e.g. on
-      a self-hosted runner that provides one).
+      (default) or a specific tag such as "v0.88.0". `sdk: jcode` requires
+      jcode v0.88.0 or later; cruise enforces this floor at run time. Ignored
+      when a `jcode` is already on PATH (e.g. on a self-hosted runner).
     required: false
     default: "latest"
   config:

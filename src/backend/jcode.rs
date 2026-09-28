@@ -1,142 +1,52 @@
-//! `sdk: jcode` backend: drive the `jcode` CLI as an NDJSON subprocess.
+//! `sdk: jcode` backend, implemented through the official Rust SDK.
 //!
-//! One prompt is one `jcode run --ndjson` child. [`stream_agent`] runs it on a
-//! dedicated thread and reports progress as [`StreamChunk`]s, so `executor.rs`
-//! folds this backend's output exactly like any other.
+//! Each prompt attempt launches an isolated jcode runtime with that prompt's
+//! environment. Its session home is private to the Cruise conversation, so
+//! concurrent conversations never contend for the user's daemon socket or
+//! mutable home files. Session homes live below the effective ambient
+//! `JCODE_HOME` (or `~/.jcode`) and are reused by session id for follow-up turns.
 //!
-//! Custom tools cannot be registered in-process -- jcode's harness API has no
-//! such request -- so cruise's tools reach the model through a stdio MCP server:
-//! [`ensure_mcp_registration`] writes a fixed `mcp.json` entry pointing at
-//! `cruise mcp-bridge` with a long per-request timeout for interactive prompts,
-//! and the per-run socket path travels to that child in the `jcode` process
-//! environment (see [`crate::tool_bridge`]).
-//!
-//! ## The jcode home cruise shares
-//!
-//! jcode keeps credentials, `config.toml`, sessions, logs and its global
-//! `mcp.json` under its home: `$JCODE_HOME` when the environment sets it, else
-//! `~/.jcode`. Cruise runs against that same home -- [`jcode_home`] mirrors
-//! jcode's own resolution -- and never sets `JCODE_HOME` on a child, so a run
-//! authenticates with the user's own `jcode login` and exporting `JCODE_HOME`
-//! before starting cruise relocates cruise and jcode together.
-//!
-//! Sharing the home cuts both ways, deliberately: cruise's `mcp-bridge`
-//! registration ([`ensure_mcp_registration`]) is visible to the user's own
-//! interactive jcode sessions, and the MCP servers the user registered there
-//! load into cruise runs.
-//!
-//! [`build_command`] defaults `JCODE_OPENAI_SERVICE_TIER` to `off` unless the
-//! workflow `env:` or cruise's environment names a tier: jcode's own default is
-//! priority processing, which an unattended batch run should not pay for. In
-//! the shared home that default also overrides an `openai_service_tier` the
-//! user's own `config.toml` sets -- an interactive preference must not silently
-//! price every cruise run.
-//!
-//! The one MCP source outside that home is the run directory: jcode also reads
-//! `.jcode/mcp.json` / `.mcp.json` / `.claude/mcp.json` from it, last-wins over
-//! the home, so a repository can shadow cruise's registration.
-//! [`check_project_mcp_config`] is the gate for that.
+//! The SDK is blocking and thread-based. [`stream_agent`] runs it on a worker
+//! thread, subscribes before sending the prompt, and answers session-tool calls
+//! with the existing in-process handlers.
 
+use jcode_sdk::{
+    ApiEvent, JcodeClient, LaunchOptions, ModelRouteInfo, SessionToolDefinition, ToolConfiguration,
+    TurnStopReason,
+};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::time::{Duration, Instant, SystemTime};
 
-use tokio::io::AsyncBufReadExt as _;
-
-use crate::backend::effort::EffortLevel;
+use crate::backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix};
 use crate::backend::stream::{LimitError, StreamChunk};
+use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
-use crate::tool_bridge::{MCP_SERVER_NAME, TOOL_SOCKET_ENV};
 
-/// Executable name looked up on `PATH` when no explicit binary is configured.
-const JCODE_BINARY: &str = "jcode";
-
-/// Environment variable jcode reads to relocate its home. Cruise only *reads*
-/// it, to resolve the same home jcode would use.
 const JCODE_HOME_ENV: &str = "JCODE_HOME";
-
-/// Default jcode home, relative to the user's home directory, used when
-/// [`JCODE_HOME_ENV`] is unset or empty.
-const DEFAULT_JCODE_HOME_DIR: &str = ".jcode";
-
-/// Lowest `jcode` version whose `run --ndjson` event shape and MCP configuration
-/// this backend are verified against.
-///
-/// Older versions are rejected outright rather than warned about: the event
-/// names are the entire contract between cruise and jcode, and a silently
-/// mismatching stream would surface as an empty step output rather than an
-/// error. The floor also ensures the upstream per-server `timeout_secs` MCP
-/// setting is honored. There is no upper bound -- unknown events are ignored,
-/// so a newer jcode that only adds events keeps working.
-const MIN_JCODE_VERSION: (u64, u64, u64) = (0, 82, 0);
-
-/// Per-request deadline cruise asks jcode to apply to the bridge, in seconds.
-/// This is jcode's upstream `McpServerConfig::timeout_secs` field. It bounds
-/// every request on the server (`initialize`, `tools/list`, and `tools/call`),
-/// not only tool calls. `0` means unset and keeps jcode's 30-second default, so
-/// this must be a real value. The long fixed deadline gives `ask_user` time to
-/// wait for a human response.
-const MCP_REQUEST_TIMEOUT_SECS: u64 = 86_400;
-
-/// Argument that makes this binary act as the stdio MCP server.
-const MCP_BRIDGE_SUBCOMMAND: &str = "mcp-bridge";
-
-/// Suppresses jcode's auto-update check. A global flag -- `jcode --help`,
-/// `jcode run --help` and `jcode version --help` all list it -- so it is
-/// accepted on either side of the subcommand; cruise must never trigger a
-/// self-update from inside a workflow run.
-const NO_UPDATE_FLAG: &str = "--no-update";
-
-/// jcode's telemetry opt-out. Cruise sets it on every child it launches, after
-/// any workflow `env:` so a workflow cannot undo it.
 const NO_TELEMETRY_ENV: &str = "JCODE_NO_TELEMETRY";
-
-/// jcode's environment override for its `[provider].openai_service_tier`
-/// setting (`priority|flex|off`). jcode v0.84.0 defaults the setting to
-/// `"priority"` -- `OpenAI` priority processing at higher usage -- so an
-/// unattended batch run would otherwise always pay for it. The override also
-/// wins over the shared home's `config.toml`, which is deliberate: an
-/// interactive preference must not price every cruise run. Ignored by
-/// non-OpenAI providers.
 const OPENAI_SERVICE_TIER_ENV: &str = "JCODE_OPENAI_SERVICE_TIER";
-
-/// Tier cruise requests when neither the workflow `env:` nor cruise's own
-/// environment names one.
+const JCODE_PROVIDER_ENV: &str = "JCODE_PROVIDER";
+const JCODE_MODEL_ENV: &str = "JCODE_MODEL";
 const OPENAI_SERVICE_TIER_DEFAULT: &str = "off";
+const SESSION_HOME_DIR: &str = ".cruise-sdk-sessions";
+const SESSION_ID_FILE: &str = ".cruise-session-id";
+const LEGACY_CRUISE_MCP_NAME: &str = "cruise";
+const MIN_JCODE_VERSION: (u64, u64, u64) = (0, 88, 0);
+const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Provider label used for [`LimitError`] when an event names none.
-const PROVIDER_LABEL: &str = "jcode";
-
-/// Number of trailing stderr lines retained for rate-limit classification and
-/// error reporting. Matches the `sdk: claude` backend: enough for a CLI error
-/// tail, bounded so a chatty child cannot grow it without limit.
-const STDERR_TAIL_LINES: usize = 64;
-
-/// Reported when the child exits without emitting a `done` or `error` event,
-/// i.e. it died before finishing the turn (bad flag, unknown session, killed).
-/// jcode's own diagnosis is on stderr, which [`send_failure`] appends.
-const NO_RESULT_MESSAGE: &str = "the jcode CLI exited without reporting a result";
-
-/// Files jcode merges *after* the home's `mcp.json`, i.e. whose entries win.
-///
-/// Discovery is limited to the run directory itself (jcode does not walk up to
-/// parents), so scanning these three paths under the working directory covers
-/// every project-local override that can affect a cruise run.
-const PROJECT_MCP_FILES: &[&str] = &[".jcode/mcp.json", ".mcp.json", ".claude/mcp.json"];
-
-/// One `sdk: jcode` prompt run.
-///
-/// `model` is a bare jcode model id and `provider` a jcode provider id, already
-/// split out of the cruise `provider/model[:effort]` reference by
-/// [`parse_model_ref`]. `resume_session_id` continues a prior session so
-/// planning's plan/fix/ask turns share context.
-///
-/// Deliberately not `Debug`: `env` can carry provider credentials, and no
-/// caller needs to format the config.
+const STALE_SESSION_HOME_AGE: Duration = Duration::from_hours(24);
+/// One `sdk: jcode` prompt attempt. Deliberately not `Debug`: `env` may contain
+/// provider credentials.
 #[derive(Default)]
 pub(crate) struct JcodeRunnerConfig {
     pub(crate) model: Option<String>,
@@ -144,171 +54,51 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) effort: Option<EffortLevel>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) resume_session_id: Option<String>,
-    /// Unix socket the spawned `cruise mcp-bridge` should dial, published to the
-    /// child as [`TOOL_SOCKET_ENV`].
-    pub(crate) tool_socket: PathBuf,
-    /// Environment variables for the spawned `jcode` process.
+    pub(crate) tools: Vec<CruiseTool>,
     pub(crate) env: HashMap<String, String>,
-    /// Cancellation signal for the run. Firing it stops reading the child's
-    /// output and drops it, which kills the process.
     pub(crate) cancel: Option<CancellationToken>,
-    /// Binary to invoke instead of resolving [`JCODE_BINARY`] on `$PATH`. Left
-    /// `None` in production; tests point it at a stub CLI.
-    pub(crate) binary: Option<PathBuf>,
+    pub(crate) keep_session_home: bool,
 }
 
-/// The jcode home a cruise-launched `jcode` resolves to: `$JCODE_HOME` when the
-/// environment sets it to a non-empty value, else `~/.jcode` (see the module
-/// header).
-///
-/// # Errors
-///
-/// Returns an error if `JCODE_HOME` names nothing and the user's home directory
-/// cannot be determined.
-pub fn jcode_home() -> Result<PathBuf> {
-    if let Some(value) = std::env::var_os(JCODE_HOME_ENV)
-        && !value.is_empty()
-    {
-        return Ok(PathBuf::from(value));
-    }
-    let home = home::home_dir()
-        .ok_or_else(|| CruiseError::Other("cannot determine home directory".to_string()))?;
-    Ok(home.join(DEFAULT_JCODE_HOME_DIR))
-}
-
-/// The `jcode` executable to invoke: `binary` when a caller names one (tests
-/// point it at a stub CLI), else [`JCODE_BINARY`] resolved on `$PATH`.
-pub(crate) fn resolve_binary(binary: Option<&Path>) -> PathBuf {
-    binary.map_or_else(|| PathBuf::from(JCODE_BINARY), Path::to_path_buf)
-}
-
-/// A `jcode` invocation with telemetry and the auto-update check off and no
-/// stdin.
-///
-/// The short cruise probes (`version`, `auth status`) build on this; the prompt
-/// run adds its own stdio wiring in [`build_command`].
-fn jcode_command(binary: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(binary);
-    command
-        .arg(NO_UPDATE_FLAG)
+/// Check the binary floor. The SDK handshake only reports the API bridge crate
+/// version (`jcode-harness-api-bridge/...`), not the jcode binary version, so
+/// this one CLI probe has no SDK equivalent.
+pub(crate) fn check_runtime_version() -> Result<()> {
+    let output = Command::new("jcode")
+        .args(["--no-update", "version", "--json"])
         .env(NO_TELEMETRY_ENV, "1")
-        .stdin(Stdio::null());
-    command
-}
-
-/// What a failed `jcode` probe actually reported: its exit status plus the tail
-/// of its stderr.
-///
-/// Without this, jcode's own diagnosis (an unreadable `config.toml`, a rejected
-/// argument, a provider error) is dropped and the user sees only cruise's
-/// "could not read ..." wrapper, which names no cause.
-fn probe_detail(output: &std::process::Output) -> String {
-    let status = match output.status.code() {
-        Some(code) => format!("exit status {code}"),
-        None => "terminated by a signal".to_string(),
-    };
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(STDERR_TAIL_LINES);
-    if lines.is_empty() {
-        status
-    } else {
-        format!("{status}; stderr:\n{}", lines[start..].join("\n"))
-    }
-}
-
-/// Everything that must hold before a `sdk: jcode` prompt can run: a
-/// new-enough binary, cruise registered as an MCP server in jcode's home, no
-/// project-local MCP config in the run directory that would shadow it, and at
-/// least one authenticated provider.
-///
-/// `env` is the workflow's `env:`, which [`build_command`] passes to the child:
-/// the authentication gate must see the same environment the run will, since
-/// jcode also accepts credentials from variables such as `ANTHROPIC_API_KEY`.
-///
-/// Runs once per prompt (not per rate-limit attempt), so the two short `jcode`
-/// invocations it makes are negligible next to a model turn.
-///
-/// # Errors
-///
-/// Returns an error if `jcode` is missing or older than [`MIN_JCODE_VERSION`],
-/// if the home cannot be resolved or its `mcp.json` cannot be prepared, if the
-/// run directory carries an MCP server named [`MCP_SERVER_NAME`], or if no
-/// provider is authenticated.
-pub(crate) fn preflight(
-    binary: Option<&Path>,
-    working_dir: Option<&Path>,
-    env: &HashMap<String, String>,
-    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<()> {
-    let bin = resolve_binary(binary);
-    check_version(&bin)?;
-    ensure_mcp_registration(&jcode_home()?)?;
-    // jcode discovers project-local MCP config in the directory it runs in:
-    // `-C <working_dir>` when the caller gave one, cruise's own cwd otherwise
-    // (see [`build_command`]). Check whichever it will actually be.
-    let run_dir = match working_dir {
-        Some(dir) => Some(dir.to_path_buf()),
-        None => std::env::current_dir().ok(),
-    };
-    if let Some(dir) = run_dir {
-        check_project_mcp_config(&dir, on_notice)?;
-    }
-    ensure_authenticated(&bin, env)
-}
-
-/// Reject a `jcode` older than [`MIN_JCODE_VERSION`], and a missing one with a
-/// message that names the install requirement instead of a bare ENOENT.
-fn check_version(binary: &Path) -> Result<()> {
-    let output = jcode_command(binary)
-        .args(["version", "--json"])
+        .stdin(Stdio::null())
         .output()
-        .map_err(|e| {
+        .map_err(|error| {
             CruiseError::Other(format!(
-                "`sdk: jcode` needs the `jcode` CLI on PATH, but running \
-                 `{} version` failed: {e}",
-                binary.display()
-            ))
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let semver = serde_json::from_str::<serde_json::Value>(&stdout)
-        .ok()
-        .and_then(|v| {
-            v.get("semver")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .ok_or_else(|| {
-            CruiseError::Other(format!(
-                "could not read a version from `{} version --json` ({}); \
-                 `sdk: jcode` requires jcode {} or newer",
-                binary.display(),
-                probe_detail(&output),
+                "`sdk: jcode` requires jcode {} or newer, but `jcode version --json` failed: {error}",
                 format_version(MIN_JCODE_VERSION)
             ))
         })?;
-    let parsed = parse_version(&semver).ok_or_else(|| {
+    let version = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("semver")?.as_str().map(str::to_string))
+        .ok_or_else(|| {
+            CruiseError::Other(format!(
+                "could not read jcode's version from `jcode version --json`; `sdk: jcode` requires jcode {} or newer",
+                format_version(MIN_JCODE_VERSION)
+            ))
+        })?;
+    let parsed = parse_version(&version).ok_or_else(|| {
         CruiseError::Other(format!(
-            "`{} version --json` reported an unparseable version '{semver}'; \
-             `sdk: jcode` requires jcode {} or newer",
-            binary.display(),
+            "jcode version --json reported an unparseable version '{version}'; `sdk: jcode` requires jcode {} or newer",
             format_version(MIN_JCODE_VERSION)
         ))
     })?;
     if parsed < MIN_JCODE_VERSION {
         return Err(CruiseError::Other(format!(
-            "jcode {semver} is too old for `sdk: jcode`, which requires {} or newer \
-             (its `run --ndjson` event stream and the per-server `timeout_secs` MCP \
-             setting are compatibility boundaries); \
-             upgrade jcode and retry",
+            "jcode {version} is too old for `sdk: jcode`, which requires {} or newer; upgrade jcode and retry",
             format_version(MIN_JCODE_VERSION)
         )));
     }
     Ok(())
 }
 
-/// Parse the leading `major.minor.patch` of a version string, ignoring any
-/// pre-release / build suffix.
 fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     let core = text
         .trim()
@@ -316,376 +106,28 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
         .split(['-', '+', ' '])
         .next()?;
     let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().unwrap_or("0").parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
 }
 
 fn format_version((major, minor, patch): (u64, u64, u64)) -> String {
     format!("{major}.{minor}.{patch}")
 }
 
-/// The `mcpServers.cruise` entry cruise registers: this binary, run as the
-/// stdio MCP bridge with a fixed upstream per-request deadline.
-///
-/// Deliberately free of the per-run socket path. The home is shared by every
-/// cruise process on the machine, so a per-run rewrite would have
-/// concurrent runs (CLI next to `WebUI`, several repositories) overwrite each
-/// other's registration. The socket travels in the `jcode` child's environment
-/// instead, which jcode passes on to the MCP servers it spawns.
-///
-/// `timeout_secs` is fixed with the shared entry because it applies to every
-/// MCP request, not just `tools/call`, and does not identify a particular run.
-/// The 24-hour value leaves the human-facing `ask_user` tool waiting without
-/// making the registration vary between concurrent cruise processes.
-fn registration_entry(exe: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "command": exe.to_string_lossy(),
-        "args": [MCP_BRIDGE_SUBCOMMAND],
-        "timeout_secs": MCP_REQUEST_TIMEOUT_SECS,
-    })
-}
-
-/// Register `cruise mcp-bridge` in `<home>/mcp.json`, rewriting only when the
-/// entry does not exactly match the fixed registration for the running
-/// executable.
-///
-/// The entry is `current_exe`-derived, so it is rewritten when cruise moves (a
-/// reinstall, a different build) and when the CLI and the `WebUI` take turns --
-/// the `WebUI` runs prompts in-process, so `current_exe` is then `cruise`, which
-/// serves `mcp-bridge` too. It is also rewritten when a fixed registration
-/// field such as `timeout_secs` changes. Every rewrite takes an advisory lock
-/// and lands through tmp+rename, so concurrent cruise processes sharing the
-/// home can neither interleave writes nor expose a partial file, and a `jcode`
-/// child reading across a rewrite sees one whole valid entry either way.
-///
-/// # Errors
-///
-/// Returns an error if the executable path cannot be determined, if the home
-/// cannot be created, if the lock cannot be taken, or if the file cannot be
-/// read or replaced.
-fn ensure_mcp_registration(home: &Path) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let path = home.join("mcp.json");
-    let entry = registration_entry(&exe);
-    if registration_matches(&path, &entry) {
-        return Ok(());
-    }
-    // The home is jcode's, but cruise may reach it first on a machine where
-    // jcode has never run: both the lock and `mcp.json` live inside it.
-    std::fs::create_dir_all(home)?;
-    with_registration_lock(&home.join("mcp.json.cruise-lock"), || {
-        // Re-check under the lock: a concurrent cruise may have written the
-        // same entry while this process waited.
-        if registration_matches(&path, &entry) {
-            return Ok(());
-        }
-        write_registration(&path, &entry)
-    })
-}
-
-/// Whether `<home>/mcp.json` already carries exactly `entry` under
-/// `mcpServers.cruise`.
-fn registration_matches(path: &Path, entry: &serde_json::Value) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v.get("mcpServers")
-                .and_then(|s| s.get(MCP_SERVER_NAME))
-                .cloned()
-        })
-        .is_some_and(|found| &found == entry)
-}
-
-/// Write `entry` into `mcpServers.cruise`, atomically replacing the file.
-///
-/// Any other server in the file is preserved: the home is jcode's own, so it
-/// carries the MCP servers the user registered for their interactive sessions,
-/// and dropping them here would break that jcode. Anything that is not a JSON
-/// object is replaced outright -- there is nothing to merge into.
-fn write_registration(path: &Path, entry: &serde_json::Value) -> Result<()> {
-    let mut document = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    let servers = document
-        .as_object_mut()
-        .and_then(|o| {
-            o.entry("mcpServers")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-        })
-        .ok_or_else(|| {
-            CruiseError::Other(format!(
-                "{} has a non-object `mcpServers`; remove or fix the file so cruise can \
-                 register its tool bridge",
-                path.display()
-            ))
-        })?;
-    servers.insert(MCP_SERVER_NAME.to_string(), entry.clone());
-
-    // Unique tmp name so two racing processes cannot clobber one another's
-    // staging file even if the lock is somehow bypassed.
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut body = serde_json::to_string_pretty(&document)?;
-    body.push('\n');
-    std::fs::write(&tmp, body)?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e.into())
-        }
-    }
-}
-
-/// Run `f` while holding an exclusive advisory lock on `lock_path`.
-#[cfg(unix)]
-fn with_registration_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    use std::os::unix::io::AsRawFd as _;
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path)?;
-    // SAFETY: `file` owns the descriptor for the whole call, so the fd is valid
-    // for both the lock and the unlock below.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let outcome = f();
-    // SAFETY: same descriptor, still owned by `file`.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    outcome
-}
-
-#[cfg(not(unix))]
-fn with_registration_lock<T>(_lock_path: &Path, _f: impl FnOnce() -> Result<T>) -> Result<T> {
-    Err(CruiseError::Other(
-        "`sdk: jcode` needs advisory file locking to share its jcode home safely between \
-         concurrent cruise runs, which this platform does not provide"
-            .to_string(),
-    ))
-}
-
-/// A project-local MCP configuration found in the run directory.
-struct ProjectMcpConfig {
-    path: PathBuf,
-    servers: Vec<String>,
-}
-
-/// Reject or warn about project-local MCP configuration in `dir`.
-///
-/// jcode merges MCP sources last-wins with project-local files *after*
-/// the home's `mcp.json`, so a repository-provided server named
-/// [`MCP_SERVER_NAME`] replaces cruise's bridge outright and the model silently
-/// loses `ask_user` / `submit_plan` / the rest. That is a hard error. Servers
-/// under other names are additive but still load third-party processes into a
-/// cruise run, so they are reported through `on_notice`.
-///
-/// # Errors
-///
-/// Returns an error if a project-local file defines a server named
-/// [`MCP_SERVER_NAME`].
-fn check_project_mcp_config(
-    dir: &Path,
-    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<()> {
-    for found in project_mcp_configs(dir) {
-        if found.servers.iter().any(|s| s == MCP_SERVER_NAME) {
-            return Err(CruiseError::Other(format!(
-                "{} defines an MCP server named '{MCP_SERVER_NAME}', which jcode would load \
-                 instead of cruise's tool bridge (project-local MCP config wins over \
-                 the home's mcp.json), leaving the model without cruise's planning tools. \
-                 Rename that server or remove the file to run with `sdk: jcode`.",
-                found.path.display()
-            )));
-        }
-        if let Some(notice) = on_notice {
-            notice(&format!(
-                "jcode will also load project-local MCP server(s) {} from {}",
-                found.servers.join(", "),
-                found.path.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The project-local MCP files present in `dir`, with the server names each
-/// declares. Unreadable or malformed files are skipped: jcode will not honor
-/// them either, so they cannot shadow cruise's registration.
-fn project_mcp_configs(dir: &Path) -> Vec<ProjectMcpConfig> {
-    let mut found = Vec::new();
-    for relative in PROJECT_MCP_FILES {
-        let path = dir.join(relative);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let servers: Vec<String> = value
-            .get("mcpServers")
-            .and_then(serde_json::Value::as_object)
-            .map(|o| o.keys().cloned().collect())
-            .unwrap_or_default();
-        if !servers.is_empty() {
-            found.push(ProjectMcpConfig { path, servers });
-        }
-    }
-    found
-}
-
-/// Authentication state of the jcode home a run will use, as reported by
-/// `jcode auth status --json`.
-pub struct AuthStatus {
-    /// jcode's own summary flag. Narrower than [`AuthStatus::is_usable`]: it
-    /// stays `false` for an `openai-compatible` / custom `[providers.<name>]`
-    /// profile even when that profile runs.
-    pub any_available: bool,
-    /// `(provider id, status)` for every provider jcode knows about.
-    pub providers: Vec<(String, String)>,
-}
-
-impl AuthStatus {
-    /// The providers whose credentials jcode considers usable.
-    ///
-    /// `"available"` is jcode's own literal for a provider it can authenticate
-    /// as; every other value (`"not_configured"`, ...) means it cannot.
-    #[must_use]
-    pub fn available(&self) -> Vec<&str> {
-        self.providers
-            .iter()
-            .filter(|(_, status)| status == "available")
-            .map(|(id, _)| id.as_str())
-            .collect()
-    }
-
-    /// Whether a `sdk: jcode` run can reach a provider at all.
-    ///
-    /// `any_available` alone is not enough: jcode reports it `false` for an
-    /// `openai-compatible` endpoint or a custom `[providers.<name>]` profile
-    /// (the arrangement cruise provisions for custom providers) while
-    /// still listing that provider as `available` and running turns through it.
-    /// Gating on the flag alone would block those runs outright.
-    #[must_use]
-    pub fn is_usable(&self) -> bool {
-        self.any_available || !self.available().is_empty()
-    }
-}
-
-/// Read `jcode auth status --json`, i.e. the credentials the user's own `jcode
-/// login` stored.
-///
-/// `env` is added to the probe's environment so credentials a workflow supplies
-/// that way (jcode reads e.g. `ANTHROPIC_API_KEY`) count as authenticated here
-/// exactly as they will for the run itself.
-///
-/// # Errors
-///
-/// Returns an error if `jcode` cannot be run or its JSON cannot be read.
-fn auth_status(binary: Option<&Path>, env: &HashMap<String, String>) -> Result<AuthStatus> {
-    let bin = resolve_binary(binary);
-    let mut command = jcode_command(&bin);
-    // Workflow `env:` first, so cruise's fixed setting wins over it: a workflow
-    // cannot re-enable telemetry.
-    command
-        .args(["auth", "status", "--json"])
-        .envs(env)
-        .env(NO_TELEMETRY_ENV, "1");
-    let output = command.output().map_err(|e| {
-        CruiseError::Other(format!(
-            "`sdk: jcode` needs the `jcode` CLI on PATH, but running \
-             `{} auth status` failed: {e}",
-            bin.display()
-        ))
-    })?;
-    parse_auth_status(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        CruiseError::Other(format!(
-            "could not read authentication status from `{} auth status --json` ({})",
-            bin.display(),
-            probe_detail(&output)
-        ))
-    })
-}
-
-fn parse_auth_status(stdout: &str) -> Option<AuthStatus> {
-    let value: serde_json::Value = serde_json::from_str(stdout).ok()?;
-    let any_available = value.get("any_available")?.as_bool()?;
-    let providers = value
-        .get("providers")
-        .and_then(serde_json::Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|e| {
-                    let id = e.get("id").and_then(serde_json::Value::as_str)?;
-                    let status = e.get("status").and_then(serde_json::Value::as_str)?;
-                    Some((id.to_string(), status.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(AuthStatus {
-        any_available,
-        providers,
-    })
-}
-
-/// Fail with `jcode login` guidance when the jcode home a run will use has no
-/// usable credentials, instead of letting the run reach the model and come back
-/// with jcode's raw provider error.
-fn ensure_authenticated(binary: &Path, env: &HashMap<String, String>) -> Result<()> {
-    if auth_status(Some(binary), env)?.is_usable() {
-        return Ok(());
-    }
-    Err(CruiseError::Other(
-        "no provider is authenticated for `sdk: jcode`; run `jcode login <provider>` to sign in \
-         (`jcode auth status` lists what is configured)."
-            .to_string(),
-    ))
-}
-
-/// A cruise `provider/model[:effort]` reference split into the parts
-/// `jcode run` takes: `(provider, model, effort)`, each unset when the
-/// reference leaves it to jcode.
+/// Cruise's `provider/model[:effort]` syntax, parsed once for each fallback
+/// attempt. `provider` is kept separate so known aliases retain their previous
+/// route-selection semantics.
 pub(crate) type ModelRef = (Option<String>, Option<String>, Option<EffortLevel>);
 
-/// Split a cruise `provider/model[:effort]` reference into the parts
-/// `jcode run` takes.
-///
-/// Accepted forms mirror the other SDK backends:
-///
-/// - `None` / empty -> everything unset; jcode picks its configured default
-///   provider and model.
-/// - `"model"` (no `/`) -> `--model model`, provider left to jcode.
-/// - `"provider/model"` -> `--provider provider --model model`.
-/// - `":effort"` alone -> effort only, model and provider left to jcode.
-///
-/// A `/` with an empty side (`"/model"`, `"provider/"`) is a configuration
-/// error: passing it through would surface as an opaque provider or model
-/// lookup failure inside jcode.
-///
-/// The `:effort` suffix is always split off. `jcode run` has no effort flag, so
-/// it must never reach `--model`; [`build_command`] forwards it through jcode's
-/// reasoning-effort environment overrides instead.
-///
-/// # Errors
-///
-/// Returns an error if the reference has a `/` with an empty provider or model.
 pub(crate) fn parse_model_ref(model_ref: Option<&str>) -> Result<ModelRef> {
-    let Some(raw) = model_ref.map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(raw) = model_ref.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok((None, None, None));
     };
-    let (base, suffix) = crate::backend::effort::split_thinking_suffix(raw);
-    let effort = suffix.and_then(crate::backend::effort::effort_from_suffix);
+    let (base, suffix) = split_thinking_suffix(raw);
+    let effort = suffix.and_then(effort_from_suffix);
     let base = base.trim();
     if base.is_empty() {
         return Ok((None, None, effort));
@@ -696,377 +138,430 @@ pub(crate) fn parse_model_ref(model_ref: Option<&str>) -> Result<ModelRef> {
             Ok((Some(provider.to_string()), Some(model.to_string()), effort))
         }
         Some(_) => Err(CruiseError::InvalidStepConfig(format!(
-            "invalid model reference '{raw}' for `sdk: jcode`: expected \
-             'provider/model[:effort]', 'model[:effort]', or no value"
+            "invalid model reference '{raw}' for `sdk: jcode`: expected 'provider/model[:effort]', 'model[:effort]', or no value"
         ))),
     }
 }
 
-/// Run `prompt` through the `jcode` CLI and surface output as [`StreamChunk`]s
-/// on a dedicated thread.
-///
-/// `text_delta` events become [`StreamChunk::Delta`], the opening `start` event's
-/// session id becomes [`StreamChunk::Session`], and the turn's `done` event
-/// becomes [`StreamChunk::Done`] with jcode's own final text. A limit-shaped
-/// `error` event becomes [`StreamChunk::Limit`], everything else terminal
-/// becomes [`StreamChunk::Error`]. Every other event kind (`connection_phase`,
-/// `reasoning_delta`, `tool_start` / `tool_done`, `message_end`, and anything a
-/// newer jcode adds) is ignored -- cruise only renders assistant text.
-///
-/// The run ends early, with no terminal chunk, when
-/// [`JcodeRunnerConfig::cancel`] fires or the returned receiver is dropped;
-/// either way the child is dropped, which kills it.
+/// Run one attempt on a dedicated thread, keeping blocking SDK calls off the
+/// async executor. The zero-capacity channel ensures the session id reaches the
+/// caller before a tool handler can block waiting for user input.
 pub(crate) fn stream_agent(config: JcodeRunnerConfig, prompt: String) -> Receiver<StreamChunk> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || run_in_runtime(config, prompt, tx));
+    let (tx, rx) = sync_channel(0);
+    std::thread::spawn(move || {
+        let terminal = match run_attempt(&config, &prompt, &tx) {
+            Ok(terminal) => terminal,
+            Err(message) => StreamChunk::Error(message),
+        };
+        let _ = tx.send(terminal);
+    });
     rx
 }
 
-fn run_in_runtime(config: JcodeRunnerConfig, prompt: String, tx: Sender<StreamChunk>) {
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        let _ = tx.send(StreamChunk::Error("failed to build tokio runtime".into()));
-        return;
+fn run_attempt(
+    config: &JcodeRunnerConfig,
+    prompt: &str,
+    tx: &SyncSender<StreamChunk>,
+) -> std::result::Result<StreamChunk, String> {
+    let source_home = resolve_source_home(config.cwd.as_deref());
+    let session_key = config.resume_session_id.as_deref().map_or_else(
+        || uuid::Uuid::new_v4().simple().to_string(),
+        session_storage_key,
+    );
+    let lock_key = source_home.join(SESSION_HOME_DIR).join(&session_key);
+    let lock = session_lock(&lock_key);
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut home = prepare_session_home(
+        source_home,
+        &session_key,
+        config.resume_session_id.as_deref(),
+    )?;
+    let mut session_id = None;
+    let run_result = match launch_client(config, &home) {
+        Ok(client) => {
+            let result = run_client_turn(&client, config, prompt, tx, &mut home, &mut session_id);
+            drop(client);
+            result
+        }
+        Err(error) => Err(error),
     };
-    rt.block_on(async move { run_async(config, prompt, &tx).await });
-}
-
-/// Terminal outcome of one child run. Delta/Session chunks are streamed out
-/// while stdout is being read; the terminal verdict waits until stderr has been
-/// drained so it can consult the trailing lines.
-enum Terminal {
-    /// A `done` event arrived, carrying jcode's final text for the turn.
-    Completed(String),
-    /// An `error` event arrived.
-    Failed(String),
-    /// Stdout ended without a `done` or `error` event: the child died before
-    /// finishing the turn (unknown flag, unknown `--resume` id, killed).
-    NoResult,
-}
-
-/// Resolves when `token` is cancelled, or waits forever if there is no token.
-async fn until_cancelled(token: Option<&CancellationToken>) {
-    match token {
-        Some(t) => t.cancelled().await,
-        None => std::future::pending().await,
+    let finalize_result =
+        finish_session_home(&mut home, session_id.as_deref(), config.keep_session_home);
+    match (run_result, finalize_result) {
+        (Ok(terminal), Ok(())) => Ok(terminal),
+        (Err(message), Ok(())) => Err(message),
+        (Ok(_), Err(error)) => Err(error.to_string()),
+        (Err(message), Err(error)) => Err(format!(
+            "{message}; could not persist jcode session home: {error}"
+        )),
     }
 }
 
-async fn run_async(config: JcodeRunnerConfig, prompt: String, tx: &Sender<StreamChunk>) {
-    let cancel = config.cancel.clone();
-    let mut command = build_command(&config, &prompt);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            send_failure(
-                tx,
-                &format!("failed to start the jcode CLI: {e}"),
-                false,
-                &[],
-                None,
-            );
-            return;
-        }
+fn launch_client(
+    config: &JcodeRunnerConfig,
+    home: &SessionHome,
+) -> std::result::Result<JcodeClient, String> {
+    let mut options = LaunchOptions {
+        jcode_home: Some(home.sdk_home.clone()),
+        working_dir: config.cwd.clone(),
+        inherit_logins: false,
+        ..Default::default()
     };
-    let Some(stdout) = child.stdout.take() else {
-        send_failure(tx, "the jcode CLI provided no stdout", false, &[], None);
-        return;
-    };
+    options.env = launch_environment(
+        &config.env,
+        config.provider.as_deref(),
+        config.model.as_deref(),
+    );
+    JcodeClient::launch(options).map_err(|error| error.to_string())
+}
 
-    // Drain stderr into a small ring buffer: an invocation that fails before it
-    // can emit NDJSON (bad flag, unknown session, provider auth) reports only
-    // there, and a rate-limit line can arrive there too.
-    let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let drain_handle = child.stderr.take().map(|stderr| {
-        let buf = Arc::clone(&stderr_tail);
-        tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                push_stderr_line(&buf, line);
-            }
-        })
-    });
-
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-    let mut provider: Option<String> = None;
-    let terminal = fold_events(&mut lines, cancel.as_ref(), tx, &mut provider).await;
-    let Some(terminal) = terminal else {
-        // Abandoned: cancelled, or the receiver is gone. There is nobody to
-        // report to, but the child still has to be collected here -- see
-        // [`reap`].
-        reap(&mut child).await;
-        return;
-    };
-    // A finished turn waits for jcode to exit by itself: it persists the session
-    // under its home on shutdown, and `--resume` for the next planning turn
-    // depends on that file. Only once the child is gone is stderr at EOF, so the
-    // drain task is awaited after that -- snapshotting earlier would miss a
-    // rate-limit line that arrived in the same scheduling tick.
-    wait_for_exit(&mut child, &mut lines, cancel.as_ref()).await;
-    await_stderr_drain(drain_handle).await;
-    let tail = snapshot_stderr_tail(&stderr_tail);
-
-    match terminal {
-        Terminal::Completed(text) => {
-            let _ = tx.send(StreamChunk::Done(text));
-        }
-        // jcode's own `error.message` is the diagnosis of the turn, so it alone
-        // decides retryable vs. permanent. Classifying the stderr tail alongside
-        // it would let an unrelated `429` in a log line turn a permanent failure
-        // (authentication, invalid request) into a retry, which PROHIBITED §7
-        // forbids; the tail is still appended, for context only.
-        Terminal::Failed(message) => {
-            let limited = crate::retry::is_limit_message(&message);
-            send_failure(tx, &message, limited, &tail, provider.as_deref());
-        }
-        // No event message exists here -- the child died before emitting NDJSON
-        // -- so stderr carries the only diagnosis there is, and is what gets
-        // classified.
-        Terminal::NoResult => {
-            let limited = tail.iter().any(|line| crate::retry::is_limit_message(line));
-            send_failure(tx, NO_RESULT_MESSAGE, limited, &tail, provider.as_deref());
-        }
+fn launch_environment(
+    workflow_env: &HashMap<String, String>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> HashMap<OsString, OsString> {
+    let mut env: HashMap<OsString, OsString> = workflow_env
+        .iter()
+        .filter(|(key, _)| key.as_str() != JCODE_HOME_ENV)
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect();
+    env.insert(OsString::from(NO_TELEMETRY_ENV), OsString::from("1"));
+    if !workflow_env.contains_key(OPENAI_SERVICE_TIER_ENV)
+        && std::env::var_os(OPENAI_SERVICE_TIER_ENV).is_none()
+    {
+        env.insert(
+            OsString::from(OPENAI_SERVICE_TIER_ENV),
+            OsString::from(OPENAI_SERVICE_TIER_DEFAULT),
+        );
     }
+    if let Some(provider) = provider {
+        env.insert(OsString::from(JCODE_PROVIDER_ENV), OsString::from(provider));
+    }
+    if let Some(model) = model {
+        env.insert(
+            OsString::from(JCODE_MODEL_ENV),
+            OsString::from(routed_model_arg(provider, model).as_ref()),
+        );
+    }
+    env
 }
 
-/// Kill the child and collect it.
-///
-/// `kill_on_drop` only signals: tokio reaps a killed child when its process
-/// driver next polls, and this backend drops its current-thread runtime as soon
-/// as the run returns, so a child left to `kill_on_drop` alone would linger as a
-/// zombie for the whole life of the cruise process.
-async fn reap(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered loop handles text, tools, stops, and cancellation"
+)]
+fn run_client_turn(
+    client: &JcodeClient,
+    config: &JcodeRunnerConfig,
+    prompt: &str,
+    tx: &SyncSender<StreamChunk>,
+    home: &mut SessionHome,
+    session_id: &mut Option<String>,
+) -> std::result::Result<StreamChunk, String> {
+    if !config.tools.is_empty() && !client.supports("session_tools") {
+        return Err(
+            "the jcode harness does not support session tools; upgrade jcode to 0.88.0 or newer"
+                .to_string(),
+        );
+    }
+    let session = match config.resume_session_id.as_deref() {
+        Some(id) => client.attach_session(id),
+        None => client.create_session(
+            config
+                .cwd
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+        ),
+    }
+    .map_err(|error| error.to_string())?;
+    *session_id = Some(session.session_id.clone());
+    write_session_id(home, &session.session_id).map_err(|error| error.to_string())?;
+    tx.send(StreamChunk::Session(session.session_id.clone()))
+        .map_err(|_| "jcode output stream was closed".to_string())?;
 
-/// Wait for a child that has already reported its turn to exit, then collect it.
-///
-/// `lines` stays alive and drained for the whole wait: dropping the stdout
-/// reader closes the pipe, and a jcode that still has shutdown output to write
-/// would then die of EPIPE before flushing the session file `--resume` needs.
-///
-/// Cancellation and [`CHILD_EXIT_TIMEOUT`] both cut the wait short, and the
-/// child is killed and reaped instead of being left behind.
-async fn wait_for_exit(
-    child: &mut tokio::process::Child,
-    lines: &mut ChildLines,
-    cancel: Option<&CancellationToken>,
-) {
-    let deadline = tokio::time::sleep(CHILD_EXIT_TIMEOUT);
-    tokio::pin!(deadline);
-    let mut stdout_open = true;
+    if !config.tools.is_empty() {
+        let custom = config
+            .tools
+            .iter()
+            .map(|tool| {
+                let parameters = tool.parameters.as_object().cloned().ok_or_else(|| {
+                    format!("tool '{}' parameters must be a JSON object", tool.name)
+                })?;
+                Ok(SessionToolDefinition {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        client
+            .configure_tools(
+                &session.session_id,
+                ToolConfiguration {
+                    enabled: None,
+                    disabled: Vec::new(),
+                    custom,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(model) = config.model.as_deref() {
+        let runtime = client
+            .get_runtime_info(&session.session_id)
+            .map_err(|error| error.to_string())?;
+        let model_request =
+            model_switch_request(config.provider.as_deref(), model, &runtime.routes);
+        client
+            .set_model(&session.session_id, &model_request)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(effort) = config.effort {
+        client
+            .set_reasoning_effort(&session.session_id, effort.as_str())
+            .map_err(|error| error.to_string())?;
+    }
+
+    // Subscribe before sending so early text and tool events cannot be missed.
+    let events = client.events(Some(&session.session_id));
+    client
+        .send_message(&session.session_id, prompt, Vec::new(), None)
+        .map_err(|error| error.to_string())?;
+
+    let mut text = TextCollector::default();
+    let mut stopped = None;
+    let mut cancel_deadline = None;
     loop {
-        tokio::select! {
-            biased;
-            () = until_cancelled(cancel) => break,
-            () = &mut deadline => break,
-            _ = child.wait() => return,
-            line = lines.next_line(), if stdout_open => {
-                stdout_open = matches!(line, Ok(Some(_)));
-            }
+        if cancel_deadline.is_none()
+            && config
+                .cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            cancel_deadline = Some(Instant::now() + CANCEL_SETTLE_TIMEOUT);
+            client
+                .cancel(&session.session_id)
+                .map_err(|error| error.to_string())?;
         }
-    }
-    reap(child).await;
-}
-
-/// Line reader over the child's stdout, from which the NDJSON events are read.
-type ChildLines = tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>;
-
-/// Read NDJSON events from `lines`, streaming [`StreamChunk::Session`] and
-/// [`StreamChunk::Delta`] out as they arrive, and return the turn's terminal
-/// verdict.
-///
-/// `None` means "abandon quietly": the run was cancelled or the receiver is
-/// gone, so there is nobody left to report a verdict to. `provider` collects the
-/// last provider an event named, which labels a [`LimitError`].
-async fn fold_events(
-    lines: &mut ChildLines,
-    cancel: Option<&CancellationToken>,
-    tx: &Sender<StreamChunk>,
-    provider: &mut Option<String>,
-) -> Option<Terminal> {
-    let mut session_reported = false;
-    loop {
-        let next = tokio::select! {
-            biased;
-            () = until_cancelled(cancel) => return None,
-            line = lines.next_line() => line,
-        };
-        let line = match next {
-            Ok(Some(line)) => line,
-            Ok(None) => return Some(Terminal::NoResult),
-            Err(e) => {
-                return Some(Terminal::Failed(format!(
-                    "failed to read the jcode CLI output: {e}"
-                )));
+        if cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err("jcode did not stop after the session cancellation request".to_string());
+        }
+        let Some(event) = events.next_timeout(Duration::from_millis(50)) else {
+            if client.is_closed() {
+                return Err("jcode harness disconnected before the turn finished".to_string());
             }
-        };
-        let Some(event) = parse_event(&line) else {
             continue;
         };
-        if let Some(named) = event.provider {
-            *provider = Some(named);
-        }
-        if let Some(id) = event.session_id
-            && !report_session(tx, &mut session_reported, &id)
-        {
-            return None;
-        }
-        match event.kind {
-            EventKind::Delta(text) => {
-                if tx.send(StreamChunk::Delta(text)).is_err() {
-                    return None;
-                }
+        match event {
+            ApiEvent::TextDelta {
+                text: delta,
+                message_id,
+                ..
+            } => {
+                text.append(message_id, &delta);
+                let _ = tx.send(StreamChunk::Delta(delta));
             }
-            EventKind::Done(text) => return Some(Terminal::Completed(text)),
-            EventKind::Failed(message) => return Some(Terminal::Failed(message)),
-            EventKind::Other => {}
+            ApiEvent::TextReplace {
+                text: replacement,
+                message_id,
+                ..
+            } => text.replace(message_id, replacement),
+            ApiEvent::TextDone { message_id, .. } => text.finish_message(message_id),
+            ApiEvent::ToolCall {
+                session_id: tool_session,
+                call_id,
+                name,
+                input,
+            } => {
+                let tool = config.tools.iter().find(|tool| tool.name == name);
+                let (output, error) = match tool {
+                    Some(tool) => match (tool.handler)(input) {
+                        Ok(output) => (output, None),
+                        Err(message) => (String::new(), Some(message)),
+                    },
+                    None => (
+                        String::new(),
+                        Some(format!("unknown cruise session tool '{name}'")),
+                    ),
+                };
+                client
+                    .submit_tool_result(&tool_session, &call_id, &output, error)
+                    .map_err(|error| error.to_string())?;
+            }
+            ApiEvent::TurnStopped {
+                reason, message, ..
+            } => {
+                stopped = Some((reason, message));
+            }
+            ApiEvent::TurnDone { .. } => {
+                return Ok(match stopped {
+                    Some((reason, message)) => {
+                        stop_chunk(reason, message, config.provider.as_deref())
+                    }
+                    None => StreamChunk::Done(text.final_text()),
+                });
+            }
+            ApiEvent::Error { code, message } => {
+                if let Some((reason, stop_message)) = stopped
+                    && (reason == TurnStopReason::LimitReached
+                        || crate::retry::is_limit_message(&stop_message))
+                {
+                    let detail = if message.trim().is_empty() {
+                        stop_message
+                    } else {
+                        message
+                    };
+                    return Ok(StreamChunk::Limit(LimitError {
+                        provider: config.provider.as_deref().unwrap_or("jcode").to_string(),
+                        detail,
+                    }));
+                }
+                return Ok(error_chunk(
+                    format!("{code:?}: {message}"),
+                    config.provider.as_deref(),
+                ));
+            }
+            _ => {}
         }
     }
 }
 
-/// What one NDJSON event contributes to the stream.
-enum EventKind {
-    /// `text_delta`: assistant text to forward.
-    Delta(String),
-    /// `done`: the turn finished with this final text.
-    Done(String),
-    /// `error`: the turn failed with this message.
-    Failed(String),
-    /// Anything else, including events a newer jcode adds.
-    Other,
-}
-
-/// One parsed NDJSON event: its contribution plus the session id and provider
-/// it may carry (both appear on several event kinds, not just `start`).
-struct Event {
-    kind: EventKind,
-    session_id: Option<String>,
-    provider: Option<String>,
-}
-
-/// Parse one NDJSON line into the event shape cruise cares about.
-///
-/// Returns `None` for a line that is not a JSON object: jcode's non-NDJSON
-/// diagnostics can share stdout with the event stream, and those lines carry
-/// nothing for the fold.
-///
-/// Unrecognized `type` values map to [`EventKind::Other`] rather than failing,
-/// which is what lets a newer jcode add events without breaking this backend.
-fn parse_event(line: &str) -> Option<Event> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if !value.is_object() {
-        return None;
+fn stop_chunk(reason: TurnStopReason, message: String, provider: Option<&str>) -> StreamChunk {
+    if reason == TurnStopReason::LimitReached || crate::retry::is_limit_message(&message) {
+        StreamChunk::Limit(LimitError {
+            provider: provider.unwrap_or("jcode").to_string(),
+            detail: message,
+        })
+    } else {
+        let detail = if message.trim().is_empty() {
+            format!("jcode turn stopped: {reason:?}")
+        } else {
+            format!("jcode turn stopped ({reason:?}): {message}")
+        };
+        StreamChunk::Error(detail)
     }
-    let string = |key: &str| {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
+}
+
+fn error_chunk(message: String, provider: Option<&str>) -> StreamChunk {
+    if crate::retry::is_limit_message(&message) {
+        StreamChunk::Limit(LimitError {
+            provider: provider.unwrap_or("jcode").to_string(),
+            detail: message,
+        })
+    } else {
+        StreamChunk::Error(message)
+    }
+}
+
+#[derive(Default)]
+struct TextCollector {
+    parts: Vec<(Option<String>, String, bool)>,
+}
+
+impl TextCollector {
+    fn index(&self, id: Option<&String>) -> Option<usize> {
+        self.parts
+            .iter()
+            .rposition(|(message_id, _, done)| message_id.as_ref() == id && (id.is_some() || !done))
+    }
+
+    fn message(&mut self, id: Option<String>) -> &mut (Option<String>, String, bool) {
+        let index = self.index(id.as_ref()).unwrap_or_else(|| {
+            self.parts.push((id, String::new(), false));
+            self.parts.len() - 1
+        });
+        &mut self.parts[index]
+    }
+
+    fn append(&mut self, id: Option<String>, delta: &str) {
+        self.message(id).1.push_str(delta);
+    }
+
+    fn replace(&mut self, id: Option<String>, text: String) {
+        self.message(id).1 = text;
+    }
+
+    fn finish_message(&mut self, id: Option<String>) {
+        self.message(id).2 = true;
+    }
+
+    fn final_text(&self) -> String {
+        self.parts
+            .iter()
+            .rev()
+            .find(|(_, text, done)| *done && !text.is_empty())
+            .map_or_else(
+                || {
+                    self.parts
+                        .iter()
+                        .map(|(_, text, _)| text.as_str())
+                        .collect()
+                },
+                |(_, text, _)| text.clone(),
+            )
+    }
+}
+
+fn model_switch_request(provider: Option<&str>, model: &str, routes: &[ModelRouteInfo]) -> String {
+    let Some(provider) = provider else {
+        return model.to_string();
     };
-    let kind = match value.get("type").and_then(serde_json::Value::as_str)? {
-        "text_delta" => EventKind::Delta(string("text").unwrap_or_default()),
-        // `done.text` is jcode's authoritative text for the whole turn, so it
-        // replaces the accumulated deltas in the reducer rather than being
-        // appended to them.
-        "done" => EventKind::Done(string("text").unwrap_or_default()),
-        "error" => EventKind::Failed(
-            string("message").unwrap_or_else(|| "the jcode CLI reported an error".to_string()),
-        ),
-        _ => EventKind::Other,
-    };
-    Some(Event {
-        kind,
-        session_id: string("session_id"),
-        provider: string("provider"),
+    let legacy_route = routed_model_arg(Some(provider), model);
+    if legacy_route != model {
+        return legacy_route.into_owned();
+    }
+    let route = routes
+        .iter()
+        .find(|route| route.model == model && route_matches_provider(route, provider));
+    let prefix = route.and_then(route_prefix).unwrap_or(provider);
+    format!("{prefix}:{model}")
+}
+
+fn route_matches_provider(route: &ModelRouteInfo, requested: &str) -> bool {
+    let requested = normalized_provider(requested);
+    let profile = route.api_method.strip_prefix("openai-compatible:");
+    [
+        Some(route.provider.as_str()),
+        Some(route.api_method.as_str()),
+        profile,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| normalized_provider(candidate) == requested)
+}
+
+fn normalized_provider(provider: &str) -> String {
+    provider
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn route_prefix(route: &ModelRouteInfo) -> Option<&str> {
+    let api_method = route.api_method.as_str();
+    if let Some(profile) = api_method.strip_prefix("openai-compatible:") {
+        return (!profile.is_empty()).then_some(profile);
+    }
+    Some(match api_method {
+        "anthropic-api-key" | "claude-api" => "claude-api",
+        "claude-oauth" => "claude-oauth",
+        "openai-api-key" | "openai-api" => "openai-api",
+        "openai-oauth" => "openai-oauth",
+        "code-assist-oauth" => "gemini",
+        "antigravity-https" => "antigravity",
+        "https" if normalized_provider(&route.provider) == "antigravity" => "antigravity",
+        "openrouter" | "copilot" | "cursor" | "bedrock" | "antigravity" | "gemini" => api_method,
+        _ if !api_method.is_empty() && !api_method.contains(':') => api_method,
+        _ => return None,
     })
 }
 
-/// Retain `line` as the newest entry of the bounded stderr tail.
-fn push_stderr_line(buf: &Arc<Mutex<VecDeque<String>>>, line: String) {
-    if let Ok(mut guard) = buf.lock() {
-        if guard.len() == STDERR_TAIL_LINES {
-            guard.pop_front();
-        }
-        guard.push_back(line);
-    }
-}
-
-fn snapshot_stderr_tail(buf: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
-    buf.lock()
-        .map(|guard| guard.iter().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// Cap on how long a finished turn waits for the `jcode` child to exit by
-/// itself before it is killed. jcode exits as soon as the turn is reported, so
-/// this only bounds a wedged child; the wait exists so jcode can flush the
-/// session it just reported (the one a follow-up `--resume` needs).
-const CHILD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Cap on how long [`await_stderr_drain`] waits for the drain task after the
-/// child has exited. The pipe is already at EOF by then, so this only guards
-/// against a task that cannot make progress.
-const STDERR_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-async fn await_stderr_drain(handle: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(handle) = handle {
-        let _ = tokio::time::timeout(STDERR_DRAIN_TIMEOUT, handle).await;
-    }
-}
-
-/// Report the run's session id the first time an event names one, tracking that
-/// in `reported` so later events don't repeat it. Returns `false` when the
-/// receiver is gone and the run should be abandoned.
-fn report_session(tx: &Sender<StreamChunk>, reported: &mut bool, id: &str) -> bool {
-    if *reported || id.is_empty() {
-        return true;
-    }
-    *reported = true;
-    tx.send(StreamChunk::Session(id.to_string())).is_ok()
-}
-
-/// Report a failed turn: `msg` plus the collected stderr tail for context, as a
-/// retryable [`StreamChunk::Limit`] when `limited`, else a [`StreamChunk::Error`].
-///
-/// The tail is appended because jcode's diagnosis for an invocation that never
-/// produced NDJSON (unknown flag, unknown `--resume` id, provider auth failure)
-/// lives on stderr only -- without it the failure reaches the user as an
-/// undiagnosable one-liner. A limit carries the same text as its
-/// [`LimitError::detail`], which is where the retry policy reads a server
-/// `Retry-After` hint from ([`crate::retry::parse_retry_after`]). Whether the
-/// tail also *classifies* the failure is the caller's call: see the match in
-/// [`run_async`].
-fn send_failure(
-    tx: &Sender<StreamChunk>,
-    msg: &str,
-    limited: bool,
-    stderr_tail: &[String],
-    provider: Option<&str>,
-) {
-    let text = if stderr_tail.is_empty() {
-        msg.to_string()
-    } else {
-        format!("{msg}\njcode stderr:\n{}", stderr_tail.join("\n"))
-    };
-    let chunk = if limited {
-        StreamChunk::Limit(LimitError {
-            provider: provider.unwrap_or(PROVIDER_LABEL).to_string(),
-            detail: text,
-        })
-    } else {
-        StreamChunk::Error(text)
-    };
-    let _ = tx.send(chunk);
-}
-
-/// jcode treats a bare `--model` as a cross-provider selector even when
-/// `--provider` is also present. Prefix models handled by its multi-provider
-/// runtime so an ambiguous model id cannot silently override the requested
-/// provider. Concrete provider runtimes already own their bare model ids.
+/// Retains the legacy CLI's explicit provider-prefix semantics. Those prefixes
+/// are the harness's model route ids; the provider and model are no longer
+/// separate SDK arguments.
 fn routed_model_arg<'a>(provider: Option<&str>, model: &'a str) -> Cow<'a, str> {
     let prefix = match provider {
         Some("anthropic-api") => "claude-api",
@@ -1079,1026 +574,456 @@ fn routed_model_arg<'a>(provider: Option<&str>, model: &'a str) -> Cow<'a, str> 
     Cow::Owned(format!("{prefix}:{model}"))
 }
 
-/// Build the `jcode run` invocation for `config`.
-fn build_command(config: &JcodeRunnerConfig, prompt: &str) -> tokio::process::Command {
-    let binary = resolve_binary(config.binary.as_deref());
-    let mut command = tokio::process::Command::new(binary);
-    command.arg(NO_UPDATE_FLAG).arg("run").arg("--ndjson");
-    // `--quiet` drops jcode's own status chatter, leaving stdout as pure NDJSON.
-    command.arg("--quiet");
-    if let Some(model) = &config.model {
-        let model = routed_model_arg(config.provider.as_deref(), model);
-        command.arg("--model").arg(model.as_ref());
-    }
-    if let Some(provider) = &config.provider {
-        command.arg("--provider").arg(provider);
-    }
-    if let Some(session) = &config.resume_session_id {
-        command.arg("--resume").arg(session);
-    }
-    if let Some(cwd) = &config.cwd {
-        command.arg("-C").arg(cwd);
-        command.current_dir(cwd);
-    }
-    command.arg(prompt);
+struct SessionHome {
+    source_home: PathBuf,
+    storage_root: PathBuf,
+    storage_home: PathBuf,
+    expected_home: Option<PathBuf>,
+    sdk_home: PathBuf,
+    temporary_alias: Option<PathBuf>,
+    stable_alias_root: Option<PathBuf>,
+    fresh: bool,
+}
 
-    // Workflow `env:` first, so cruise's own fixed settings below cannot be
-    // overridden by a workflow into enabling telemetry. `JCODE_HOME` is not
-    // among them: a workflow that sets it relocates jcode, exactly as it would
-    // outside cruise.
-    command.envs(&config.env);
-    // Workflow `env:` wins, then cruise's own process environment (inherited by
-    // the child as-is); only when neither names a tier does cruise turn priority
-    // processing off. Presence of the key is what counts, not its value.
-    if !config.env.contains_key(OPENAI_SERVICE_TIER_ENV)
-        && std::env::var_os(OPENAI_SERVICE_TIER_ENV).is_none()
+fn prepare_session_home(
+    source_home: PathBuf,
+    session_key: &str,
+    resume_session_id: Option<&str>,
+) -> std::result::Result<SessionHome, String> {
+    let storage_root = source_home.join(SESSION_HOME_DIR);
+    ensure_private_dir(&storage_root).map_err(|error| error.to_string())?;
+    prune_unclaimed_session_homes(&storage_root).map_err(|error| error.to_string())?;
+    let expected_home = resume_session_id.map(|_| storage_root.join(session_key));
+    let storage_home = match (resume_session_id, expected_home.as_ref()) {
+        (Some(id), Some(expected)) => {
+            find_session_home(&storage_root, expected, id).unwrap_or_else(|| expected.clone())
+        }
+        _ => storage_root.join(session_key),
+    };
+    let fresh = !storage_home.exists();
+    ensure_private_dir(&storage_home).map_err(|error| error.to_string())?;
+    jcode_sdk::inherit_credentials(&source_home, &storage_home)
+        .map_err(|error| error.to_string())?;
+    disable_private_updates(&storage_home).map_err(|error| error.to_string())?;
+    copy_global_mcp(&source_home, &storage_home).map_err(|error| error.to_string())?;
+
+    #[cfg(unix)]
+    let (sdk_home, temporary_alias, stable_alias_root) = {
+        let alias_root = short_home_alias_root();
+        ensure_private_dir(&alias_root).map_err(|error| error.to_string())?;
+        let alias_key = resume_session_id.map_or_else(
+            || session_key.to_string(),
+            |id| stable_alias_key(&source_home, id),
+        );
+        let alias = alias_root.join(alias_key);
+        ensure_home_alias(&alias, &storage_home).map_err(|error| error.to_string())?;
+        (alias.clone(), Some(alias), Some(alias_root))
+    };
+    #[cfg(not(unix))]
+    let (sdk_home, temporary_alias, stable_alias_root) = { (storage_home.clone(), None, None) };
+
+    Ok(SessionHome {
+        source_home,
+        storage_root,
+        storage_home,
+        expected_home,
+        sdk_home,
+        temporary_alias,
+        stable_alias_root,
+        fresh,
+    })
+}
+
+fn finish_session_home(
+    home: &mut SessionHome,
+    session_id: Option<&str>,
+    keep: bool,
+) -> std::io::Result<()> {
+    if !keep {
+        remove_home_aliases_for_target(&home.storage_home)?;
+        if home.storage_home.exists() {
+            fs::remove_dir_all(&home.storage_home)?;
+        }
+        return Ok(());
+    }
+    if let Some(session_id) = session_id {
+        write_session_id(home, session_id)?;
+        let expected = home
+            .expected_home
+            .clone()
+            .unwrap_or_else(|| home.storage_root.join(session_storage_key(session_id)));
+        if home.storage_home != expected && !expected.exists() {
+            fs::rename(&home.storage_home, &expected)?;
+            home.storage_home.clone_from(&expected);
+        }
+        #[cfg(unix)]
+        if let Some(alias_root) = &home.stable_alias_root {
+            let stable_alias = alias_root.join(stable_alias_key(&home.source_home, session_id));
+            ensure_home_alias(&stable_alias, &home.storage_home)?;
+            if home.temporary_alias.as_ref() != Some(&stable_alias)
+                && let Some(alias) = &home.temporary_alias
+            {
+                remove_home_alias(alias)?;
+            }
+        }
+    } else if home.fresh {
+        remove_home_aliases_for_target(&home.storage_home)?;
+        fs::remove_dir_all(&home.storage_home)?;
+    }
+    Ok(())
+}
+
+/// Remove a persistent SDK home when its owning Cruise session is deleted.
+pub(crate) fn cleanup_session_home(session_id: &str) -> Result<()> {
+    let source_home = resolve_source_home(None);
+    cleanup_session_home_at(&source_home, session_id)
+        .map_err(|error| CruiseError::Other(format!("could not clean jcode session home: {error}")))
+}
+
+fn cleanup_session_home_at(source_home: &Path, session_id: &str) -> std::io::Result<()> {
+    let root = source_home.join(SESSION_HOME_DIR);
+    let expected = root.join(session_storage_key(session_id));
+    let Some(home) = find_session_home(&root, &expected, session_id) else {
+        return Ok(());
+    };
+    stop_private_daemon(&home)?;
+    remove_home_aliases_for_target(&home)?;
+    fs::remove_dir_all(home)
+}
+
+fn prune_unclaimed_session_homes(root: &Path) -> std::io::Result<()> {
+    prune_unclaimed_session_homes_at(root, SystemTime::now())
+}
+
+fn prune_unclaimed_session_homes_at(root: &Path, now: SystemTime) -> std::io::Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries.flatten() {
+        let home = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&home) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if home.join(SESSION_ID_FILE).is_file() {
+            continue;
+        }
+        let stale = metadata.modified().is_ok_and(|modified| {
+            now.duration_since(modified).unwrap_or_default() >= STALE_SESSION_HOME_AGE
+        });
+        if stale {
+            stop_private_daemon(&home)?;
+            remove_home_aliases_for_target(&home)?;
+            fs::remove_dir_all(home)?;
+        }
+    }
+    Ok(())
+}
+
+fn find_session_home(root: &Path, expected: &Path, session_id: &str) -> Option<PathBuf> {
+    let matches_session = |path: &Path| {
+        fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && fs::read_to_string(path.join(SESSION_ID_FILE))
+                .is_ok_and(|id| id.trim() == session_id)
+    };
+    if matches_session(expected) {
+        return Some(expected.to_path_buf());
+    }
+    let entries = fs::read_dir(root).ok()?;
+    entries
+        .filter_map(std::result::Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            matches_session(&path).then_some(path)
+        })
+}
+
+fn remove_home_aliases_for_target(home: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
     {
-        command.env(OPENAI_SERVICE_TIER_ENV, OPENAI_SERVICE_TIER_DEFAULT);
+        let root = short_home_alias_root();
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries.flatten() {
+            let alias = entry.path();
+            if fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && fs::read_link(&alias).is_ok_and(|target| target == home)
+            {
+                fs::remove_file(alias)?;
+            }
+        }
     }
-    command.env(NO_TELEMETRY_ENV, "1");
-    command.env(TOOL_SOCKET_ENV, &config.tool_socket);
-    if let Some(effort) = config.effort {
-        // `jcode run` has no effort flag; these are jcode's environment
-        // overrides for its `[provider] *_reasoning_effort` config keys, and are
-        // ignored by providers and models that do not support reasoning effort.
-        command.env("JCODE_ANTHROPIC_REASONING_EFFORT", effort.as_str());
-        command.env("JCODE_OPENAI_REASONING_EFFORT", effort.as_str());
-    }
+    #[cfg(not(unix))]
+    let _ = home;
+    Ok(())
+}
 
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    command
+#[cfg(unix)]
+fn stop_private_daemon(home: &Path) -> std::io::Result<()> {
+    let registry_path = home.join("servers.json");
+    let raw = match fs::read(&registry_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Ok(registry) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+    let Ok(runtime_dir) = fs::canonicalize(home.join("run")) else {
+        return Ok(());
+    };
+    let Some(pid) = registry
+        .as_object()
+        .and_then(|entries| {
+            entries.values().find_map(|entry| {
+                let entry = entry.as_object()?;
+                let socket = Path::new(entry.get("socket")?.as_str()?);
+                let socket_runtime = socket.parent()?;
+                if fs::canonicalize(socket_runtime).ok()?.as_path() != runtime_dir.as_path() {
+                    return None;
+                }
+                i32::try_from(entry.get("pid")?.as_i64()?).ok()
+            })
+        })
+        .filter(|pid| *pid > 1)
+    else {
+        return Ok(());
+    };
+    signal_private_process_group(pid, libc::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && private_process_exists(pid) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if private_process_exists(pid) {
+        signal_private_process_group(pid, libc::SIGKILL);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && private_process_exists(pid) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stop_private_daemon(_home: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_private_process_group(pid: i32, signal: i32) {
+    // The PID comes from this Cruise-owned private home's jcode server registry.
+    unsafe {
+        if libc::kill(-pid, signal) != 0 {
+            libc::kill(pid, signal);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn private_process_exists(pid: i32) -> bool {
+    // Signal 0 only probes whether the private daemon PID is still live.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn write_session_id(home: &SessionHome, session_id: &str) -> std::io::Result<()> {
+    let path = home.storage_home.join(SESSION_ID_FILE);
+    fs::write(&path, session_id)?;
+    set_private_file(&path)
+}
+
+fn copy_global_mcp(source_home: &Path, storage_home: &Path) -> std::io::Result<()> {
+    let source = source_home.join("mcp.json");
+    let destination = storage_home.join("mcp.json");
+    let mut contents = match fs::read(&source) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&destination) {
+                Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+                    fs::remove_file(&destination)?;
+                }
+                Ok(_) => {
+                    return Err(std::io::Error::other(
+                        "jcode mcp.json destination is not a file",
+                    ));
+                }
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(missing) => return Err(missing),
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&contents)
+        && let Some(servers) = value
+            .get_mut("mcpServers")
+            .and_then(serde_json::Value::as_object_mut)
+        && servers.remove(LEGACY_CRUISE_MCP_NAME).is_some()
+    {
+        contents = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
+    }
+    fs::write(&destination, contents)?;
+    set_private_file(&destination)
+}
+
+fn disable_private_updates(storage_home: &Path) -> std::io::Result<()> {
+    let path = storage_home.join("config.toml");
+    let mut config = match fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str::<toml::Value>(&contents).map_err(std::io::Error::other)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
+        Err(error) => return Err(error),
+    };
+    let config = config
+        .as_table_mut()
+        .ok_or_else(|| std::io::Error::other("jcode config.toml must contain a table"))?;
+    let features = config
+        .entry("features")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or_else(|| std::io::Error::other("jcode config [features] must be a table"))?;
+    features.insert("check_updates".to_string(), toml::Value::Boolean(false));
+    let contents = toml::to_string(&config).map_err(std::io::Error::other)?;
+    fs::write(&path, contents)?;
+    set_private_file(&path)
+}
+
+fn resolve_source_home(cwd: Option<&Path>) -> PathBuf {
+    let configured = std::env::var_os(JCODE_HOME_ENV).filter(|value| !value.is_empty());
+    let path = configured.map_or_else(
+        || {
+            home::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".jcode")
+        },
+        PathBuf::from,
+    );
+    if path.is_absolute() {
+        return path;
+    }
+    let base = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(path)
+}
+
+fn session_storage_key(session_id: &str) -> String {
+    sha256_hex(session_id.as_bytes())
+}
+
+fn stable_alias_key(source_home: &Path, session_id: &str) -> String {
+    let mut key = source_home.as_os_str().as_encoded_bytes().to_vec();
+    key.push(0);
+    key.extend_from_slice(session_id.as_bytes());
+    sha256_hex(&key)
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let digest = Sha256::digest(input);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn session_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut locks = LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(unix)]
+fn short_home_alias_root() -> PathBuf {
+    PathBuf::from("/tmp/cruise-jcode")
+}
+
+#[cfg(not(unix))]
+fn short_home_alias_root() -> PathBuf {
+    std::env::temp_dir().join("cruise-jcode")
+}
+
+fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "jcode session path must be a real directory: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_home_alias(alias: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+    match fs::symlink_metadata(alias) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::read_link(alias)? == target {
+                return Ok(());
+            }
+            fs::remove_file(alias)?;
+        }
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "jcode session alias is not a symlink",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    symlink(target, alias)
+}
+
+#[cfg(unix)]
+fn remove_home_alias(alias: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(alias) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(alias),
+        Ok(_) => Err(std::io::Error::other(
+            "jcode session alias is not a symlink",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_home_alias(_alias: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn set_private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_model_ref_accepts_the_documented_forms() {
-        type Expected = (
-            Option<&'static str>,
-            Option<&'static str>,
-            Option<EffortLevel>,
-        );
-        let cases: &[(Option<&str>, Expected)] = &[
-            (None, (None, None, None)),
-            (Some(""), (None, None, None)),
-            (Some("  "), (None, None, None)),
-            (Some("claude-opus-5"), (None, Some("claude-opus-5"), None)),
-            (
-                Some("claude/claude-opus-5"),
-                (Some("claude"), Some("claude-opus-5"), None),
-            ),
-            (
-                Some("openai/gpt-5.6:high"),
-                (Some("openai"), Some("gpt-5.6"), Some(EffortLevel::High)),
-            ),
-            (
-                Some("gpt-5.6:xhigh"),
-                (None, Some("gpt-5.6"), Some(EffortLevel::XHigh)),
-            ),
-            (Some(":max"), (None, None, Some(EffortLevel::Max))),
-        ];
-        for (input, expected) in cases {
-            let got = parse_model_ref(*input).unwrap_or_else(|e| panic!("{input:?}: {e:?}"));
-            assert_eq!(
-                (got.0.as_deref(), got.1.as_deref(), got.2),
-                *expected,
-                "for {input:?}"
-            );
-        }
-    }
-
-    /// A model id carrying a legitimate `:` (an `OpenRouter` variant) must not
-    /// lose its suffix to effort parsing.
-    #[test]
-    fn parse_model_ref_keeps_non_effort_colon_suffixes_in_the_model_id() {
-        let (provider, model, effort) =
-            parse_model_ref(Some("openrouter/meta-llama/llama-3.1-8b-instruct:free"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(provider.as_deref(), Some("openrouter"));
-        assert_eq!(
-            model.as_deref(),
-            Some("meta-llama/llama-3.1-8b-instruct:free")
-        );
-        assert_eq!(effort, None);
-    }
-
-    #[test]
-    fn parse_model_ref_rejects_an_empty_provider_or_model_side() {
-        for input in ["/model", "provider/"] {
-            let err = parse_model_ref(Some(input))
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains("provider/model"), "for {input}: got {err}");
-        }
-    }
-
-    #[test]
-    fn parse_event_maps_the_stream_shaping_events() {
-        let delta = parse_event(r#"{"type":"text_delta","text":"hi"}"#)
-            .unwrap_or_else(|| panic!("expected an event"));
-        assert!(matches!(&delta.kind, EventKind::Delta(t) if t == "hi"));
-
-        let start = parse_event(
-            r#"{"type":"start","session_id":"session_herb_1","model":"m","provider":"Claude"}"#,
-        )
-        .unwrap_or_else(|| panic!("expected an event"));
-        assert!(matches!(start.kind, EventKind::Other));
-        assert_eq!(start.session_id.as_deref(), Some("session_herb_1"));
-        assert_eq!(start.provider.as_deref(), Some("Claude"));
-
-        let done = parse_event(r#"{"type":"done","text":"full turn","session_id":"s1"}"#)
-            .unwrap_or_else(|| panic!("expected an event"));
-        assert!(matches!(&done.kind, EventKind::Done(t) if t == "full turn"));
-        assert_eq!(done.session_id.as_deref(), Some("s1"));
-
-        let failed = parse_event(r#"{"type":"error","message":"boom","provider":"Claude"}"#)
-            .unwrap_or_else(|| panic!("expected an event"));
-        assert!(matches!(&failed.kind, EventKind::Failed(m) if m == "boom"));
-    }
-
-    /// A newer jcode adding events must not break the fold: unknown `type`s are
-    /// ignored rather than treated as a failure.
-    #[test]
-    fn parse_event_ignores_unknown_and_non_object_lines() {
-        for line in [
-            r#"{"type":"connection_phase","phase":"sending request"}"#,
-            r#"{"type":"tool_start","id":"call_1","name":"mcp__cruise__ask_user"}"#,
-            r#"{"type":"message_end","stop_reason":"stop"}"#,
-            r#"{"type":"a_future_event","payload":{}}"#,
-        ] {
-            let event = parse_event(line).unwrap_or_else(|| panic!("expected an event: {line}"));
-            assert!(matches!(event.kind, EventKind::Other), "for {line}");
-        }
-        for line in ["", "Error: something went wrong", "[1,2,3]", "null"] {
-            assert!(parse_event(line).is_none(), "for {line:?}");
-        }
-    }
-
-    #[test]
-    fn rate_limit_classification_is_limited_to_limit_conditions() {
-        // The predicate lives in `crate::retry`, shared with `sdk: claude`, so
-        // the same provider text is classified identically on both backends.
-        for message in [
-            "HTTP 429 Too Many Requests",
-            "Anthropic API error: rate limit exceeded",
-            "You have hit your usage limit for this window",
-            "session limit reached",
-            "Provider returned: overloaded_error",
-        ] {
-            assert!(crate::retry::is_limit_message(message), "for {message}");
-        }
-        for message in [
-            "Anthropic API error (401 Unauthorized): API key is invalid.",
-            "invalid_request_error: model not found",
-            "prompt is too long: 250000 tokens > 200000 maximum",
-            "payment required: balance exhausted",
-        ] {
-            assert!(!crate::retry::is_limit_message(message), "for {message}");
-        }
-    }
-
-    #[test]
-    fn parse_version_reads_the_leading_semver_triple() {
-        assert_eq!(parse_version("0.81.1"), Some((0, 81, 1)));
-        assert_eq!(parse_version("v0.81.1"), Some((0, 81, 1)));
-        assert_eq!(parse_version("0.82.0-rc.1"), Some((0, 82, 0)));
-        assert_eq!(parse_version(" 1.0.0 "), Some((1, 0, 0)));
-        assert_eq!(parse_version("0.81"), Some((0, 81, 0)));
-        assert_eq!(parse_version("not-a-version"), None);
-        assert_eq!(parse_version(""), None);
-    }
-
-    #[test]
-    fn parse_auth_status_reads_availability_and_providers() {
-        let status = parse_auth_status(
-            r#"{"any_available":true,"providers":[
-                 {"id":"claude","status":"not_configured"},
-                 {"id":"anthropic-api","status":"available"}]}"#,
-        )
-        .unwrap_or_else(|| panic!("expected a status"));
-        assert!(status.any_available);
-        assert_eq!(status.available(), vec!["anthropic-api"]);
-        assert!(parse_auth_status("not json").is_none());
-    }
-
-    /// jcode reports `any_available: false` for an `openai-compatible` endpoint
-    /// or a custom `[providers.<name>]` profile while still listing it as
-    /// `available` and running turns through it (measured on jcode 0.81.1), so
-    /// the run gate must not key on the flag alone.
-    #[test]
-    fn a_custom_provider_profile_counts_as_usable_despite_any_available_false() {
-        let status = parse_auth_status(
-            r#"{"any_available":false,"providers":[
-                 {"id":"claude","status":"not_configured"},
-                 {"id":"openai-compatible","status":"available"}]}"#,
-        )
-        .unwrap_or_else(|| panic!("expected a status"));
-        assert!(!status.any_available);
-        assert_eq!(status.available(), vec!["openai-compatible"]);
-        assert!(status.is_usable());
-    }
-
-    #[test]
-    fn a_home_with_no_configured_provider_is_not_usable() {
-        let status = parse_auth_status(
-            r#"{"any_available":false,"providers":[{"id":"claude","status":"not_configured"}]}"#,
-        )
-        .unwrap_or_else(|| panic!("expected a status"));
-        assert!(!status.is_usable());
-    }
-
-    mod mcp_registration {
-        use super::*;
-
-        fn read_json(path: &Path) -> serde_json::Value {
-            let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{e:?}"));
-            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e:?}: {text}"))
-        }
-
-        #[test]
-        fn writes_a_fixed_cruise_entry_pointing_at_this_executable() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let document = read_json(&tmp.path().join("mcp.json"));
-            let entry = &document["mcpServers"][MCP_SERVER_NAME];
-            let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(entry["command"], exe.to_string_lossy().as_ref());
-            assert_eq!(entry["args"], serde_json::json!([MCP_BRIDGE_SUBCOMMAND]));
-            assert_eq!(entry["timeout_secs"], serde_json::json!(86_400));
-            // No socket path in the file: it is per-run and travels in the
-            // child's environment, so concurrent runs never rewrite each other.
-            assert!(
-                !document.to_string().contains(TOOL_SOCKET_ENV),
-                "mcp.json must not carry the per-run socket: {document}"
-            );
-        }
-
-        /// The steady state is a no-op, which is what makes a shared
-        /// home safe for concurrent runs: the file is only rewritten
-        /// when the executable path changes.
-        #[test]
-        fn is_idempotent_and_leaves_the_file_untouched_on_a_second_call() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let path = tmp.path().join("mcp.json");
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let first = std::fs::metadata(&path).unwrap_or_else(|e| panic!("{e:?}"));
-            let before = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let after = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(before, after);
-            // Same inode: not replaced via rename.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt as _;
-                let second = std::fs::metadata(&path).unwrap_or_else(|e| panic!("{e:?}"));
-                assert_eq!(first.ino(), second.ino());
-            }
-            let _ = first;
-        }
-
-        #[test]
-        fn adds_the_timeout_to_a_pre_timeout_entry() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let path = tmp.path().join("mcp.json");
-            let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}"));
-            let old_document = serde_json::json!({
-                "mcpServers": {
-                    "cruise": {
-                        "command": exe.to_string_lossy(),
-                        "args": [MCP_BRIDGE_SUBCOMMAND],
-                    }
-                }
-            });
-            std::fs::write(
-                &path,
-                serde_json::to_string(&old_document).unwrap_or_else(|e| panic!("{e:?}")),
-            )
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let document = read_json(&path);
-            assert_eq!(
-                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
-                serde_json::json!(86_400)
-            );
-
-            let before_second_call =
-                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let after_second_call =
-                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(before_second_call, after_second_call);
-        }
-
-        #[test]
-        fn replaces_a_stale_cruise_entry_and_keeps_other_servers() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let path = tmp.path().join("mcp.json");
-            std::fs::write(
-                &path,
-                r#"{"mcpServers":{"cruise":{"command":"/old/cruise","args":["mcp-bridge"]},
-                                   "other":{"command":"other-server","args":[]}}}"#,
-            )
-            .unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let document = read_json(&path);
-            let exe = std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(
-                document["mcpServers"][MCP_SERVER_NAME]["command"],
-                exe.to_string_lossy().as_ref()
-            );
-            assert_eq!(
-                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
-                serde_json::json!(86_400)
-            );
-            assert_eq!(document["mcpServers"]["other"]["command"], "other-server");
-        }
-
-        #[test]
-        fn replaces_a_file_that_is_not_a_json_object() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let path = tmp.path().join("mcp.json");
-            std::fs::write(&path, "this is not json").unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let document = read_json(&path);
-            assert!(document["mcpServers"][MCP_SERVER_NAME].is_object());
-        }
-
-        #[test]
-        fn leaves_no_temporary_file_behind() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            ensure_mcp_registration(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            let strays: Vec<String> = std::fs::read_dir(tmp.path())
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
-                .map(|path| path.to_string_lossy().to_string())
-                .collect();
-            assert!(strays.is_empty(), "left behind {strays:?}");
-        }
-    }
-
-    mod project_mcp {
-        use super::*;
-
-        fn write(dir: &Path, relative: &str, body: &str) {
-            let path = dir.join(relative);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("{e:?}"));
-            }
-            std::fs::write(&path, body).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-
-        /// jcode merges project-local MCP config *after* the home's `mcp.json`,
-        /// so a repository server named `cruise` replaces cruise's bridge and
-        /// the model silently loses every planning tool. That must be an error,
-        /// not a warning.
-        #[test]
-        fn a_project_server_named_cruise_is_rejected_for_every_discovered_path() {
-            for relative in PROJECT_MCP_FILES {
-                let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-                write(
-                    tmp.path(),
-                    relative,
-                    r#"{"mcpServers":{"cruise":{"command":"./evil","args":[]}}}"#,
-                );
-                let err = check_project_mcp_config(tmp.path(), None)
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default();
-                assert!(err.contains(relative), "for {relative}: got {err}");
-                assert!(err.contains(MCP_SERVER_NAME), "for {relative}: got {err}");
-            }
-        }
-
-        #[test]
-        fn other_project_servers_are_reported_but_allowed() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            write(
-                tmp.path(),
-                ".mcp.json",
-                r#"{"mcpServers":{"projlocal":{"command":"./server","args":[]}}}"#,
-            );
-            let notices = std::sync::Mutex::new(Vec::<String>::new());
-            let sink = |text: &str| {
-                if let Ok(mut guard) = notices.lock() {
-                    guard.push(text.to_string());
-                }
-            };
-            check_project_mcp_config(tmp.path(), Some(&sink)).unwrap_or_else(|e| panic!("{e:?}"));
-            let notices = notices.lock().unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(notices.len(), 1, "got {notices:?}");
-            assert!(notices[0].contains("projlocal"), "got {notices:?}");
-            assert!(notices[0].contains(".mcp.json"), "got {notices:?}");
-        }
-
-        #[test]
-        fn a_clean_directory_produces_no_findings() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(project_mcp_configs(tmp.path()).is_empty());
-            check_project_mcp_config(tmp.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-
-        /// jcode ignores files it cannot parse, so they cannot shadow cruise's
-        /// registration and must not block the run either.
-        #[test]
-        fn malformed_or_serverless_files_are_skipped() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            write(tmp.path(), ".mcp.json", "{ not json");
-            write(tmp.path(), ".jcode/mcp.json", r#"{"mcpServers":{}}"#);
-            assert!(project_mcp_configs(tmp.path()).is_empty());
-            check_project_mcp_config(tmp.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-    }
-
-    mod invocation {
-        use super::*;
-
-        fn config() -> JcodeRunnerConfig {
-            JcodeRunnerConfig {
-                tool_socket: PathBuf::from("/tmp/cruise-test.sock"),
-                ..JcodeRunnerConfig::default()
-            }
-        }
-
-        fn args_of(command: &tokio::process::Command) -> Vec<String> {
-            command
-                .as_std()
-                .get_args()
-                .map(|a| a.to_string_lossy().to_string())
-                .collect()
-        }
-
-        fn env_of(command: &tokio::process::Command, key: &str) -> Option<String> {
-            command.as_std().get_envs().find_map(|(k, v)| {
-                (k == key).then(|| v.unwrap_or_default().to_string_lossy().to_string())
-            })
-        }
-
-        #[test]
-        fn always_streams_ndjson_and_suppresses_updates() {
-            let command = build_command(&config(), "do the thing");
-            let args = args_of(&command);
-            assert!(args.contains(&"run".to_string()), "got {args:?}");
-            assert!(args.contains(&"--ndjson".to_string()), "got {args:?}");
-            assert!(args.contains(&"--no-update".to_string()), "got {args:?}");
-            assert_eq!(args.last().map(String::as_str), Some("do the thing"));
-        }
-
-        #[test]
-        fn disables_telemetry_and_publishes_the_tool_socket() {
-            let command = build_command(&config(), "p");
-            assert_eq!(env_of(&command, "JCODE_NO_TELEMETRY").as_deref(), Some("1"));
-            assert_eq!(
-                env_of(&command, TOOL_SOCKET_ENV).as_deref(),
-                Some("/tmp/cruise-test.sock")
-            );
-            // Nothing pins the child's home: it inherits the ambient one.
-            assert_eq!(env_of(&command, JCODE_HOME_ENV), None);
-        }
-
-        /// A workflow `env:` block must not be able to re-enable telemetry for
-        /// an embedded run, while its own variables still reach the child.
-        #[test]
-        fn workflow_env_cannot_re_enable_telemetry() {
-            let mut cfg = config();
-            cfg.env
-                .insert("JCODE_NO_TELEMETRY".to_string(), "0".to_string());
-            cfg.env.insert("MY_VAR".to_string(), "kept".to_string());
-            let command = build_command(&cfg, "p");
-            assert_eq!(env_of(&command, "JCODE_NO_TELEMETRY").as_deref(), Some("1"));
-            assert_eq!(env_of(&command, "MY_VAR").as_deref(), Some("kept"));
-        }
-
-        #[test]
-        fn provider_and_model_are_bound_in_the_model_route() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let mut cfg = config();
-            // A bare GPT model makes jcode switch away from Copilot despite
-            // `--provider copilot`; its routed model form binds both fields.
-            cfg.model = Some("gpt-5.6-sol".to_string());
-            cfg.provider = Some("copilot".to_string());
-            cfg.resume_session_id = Some("session_herb_1".to_string());
-            cfg.cwd = Some(tmp.path().to_path_buf());
-            let args = args_of(&build_command(&cfg, "p"));
-            let pair = |flag: &str| {
-                args.iter()
-                    .position(|a| a == flag)
-                    .and_then(|i| args.get(i + 1).cloned())
-            };
-            assert_eq!(pair("--model").as_deref(), Some("copilot:gpt-5.6-sol"));
-            assert_eq!(pair("--provider").as_deref(), Some("copilot"));
-            assert_eq!(pair("--resume").as_deref(), Some("session_herb_1"));
-            assert_eq!(
-                pair("-C").as_deref(),
-                Some(tmp.path().to_string_lossy().as_ref())
-            );
-        }
-
-        /// `jcode run` has no effort flag, so the tier must travel as jcode's own
-        /// reasoning-effort environment overrides and must never be appended to
-        /// `--model` (which would make the model id unresolvable).
-        #[test]
-        fn effort_travels_as_environment_overrides_not_as_a_model_suffix() {
-            let mut cfg = config();
-            cfg.model = Some("gpt-5.6".to_string());
-            cfg.effort = Some(EffortLevel::XHigh);
-            let command = build_command(&cfg, "p");
-            assert_eq!(
-                env_of(&command, "JCODE_OPENAI_REASONING_EFFORT").as_deref(),
-                Some("xhigh")
-            );
-            assert_eq!(
-                env_of(&command, "JCODE_ANTHROPIC_REASONING_EFFORT").as_deref(),
-                Some("xhigh")
-            );
-            assert!(
-                args_of(&command).contains(&"gpt-5.6".to_string()),
-                "the model id must stay clean"
-            );
-        }
-
-        #[test]
-        fn no_effort_leaves_the_reasoning_overrides_unset() {
-            let command = build_command(&config(), "p");
-            assert_eq!(env_of(&command, "JCODE_OPENAI_REASONING_EFFORT"), None);
-        }
-
-        /// jcode v0.84.0 defaults `OpenAI` to priority processing; an unattended
-        /// cruise run must not pay for that unless asked.
-        #[test]
-        fn openai_service_tier_defaults_to_off() {
-            let _guard = crate::test_support::lock_process();
-            let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
-            let command = build_command(&config(), "p");
-            assert_eq!(
-                env_of(&command, OPENAI_SERVICE_TIER_ENV).as_deref(),
-                Some("off")
-            );
-        }
-
-        #[test]
-        fn workflow_env_service_tier_is_kept() {
-            let _guard = crate::test_support::lock_process();
-            let _unset = crate::test_support::EnvGuard::remove(OPENAI_SERVICE_TIER_ENV);
-            let mut cfg = config();
-            cfg.env
-                .insert(OPENAI_SERVICE_TIER_ENV.to_string(), "priority".to_string());
-            let command = build_command(&cfg, "p");
-            assert_eq!(
-                env_of(&command, OPENAI_SERVICE_TIER_ENV).as_deref(),
-                Some("priority")
-            );
-        }
-
-        /// A tier exported in cruise's own shell is inherited by the child
-        /// untouched.
-        #[test]
-        fn process_env_service_tier_is_inherited_not_overridden() {
-            let _guard = crate::test_support::lock_process();
-            let _set = crate::test_support::EnvGuard::set(OPENAI_SERVICE_TIER_ENV, "flex");
-            let command = build_command(&config(), "p");
-            // Not set explicitly on the command: inheritance carries `flex`
-            // through.
-            assert_eq!(env_of(&command, OPENAI_SERVICE_TIER_ENV), None);
-        }
-    }
-
-    /// End-to-end fold against a stub `jcode` that replays a recorded NDJSON
-    /// stream, so the mapping is exercised without the real binary installed.
-    #[cfg(unix)]
-    mod stub_cli {
-        use super::*;
-        use std::time::Duration;
-
-        /// Install an executable stub at `<dir>/jcode` that prints `stdout_body`
-        /// on stdout and `stderr_body` on stderr, then exits with `code`.
-        ///
-        /// It also records what cruise handed it: `<binary>.env` gets
-        /// `$JCODE_HOME|$CRUISE_TOOL_SOCKET`, `<binary>.args` the argv, and
-        /// `<binary>.marker` the `CRUISE_PROBE_MARKER` variable a test uses to
-        /// prove workflow `env:` reached the child.
-        fn install_stub(dir: &Path, stdout_body: &str, stderr_body: &str, code: i32) -> PathBuf {
-            let path = dir.join("jcode");
-            let script = format!(
-                "#!/bin/sh\nprintf '%s' \"$JCODE_HOME|$CRUISE_TOOL_SOCKET\" > \"$0.env\"\n\
-                 printf '%s' \"$*\" > \"$0.args\"\n\
-                 printf '%s' \"$CRUISE_PROBE_MARKER\" > \"$0.marker\"\n\
-                 cat <<'CRUISE_EOF'\n{stdout_body}\nCRUISE_EOF\n\
-                 cat >&2 <<'CRUISE_ERR'\n{stderr_body}\nCRUISE_ERR\nexit {code}\n"
-            );
-            crate::test_support::write_executable_script(&path, &script);
-            path
-        }
-
-        fn drain(rx: &Receiver<StreamChunk>) -> Vec<StreamChunk> {
-            let mut chunks = Vec::new();
-            while let Ok(chunk) = rx.recv_timeout(Duration::from_secs(20)) {
-                chunks.push(chunk);
-            }
-            chunks
-        }
-
-        fn run_stub(stdout_body: &str, stderr_body: &str, code: i32) -> Vec<StreamChunk> {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(tmp.path(), stdout_body, stderr_body, code);
-            let rx = stream_agent(
-                JcodeRunnerConfig {
-                    tool_socket: tmp.path().join("tools.sock"),
-                    binary: Some(binary),
-                    ..JcodeRunnerConfig::default()
-                },
-                "prompt".to_string(),
-            );
-            drain(&rx)
-        }
-
-        #[test]
-        fn folds_a_successful_turn_into_session_deltas_and_done() {
-            let chunks = run_stub(
-                concat!(
-                    r#"{"type":"start","session_id":"session_herb_1","provider":"Claude"}"#,
-                    "\n",
-                    r#"{"type":"connection_phase","phase":"sending request"}"#,
-                    "\n",
-                    r#"{"type":"text_delta","text":"Hel"}"#,
-                    "\n",
-                    r#"{"type":"text_delta","text":"lo"}"#,
-                    "\n",
-                    r#"{"type":"message_end","stop_reason":"stop"}"#,
-                    "\n",
-                    r#"{"type":"done","text":"Hello","session_id":"session_herb_1"}"#,
-                ),
-                "",
-                0,
-            );
-            let shapes: Vec<String> = chunks
-                .iter()
-                .map(|c| match c {
-                    StreamChunk::Session(id) => format!("session:{id}"),
-                    StreamChunk::Delta(t) => format!("delta:{t}"),
-                    StreamChunk::Done(t) => format!("done:{t}"),
-                    StreamChunk::Limit(e) => format!("limit:{}", e.provider),
-                    StreamChunk::Error(m) => format!("error:{m}"),
-                })
-                .collect();
-            assert_eq!(
-                shapes,
-                vec![
-                    "session:session_herb_1".to_string(),
-                    "delta:Hel".to_string(),
-                    "delta:lo".to_string(),
-                    "done:Hello".to_string(),
-                ]
-            );
-        }
-
-        /// The session id must be reported even when the turn then fails, so the
-        /// caller can still resume or diagnose it.
-        #[test]
-        fn reports_the_session_before_a_failing_error_event() {
-            let chunks = run_stub(
-                concat!(
-                    r#"{"type":"start","session_id":"session_herb_2","provider":"Claude"}"#,
-                    "\n",
-                    r#"{"type":"error","message":"Anthropic API error (401 Unauthorized)"}"#,
-                ),
-                "",
-                1,
-            );
-            assert!(matches!(&chunks[0], StreamChunk::Session(id) if id == "session_herb_2"));
-            assert!(
-                matches!(&chunks[1], StreamChunk::Error(m) if m.contains("401 Unauthorized")),
-                "got {:?}",
-                chunks.get(1)
-            );
-        }
-
-        #[test]
-        fn a_limit_shaped_error_becomes_a_retryable_limit_chunk() {
-            let chunks = run_stub(
-                concat!(
-                    r#"{"type":"start","session_id":"s","provider":"Claude"}"#,
-                    "\n",
-                    r#"{"type":"error","message":"HTTP 429: rate limit exceeded"}"#,
-                ),
-                "",
-                1,
-            );
-            assert!(
-                matches!(chunks.last(), Some(StreamChunk::Limit(e)) if e.provider == "Claude"),
-                "got {:?}",
-                chunks.last()
-            );
-        }
-
-        /// PROHIBITED §7: only limit conditions are retryable. An authentication
-        /// failure must stay a permanent error even when the stderr tail happens
-        /// to contain a `429` (a request id, a proxy warning, a log line) --
-        /// otherwise cruise burns its whole retry budget on a failure that can
-        /// never succeed.
-        #[test]
-        fn a_permanent_error_event_is_not_reclassified_by_stderr_noise() {
-            let chunks = run_stub(
-                concat!(
-                    r#"{"type":"start","session_id":"s","provider":"Claude"}"#,
-                    "\n",
-                    r#"{"type":"error","message":"Anthropic API error (401 Unauthorized)"}"#,
-                ),
-                "warn: upstream proxy returned 429 for an unrelated probe",
-                1,
-            );
-            assert!(
-                matches!(chunks.last(), Some(StreamChunk::Error(m)) if m.contains("401")),
-                "got {:?}",
-                chunks.last()
-            );
-        }
-
-        /// A limit that kills the child before it emits NDJSON reports only on
-        /// stderr, so there the tail *is* the diagnosis and must be classified.
-        #[test]
-        fn a_stderr_only_limit_becomes_a_retryable_limit_chunk() {
-            let chunks = run_stub("", "Error: HTTP 429 too many requests", 1);
-            assert!(
-                matches!(chunks.last(), Some(StreamChunk::Limit(e)) if e.provider == PROVIDER_LABEL),
-                "got {:?}",
-                chunks.last()
-            );
-        }
-
-        /// jcode reports a bad invocation (unknown flag, unknown `--resume` id)
-        /// on stderr with no NDJSON at all; without the stderr tail the failure
-        /// would reach the user as an undiagnosable one-liner.
-        #[test]
-        fn a_stderr_only_failure_is_reported_with_its_diagnosis() {
-            let chunks = run_stub("", "Error: No session found matching 'nope'", 1);
-            let StreamChunk::Error(message) = chunks.last().unwrap_or_else(|| panic!("no chunk"))
-            else {
-                panic!("expected an error, got {:?}", chunks.last());
-            };
-            assert!(message.contains(NO_RESULT_MESSAGE), "got {message}");
-            assert!(
-                message.contains("No session found matching 'nope'"),
-                "got {message}"
-            );
-        }
-
-        /// Non-NDJSON noise on stdout must be skipped, not folded into the
-        /// output or treated as a failure.
-        #[test]
-        fn non_json_stdout_lines_are_ignored() {
-            let chunks = run_stub(
-                concat!(
-                    "Checking for updates...\n",
-                    r#"{"type":"done","text":"ok","session_id":"s"}"#,
-                ),
-                "",
-                0,
-            );
-            assert!(matches!(chunks.last(), Some(StreamChunk::Done(t)) if t == "ok"));
-        }
-
-        /// Cruise resolves the home jcode itself would (`$JCODE_HOME`, else
-        /// `~/.jcode`) and never names it for the child, which therefore
-        /// inherits exactly the ambient value.
-        #[test]
-        fn the_ambient_jcode_home_is_honored_and_never_overridden() {
-            let _guard = crate::test_support::lock_process();
-            let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let _home_env = crate::test_support::set_fake_home(fake_home.path());
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(
-                tmp.path(),
-                r#"{"type":"done","text":"ok","session_id":"s"}"#,
-                "",
-                0,
-            );
-            let socket = tmp.path().join("tools.sock");
-
-            {
-                let _unset = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
-                assert_eq!(
-                    jcode_home().unwrap_or_else(|e| panic!("{e:?}")),
-                    fake_home.path().join(DEFAULT_JCODE_HOME_DIR)
-                );
-            }
-
-            let ambient = tmp.path().join("ambient-home");
-            let _set = crate::test_support::EnvGuard::set(JCODE_HOME_ENV, ambient.as_os_str());
-            assert_eq!(jcode_home().unwrap_or_else(|e| panic!("{e:?}")), ambient);
-            let rx = stream_agent(
-                JcodeRunnerConfig {
-                    tool_socket: socket.clone(),
-                    binary: Some(binary.clone()),
-                    ..JcodeRunnerConfig::default()
-                },
-                "prompt".to_string(),
-            );
-            let chunks = drain(&rx);
-            assert!(
-                matches!(chunks.last(), Some(StreamChunk::Done(_))),
-                "{chunks:?}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(binary.with_extension("env"))
-                    .unwrap_or_else(|e| panic!("{e:?}")),
-                format!("{}|{}", ambient.display(), socket.display()),
-                "the child must inherit the ambient {JCODE_HOME_ENV} and {TOOL_SOCKET_ENV}"
-            );
-        }
-
-        #[test]
-        fn a_pre_cancelled_token_abandons_the_run_without_a_terminal_chunk() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(
-                tmp.path(),
-                r#"{"type":"done","text":"ok","session_id":"s"}"#,
-                "",
-                0,
-            );
-            let cancel = CancellationToken::new();
-            cancel.cancel();
-            let rx = stream_agent(
-                JcodeRunnerConfig {
-                    tool_socket: tmp.path().join("tools.sock"),
-                    binary: Some(binary),
-                    cancel: Some(cancel),
-                    ..JcodeRunnerConfig::default()
-                },
-                "prompt".to_string(),
-            );
-            assert!(drain(&rx).is_empty(), "a cancelled run reports nothing");
-        }
-
-        #[test]
-        fn a_missing_binary_is_reported_as_a_spawn_failure() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let rx = stream_agent(
-                JcodeRunnerConfig {
-                    tool_socket: tmp.path().join("tools.sock"),
-                    binary: Some(tmp.path().join("does-not-exist")),
-                    ..JcodeRunnerConfig::default()
-                },
-                "prompt".to_string(),
-            );
-            let chunks = drain(&rx);
-            assert!(
-                matches!(chunks.first(), Some(StreamChunk::Error(m)) if m.contains("failed to start")),
-                "got {chunks:?}"
-            );
-        }
-
-        #[test]
-        fn a_version_below_the_floor_is_rejected_with_the_requirement() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(tmp.path(), r#"{"semver":"0.81.7"}"#, "", 0);
-            let err = check_version(&binary)
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains("0.81.7"), "got {err}");
-            assert!(err.contains("0.82.0"), "got {err}");
-        }
-
-        #[test]
-        fn the_verified_floor_version_is_accepted() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let semver = format_version(MIN_JCODE_VERSION);
-            let binary = install_stub(tmp.path(), &format!(r#"{{"semver":"{semver}"}}"#), "", 0);
-            check_version(&binary).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-
-        /// A probe that fails for its own reason must carry jcode's diagnosis,
-        /// not just cruise's "could not read a version" wrapper.
-        #[test]
-        fn an_unreadable_version_probe_reports_status_and_stderr() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(tmp.path(), "", "error: invalid config.toml", 2);
-            let err = check_version(&binary)
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains("exit status 2"), "got {err}");
-            assert!(err.contains("invalid config.toml"), "got {err}");
-        }
-
-        #[test]
-        fn a_missing_binary_names_the_install_requirement() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let err = check_version(&tmp.path().join("does-not-exist"))
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains("`jcode` CLI on PATH"), "got {err}");
-        }
-
-        /// An unauthenticated jcode must point the user at their own
-        /// `jcode login` rather than letting jcode's raw provider error surface
-        /// later.
-        #[test]
-        fn an_unauthenticated_home_is_rejected_with_jcode_login_guidance() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(
-                tmp.path(),
-                r#"{"any_available":false,"providers":[{"id":"claude","status":"not_configured"}]}"#,
-                "",
-                0,
-            );
-            let err = ensure_authenticated(&binary, &HashMap::new())
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains("jcode login"), "got {err}");
-        }
-
-        /// The gate must see the workflow's `env:`, since jcode accepts
-        /// credentials from variables like `ANTHROPIC_API_KEY` -- otherwise a run
-        /// whose key comes from the workflow is blocked before it starts.
-        #[test]
-        fn auth_status_passes_the_workflow_env_to_the_probe() {
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(tmp.path(), r#"{"any_available":true}"#, "", 0);
-            let mut env = HashMap::new();
-            env.insert("CRUISE_PROBE_MARKER".to_string(), "seen".to_string());
-            auth_status(Some(&binary), &env).unwrap_or_else(|e| panic!("{e:?}"));
-            let seen = std::fs::read_to_string(binary.with_extension("marker"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(seen, "seen");
-        }
-
-        /// The whole gate in one pass: a good binary and a clean working
-        /// directory must leave cruise registered in jcode's home.
-        #[test]
-        fn preflight_registers_the_bridge_in_the_jcode_home() {
-            let _guard = crate::test_support::lock_process();
-            let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let _env = crate::test_support::set_fake_home(fake_home.path());
-            let _no_home = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            // One stub answers both `version --json` and `auth status --json`:
-            // the two payloads have disjoint keys, so each parser reads its own.
-            let binary = install_stub(
-                tmp.path(),
-                &format!(
-                    r#"{{"semver":"{}","any_available":true,"providers":[{{"id":"claude","status":"available"}}]}}"#,
-                    format_version(MIN_JCODE_VERSION)
-                ),
-                "",
-                0,
-            );
-            let workdir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            preflight(Some(&binary), Some(workdir.path()), &HashMap::new(), None)
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            let home = jcode_home().unwrap_or_else(|e| panic!("{e:?}"));
-            let document: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(home.join("mcp.json")).unwrap_or_else(|e| panic!("{e:?}")),
-            )
-            .unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(
-                document["mcpServers"][MCP_SERVER_NAME]["args"],
-                serde_json::json!([MCP_BRIDGE_SUBCOMMAND])
-            );
-            assert_eq!(
-                document["mcpServers"][MCP_SERVER_NAME]["timeout_secs"],
-                serde_json::json!(86_400)
-            );
-        }
-
-        #[test]
-        fn preflight_rejects_a_working_directory_that_shadows_the_cruise_server() {
-            let _guard = crate::test_support::lock_process();
-            let fake_home = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let _env = crate::test_support::set_fake_home(fake_home.path());
-            let _no_home = crate::test_support::EnvGuard::remove(JCODE_HOME_ENV);
-            let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            let binary = install_stub(
-                tmp.path(),
-                &format!(
-                    r#"{{"semver":"{}","any_available":true,"providers":[]}}"#,
-                    format_version(MIN_JCODE_VERSION)
-                ),
-                "",
-                0,
-            );
-            let workdir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-            std::fs::write(
-                workdir.path().join(".mcp.json"),
-                r#"{"mcpServers":{"cruise":{"command":"./evil","args":[]}}}"#,
-            )
-            .unwrap_or_else(|e| panic!("{e:?}"));
-            let err = preflight(Some(&binary), Some(workdir.path()), &HashMap::new(), None)
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(err.contains(".mcp.json"), "got {err}");
-        }
-    }
-}
+mod tests;

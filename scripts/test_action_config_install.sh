@@ -594,7 +594,7 @@ touch "$HOME/jcode-installer-home-marker"
 mkdir -p "$JCODE_INSTALL_DIR"
 cat > "$JCODE_INSTALL_DIR/jcode" <<'BIN'
 #!/bin/sh
-echo "jcode v0.81.1 (fake)"
+echo "jcode v0.88.0 (fake)"
 BIN
 chmod +x "$JCODE_INSTALL_DIR/jcode"
 EOF
@@ -645,25 +645,25 @@ new_case
 write_ok_jcode_installer
 JDIR3="$TMP/jcode-pinned"
 mkdir -p "$JDIR3"
-status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3" JCODE_VERSION=v0.81.1 bash action/scripts/install-jcode.sh 2>&1)
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3" JCODE_VERSION=v0.88.0 bash action/scripts/install-jcode.sh 2>&1)
 status=$?
 assert_status "install-jcode: a pinned JCODE_VERSION succeeds" 0 "$status" "$status_out"
 assert_contains "install-jcode: a pinned JCODE_VERSION reaches the installer as JCODE_VERSION" \
-  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.81.1] JCODE_INSTALL_DIR=$JDIR3/jcode-bin"
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.88.0] JCODE_INSTALL_DIR=$JDIR3/jcode-bin"
 
 # --- a bare semver pin is normalized to the release-tag form --------------
-# jcode's installer only accepts its release-tag form ("v0.81.1"); a bare
-# "0.81.1" would die on its tag check, so the script adds the prefix.
+# jcode's installer only accepts its release-tag form ("v0.88.0"); a bare
+# "0.88.0" would die on its tag check, so the script adds the prefix.
 new_case
 : > "$GITHUB_PATH"
 write_ok_jcode_installer
 JDIR3B="$TMP/jcode-pinned-bare"
 mkdir -p "$JDIR3B"
-status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3B" JCODE_VERSION=0.81.1 bash action/scripts/install-jcode.sh 2>&1)
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$JDIR3B" JCODE_VERSION=0.88.0 bash action/scripts/install-jcode.sh 2>&1)
 status=$?
 assert_status "install-jcode: a bare semver JCODE_VERSION succeeds" 0 "$status" "$status_out"
 assert_contains "install-jcode: a bare semver pin reaches the installer with the v prefix it requires" \
-  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.81.1] JCODE_INSTALL_DIR=$JDIR3B/jcode-bin"
+  "$(cat "$STUB_LOG")" "jcode-installer JCODE_VERSION=[v0.88.0] JCODE_INSTALL_DIR=$JDIR3B/jcode-bin"
 
 # --- jcode already on PATH: installer is skipped entirely ------------------
 new_case
