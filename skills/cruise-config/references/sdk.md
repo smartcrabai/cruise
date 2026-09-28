@@ -5,9 +5,9 @@ Setting the top-level `sdk` field selects an SDK execution path instead of the c
 ```yaml
 sdk: jcode
 
-model: anthropic-api/claude-sonnet-4-6   # "provider/model[:effort]" for prompt steps
-plan_model: openai-api/gpt-5.5:high      # model for the built-in plan step (falls back to `model`)
-# model: [anthropic-api/claude-sonnet-4-6, openai-api/gpt-5.5]
+# Optional model references use `provider/model[:effort]` or a bare model.
+# Replace this placeholder with a route available in your jcode setup.
+# model: provider/model[:effort]
 
 steps:
   implement:
@@ -26,62 +26,51 @@ In both SDK backends, `model` / `plan_model` / per-step `model` carry the same p
 
 | Form | Example | Behavior |
 |------|---------|----------|
-| `provider/model[:effort]` | `openai-api/gpt-5.5:xhigh` | Explicit provider + model **under `sdk: jcode` only**. `sdk: claude` does not split on `/`: it strips the `:effort` suffix and passes the rest to `claude --model` verbatim, so `provider/model` reaches the CLI as a single (usually unknown) model id. |
+| `provider/model[:effort]` | `provider/model` | Explicit provider + model syntax for `sdk: jcode`. `sdk: claude` treats everything before `:effort` as the model name. |
 | `:effort` | `:high` | Provider/model left to the backend default; the requested effort is applied. |
-| `model` (no `/`) | `claude-sonnet-4-6` | Provider left to the backend's own resolution. |
+| `model` (no `/`) | `model-name` | Provider left to the backend's own resolution. |
 | unset | *(both `model` and `plan_model` omitted)* | The backend's configured default provider/model is used. |
 
 The `:effort` suffix is recognized only when it names an effort tier (`low`/`medium`/`high`/`xhigh`/`max`, the aliases `minimal`/`min`/`med`, or the numeric spellings `1`..`4`) or one of `off`/`none`/`0`/`5` — those four are stripped from the model id but leave the effort unset. Any other `:` suffix (e.g. an OpenRouter `:free` variant) stays part of the model id, so watch out for a model id whose own suffix happens to be `:0`..`:5`.
 
 A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode` when the prompt runs — a step error, not a config-validation error, so `cruise plan --dry-run` does not catch it. `sdk: claude` forwards it to the CLI, which fails with its own message.
 
-## `sdk: jcode` — the jcode CLI (default)
+## `sdk: jcode` — the jcode SDK (default)
 
-`sdk: jcode` drives the [jcode](https://github.com/1jehuang/jcode) CLI as a subprocess: one prompt is one `jcode run --ndjson` child. jcode **v0.82.0 or newer** is required — an older binary is rejected with a clear error, because cruise relies on both the NDJSON event shape and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id — one of the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `jcode auth status` shows which ones you are signed in to. The effort suffix is forwarded through jcode's reasoning-effort environment overrides and ignored by providers/models without reasoning effort.
+`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. Cruise checks the SDK handshake for `sessions` and, when custom tools are registered, `session_tools`; it does not run a CLI version probe. A missing capability produces an actionable upgrade error. `model`, `plan_model`, and per-step `model` accept `provider/model[:effort]`, a bare `model`, or no value. The effort suffix is applied through the SDK.
 
-OpenAI priority processing is off by default (cruise sets `JCODE_OPENAI_SERVICE_TIER=off`); opt in with `env.JCODE_OPENAI_SERVICE_TIER: "priority"` — see [the configuration example](env-and-llm.md#openai-priority-processing-with-jcode).
+The GitHub Action's shell bootstrap uses `jcode version --json`, `jcode login`, `jcode provider add`, and observational `jcode auth status` because that shell setup has no SDK client and the SDK exposes neither CLI version metadata nor account/profile setup operations. The Cruise backend itself uses the SDK capability handshake after launch.
 
-### Authentication and the shared jcode home
+Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/.jcode`. Each Cruise session gets an isolated SDK home that inherits credentials and config; resumed plan turns reuse it. The private runtime receives `JCODE_CHECK_UPDATES=0` without rewriting the copied config. Plan homes persist until their Cruise session is deleted or cleaned, while non-resumable prompt homes are removed after each turn. Unclaimed homes are pruned after 24 hours only when a cross-process lock proves no run is active. Before removing a private home, Cruise stops only a live `jcode serve` process whose command and `JCODE_HOME`/`JCODE_RUNTIME_DIR`/`JCODE_SOCKET` identify that runtime; it never trusts a registry PID alone. The absolute source-home path is saved with resumable plan sessions. The GitHub Action provisions credentials in its temporary source home; see [GitHub Actions](../../../docs/github-actions.md).
 
-Credentials, sessions, `config.toml`, and MCP registration live in **jcode's own home** — `$JCODE_HOME` when that variable is set and non-empty, otherwise `~/.jcode` — the same home an interactive `jcode` session uses. Cruise has no home of its own and never injects `JCODE_HOME` into the jcode child; exporting it before starting cruise relocates everything at once, which is how the GitHub Action keeps credentials off a runner's real home.
+`ask_user` keeps one pending question across the SDK's 120-second callback deadline. After about 110 seconds without an answer, the callback returns a successful instruction for the model to call `ask_user` again with the identical question. Cruise does not re-prompt, and an answer arriving between calls is returned by the next call; the wait remains bounded by the workflow step timeout. If a saved plan conversation is missing from its private jcode home, Cruise starts a fresh SDK session because the current plan is already in the prompt context.
 
-- `jcode login <provider>` — sign in (interactive picker / OAuth flow, or the provider's API key).
-- `jcode auth status` — list the authenticated providers; `--json` for machine-readable output.
-- `jcode model list` — list the models those providers expose.
+`submit_plan` and `update_plan` only write the plan and return; approval remains Cruise's normal post-turn flow rather than a blocking SDK callback.
 
-Running `sdk: jcode` with no authenticated provider fails with an error pointing at `jcode login`. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) in that home's `config.toml` — cruise adds no provider notation of its own.
+**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
 
-### Custom tools via MCP
-
-jcode cannot register custom tools in-process, so cruise's tools reach the model through a stdio MCP server (`cruise mcp-bridge`, registered in the home's `mcp.json`) and appear as `mcp__cruise__<tool>`. Cruise sets jcode's upstream `timeout_secs` to 86,400 seconds (24 hours) for that server, so interactive `ask_user` questions can wait up to 24 hours at the MCP layer, subject to any shorter workflow step timeout. Caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), last-wins over the home. A project-local server named `cruise` is a **hard error** (it would shadow cruise's tools); servers under other names load but are reported with a warning.
+The backend exposes Cruise session tools through jcode's session-tools support.
 
 ## `sdk: claude` — the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed: cruise workflows are unattended, so there is no console to answer a permission prompt on.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on. Cruise's workflow tools are exposed through the SDK.
 
 ## Differences from command mode
 
-- **`env` applies to prompt steps**: top-level and per-step `env:` values are placed in the environment of the backend's child process (the `jcode` / `claude` CLI).
+- **`env` applies to prompt steps**: top-level and per-step `env:` values are passed to SDK prompt execution; command steps receive them in their child process.
 - **`{model}` placeholder is irrelevant**: it only exists for the `command` array.
-- **Interactive planning**: during `cruise plan`, the SDK agent gets custom planning tools — `ask_user` (ask the user a clarifying question), `submit_plan` (write the plan markdown), and `update_plan` (find/replace a section of the existing plan). Both SDK backends support them. In non-interactive runs (no TTY), `ask_user` is not registered — the prompt instead tells the agent to decide on explicitly stated assumptions — but `submit_plan` and `update_plan` remain available, and a turn that ends without a successful `submit_plan`/`update_plan` call fails instead of falling back to the agent's final message as the plan. The interview-style `cruise plan --grill` mode builds on `ask_user`. Set `interactive_planning: false` to disable all of this and have the agent write `plan.md` directly, exactly like the `command` backend.
-- **Run steps execute autonomously**: ordinary prompt steps get no custom tools; the agent's built-in tools do the file editing. The one exception is `skip_step` (see below), which is registered only on steps that need it.
+- **Interactive planning**: when enabled, SDK planning can ask questions and submit or revise `plan.md`; non-interactive runs omit user interaction. Set `interactive_planning: false` to have the agent write `plan.md` directly, as in `command` mode.
+- **Run steps execute autonomously**: ordinary prompt steps use the provider's built-in tools for file editing. Cruise only adds its workflow-specific session capabilities where needed.
 - **Session continuity**: planning's plan/fix/ask turns share one backend session only when an SDK backend is active and `interactive_planning` is `true`; with `interactive_planning: false`, each turn starts a fresh backend session.
 
-## Commit guard
+### Structured intentional no-changes (`if.no-file-changes` steps only)
 
-SDK prompt steps are protected from advancing Git `HEAD` by default. Set `allow_commit: true` on a prompt that is intentionally expected to create commits or otherwise move `HEAD`; omitted and `false` values keep the guard enabled and false values are omitted when configs are serialized. The `true` value bypasses all commit-guard behavior for that prompt. A guarded movement is reported as a commit-guard violation and fails the step, even if cruise restores the original branch reference without touching the index or worktree.
+A prompt step with an `if.no-file-changes` condition (`failed` or `retry`) additionally gets a structured SDK action for declaring that leaving the workspace unchanged is deliberate (for example, the plan explicitly says not to add tests). This disables that step's `if.no-file-changes` action for the current attempt. A plain-text alternative — a `NO_CHANGES_INTENTIONAL: <reason>` line anchored at the start of a line in the step's output — has the same effect and works in `command:` mode too; see `flow-control.md` for both.
 
-This guard covers both `sdk: jcode` and `sdk: claude` prompt execution. It does not apply to command or option steps, planning/title/PR-metadata calls, or cruise-owned PR worktree commits. `allow_commit: true` belongs on the actual prompt step, not a `group:` or `workflow_call:` invocation (those call sites reject the override).
-
-### `skip_step` — declaring intentional no-changes (`if.no-file-changes` steps only)
-
-A prompt step with an `if.no-file-changes` condition (`failed` or `retry`) additionally gets a `skip_step(reason)` tool: the agent calls it to declare that leaving the workspace unchanged this turn is the deliberate, correct outcome (for example, the plan explicitly says not to add tests), which disables that step's `if.no-file-changes` action for the current attempt. A plain-text alternative that needs no tool support at all — a `NO_CHANGES_INTENTIONAL: <reason>` line anchored at the start of a line in the step's output — has the same effect and works in `command:` mode too; see `flow-control.md` for both.
-
-This tool is registered **only** on steps that carry `if.no-file-changes` — not on every run step — to keep the exposed tool set minimal on steps that can never call it.
-
-`skip_step` only exists in SDK mode. In classic `command:` mode, `run_command` never sees `tools` at all, so there is no way for a `command:` step to call it — the `NO_CHANGES_INTENTIONAL:` output marker is the only option there.
+The structured action is available only on prompt steps that carry an `if.no-file-changes` condition. In classic `command:` mode, the output marker is the only option.
 
 Command and option steps behave identically in both modes.
+
 
 ## Rate limits and fallback
 

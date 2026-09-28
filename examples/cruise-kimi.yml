@@ -44,13 +44,8 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          # Kimi for Coding (https://api.kimi.com/coding/) is a jcode
-          # built-in provider (id `kimi`), so no `providers` profile is
-          # needed -- just its API key (via `env`, since there is no
-          # dedicated `kimi_api_key` input) and an explicit model selection
-          # for both the planning step (plan_model) and the implementation
-          # steps (model).
-          model: kimi/kimi-for-coding
-          plan_model: kimi/kimi-for-coding
+          # This supplies Kimi credentials to the action's jcode SDK runtime
+          # and leaves model selection to the SDK default. Add model inputs
+          # only for routes advertised by the installed jcode SDK.
           env: |
             KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}

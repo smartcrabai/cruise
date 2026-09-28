@@ -13,18 +13,12 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 ## Prerequisites
 
 - [`gh` CLI](https://cli.github.com/) -- required for worktree mode (PR creation and cleanup). Not needed when using current-branch mode.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.82.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
 - [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
 ## Installation
-
-### cargo install
-
-```sh
-cargo install cruise
-```
 
 ### Homebrew
 
@@ -149,7 +143,7 @@ PR and Issue URLs are shown as text; a successful Publish as Issue also opens th
 
 The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
-For `ask_user`, a question containing line breaks is rendered as adjacent lines in the selected session's Plan tab. Its answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
+For interactive planning questions, line breaks are rendered as adjacent lines in the selected session's Plan tab. The answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
 
 The Sessions sidebar shows a presentation status, which can differ from the persisted session **Phase** while planning, running, or waiting for a user action. A filled `●` marks **Awaiting Input** and **Awaiting Approval** in light blue, **Running** and **Planning** in yellow, **Planned** in blue, **Completed** in green, **Failed** and **Plan Failed** in red, and **Suspended** in purple. A draft uses a green `◯`. The status text remains visible when `NO_COLOR` is set.
 
@@ -278,9 +272,9 @@ Successful plan generation sends a best-effort **Plan ready** desktop notificati
 
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead; pass `--no-force-exec`.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The WebUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button remains "Create & plan").
 
-With `--grill`, the plan step becomes an interview: instead of writing the plan in one shot, the SDK agent asks you questions **one at a time** (via the `ask_user` tool) — recommending an answer for each — until scope, edge cases, and the implementation approach are fully pinned down, and only then writes `plan.md`. It requires an SDK backend -- `sdk: jcode`, `sdk: claude`, or a config that names neither `sdk:` nor `command:` and therefore runs on the default `jcode` backend -- plus an interactive terminal and `interactive_planning: true`; cruise errors out (and discards the session) otherwise. `--grill` conflicts with `--skip-planning` and applies only to initial plan generation — Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The WebUI exposes the same behavior via the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
+With `--grill`, SDK planning becomes an interview: the agent asks questions one at a time and recommends answers before writing `plan.md`. It requires an SDK backend (including the default `jcode` backend), an interactive terminal, and `interactive_planning: true`; otherwise Cruise reports an error and discards the new session. It conflicts with `--skip-planning` and applies only to initial planning; Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The WebUI exposes the same behavior through the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
 
-With `--no-interactive-planning`, the interactive planning tools (`submit_plan` / `update_plan` / `ask_user`) are disabled for this session even if the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly instead — exactly like the `command` backend (with `force_exec: true` the flag is not an opt-out; see below). The flag conflicts with `--grill` (which requires the interactive tools). It is equivalent to setting `interactive_planning: false` in the workflow config but only affects the current session. The WebUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
+With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even when the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly, as in `command` mode. The flag conflicts with `--grill`; it is equivalent to setting `interactive_planning: false` but only affects the current session. The WebUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
 With `--formal-spec`, the initial implementation plan keeps its normal Markdown requirements and additionally asks the agent for both Quint and Alloy formal specifications. The formal blocks must use valid syntax, preserve the requirements' meaning, model relevant states, transitions, invariants, temporal requirements, ownership, and cardinality, and include standalone semantic comments in the configured plan language. The prompt also requires internally consistent models and reachable final states. The mode is off by default, works with `--grill`, `--no-interactive-planning`, and command or SDK backends, and conflicts with `--skip-planning` because that mode does not invoke an LLM. The TUI provides this toggle, but the WebUI New Session form does not. The CLI and standard TUI flows expose it only for the initial foreground plan request, not background `cruise --plan`, Fix, Ask, Replan, or existing-draft plan generation. The lower-level application API carries `formalSpec` on `Generate` requests and honors it for callers that invoke that operation directly, including eligible existing-draft Generate calls. An explicit `--formal-spec` also overrides `force_exec: true` for that invocation so the plan is generated normally.
 
@@ -320,7 +314,7 @@ Options:
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
-Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and `ask_user` questions send **Action required** immediately before waiting for input.
+Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted WebUI/TUI setting (`cruise config --set-parallelism`).
 
@@ -537,9 +531,9 @@ command:                   # LLM invocation command (mutually exclusive with `sd
   - "{model}"
   - -p
 
-# sdk: jcode              # alternative to `command`: drive the jcode CLI (this is the default
-                          # when neither `command` nor `sdk` is set -- see SDK Mode)
-# sdk: claude             # alternative: drive the claude CLI in-process via claude-agent-sdk
+# sdk: jcode              # Use jcode-sdk (the default when neither
+                          # `command` nor `sdk` is set; see SDK Mode)
+# sdk: claude             # Use claude-agent-sdk to drive the claude CLI
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -613,42 +607,50 @@ Instead of spawning an external CLI via `command`, prompt steps can be driven th
 ```yaml
 sdk: jcode        # optional -- this is the default when neither `command` nor `sdk` is set
 
-model: anthropic-api/claude-opus-4-6   # "provider/model[:effort]" for ordinary prompt steps
-plan_model: openai-api/gpt-5.5:high    # model for the built-in plan step (falls back to `model`)
-# model: [anthropic-api/claude-opus-4-6, openai-api/gpt-5.5, google/gemini]
+# Optional `model`/`plan_model` references use `provider/model[:effort]` or a bare model.
+# Replace these placeholders with routes available in your jcode setup.
+# model: provider/model[:effort]
 ```
 
 In both SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). The optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
 
 At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the first entry is the primary model and later entries form an implicit fallback chain. A model array with fallback entries enables model fallback automatically; an explicit `retry.fallback_chains` entry for the primary model takes precedence over the array tail. A 429 retries the current model while its retry budget and delay permit, then switches to the next usable fallback when one exists. A 5xx, an HTTP 4xx other than 429, 401, 403, 407, and 408, or a network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed; such a 4xx is never resent to the same model, since an identical request would fail the same way. 401, 403, and 407 are authentication or permission failures no other model can answer, so they fail the step at once instead of walking the chain. A 408 is a transport timeout classified as a network failure, so it takes the same immediate-switch path as a 5xx: it moves to a usable fallback first, and is only resent to the same model when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. A model skipped after a 429, a 5xx, or a network failure (a 408 included) is cooled down for 30 minutes in the current process, and so is one whose provider reported it as missing (`400 model_not_supported`, `404 model_not_found`), because there the model rather than the request is the defect; only a model left behind by a plain client-error switch is not cooled, since that status describes the request, not the model's health. In command mode, only the first entry is used and the historical same-model retry behavior remains unchanged.
 
-- `"provider/model[:effort]"` (e.g. `openai-api/gpt-5.5:xhigh`) -- under `sdk: jcode` this names the provider and the model separately; a `/` with an empty side (`"/model"`, `"provider/"`) fails the step with a clear error when the prompt runs, not at config-validation time. Under `sdk: claude` there is no provider part: everything except the `:effort` suffix goes to `claude --model` verbatim, so a `provider/model` value reaches the CLI as one model id and is rejected by it.
-- `"model"` (no `/`) -- the provider is left to the backend's own resolution.
-- Unset -- the backend's configured default provider/model is used.
+- `"provider/model[:effort]"` (e.g. `provider/model:xhigh`) -- `sdk: jcode` parses the provider and model separately; an empty side (`"/model"`, `"provider/"`) fails when the prompt runs. `sdk: claude` treats everything except the `:effort` suffix as the model name.
+- `"model"` (no `/`) -- no explicit provider is supplied.
+- Unset -- no explicit model is supplied.
 
-#### `sdk: jcode` -- the jcode CLI (default)
+#### `sdk: jcode` — the jcode SDK (default)
 
-`sdk: jcode` drives the [`jcode`](https://github.com/1jehuang/jcode) CLI (`jcode run`) as a subprocess. jcode v0.82.0 or newer is required; an older binary is rejected with a clear error. This floor provides both the `run --ndjson` event contract and jcode's upstream per-server MCP `timeout_secs` setting. The provider part of a model reference is a jcode provider id -- the values `jcode login --help` lists (`jcode provider list` prints only a curated subset and omits API-key providers such as `anthropic-api`); `jcode auth status` shows the ones you are already signed in to. Custom OpenAI-compatible endpoints are added as jcode's own `[providers.<name>]` profiles (`jcode provider add`) rather than anything cruise-specific.
+`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. At launch, Cruise validates the SDK handshake and required capabilities (`sessions`, plus `session_tools` when custom tools are registered); it does not probe the CLI version. Upgrade jcode when a required capability is missing. The `model`, `plan_model`, and per-step `model` fields accept `provider/model[:effort]`, a bare `model`, or no value. The effort suffix is applied through the SDK.
 
-Credentials, sessions, `config.toml`, and the MCP registration all live in jcode's own home -- `$JCODE_HOME` when that variable is set and non-empty, otherwise `~/.jcode` -- exactly the home your interactive `jcode` sessions use. Cruise has no home of its own and never injects `JCODE_HOME` into the jcode child, so exporting it before starting cruise relocates credentials, sessions, and config together -- that is how the [GitHub Action](docs/github-actions.md) keeps a job's credentials out of a persistent runner's `~/.jcode`. Sign in with `jcode login <provider>` and check the result with `jcode auth status`; running `sdk: jcode` with no authenticated provider fails with an error pointing at `jcode login`. Sharing that home cuts both ways: the `cruise` MCP server cruise registers in `mcp.json` (see below) stays registered afterwards, so `mcp__cruise__*` tools also show up in your own interactive jcode sessions, and the MCP servers you configured there load inside cruise runs.
+The GitHub Action's shell bootstrap retains `jcode version --json`, `jcode login`, `jcode provider add`, and observational `jcode auth status`: it has no SDK client, and the SDK exposes neither the CLI version string nor these account/profile setup operations. The Cruise backend itself uses the SDK capability handshake after launch.
 
-Because jcode cannot register custom tools in-process, cruise's tools (`ask_user`, `submit_plan`, ...) reach the model through a stdio MCP server and appear as `mcp__cruise__<tool>`. Cruise registers that server with jcode's upstream `timeout_secs` set to 86,400 seconds (24 hours), so an interactive `ask_user` question can wait up to 24 hours at the MCP layer, subject to any shorter workflow step timeout. One caveat: jcode also merges MCP configuration from the run directory (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`), which takes precedence over cruise's registration. A project-local MCP server named `cruise` is rejected with an error (it would shadow cruise's tools); other project-local servers are loaded but pointed out with a warning.
+Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/.jcode`. Each Cruise session gets an isolated SDK home that inherits credentials and config; resumed plan turns reuse it. The private runtime receives `JCODE_CHECK_UPDATES=0` without rewriting the copied config. Plan homes persist until their Cruise session is deleted or cleaned, while non-resumable prompt homes are removed after each turn. Unclaimed homes are pruned after 24 hours only when a cross-process lock proves no run is active. Before removing a private home, Cruise stops only a live `jcode serve` process whose command and `JCODE_HOME`/`JCODE_RUNTIME_DIR`/`JCODE_SOCKET` identify that runtime; it never trusts a registry PID alone. The absolute source-home path is saved with resumable plan sessions so deletion still works when Cruise is launched from another directory.
 
-#### `sdk: claude` -- the claude CLI in-process
+`ask_user` keeps its pending question alive across jcode's 120-second SDK callback deadline. After about 110 seconds without an answer, the tool returns a successful continuation notice asking the model to call `ask_user` again with the identical question; it does not prompt the user again, and an answer received between calls is returned by the next call. The wait remains bounded by the workflow step timeout. When a saved plan conversation is absent from its private jcode home, Cruise starts a fresh SDK session because the current plan is already included in the prompt.
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk, with cruise's tools exposed as `mcp__cruise__<tool>`. Model references are plain `claude --model` names with the optional `:effort` suffix, which is forwarded as `claude --effort` (a CLI too old for that flag fails the step -- see [Prerequisites](#prerequisites)); authentication is the claude CLI's own (its stored credentials or `ANTHROPIC_API_KEY`), unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on.
+`submit_plan` and `update_plan` only write the plan and return; Cruise's existing approval flow happens after the model turn and does not hold an SDK tool callback open.
+
+**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
+
+The backend exposes Cruise session tools through jcode's session-tools support.
+
+#### `sdk: claude` — the claude CLI in-process
+
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on. Cruise's workflow tools are exposed through the SDK.
 
 #### Tool-less (non-interactive) planning
 
-By default, SDK-mode planning drives the plan through custom tools (`submit_plan` / `update_plan` / `ask_user`); both SDK backends support them.
+By default, SDK-mode planning uses session tools to ask questions and submit or revise the plan.
 
-Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend — and registers no custom tools. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written, same as `command` mode).
+Set `interactive_planning: false` to turn that off. Planning then embeds the target plan-file path in the prompt and asks the agent to write `plan.md` directly — exactly like the `command` backend. The resulting `plan.md` is read back afterward (falling back to the agent's captured output if the file was not written).
 
 ```yaml
 interactive_planning: false   # tool-less, file-based planning
 ```
 
-`--grill` requires the interactive tool-based flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
+`--grill` requires the interactive planning flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
 
 ### Prompt Languages
 
@@ -673,7 +675,7 @@ The effective values are available to built-in templates as `{pr.language}` and 
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise invokes the agent with the `generate_title` SDK tool (approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead), using the same model resolution as the plan step (`plan_model` -> `model`, then the backend's own default). If the call fails, cruise falls back to extracting the title from `plan.md`.
+- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise makes a separate title-generation request using the plan step's model resolution (`plan_model` -> `model`, then the backend's own default). Approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead. If title generation fails, cruise extracts the title from `plan.md`.
 - **Command mode (`command:` set)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 No additional configuration is required.
@@ -684,15 +686,13 @@ Environment variables can be set at workflow and step level. Step-level values o
 
 The CLI and WebUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
-`JCODE_OPENAI_SERVICE_TIER` controls jcode's OpenAI service tier. When neither the workflow `env:` nor the parent process environment defines this key, cruise injects `off` into the jcode child; if either defines it, cruise preserves the supplied value. The key's presence, not its value, determines whether cruise injects the default.
+`JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 
-`CRUISE_TOOL_SOCKET` names the Unix socket a `cruise mcp-bridge` child dials to reach the parent run's tool server. Cruise sets it on the jcode child, which passes it on to the MCP servers it spawns; it is also the default for `cruise mcp-bridge --socket`.
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
 
 `CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
 
-Cruise also injects fixed values into every jcode child process, after any workflow `env:`, so a workflow cannot override them: `JCODE_NO_TELEMETRY=1`, and, when a model carries a reasoning-effort suffix, `JCODE_ANTHROPIC_REASONING_EFFORT` and `JCODE_OPENAI_REASONING_EFFORT` set to that effort (jcode ignores them for providers and models without reasoning-effort support). `JCODE_HOME` is *not* among them -- see [`sdk: jcode`](#sdk-jcode----the-jcode-cli-default) for how the child inherits the ambient jcode home.
 
 ```yaml
 env:                        # top-level: applied to all steps
@@ -1025,9 +1025,9 @@ steps:
 Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** actions (`failed` and `retry`) for that attempt:
 
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
-- **`skip_step` tool** (SDK mode only) -- the agent calls `skip_step(reason)` instead. Schema-validated rather than text-matched. Registered only on prompt steps with an `if.no-file-changes` condition, to keep the exposed tool set minimal on steps that can never call it. Not available in classic `command:` mode -- use the output marker there.
+- **Structured SDK response** -- SDK-mode agents can declare intentional no-changes through a schema-validated structured response on prompt steps with an `if.no-file-changes` condition. In classic `command:` mode, use the output marker.
 
-Either path logs the declared reason so the decision stays visible in the run output. Parallel children cannot make this declaration for their parent: child output markers are stored inside the aggregate JSON, and children do not receive the `skip_step` tool. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
+Either path logs the declared reason so the decision stays visible in the run output. Parallel children cannot make this declaration for their parent: child output markers remain inside the aggregate JSON, and children do not receive the structured response. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
 
 #### Failure handling (`if.fail`)
 
@@ -1386,10 +1386,10 @@ retry:
   fallback_chains:          # tried in order: exact "provider/model" (or bare "model") key,
                             # then "provider/*", then "default"
     default:
-      - anthropic-api/claude-opus-4-6
-      - openai-api/gpt-5.5
-    "anthropic-api/*":
-      - openrouter/*
+      - provider-a/model-a
+      - provider-b/model-b
+    "provider-a/*":
+      - provider-c/*
 ```
 
 With an SDK retry policy, whether declared by `retry:` or implied by a model array with fallback entries, HTTP 5xx, HTTP 4xx other than 429, 401, 403, 407, and 408, and network failures become retryable too, and they switch to the next chain entry immediately when `--rate-limit-retries` is above zero, a usable fallback exists, and no visible text was streamed, with a fresh budget and a fresh session. Such a 4xx is answered by a switch only: the same request is never resent to the same model, and a 400 counts even when its message reads like a permanent error (`invalid request`, `context length`, `max_tokens`), because another model may accept the very same request. A message that instead names the model as absent -- `model_not_supported`, `model_not_found`, `model not found`, `model not supported`, `model is not supported`, `unknown model`, `no such model`, `model does not exist`, `not a valid model`, read from the provider's own error rather than the child-process stderr appended after it -- is classified as a missing model instead: it still only switches, but the reference rather than the request is at fault, so `invalid_request_error: model not found` is a switch rather than a permanent failure and the abandoned model is cooled down. When no usable chain entry is left, the original 4xx surfaces unchanged. The excluded statuses keep their own handling: 401, 403, and 407 are authentication or permission failures that no other model can answer, so they fail the step immediately with the provider's own error rather than hiding it behind a walk through the chain, and a 408 Request Timeout is classified as a network failure, so it follows the 5xx/network path instead: it switches to a usable fallback first and is resent to the same model only when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. Classification reads rate-limit wording first, 5xx and the network markers next, and the missing-model wordings before any bare 4xx-looking number, so a `429` or a `503` keeps its own class even when the surrounding text -- a stack trace or a URL appended from the CLI's stderr, say -- also contains something that looks like a 4xx. A failure with no recognizable status code (`unknown option '--effort'`, say) stays permanent and fails the step immediately; a number is read as an HTTP status only when it is a standalone three-digit number with one of `http`, `status`, `code`, `error`, `returned`, or `upstream` within the preceding 24 bytes, and source locations (`src/lib.rs:404:17`) and URL ports (`https://host:443/path`) are never treated as statuses. A `provider/*` chain entry keeps the failing model id and swaps only the provider. `--rate-limit-retries 0` disables retrying, so a rate limit, a 5xx, or a 4xx fails the step with no model switch; only a model reference the backend refuses outright still moves to the next chain entry, since nothing was sent and there is nothing to replay. A model skipped because of a 429, a 5xx, or a network failure -- a 408 included -- remains skipped for the next 30 minutes in this process (in-memory state, not persisted across processes), as does one the provider reported as missing, so later turns and later steps stop re-selecting a model it does not have; only a model left behind by a 4xx client-error switch escapes the cooldown, because a client error says something about the request, not about the model's health. A turn that already streamed visible text is never retried on another model. For a 429, the same-model retry can instead be bypassed when its computed or server-requested delay exceeds `retry.max_delay_ms`.

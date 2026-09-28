@@ -28,16 +28,13 @@ export_env() { # $1=name $2=value
   echo "$1=$2" >> "$GITHUB_ENV"
 }
 
-# --- cruise's XDG dirs and the jcode home, identical for EVERY later step.
-# XDG_* places cruise's own data (its session store lives under
-# XDG_DATA_HOME; src/paths.rs falls back to $HOME/.local/share/cruise when it
-# is unset). JCODE_HOME is what keeps the model credentials -- and the jcode
-# sessions the runs produce -- off a self-hosted runner's real $HOME: cruise
-# no longer relocates jcode itself, it just inherits whatever home the
-# ambient environment names, so pinning that home is this action's job.
-# $GITHUB_ENV written here, ahead of the install and provision steps, is the
-# only channel that reaches all of them, so provision-jcode.sh writing the
-# credentials and the run step reading them resolve the same paths. ---
+# --- cruise XDG dirs and the jcode credential-source home, for EVERY step.
+# XDG_* places cruise's own data. JCODE_HOME points at the source config and
+# credentials; SDK sessions get private homes beneath it. Pin both cruise
+# data and the source home under $RUNNER_TEMP so they stay off the runner's
+# persistent home. $GITHUB_ENV carries the same paths to install, provision,
+# and run steps, so credential provisioning and SDK session creation share a
+# source home.
 CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
 mkdir -p "$CRUISE_DIR/data" "$CRUISE_DIR/xdg-config" "$CRUISE_DIR/xdg-state" "$CRUISE_DIR/jcode-home"
 export_env XDG_DATA_HOME "$CRUISE_DIR/data"

@@ -40,6 +40,7 @@ fn cli_plan_ctx<'a>(
     grill: bool,
     formal_spec: bool,
     cancel_token: Option<&'a CancellationToken>,
+    on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
 ) -> PlanPromptCtx<'a> {
     // Only the interactive approve loop can prompt the user; non-TTY contexts use
@@ -60,7 +61,7 @@ fn cli_plan_ctx<'a>(
         working_dir,
         grill,
         formal_spec,
-        on_session_id: None,
+        on_session_id,
         on_notice,
         cancel_token,
     }
@@ -72,6 +73,48 @@ fn cli_notice_callback(
 ) -> impl Fn(&str) + Send + Sync + 'static {
     let logger = crate::session::SessionLogger::new(manager.run_log_path(session_id));
     move |message: &str| logger.write(&format!("[info] {message}"))
+}
+// Persist retained Jcode plan homes with their Cruise session owner.
+fn cli_plan_session_callback<'a>(
+    manager: &'a SessionManager,
+    session: &SessionState,
+    config: &WorkflowConfig,
+    working_dir: &Path,
+) -> Option<Box<crate::executor::SessionIdCallback<'a>>> {
+    if !matches!(
+        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
+        crate::executor::Executor::Jcode
+    ) || !crate::planning::sdk_plan_tools_enabled(config)
+    {
+        return None;
+    }
+
+    let identity = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
+    let key = crate::planning::plan_conversation_key(config, &identity);
+    let home = crate::backend::jcode::resolve_source_home(Some(working_dir));
+    let session_id = session.id.clone();
+    Some(Box::new(move |backend_id| {
+        let mut state = manager.load(&session_id)?;
+        if let Some(previous_id) = state.plan_conversation_id.as_deref()
+            && (previous_id != backend_id
+                || state.plan_conversation_home.as_deref() != Some(home.as_path()))
+        {
+            let previous_home = state.plan_conversation_home.clone().unwrap_or_else(|| {
+                crate::backend::jcode::resolve_source_home(
+                    state.worktree_path.as_deref().or(Some(&state.base_dir)),
+                )
+            });
+            crate::backend::jcode::cleanup_session_home_at(&previous_home, previous_id).map_err(
+                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            )?;
+        }
+        state.plan_conversation_id = Some(backend_id.to_string());
+        state.plan_conversation_key = Some(key.clone());
+        state.plan_conversation_home = Some(home.clone());
+        manager.save(&state)
+    }))
 }
 
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
@@ -304,6 +347,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         let work_dir = plan_working_dir(&session).to_path_buf();
         let cancel_token = CancellationToken::new();
         let on_notice = cli_notice_callback(&manager, &session.id);
+        let on_session_id = cli_plan_session_callback(&manager, &session, &config, &work_dir);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -313,6 +357,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             args.grill,
             args.formal_spec,
             Some(&cancel_token),
+            on_session_id.as_deref(),
             Some(&on_notice),
         );
         let plan_result = tokio::select! {
@@ -338,6 +383,8 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             return Err(e);
         }
         notify_plan_result(&session, &Ok(()));
+        let session_id = session.id.clone();
+        session = manager.load(&session_id)?;
     }
 
     // Approve-plan loop.
@@ -460,6 +507,8 @@ pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
     manager.save(&session)?;
 
     let result = generate_plan_for_session(&manager, &session, args.rate_limit_retries).await;
+    let session_id = session.id.clone();
+    session = manager.load(&session_id)?;
     match result {
         Ok(plan_markdown) => {
             crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
@@ -904,17 +953,19 @@ async fn generate_plan_for_session(
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
-    // Background worker is non-interactive, so grill mode is never used here.
     let on_notice = cli_notice_callback(manager, &session.id);
+    let working_dir = plan_working_dir(session);
+    let on_session_id = cli_plan_session_callback(manager, session, &config, working_dir);
     let ctx = cli_plan_ctx(
         &config,
         &plan_path,
-        Some(plan_working_dir(session)),
+        Some(working_dir),
         false,
         rate_limit_retries,
         false,
         false,
         None,
+        on_session_id.as_deref(),
         Some(&on_notice),
     );
     generate_plan_markdown(&ctx, &mut vars, &mut resume).await
@@ -935,26 +986,11 @@ async fn generate_plan_markdown(
         true,
     )
     .await?;
-    // Read the backend transcript only when content resolution fails; on
-    // success the plan document is already on disk and the transcript read
-    // would be dead I/O.
     crate::planning::resolve_generated_plan_content(
         ctx.plan_path,
         &prompt_result.output,
         &prompt_result.stderr,
-        None,
     )
-    .or_else(|_| {
-        let transcript = resume.as_deref().and_then(|session_id| {
-            crate::planning::read_sdk_transcript(ctx.working_dir, session_id)
-        });
-        crate::planning::resolve_generated_plan_content(
-            ctx.plan_path,
-            &prompt_result.output,
-            &prompt_result.stderr,
-            transcript.as_deref(),
-        )
-    })
 }
 
 #[derive(Clone)]
@@ -1127,6 +1163,7 @@ async fn run_approve_loop(
     // Grill affects only the initial plan template; fix/ask turns are standard.
     let cancel_token = CancellationToken::new();
     let on_notice = cli_notice_callback(manager, &session.id);
+    let on_session_id = cli_plan_session_callback(manager, session, config, &working_dir);
     let ctx = cli_plan_ctx(
         config,
         plan_path,
@@ -1136,6 +1173,7 @@ async fn run_approve_loop(
         false,
         false,
         Some(&cancel_token),
+        on_session_id.as_deref(),
         Some(&on_notice),
     );
 
@@ -1256,6 +1294,8 @@ async fn run_approve_loop(
                     .as_ref()
                     .inspect_err(|_| notify_plan_result(session, &fix_result));
                 fix_result?;
+                let session_id = session.id.clone();
+                *session = manager.load(&session_id)?;
                 plan_content = match crate::metadata::read_plan_markdown(plan_path) {
                     Ok(content) => content,
                     Err(error) => {
@@ -1283,6 +1323,8 @@ async fn run_approve_loop(
                     .as_ref()
                     .inspect_err(|_| notify_plan_result(session, &ask_result));
                 ask_result?;
+                let session_id = session.id.clone();
+                *session = manager.load(&session_id)?;
             }
 
             "Publish as Issue" => {
@@ -1355,6 +1397,7 @@ pub async fn replan_session(
             .unwrap_or_else(|| session.base_dir.clone());
         let mut resume: Option<String> = None;
         let on_notice = cli_notice_callback(manager, &session.id);
+        let on_session_id = cli_plan_session_callback(manager, session, &config, &working_dir);
         // Fix-plan reuses the standard template regardless of grill.
         let ctx = cli_plan_ctx(
             &config,
@@ -1365,9 +1408,12 @@ pub async fn replan_session(
             false,
             false,
             None,
+            on_session_id.as_deref(),
             Some(&on_notice),
         );
         run_fix_plan(&ctx, &mut vars, &mut resume).await?;
+        let session_id = session.id.clone();
+        *session = manager.load(&session_id)?;
 
         let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
@@ -1516,6 +1562,7 @@ pub async fn regenerate_plan_for_session(
         let work_dir = plan_working_dir(session).to_path_buf();
         let mut resume: Option<String> = None;
         let on_notice = cli_notice_callback(manager, &session.id);
+        let on_session_id = cli_plan_session_callback(manager, session, &config, &work_dir);
         let ctx = cli_plan_ctx(
             &config,
             &plan_path,
@@ -1525,11 +1572,16 @@ pub async fn regenerate_plan_for_session(
             false,
             false,
             None,
+            on_session_id.as_deref(),
             Some(&on_notice),
         );
         generate_plan_markdown(&ctx, &mut vars, &mut resume)
             .await
             .inspect_err(|e| {
+                let session_id = session.id.clone();
+                if let Ok(reloaded) = manager.load(&session_id) {
+                    *session = reloaded;
+                }
                 session.plan_error = Some(e.to_string());
                 if saved_worktree_path.is_none() {
                     // Worktree was freshly created for this planning attempt; clean it up.
@@ -1545,6 +1597,8 @@ pub async fn regenerate_plan_for_session(
                     eprintln!("warning: failed to persist plan error state: {save_err}");
                 }
             })?;
+        let session_id = session.id.clone();
+        *session = manager.load(&session_id)?;
 
         let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
@@ -1699,6 +1753,61 @@ mod tests {
             std::fs::read_to_string(config_path).unwrap_or_else(|e| panic!("{e:?}")),
             expected
         );
+    }
+
+    #[test]
+    fn cli_jcode_plan_callback_persists_and_replaces_owned_home() {
+        let _lock = lock_process();
+        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error:?}"));
+        let _jcode_home = crate::test_support::EnvGuard::set(
+            "JCODE_HOME",
+            std::ffi::OsStr::new("relative-jcode"),
+        );
+        let manager = SessionManager::new(tmp.path().join("sessions"));
+        let working_dir = tmp.path().join("working");
+        fs::create_dir_all(&working_dir).unwrap_or_else(|error| panic!("{error:?}"));
+        let old_home = crate::backend::jcode::resolve_source_home(Some(&working_dir))
+            .join(".cruise-sdk-sessions")
+            .join("old-home");
+        fs::create_dir_all(&old_home).unwrap_or_else(|error| panic!("{error:?}"));
+        fs::write(old_home.join(".cruise-session-id"), "old-session-id")
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let mut session = make_session("20260624000000", tmp.path());
+        let source_home = crate::backend::jcode::resolve_source_home(Some(&working_dir));
+        session.plan_conversation_id = Some("old-session-id".to_string());
+        session.plan_conversation_home = Some(source_home.clone());
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+
+        let callback = cli_plan_session_callback(&manager, &session, &config, &working_dir)
+            .unwrap_or_else(|| panic!("expected a jcode plan callback"));
+        callback("jcode-session-id").unwrap_or_else(|error| panic!("{error:?}"));
+
+        let stored = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let identity = session
+            .config
+            .stable_identity(session.repo.as_deref(), &session.id);
+        let expected_key = crate::planning::plan_conversation_key(&config, &identity);
+        assert_eq!(
+            stored.plan_conversation_id.as_deref(),
+            Some("jcode-session-id")
+        );
+        assert_eq!(
+            stored.plan_conversation_key.as_deref(),
+            Some(expected_key.as_str())
+        );
+        assert_eq!(
+            stored.plan_conversation_home.as_deref(),
+            Some(source_home.as_path())
+        );
+        assert!(!old_home.exists(), "replaced session home must be removed");
     }
 
     #[test]

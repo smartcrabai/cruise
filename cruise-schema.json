@@ -21,7 +21,7 @@
     "sdk": {
       "type": "string",
       "enum": ["jcode", "claude"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both runs prompts on \"jcode\", the default backend. \"jcode\" drives the jcode CLI as an NDJSON subprocess in jcode's own home, using the credentials `jcode login` stored (model/plan_model become `provider/model` references in jcode's namespace with an optional `:effort` suffix); \"claude\" drives the claude CLI in-process through claude-agent-sdk (model/plan_model become plain `claude --model` names with an optional `:effort` suffix)."
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode`, the default backend. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. SDK model references support `provider/model[:effort]` or a bare model."
     },
     "model": {
       "oneOf": [
@@ -53,7 +53,7 @@
     },
     "interactive_planning": {
       "type": "boolean",
-      "description": "Whether SDK-mode planning drives the plan through the interactive submit_plan/update_plan/ask_user tools instead of writing plan.md directly. Default: true. Applies to any SDK backend, including the default `jcode` one used when neither `sdk` nor `command` is set; it has no effect with a `command` backend, which is always file-based."
+      "description": "Whether SDK-mode planning uses session tools to ask questions and submit or revise the plan instead of writing `plan.md` directly. Default: true. Applies to SDK backends, including the default `jcode`; it has no effect with a `command` backend, which always uses file-based planning."
     },
     "pr_language": {
       "type": "string",

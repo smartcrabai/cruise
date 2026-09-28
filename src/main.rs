@@ -40,7 +40,6 @@ mod graph;
 mod herdr;
 mod issue_publish;
 mod list_cmd;
-mod mcp_bridge;
 mod metadata;
 mod multiline_input;
 pub mod new_session_draft;
@@ -67,7 +66,6 @@ mod test_binary_support;
 #[cfg(test)]
 mod test_support;
 mod timeout;
-mod tool_bridge;
 mod tui;
 mod variable;
 mod webui;
@@ -111,7 +109,6 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
-        Some(cli::Commands::McpBridge(args)) => mcp_bridge::run(args.socket),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),

@@ -25,24 +25,11 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **Secrets caveat**: avoid writing real API keys into `env:` values — config files tend to get committed. Prefer exporting secrets in the shell environment and keeping only non-secret values in `env:`.
 
-**SDK mode**: prompt steps receive `env:` in the environment of the backend's child process — the `jcode` CLI under `sdk: jcode`, the `claude` CLI under `sdk: claude` (see [sdk.md](sdk.md)). Command steps still spawn a shell and receive `env:` as usual.
+**SDK mode**: top-level and per-step `env:` values are passed to SDK prompt execution. Command steps receive `env:` in their child process (see [sdk.md](sdk.md)).
 
 ## OpenAI priority processing with jcode
 
-For `sdk: jcode` with the `openai` (ChatGPT/Codex subscription) or `openai-api` provider, set `JCODE_OPENAI_SERVICE_TIER` in `env:` to request `service_tier="priority"`:
-
-```yaml
-sdk: jcode
-model: openai/gpt-5.5
-env:
-  JCODE_OPENAI_SERVICE_TIER: "priority"
-
-steps:
-  implement:
-    prompt: "{input}"
-```
-
-jcode v0.84.0 defaults `[provider].openai_service_tier` to `"priority"` ([jcode defaults](https://github.com/1jehuang/jcode/blob/v0.84.0/crates/jcode-base/src/config/default_file.rs#L369)), but cruise turns it off: every `jcode run` gets `JCODE_OPENAI_SERVICE_TIER=off` unless the workflow `env:` or cruise's own process environment already sets the variable (either wins as-is; per-step `env:` overrides top-level `env:`). Set `"priority"` (or `"flex"`) to opt in. The variable overrides jcode's `config.toml` setting.
+For `sdk: jcode`, `JCODE_OPENAI_SERVICE_TIER` controls the OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Set it to `"priority"` or `"flex"` in workflow `env:` to opt in; step-level `env:` overrides workflow-level `env:` for that step.
 
 ## Process-level config overrides
 
@@ -62,7 +49,7 @@ then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LA
 
 After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the WebUI sidebar:
 
-- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) invokes the agent with the `generate_title` tool only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model`, then `model`, then the backend default. SDK title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
+- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) makes a separate title-generation request only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model`, then `model`, then the backend default. Title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
 - **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
 - `cruise list` **Approve**, WebUI/TUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
 

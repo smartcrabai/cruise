@@ -3,9 +3,14 @@ description = "YAML-driven coding agent workflow orchestrator"
 edition = "2024"
 license = "MIT"
 name = "cruise"
+publish = false
 repository = "https://github.com/smartcrabai/cruise"
 rust-version = "1.95"
 version.workspace = true
+
+# `publish = false` would otherwise make dist skip this package.
+[package.metadata.dist]
+dist = true
 
 [workspace]
 members = ["."]
@@ -54,6 +59,7 @@ home = "0.5"
 include_dir = "0.7"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
+jcode-sdk = { git = "https://github.com/1jehuang/jcode", tag = "v0.88.0" }
 jsxrs = "0.1.5"
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",

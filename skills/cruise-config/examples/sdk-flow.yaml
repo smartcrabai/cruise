@@ -1,14 +1,12 @@
-# jcode SDK backend example: no external command; the jcode CLI runs the
-# prompts. This is also the default when neither `command` nor `sdk` is set.
+# jcode SDK backend example: no external command; jcode-sdk drives prompts
+# through a local API bridge. A compatible jcode CLI is required.
 sdk: jcode
 
 description: SDK-backed TDD flow
 
-# Plain model references: "provider/model[:effort]" (provider is a jcode
-# provider id; `jcode login --help` lists them all). Omit both to use the
-# jcode home's configured default. Sign in first with `jcode login <provider>`.
-model: anthropic-api/claude-sonnet-4-6   # for ordinary prompt steps
-plan_model: openai-api/gpt-5.5:high      # for the built-in plan step (falls back to `model`)
+# Optional model references use `provider/model[:effort]` or a bare model.
+# Replace this placeholder with a route available in your jcode setup.
+# model: provider/model[:effort]
 
 steps:
   write-tests:
@@ -16,9 +14,7 @@ steps:
       Write tests for {plan}. Do not implement yet.
 
   implement:
-    # Per-step model is also a plain model reference. A bare model name (no
-    # "provider/" prefix) leaves the provider to jcode's own resolution.
-    model: claude-sonnet-4-6
+    # A per-step model may be set to override top-level model settings.
     prompt: |
       Tests are written for {plan}. Implement to make them pass.
     timeout: 30m

@@ -41,10 +41,10 @@ pub struct WorkflowConfig {
     /// Mutually exclusive with `command`. Accepted values (validated by
     /// [`validate_sdk`]):
     ///
-    /// - `"jcode"` — drives the `jcode` CLI as an NDJSON subprocess in jcode's
-    ///   own home, using the credentials the user's own `jcode login` stored.
-    ///   `model` / `plan_model` / per-step `model` are `provider/model`
-    ///   references in jcode's own provider/model namespace, with an optional
+    /// - `"jcode"` — drives prompts through the official `jcode-sdk`, which
+    ///   starts the jcode API bridge using credentials from the user's jcode
+    ///   home. `model` / `plan_model` / per-step `model` are `provider/model`
+    ///   references in jcode's provider/model namespace, with an optional
     ///   `:effort` suffix (unset lets jcode pick its configured default).
     /// - `"claude"` — drives the `claude` CLI in-process through
     ///   `claude-agent-sdk`. `model` / `plan_model` / per-step `model` are

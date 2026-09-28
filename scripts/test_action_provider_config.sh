@@ -7,7 +7,7 @@
 # provision-jcode.sh drives one binary it must not re-implement, so `jcode`
 # is stubbed for the four subcommands it uses: `version --json`,
 # `login <provider> --no-validate`, `provider add` and `auth status`.
-# The stub reproduces the parts of jcode 0.82.0 this script depends on --
+# The stub reproduces the parts of jcode 0.88.0 this script depends on --
 # the owner-only `<provider>.env` file `login` writes for a key read from
 # stdin, the `[providers.<name>]` table `provider add` appends to
 # $JCODE_HOME/config.toml plus the owner-only `provider-<name>.env` file it
@@ -33,7 +33,7 @@ printf 'jcode-env JCODE_HOME=%s JCODE_NO_TELEMETRY=%s\n' "${JCODE_HOME:-}" "${JC
 while [ "${1:-}" = "--no-update" ]; do shift; done
 case "${1:-}" in
   version)
-    echo '{"version":"v0.82.0 (fake)","semver":"0.82.0"}'
+    echo '{"version":"v0.88.0 (fake)","semver":"0.88.0"}'
     exit 0
     ;;
   login)
@@ -229,8 +229,8 @@ else
   fail "the jcode version probe suppresses the auto-update check" "$(cat "$STUB_LOG")"
 fi
 # The logged version is the bare `semver` field, not the decorated
-# "v0.82.0 (fake)" human string -- cruise's floor check reads the same field.
-if printf '%s\n' "$output" | grep -Fqx 'cruise: jcode 0.82.0'; then
+# "v0.88.0 (fake)" human string -- cruise's floor check reads the same field.
+if printf '%s\n' "$output" | grep -Fqx 'cruise: jcode 0.88.0'; then
   pass "the version log prints jcode's semver field"
 else
   fail "the version log prints jcode's semver field" "$output"
@@ -452,15 +452,15 @@ stub jcode <<'SH'
 printf 'jcode %s\n' "$*" >> "$STUB_LOG"
 while [ "${1:-}" = "--no-update" ]; do shift; done
 if [ "${1:-}" = "version" ]; then
-  # This is above the old 0.81.1 floor but below the new 0.82.0 floor.
-  echo '{"version":"v0.81.7 (fake)","semver":"0.81.7"}'
+  # This is below the new 0.88.0 floor.
+  echo '{"version":"v0.87.9 (fake)","semver":"0.87.9"}'
   exit 0
 fi
 echo "jcode stub: unexpected invocation '$*'" >&2
 exit 1
 SH
 assert_provision_fails "a jcode below cruise's floor is refused with the floor named" \
-  "jcode 0.81.7 is too old for this version of the action (requires jcode v0.82.0 or newer"
+  "jcode 0.87.9 is too old for this version of the action (requires jcode v0.88.0 or newer"
 
 # ===========================================================================
 # gate.sh credential sources

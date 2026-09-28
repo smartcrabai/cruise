@@ -65,9 +65,6 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine and open it in the default browser.
     Webui(WebuiArgs),
-    /// Serve cruise's tools to `jcode` as a stdio MCP server (spawned by jcode).
-    #[command(name = "mcp-bridge", hide = true)]
-    McpBridge(McpBridgeArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -314,14 +311,6 @@ pub enum SshTtyMode {
     Auto,
     Always,
     Never,
-}
-
-#[derive(Parser, Debug)]
-pub struct McpBridgeArgs {
-    /// Unix socket of the parent cruise run's tool server. Defaults to the
-    /// `CRUISE_TOOL_SOCKET` environment variable, which jcode passes down.
-    #[arg(long, value_name = "PATH")]
-    pub socket: Option<std::path::PathBuf>,
 }
 
 pub fn parse_cli() -> Cli {
@@ -820,30 +809,6 @@ mod tests {
                 assert_eq!(args.rate_limit_retries, 2);
             }
             _ => panic!("expected Exec subcommand"),
-        }
-    }
-
-    // -- mcp-bridge subcommand -------------------------------------------------
-
-    #[test]
-    fn test_mcp_bridge_subcommand_defaults_to_the_socket_environment_variable() {
-        // Given: `cruise mcp-bridge` exactly as registered in mcp.json
-        let cli = Cli::parse_from(["cruise", "mcp-bridge"]);
-        // When/Then: no --socket, so the env var supplies the path
-        match cli.command {
-            Some(Commands::McpBridge(args)) => assert_eq!(args.socket, None),
-            _ => panic!("expected McpBridge subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_mcp_bridge_socket_flag_overrides() {
-        let cli = Cli::parse_from(["cruise", "mcp-bridge", "--socket", "/tmp/x.sock"]);
-        match cli.command {
-            Some(Commands::McpBridge(args)) => {
-                assert_eq!(args.socket, Some(std::path::PathBuf::from("/tmp/x.sock")));
-            }
-            _ => panic!("expected McpBridge subcommand"),
         }
     }
 
