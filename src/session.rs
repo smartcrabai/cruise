@@ -1555,7 +1555,7 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(sessions, []);
+        assert_eq!(sessions, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -1641,7 +1641,7 @@ mod tests {
         assert!(!manager.sessions_dir().join(&id).exists());
 
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(sessions, []);
+        assert_eq!(sessions, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -2063,7 +2063,7 @@ mod tests {
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: an empty list is returned
-        assert_eq!(result, []);
+        assert_eq!(result, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -2427,7 +2427,7 @@ mod tests {
         // Then: an empty list is returned
         assert_eq!(
             candidates,
-            [],
+            [] as [SessionState; 0],
             "no candidates when only Completed exists"
         );
     }

@@ -642,7 +642,7 @@ mod tests {
 
         assert_eq!(form.input.text(), "");
         assert_eq!(form.attachments.text(), "");
-        assert_eq!(form.attachment_paths(), []);
+        assert_eq!(form.attachment_paths(), [] as [PathBuf; 0]);
         assert_eq!(form.step, Step::Task);
         assert!(!form.dirty);
         assert_eq!(form.working_dir.text(), "/tmp/project");
@@ -701,7 +701,7 @@ mod tests {
 
         assert_eq!(form.input.text(), "");
         assert_eq!(form.attachments.text(), "");
-        assert_eq!(form.attachment_paths(), []);
+        assert_eq!(form.attachment_paths(), [] as [PathBuf; 0]);
         assert!(!form.dirty);
     }
 

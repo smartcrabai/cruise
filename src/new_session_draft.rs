@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(draft.input, "");
         assert!(draft.requested_config_path.is_none());
         assert_eq!(draft.working_dir, "");
-        assert_eq!(draft.skipped_steps, []);
+        assert_eq!(draft.skipped_steps, [] as [String; 0]);
         assert_eq!(draft.updated_at, "");
     }
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(draft.input, "");
         assert!(draft.requested_config_path.is_none());
         assert_eq!(draft.working_dir, "");
-        assert_eq!(draft.skipped_steps, []);
+        assert_eq!(draft.skipped_steps, [] as [String; 0]);
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(draft.input, "hello");
         assert_eq!(draft.working_dir, "/tmp");
         assert!(draft.requested_config_path.is_none());
-        assert_eq!(draft.skipped_steps, []);
+        assert_eq!(draft.skipped_steps, [] as [String; 0]);
     }
 
     #[test]

@@ -489,7 +489,7 @@ steps:
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         assert_eq!(
             manager.list().unwrap_or_else(|e| panic!("{e:?}")),
-            []
+            [] as [SessionState; 0]
         );
     }
 

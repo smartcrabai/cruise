@@ -3705,7 +3705,7 @@ mod tests {
             .delete(&id)
             .unwrap_or_else(|error| panic!("failed to delete session: {error}"));
         app.refresh();
-        assert_eq!(app.sessions, []);
+        assert_eq!(app.sessions, [] as [SessionState; 0]);
 
         state.plan_error = None;
         manager
@@ -3786,7 +3786,7 @@ mod tests {
             let mut fixture = persisted_fixture(&[]);
 
             assert!(!fixture.app.handle_key(key(key_code)));
-            assert_eq!(fixture.app.sessions, []);
+            assert_eq!(fixture.app.sessions, [] as [SessionState; 0]);
             assert_eq!(fixture.app.view, View::Sessions);
             assert_eq!(fixture.app.tab, DetailTab::Info, "key {key_code:?}");
             assert_eq!(fixture.app.manual_detail_tabs, HashMap::new());
@@ -4157,7 +4157,7 @@ mod tests {
             .delete(&test_session_id(2))
             .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
         fixture.app.refresh();
-        assert_eq!(fixture.app.sessions, []);
+        assert_eq!(fixture.app.sessions, [] as [SessionState; 0]);
         assert_eq!(fixture.app.tab, DetailTab::Info);
 
         persisted_state(&fixture.manager, 1, crate::session::SessionPhase::Draft);
@@ -4456,7 +4456,7 @@ mod tests {
         assert_eq!(app.view, View::Sessions);
         assert_eq!(app.form.input.text(), "");
         assert_eq!(app.form.attachments.text(), "");
-        assert_eq!(app.form.attachment_paths(), []);
+        assert_eq!(app.form.attachment_paths(), [] as [PathBuf; 0]);
         assert_eq!(app.form.step, Step::Task);
         assert!(!app.form.dirty);
     }
@@ -5024,14 +5024,14 @@ mod tests {
             app.config_defaults.is_none(),
             "auto-detect must wait until the repository clone exists"
         );
-        assert_eq!(app.skip_choices(), []);
+        assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
 
         let request = app
             .session_request()
             .unwrap_or_else(|| panic!("expected a valid GitHub request"));
         assert_eq!(
             request.skipped_steps,
-            [],
+            [] as [String; 0],
             "auto-detect must not copy skip ids from the caller-local config"
         );
     }
@@ -5162,7 +5162,7 @@ mod tests {
         );
         assert!(app.form.skipped_explicit);
         assert!(!app.handle_key(key(KeyCode::Char(' '))));
-        assert_eq!(app.form.selected_skipped_steps(), []);
+        assert_eq!(app.form.selected_skipped_steps(), [] as [String; 0]);
     }
 
     #[test]
@@ -5845,7 +5845,7 @@ mod tests {
     #[test]
     fn run_all_parallelism_shortcut_opens_without_sessions_and_preserves_saved_value() {
         let mut fixture = configured_app(4);
-        assert_eq!(fixture.app.sessions, []);
+        assert_eq!(fixture.app.sessions, [] as [SessionState; 0]);
 
         open_parallelism_editor(&mut fixture.app);
         assert!(!fixture.app.handle_key(key(KeyCode::Enter)));

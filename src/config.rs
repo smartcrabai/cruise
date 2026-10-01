@@ -1724,7 +1724,7 @@ steps:
             Some("Japanese")
         );
         assert_eq!(config.effective_pr_language(), "Japanese");
-        assert_eq!(config.deprecated_language_warnings(), []);
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -1743,7 +1743,7 @@ steps:
             Some("Japanese")
         );
         assert_eq!(config.effective_plan_language(), "Japanese");
-        assert_eq!(config.deprecated_language_warnings(), []);
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -1835,7 +1835,7 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.deprecated_language_warnings(), []);
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -2292,12 +2292,12 @@ steps:
         assert_eq!(config.sdk, None);
         assert_eq!(
             config.command,
-            [],
+            [] as [String; 0],
             "command should be empty when no backend is named"
         );
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
-        assert_ne!(config.steps.keys().collect::<Vec<_>>(), [], "steps is empty");
+        assert_ne!(config.steps.len(), 0, "steps is empty");
         assert!(
             config.steps.contains_key("mise-trust"),
             "expected mise-trust step"
@@ -2308,7 +2308,7 @@ steps:
     fn test_empty_steps() {
         let yaml = "command: [echo]\nsteps: {}";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.steps.keys().collect::<Vec<_>>(), []);
+        assert_eq!(config.steps.len(), 0);
     }
 
     #[test]
@@ -2330,7 +2330,7 @@ steps:
         // Old configs with `state` or `worktree` fields should still parse.
         let yaml = "command: [echo]\nworktree: true\nstate: .cruise/state.json\nsteps:\n  s1:\n    command: echo hi";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(config.steps.keys().collect::<Vec<_>>(), []);
+        assert_ne!(config.steps.len(), 0);
     }
 
     #[test]
@@ -2560,7 +2560,7 @@ steps:
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: after_pr defaults to empty IndexMap
-        assert_eq!(config.after_pr.keys().collect::<Vec<_>>(), []);
+        assert_eq!(config.after_pr.len(), 0);
     }
 
     #[test]
@@ -3771,7 +3771,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: sdk is set and command defaults to empty
         assert_eq!(config.sdk.as_deref(), Some("jcode"));
-        assert_eq!(config.command, [], "command should default to empty");
+        assert_eq!(config.command, [] as [String; 0], "command should default to empty");
     }
 
     #[test]
@@ -4383,7 +4383,7 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(config.command, [], "precondition: command is set");
+        assert_ne!(config.command, [] as [String; 0], "precondition: command is set");
 
         // When: CRUISE_SDK env var is applied
         config
@@ -4394,7 +4394,7 @@ steps:
         assert_eq!(config.sdk, Some("jcode".to_string()));
         assert_eq!(
             config.command,
-            [],
+            [] as [String; 0],
             "command must be cleared when sdk is set via env"
         );
         assert!(
@@ -4412,7 +4412,7 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(config.command, [], "precondition: command is set");
+        assert_ne!(config.command, [] as [String; 0], "precondition: command is set");
 
         // When: CRUISE_SDK=claude env var is applied
         config
@@ -4423,7 +4423,7 @@ steps:
         assert_eq!(config.sdk, Some("claude".to_string()));
         assert_eq!(
             config.command,
-            [],
+            [] as [String; 0],
             "command must be cleared when sdk is set via env"
         );
         assert!(

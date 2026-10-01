@@ -1100,7 +1100,7 @@ mod tests {
                 assert_eq!(args.cwd, None);
                 assert_eq!(args.cruise_bin, "cruise");
                 assert_eq!(args.tty, SshTtyMode::Auto);
-                assert_eq!(args.args, []);
+                assert_eq!(args.args, [] as [String; 0]);
             }
             _ => panic!("expected Ssh subcommand"),
         }

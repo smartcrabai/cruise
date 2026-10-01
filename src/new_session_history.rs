@@ -522,7 +522,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
         assert_eq!(
             history.entries,
-            [],
+            [] as [NewSessionHistoryEntry; 0],
             "absent history file should yield empty entries"
         );
     }
@@ -733,7 +733,7 @@ mod tests {
         let all_steps = &["plan", "review", "implement", "test"];
         let saved_skipped: Vec<String> = vec![];
         let indices = skipped_steps_to_default_indices(all_steps, &saved_skipped);
-        assert_eq!(indices, []);
+        assert_eq!(indices, [] as [usize; 0]);
     }
 
     #[test]
@@ -757,7 +757,7 @@ mod tests {
         let all_steps: &[&str] = &[];
         let saved_skipped = vec!["step1".to_string()];
         let indices = skipped_steps_to_default_indices(all_steps, &saved_skipped);
-        assert_eq!(indices, []);
+        assert_eq!(indices, [] as [usize; 0]);
     }
 
     #[test]
@@ -1257,7 +1257,7 @@ mod tests {
         // which would create a dead entry that can never be looked up again.
         assert_eq!(
             history.entries,
-            [],
+            [] as [NewSessionHistoryEntry; 0],
             "temp directory scope should not produce any history entry"
         );
     }
