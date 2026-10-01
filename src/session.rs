@@ -1495,8 +1495,8 @@ mod tests {
         // Then: invalid contents are returned with an error and a consistent fingerprint
         match inspected {
             SessionFileContents::Invalid { fingerprint, error } => {
-                assert!(
-                    !error.is_empty(),
+                assert_ne!(
+                    error, "",
                     "invalid JSON inspection should include a parse error"
                 );
                 assert_eq!(
@@ -1554,7 +1554,7 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(sessions.is_empty());
+        assert_eq!(sessions, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -1640,7 +1640,7 @@ mod tests {
         assert!(!manager.sessions_dir().join(&id).exists());
 
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(sessions.is_empty());
+        assert_eq!(sessions, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -2062,7 +2062,7 @@ mod tests {
         let result = manager.planned().unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: an empty list is returned
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [SessionState; 0]);
     }
 
     #[test]
@@ -2424,8 +2424,9 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: an empty list is returned
-        assert!(
-            candidates.is_empty(),
+        assert_eq!(
+            candidates,
+            [] as [SessionState; 0],
             "no candidates when only Completed exists"
         );
     }
@@ -2537,8 +2538,9 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: empty
-        assert!(
-            remaining.is_empty(),
+        assert_eq!(
+            remaining,
+            [],
             "all candidates are seen, result should be empty"
         );
     }
@@ -3055,8 +3057,9 @@ mod tests {
         );
         // When: checking skipped_steps
         // Then: it is empty by default
-        assert!(
-            state.skipped_steps.is_empty(),
+        assert_eq!(
+            state.skipped_steps,
+            [] as [String; 0],
             "skipped_steps should be empty for a new session"
         );
     }
@@ -3080,8 +3083,9 @@ mod tests {
         let state: SessionState = serde_json::from_str(json)
             .unwrap_or_else(|e| panic!("failed to deserialize legacy JSON: {e:?}"));
         // Then: skipped_steps defaults to empty vec via #[serde(default)]
-        assert!(
-            state.skipped_steps.is_empty(),
+        assert_eq!(
+            state.skipped_steps,
+            [] as [String; 0],
             "skipped_steps should default to empty when absent from JSON"
         );
     }
@@ -3135,8 +3139,9 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: skipped_steps is empty
-        assert!(
-            loaded.skipped_steps.is_empty(),
+        assert_eq!(
+            loaded.skipped_steps,
+            [] as [String; 0],
             "empty skipped_steps should round-trip as empty"
         );
     }
@@ -4090,7 +4095,7 @@ mod tests {
             .current_dir(worktree.original_dir)
             .output()
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+        assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "");
     }
     #[test]
     fn test_input_as_plan_accepts_image_only_session() {
