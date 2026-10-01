@@ -398,14 +398,14 @@ mod tests {
     #[test]
     fn extract_image_paths_ignores_urls_and_non_image_paths() {
         let (text, paths) = extract_image_paths("see https://example.com/a.png and /tmp/notes.txt");
-        assert!(paths.is_empty());
+        assert_eq!(paths, []);
         assert_eq!(text, "see https://example.com/a.png and /tmp/notes.txt");
     }
 
     #[test]
     fn extract_image_paths_ignores_quoted_relative_path() {
         let (text, paths) = extract_image_paths("see \"image.png\" please");
-        assert!(paths.is_empty());
+        assert_eq!(paths, []);
         assert_eq!(text, "see \"image.png\" please");
     }
 

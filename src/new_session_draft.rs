@@ -396,11 +396,11 @@ mod tests {
     #[test]
     fn test_default_draft_has_empty_fields() {
         let draft = NewSessionDraft::default();
-        assert!(draft.input.is_empty());
+        assert_eq!(draft.input, "");
         assert!(draft.requested_config_path.is_none());
-        assert!(draft.working_dir.is_empty());
-        assert!(draft.skipped_steps.is_empty());
-        assert!(draft.updated_at.is_empty());
+        assert_eq!(draft.working_dir, "");
+        assert_eq!(draft.skipped_steps, []);
+        assert_eq!(draft.updated_at, "");
     }
 
     #[test]
@@ -408,10 +408,10 @@ mod tests {
         let json = r"{}";
         let draft: NewSessionDraft =
             serde_json::from_str(json).unwrap_or_else(|e| panic!("deserialize failed: {e}"));
-        assert!(draft.input.is_empty());
+        assert_eq!(draft.input, "");
         assert!(draft.requested_config_path.is_none());
-        assert!(draft.working_dir.is_empty());
-        assert!(draft.skipped_steps.is_empty());
+        assert_eq!(draft.working_dir, "");
+        assert_eq!(draft.skipped_steps, []);
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(draft.input, "hello");
         assert_eq!(draft.working_dir, "/tmp");
         assert!(draft.requested_config_path.is_none());
-        assert!(draft.skipped_steps.is_empty());
+        assert_eq!(draft.skipped_steps, []);
     }
 
     #[test]
@@ -432,6 +432,6 @@ mod tests {
         assert_eq!(fresh.input, draft.input);
         assert_eq!(fresh.working_dir, draft.working_dir);
         assert_ne!(fresh.updated_at, draft.updated_at);
-        assert!(!fresh.updated_at.is_empty());
+        assert_ne!(fresh.updated_at, "");
     }
 }

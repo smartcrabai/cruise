@@ -1100,7 +1100,7 @@ mod tests {
                 assert_eq!(args.cwd, None);
                 assert_eq!(args.cruise_bin, "cruise");
                 assert_eq!(args.tty, SshTtyMode::Auto);
-                assert!(args.args.is_empty());
+                assert_eq!(args.args, []);
             }
             _ => panic!("expected Ssh subcommand"),
         }

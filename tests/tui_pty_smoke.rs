@@ -890,10 +890,7 @@ fn new_session_ctrl_p_validates_before_starting_planning() {
         .manager
         .list()
         .unwrap_or_else(|error| panic!("{error}"));
-    assert!(
-        sessions.is_empty(),
-        "validation unexpectedly created a session"
-    );
+    assert_eq!(sessions, [], "validation unexpectedly created a session");
 }
 
 #[test]
@@ -1229,7 +1226,7 @@ fn new_session_form_autosaves_edited_text() {
     let draft: cruise::new_session_draft::NewSessionDraft =
         serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(draft.input, "autosaved through terminal e2e");
-    assert!(!draft.updated_at.is_empty());
+    assert_ne!(draft.updated_at, "");
 }
 
 #[test]

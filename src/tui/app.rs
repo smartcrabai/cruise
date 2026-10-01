@@ -3705,7 +3705,7 @@ mod tests {
             .delete(&id)
             .unwrap_or_else(|error| panic!("failed to delete session: {error}"));
         app.refresh();
-        assert!(app.sessions.is_empty());
+        assert_eq!(app.sessions, []);
 
         state.plan_error = None;
         manager
@@ -3786,10 +3786,10 @@ mod tests {
             let mut fixture = persisted_fixture(&[]);
 
             assert!(!fixture.app.handle_key(key(key_code)));
-            assert!(fixture.app.sessions.is_empty());
+            assert_eq!(fixture.app.sessions, []);
             assert_eq!(fixture.app.view, View::Sessions);
             assert_eq!(fixture.app.tab, DetailTab::Info, "key {key_code:?}");
-            assert!(fixture.app.manual_detail_tabs.is_empty());
+            assert_eq!(fixture.app.manual_detail_tabs, HashMap::new());
         }
     }
 
@@ -4157,7 +4157,7 @@ mod tests {
             .delete(&test_session_id(2))
             .unwrap_or_else(|error| panic!("failed to delete test session: {error}"));
         fixture.app.refresh();
-        assert!(fixture.app.sessions.is_empty());
+        assert_eq!(fixture.app.sessions, []);
         assert_eq!(fixture.app.tab, DetailTab::Info);
 
         persisted_state(&fixture.manager, 1, crate::session::SessionPhase::Draft);
@@ -4454,9 +4454,9 @@ mod tests {
 
     fn assert_creation_form_reset(app: &TuiApp) {
         assert_eq!(app.view, View::Sessions);
-        assert!(app.form.input.text().is_empty());
-        assert!(app.form.attachments.text().is_empty());
-        assert!(app.form.attachment_paths().is_empty());
+        assert_eq!(app.form.input.text(), "");
+        assert_eq!(app.form.attachments.text(), "");
+        assert_eq!(app.form.attachment_paths(), []);
         assert_eq!(app.form.step, Step::Task);
         assert!(!app.form.dirty);
     }
@@ -4542,7 +4542,7 @@ mod tests {
         assert!(result.is_ok(), "creation failed: {result:?}");
         app.apply_event(event);
         assert_eq!(app.view, View::Sessions);
-        assert!(app.form.input.text().is_empty());
+        assert_eq!(app.form.input.text(), "");
         assert_eq!(app.form.step, Step::Task);
         assert!(!app.form.dirty);
         app.registry.shutdown().await;
@@ -4576,14 +4576,14 @@ mod tests {
 
         assert!(!app.handle_key(key(KeyCode::Char('n'))));
         assert_eq!(app.view, View::NewSession);
-        assert!(app.form.input.text().is_empty());
-        assert!(app.form.attachments.text().is_empty());
+        assert_eq!(app.form.input.text(), "");
+        assert_eq!(app.form.attachments.text(), "");
         assert!(!app.handle_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Sessions);
         assert!(!app.handle_key(key(KeyCode::Char('2'))));
         assert_eq!(app.view, View::NewSession);
-        assert!(app.form.input.text().is_empty());
-        assert!(app.form.attachments.text().is_empty());
+        assert_eq!(app.form.input.text(), "");
+        assert_eq!(app.form.attachments.text(), "");
 
         app.registry.shutdown().await;
     }
@@ -4652,8 +4652,8 @@ mod tests {
         );
 
         let restarted = app_for(application);
-        assert!(restarted.form.input.text().is_empty());
-        assert!(restarted.form.attachments.text().is_empty());
+        assert_eq!(restarted.form.input.text(), "");
+        assert_eq!(restarted.form.attachments.text(), "");
     }
 
     #[test]
@@ -4772,7 +4772,7 @@ mod tests {
         assert_eq!(app.form.skipped.text(), "build, test");
         assert_eq!(app.form.source, SourceKind::GitHub);
         assert!(app.form.skipped_explicit);
-        assert!(app.form.attachments.text().is_empty());
+        assert_eq!(app.form.attachments.text(), "");
         assert!(!app.form.dirty);
     }
 
@@ -5024,13 +5024,14 @@ mod tests {
             app.config_defaults.is_none(),
             "auto-detect must wait until the repository clone exists"
         );
-        assert!(app.skip_choices().is_empty());
+        assert_eq!(app.skip_choices(), []);
 
         let request = app
             .session_request()
             .unwrap_or_else(|| panic!("expected a valid GitHub request"));
-        assert!(
-            request.skipped_steps.is_empty(),
+        assert_eq!(
+            request.skipped_steps,
+            [],
             "auto-detect must not copy skip ids from the caller-local config"
         );
     }
@@ -5161,7 +5162,7 @@ mod tests {
         );
         assert!(app.form.skipped_explicit);
         assert!(!app.handle_key(key(KeyCode::Char(' '))));
-        assert!(app.form.selected_skipped_steps().is_empty());
+        assert_eq!(app.form.selected_skipped_steps(), []);
     }
 
     #[test]
@@ -5244,7 +5245,7 @@ mod tests {
         for key in ['p', 'g', 'u', 's'] {
             assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
             assert!(matches!(app.modal, Some(Modal::Prompt)));
-            assert!(app.prompts.answer.text().is_empty());
+            assert_eq!(app.prompts.answer.text(), "");
         }
         assert!(!app.form.options.planning.grill);
     }
@@ -5388,7 +5389,7 @@ mod tests {
         app.tab = DetailTab::Plan;
         assert!(app.active_plan_prompt().is_none());
         assert!(!app.plan_prompts.has_session("session"));
-        assert!(app.application.pending_prompts("session").is_empty());
+        assert_eq!(app.application.pending_prompts("session").len(), 0);
         assert!(app.handle_plan_prompt_key(key(KeyCode::Enter)).is_none());
     }
 
@@ -5576,7 +5577,7 @@ mod tests {
         assert_eq!(app.tab, DetailTab::Plan);
         assert!(app.modal.is_none());
         assert!(app.active_plan_prompt().is_none());
-        assert!(app.application.pending_prompts("session").is_empty());
+        assert_eq!(app.application.pending_prompts("session").len(), 0);
         assert!(app.plan_prompts.answer_text("session").is_none());
     }
 
@@ -5844,7 +5845,7 @@ mod tests {
     #[test]
     fn run_all_parallelism_shortcut_opens_without_sessions_and_preserves_saved_value() {
         let mut fixture = configured_app(4);
-        assert!(fixture.app.sessions.is_empty());
+        assert_eq!(fixture.app.sessions, []);
 
         open_parallelism_editor(&mut fixture.app);
         assert!(!fixture.app.handle_key(key(KeyCode::Enter)));
