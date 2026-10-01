@@ -1207,8 +1207,7 @@ mod tests {
             "Directory scope entry must not have repo set"
         );
         assert_ne!(
-            entry.working_dir,
-            "",
+            entry.working_dir, "",
             "Directory scope entry must have working_dir set"
         );
     }

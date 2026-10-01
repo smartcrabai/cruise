@@ -3771,7 +3771,11 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: sdk is set and command defaults to empty
         assert_eq!(config.sdk.as_deref(), Some("jcode"));
-        assert_eq!(config.command, [] as [String; 0], "command should default to empty");
+        assert_eq!(
+            config.command,
+            [] as [String; 0],
+            "command should default to empty"
+        );
     }
 
     #[test]
@@ -4383,7 +4387,11 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(config.command, [] as [String; 0], "precondition: command is set");
+        assert_ne!(
+            config.command,
+            [] as [String; 0],
+            "precondition: command is set"
+        );
 
         // When: CRUISE_SDK env var is applied
         config
@@ -4412,7 +4420,11 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(config.command, [] as [String; 0], "precondition: command is set");
+        assert_ne!(
+            config.command,
+            [] as [String; 0],
+            "precondition: command is set"
+        );
 
         // When: CRUISE_SDK=claude env var is applied
         config

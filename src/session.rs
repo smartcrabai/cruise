@@ -1496,8 +1496,7 @@ mod tests {
         match inspected {
             SessionFileContents::Invalid { fingerprint, error } => {
                 assert_ne!(
-                    error,
-                    "",
+                    error, "",
                     "invalid JSON inspection should include a parse error"
                 );
                 assert_eq!(
@@ -3060,7 +3059,7 @@ mod tests {
         // Then: it is empty by default
         assert_eq!(
             state.skipped_steps,
-            [],
+            [] as [String; 0],
             "skipped_steps should be empty for a new session"
         );
     }
@@ -3086,7 +3085,7 @@ mod tests {
         // Then: skipped_steps defaults to empty vec via #[serde(default)]
         assert_eq!(
             state.skipped_steps,
-            [],
+            [] as [String; 0],
             "skipped_steps should default to empty when absent from JSON"
         );
     }
@@ -3142,7 +3141,7 @@ mod tests {
         // Then: skipped_steps is empty
         assert_eq!(
             loaded.skipped_steps,
-            [],
+            [] as [String; 0],
             "empty skipped_steps should round-trip as empty"
         );
     }
