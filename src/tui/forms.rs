@@ -640,9 +640,9 @@ mod tests {
 
         form.reset_after_creation();
 
-        assert!(form.input.text().is_empty());
-        assert!(form.attachments.text().is_empty());
-        assert!(form.attachment_paths().is_empty());
+        assert_eq!(form.input.text(), "");
+        assert_eq!(form.attachments.text(), "");
+        assert_eq!(form.attachment_paths(), [] as [PathBuf; 0]);
         assert_eq!(form.step, Step::Task);
         assert!(!form.dirty);
         assert_eq!(form.working_dir.text(), "/tmp/project");
@@ -679,8 +679,8 @@ mod tests {
 
         form.reset_after_creation();
 
-        assert!(form.input.text().is_empty());
-        assert!(form.attachments.text().is_empty());
+        assert_eq!(form.input.text(), "");
+        assert_eq!(form.attachments.text(), "");
         assert_eq!(form.working_dir.text(), preserved.0);
         assert_eq!(form.options.allow_dirty_working_tree, preserved.1);
         assert_eq!(form.last_change, preserved.2);
@@ -699,9 +699,9 @@ mod tests {
 
         form.reset_after_creation();
 
-        assert!(form.input.text().is_empty());
-        assert!(form.attachments.text().is_empty());
-        assert!(form.attachment_paths().is_empty());
+        assert_eq!(form.input.text(), "");
+        assert_eq!(form.attachments.text(), "");
+        assert_eq!(form.attachment_paths(), [] as [PathBuf; 0]);
         assert!(!form.dirty);
     }
 
@@ -790,7 +790,7 @@ mod tests {
         form.cycle_config(&sources, -1);
         assert_eq!(form.config.text(), "a.yaml");
         form.cycle_config(&sources, -1);
-        assert!(form.config.text().is_empty(), "recall wraps to Auto-detect");
+        assert_eq!(form.config.text(), "", "recall wraps to Auto-detect");
 
         form.step = Step::SkippedSteps;
         form.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -827,10 +827,7 @@ mod tests {
             crate::new_session_history::BUILTIN_CONFIG_KEY
         );
         form.cycle_config(&sources, 1);
-        assert!(
-            form.config.text().is_empty(),
-            "cycle should wrap to Auto-detect"
-        );
+        assert_eq!(form.config.text(), "", "cycle should wrap to Auto-detect");
 
         // Up from Auto-detect wraps in the opposite direction through Built-in.
         form.cycle_config(&sources, -1);
@@ -843,8 +840,9 @@ mod tests {
         form.cycle_config(&sources, -1);
         assert_eq!(form.config.text(), "first.yaml");
         form.cycle_config(&sources, -1);
-        assert!(
-            form.config.text().is_empty(),
+        assert_eq!(
+            form.config.text(),
+            "",
             "cycle should wrap back to Auto-detect"
         );
     }
@@ -909,7 +907,7 @@ mod tests {
             crate::new_session_history::BUILTIN_CONFIG_KEY
         );
         form.cycle_config(&sources, 1);
-        assert!(form.config.text().is_empty());
+        assert_eq!(form.config.text(), "");
     }
 
     #[test]

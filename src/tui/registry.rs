@@ -68,7 +68,7 @@ impl ApplicationEventSink for ControlSink {
             let length = text.len();
             if self
                 .chunk_budget
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
                     budget.checked_sub(length)
                 })
                 .is_err()

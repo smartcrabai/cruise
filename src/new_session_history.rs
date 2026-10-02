@@ -520,8 +520,9 @@ mod tests {
         let missing = tmp.path().join("nonexistent").join("history.json");
         let history = NewSessionHistory::load_from(&missing)
             .unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
-        assert!(
-            history.entries.is_empty(),
+        assert_eq!(
+            history.entries,
+            [] as [NewSessionHistoryEntry; 0],
             "absent history file should yield empty entries"
         );
     }
@@ -698,7 +699,7 @@ mod tests {
             .entries
             .first()
             .unwrap_or_else(|| panic!("expected latest entry"));
-        assert!(!entry.selected_at.is_empty());
+        assert_ne!(entry.selected_at, "");
         assert_eq!(entry.requested_config_path, None);
         assert_eq!(entry.working_dir, "/Users/test/project");
     }
@@ -732,7 +733,7 @@ mod tests {
         let all_steps = &["plan", "review", "implement", "test"];
         let saved_skipped: Vec<String> = vec![];
         let indices = skipped_steps_to_default_indices(all_steps, &saved_skipped);
-        assert!(indices.is_empty());
+        assert_eq!(indices, [] as [usize; 0]);
     }
 
     #[test]
@@ -756,7 +757,7 @@ mod tests {
         let all_steps: &[&str] = &[];
         let saved_skipped = vec!["step1".to_string()];
         let indices = skipped_steps_to_default_indices(all_steps, &saved_skipped);
-        assert!(indices.is_empty());
+        assert_eq!(indices, [] as [usize; 0]);
     }
 
     #[test]
@@ -1205,8 +1206,8 @@ mod tests {
             entry.repo, None,
             "Directory scope entry must not have repo set"
         );
-        assert!(
-            !entry.working_dir.is_empty(),
+        assert_ne!(
+            entry.working_dir, "",
             "Directory scope entry must have working_dir set"
         );
     }
@@ -1253,8 +1254,9 @@ mod tests {
 
         // Then: no entry is written — temp paths get cleared to "" by record_selection,
         // which would create a dead entry that can never be looked up again.
-        assert!(
-            history.entries.is_empty(),
+        assert_eq!(
+            history.entries,
+            [] as [NewSessionHistoryEntry; 0],
             "temp directory scope should not produce any history entry"
         );
     }

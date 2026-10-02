@@ -1286,7 +1286,7 @@ mod tests {
                 .contains("all configured models are cooling down"),
             "unexpected error: {error}"
         );
-        assert!(recorded(&notices).is_empty());
+        assert_eq!(recorded(&notices), [] as [String; 0]);
     }
 
     #[tokio::test]
