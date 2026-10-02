@@ -9,9 +9,14 @@ A pure `workflow_call:` call site (optionally with `skip`,
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
-`group`, `if`, `timeout`, `env`, `allow_commit`, and `output_file`.
+`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, and
+`output_file`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
+`computer_use` can be set on a `prompt` or `prompt_file` step to override the
+workflow-level setting. Parallel prompt children can also set it. It is rejected
+on command and option steps, parallel parents, and workflow-call call sites;
+group call sites cannot set it either (see [groups.md](groups.md)).
 
 ## Prompt step (LLM call)
 

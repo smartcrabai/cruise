@@ -25,6 +25,7 @@ pub struct PromptStep {
     pub prompt: String,
     pub instruction: Option<String>,
     pub output_file: Option<String>,
+    pub computer_use: Option<bool>,
 }
 
 /// Parameters for a command step.
@@ -89,6 +90,17 @@ impl TryFrom<StepConfig> for StepKind {
                 )));
             }
         }
+        let is_prompt_step = config.parallel.is_none()
+            && config.group.is_none()
+            && config.workflow_call.is_none()
+            && config.command.is_none()
+            && config.option.is_none()
+            && (config.prompt.is_some() || config.prompt_file.is_some());
+        if config.computer_use.is_some() && !is_prompt_step {
+            return Err(CruiseError::InvalidStepConfig(
+                "computer_use is only supported on prompt steps".to_string(),
+            ));
+        }
         if let Some(children) = config.parallel {
             return Ok(StepKind::Parallel(children));
         }
@@ -105,6 +117,7 @@ impl TryFrom<StepConfig> for StepKind {
                 prompt,
                 instruction: config.instruction,
                 output_file: config.output_file,
+                computer_use: config.computer_use,
             }));
         }
 
@@ -245,6 +258,34 @@ mod tests {
         config.allow_commit = true;
         let result = StepKind::try_from(config);
         assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
+    }
+
+    #[test]
+    fn computer_use_is_rejected_on_command_steps_even_when_false() {
+        let mut config = make_command_step();
+        config.computer_use = Some(false);
+
+        let Err(error) = StepKind::try_from(config) else {
+            panic!("computer_use is only supported on prompt steps");
+        };
+        assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
+        assert!(error.to_string().contains("computer_use"));
+    }
+
+    #[test]
+    fn prompt_step_carries_computer_use_override() {
+        let mut config = StepConfig {
+            prompt: Some("inspect".to_string()),
+            ..StepConfig::default()
+        };
+        config.computer_use = Some(true);
+
+        let StepKind::Prompt(step) =
+            StepKind::try_from(config).unwrap_or_else(|error| panic!("{error}"))
+        else {
+            panic!("expected a prompt step");
+        };
+        assert_eq!(step.computer_use, Some(true));
     }
 
     #[test]

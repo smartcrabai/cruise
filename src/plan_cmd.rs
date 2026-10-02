@@ -665,6 +665,7 @@ async fn generate_title_via_sdk(
             tools: vec![tool],
             on_session_id: None,
             resume: None,
+            computer_use: false,
         })
         .await?;
 

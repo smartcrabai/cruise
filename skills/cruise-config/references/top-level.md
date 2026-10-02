@@ -22,6 +22,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
+computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
   plan: English           # Language for built-in planning prompts
@@ -65,6 +66,10 @@ There are three prompt-execution backends:
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
 - `sdk: jcode` — use the jcode SDK; the default when neither `command` nor `sdk` is set. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
+
+`computer_use` defaults to `false` and is supported only with the `jcode`
+backend. When enabled, it allows prompt turns to use jcode's macOS computer-use
+tool; a prompt step can override the workflow setting (see [steps.md](steps.md)).
 
 ## `command` and the `{model}` placeholder
 

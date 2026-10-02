@@ -108,6 +108,10 @@
       "type": "boolean",
       "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
     },
+    "computer_use": {
+      "type": "boolean",
+      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false. Only available with the jcode backend on macOS (no effect on Linux); true is rejected for sdk: claude and command: backends."
+    },
     "retry": {
       "$ref": "#/$defs/RetryConfig",
       "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried on the same model, unless a workflow-level model array with fallback entries supplies an implicit policy."
@@ -129,6 +133,10 @@
         "allow_commit": {
           "type": "boolean",
           "description": "Allow this prompt step to create commits or otherwise advance Git HEAD. Defaults to false and is omitted when false during serialization. Only applies to prompt steps; group-call and workflow-call steps cannot set it to true."
+        },
+        "computer_use": {
+          "type": "boolean",
+          "description": "Override the workflow-level computer_use setting for this prompt step."
         },
         "instruction": {
           "type": "string",
@@ -225,6 +233,22 @@
           }
         },
         {
+          "if": { "required": ["computer_use"] },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "required": ["parallel"] },
           "then": {
             "properties": {
@@ -238,6 +262,7 @@
               "instruction": { "type": "null" },
               "plan": { "type": "null" },
               "output_file": { "type": "null" },
+              "computer_use": { "type": "null" },
               "allow_commit": { "const": false }
             }
           }
@@ -272,7 +297,8 @@
               "workflow_call": { "type": "null" },
               "if": { "type": "null" },
               "allow_commit": { "const": false },
-              "output_file": { "type": "null" }
+              "output_file": { "type": "null" },
+              "computer_use": { "type": "null" }
             }
           }
         },
@@ -293,7 +319,8 @@
               "env": { "maxProperties": 0 },
               "prompt_file": { "type": "null" },
               "timeout": { "type": "null" },
-              "output_file": { "type": "null" }
+              "output_file": { "type": "null" },
+              "computer_use": { "type": "null" }
             }
           }
         }
@@ -311,6 +338,7 @@
         "skip": { "$ref": "#/$defs/StepConfig/properties/skip" },
         "when": { "$ref": "#/$defs/StepConfig/properties/when" },
         "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
+        "computer_use": { "$ref": "#/$defs/StepConfig/properties/computer_use" },
         "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
         "allow_commit": { "const": false }
       },
@@ -320,6 +348,14 @@
         { "required": ["command"] }
       ],
       "allOf": [
+        {
+          "if": { "required": ["command"] },
+          "then": {
+            "properties": {
+              "computer_use": { "type": "null" }
+            }
+          }
+        },
         {
           "if": {
             "properties": { "output_file": { "type": "string" } },

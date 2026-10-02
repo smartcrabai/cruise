@@ -45,6 +45,8 @@ steps:
 ## Group-call steps
 
 A call-site step (one with `group: <name>`) must stay a pure invocation. Adding `prompt` / `prompt_file` / `command` alongside is a validation error.
+`computer_use` is also rejected on a group call site; set it on the inner
+prompt step instead.
 
 ```yaml
 # OK
