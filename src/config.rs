@@ -3775,7 +3775,6 @@ steps:
                 "StepConfig schema must reject computer_use on {context} steps"
             );
         }
-
     }
 
     #[test]
