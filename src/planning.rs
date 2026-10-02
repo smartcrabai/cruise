@@ -370,6 +370,7 @@ pub async fn run_plan_prompt_template(
             tools,
             on_session_id: ctx.on_session_id,
             resume: resume.clone(),
+            computer_use: ctx.config.computer_use,
         })
         .await;
     drop(spinner);

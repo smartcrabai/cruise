@@ -263,6 +263,7 @@ async fn generate_pr_description(
                 tools: Vec::new(),
                 on_session_id: None,
                 resume: None,
+                computer_use: false,
             })
             .await
         {
@@ -334,6 +335,7 @@ async fn generate_pr_via_sdk_tool(
             tools: vec![tool],
             on_session_id: None,
             resume: None,
+            computer_use: false,
         })
         .await
     {
@@ -883,6 +885,7 @@ mod tests {
             pr_language: "English".to_string(),
             mcp_servers: IndexMap::new(),
             cleanup_after_pr: false,
+            computer_use: false,
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

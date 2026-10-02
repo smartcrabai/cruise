@@ -666,6 +666,7 @@ async fn generate_title_via_sdk(
             tools: vec![tool],
             on_session_id: None,
             resume: None,
+            computer_use: false,
         })
         .await?;
 
@@ -2644,7 +2645,7 @@ steps:
         assert!(session.worktree_path.is_some());
         let plan = fs::read_to_string(session.plan_path(&manager.sessions_dir()))
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(!plan.trim().is_empty());
+        assert_ne!(plan.trim(), "");
     }
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]

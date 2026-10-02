@@ -75,6 +75,9 @@ pub struct PromptRun<'a> {
     pub on_session_id: Option<&'a SessionIdCallback<'a>>,
     /// Prior session id to resume (SDK mode only).
     pub resume: Option<String>,
+    /// Allow jcode's macOS desktop-control tool for this turn. This is jcode
+    /// backend only and is validated by [`crate::config::validate_computer_use`].
+    pub computer_use: bool,
 }
 
 /// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the
@@ -188,8 +191,18 @@ impl Executor {
     /// cruise does not implement.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         match self {
+            Executor::Command { .. } if req.computer_use => {
+                Err(CruiseError::InvalidStepConfig(
+                    "computer use requires the jcode backend because a command CLI manages its own tools"
+                        .to_string(),
+                ))
+            }
             Executor::Command { command } => run_command(command, req).await,
             Executor::Jcode => run_jcode(req).await,
+            Executor::Claude if req.computer_use => Err(CruiseError::InvalidStepConfig(
+                "Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise"
+                    .to_string(),
+            )),
             Executor::Claude => run_claude(req).await,
             Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
                 format!("unsupported `sdk` value '{sdk}'"),
@@ -572,6 +585,7 @@ fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<Jc
         tools: req.tools.clone(),
         env: req.env.clone(),
         mcp_servers: req.mcp_servers.clone(),
+        computer_use: req.computer_use,
         cancel: req.cancel_token.cloned(),
         keep_session_home: req.resume.is_some()
             || req.on_session_id.is_some()
@@ -658,6 +672,7 @@ mod tests {
                 tools: Vec::new(),
                 on_session_id: None,
                 resume: None,
+                computer_use: false,
             })
             .await;
         let Err(err) = result else {
@@ -734,7 +749,41 @@ mod tests {
             tools: Vec::new(),
             on_session_id: None,
             resume: None,
+            computer_use: false,
         }
+    }
+
+    #[tokio::test]
+    async fn claude_backend_rejects_computer_use_before_running_a_prompt() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.computer_use = true;
+
+        let Err(error) = claude_executor().run(req).await else {
+            panic!("Claude backend must reject computer use");
+        };
+        assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
+        assert!(error.to_string().contains("interactive sessions"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_backend_rejects_computer_use_without_spawning_the_command() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let marker = temp.path().join("command-was-spawned");
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.computer_use = true;
+        let executor = Executor::Command {
+            command: vec!["touch".to_string(), marker.to_string_lossy().into_owned()],
+        };
+
+        let Err(error) = executor.run(req).await else {
+            panic!("command backend must reject computer use");
+        };
+        assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
+        assert!(error.to_string().contains("jcode backend"));
+        assert!(!marker.exists(), "the command must not be spawned");
     }
 
     // -- build_claude_config ---------------------------------------------------
@@ -790,6 +839,7 @@ mod tests {
             tools: vec![tool],
             on_session_id: None,
             resume: Some("sess-1".to_string()),
+            computer_use: false,
         };
         let config = build_claude_config(&req, req.model_or_mode);
         assert_eq!(config.cwd, Some(dir));
@@ -982,6 +1032,7 @@ mod tests {
                     tools: Vec::new(),
                     on_session_id: None,
                     resume: None,
+                    computer_use: false,
                 })
                 .await
                 .unwrap_or_else(|e| panic!("command run failed: {e}"));
@@ -1279,7 +1330,7 @@ mod tests {
                 .contains("all configured models are cooling down"),
             "unexpected error: {error}"
         );
-        assert!(recorded(&notices).is_empty());
+        assert_eq!(recorded(&notices), [] as [String; 0]);
     }
 
     #[tokio::test]

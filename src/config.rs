@@ -27,6 +27,14 @@ pub struct LanguagesConfig {
 }
 
 /// Top-level workflow configuration.
+///
+/// `computer_use` defaults to `false` and controls access to jcode's macOS
+/// desktop-control tool for prompt turns. Per-step prompt settings can override
+/// this default.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "workflow configuration flags represent independent settings"
+)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
@@ -111,6 +119,11 @@ pub struct WorkflowConfig {
     /// Defaults to `false`; `--no-force-exec` opts out for one invocation.
     #[serde(default)]
     pub force_exec: bool,
+
+    /// Whether prompt turns may use jcode's macOS desktop-control tool.
+    /// Defaults to `false`; only the jcode backend can enable it.
+    #[serde(default)]
+    pub computer_use: bool,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -211,6 +224,10 @@ pub struct StepConfig {
     /// Defaults to `false`; false values are omitted when serialized.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_commit: bool,
+
+    /// Per-prompt override for the workflow-level computer-use setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
 
     /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
@@ -847,6 +864,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
     validate_mcp_servers(config)?;
+    validate_computer_use(config)?;
     validate_output_file_usage(config)?;
     validate_parallel_steps(config)?;
     validate_groups(config)?;
@@ -1042,10 +1060,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.instruction.is_some()
         || step.plan.is_some()
         || step.allow_commit
+        || step.computer_use.is_some()
         || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout"
+            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout; computer_use is only supported on prompt children"
         )));
     }
     for (child_name, child) in children {
@@ -1068,11 +1087,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
             || child.instruction.is_some()
             || child.plan.is_some()
             || child.allow_commit
+            || (child.computer_use.is_some() && child.command.is_some())
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, timeout, and output_file (prompt children only) \
-                 may accompany it"
+                 only model, env, skip, when, timeout, computer_use (prompt children only), \
+                 and output_file (prompt children only) may accompany it"
             )));
         }
         if matches!(&child.command, Some(StringOrVec::Multiple(commands)) if commands.is_empty()) {
@@ -1265,6 +1285,87 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
 }
 
+/// Validate that computer use is enabled only for prompt turns on the jcode backend.
+///
+/// # Errors
+///
+/// Returns an error when computer use is requested for an unsupported backend
+/// or is configured on a non-prompt step.
+pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()> {
+    let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
+    let is_jcode = matches!(executor, crate::executor::Executor::Jcode);
+
+    if !is_jcode && config.computer_use {
+        return Err(computer_use_backend_error(config, None));
+    }
+
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        if !is_jcode && step.computer_use == Some(true) {
+            return Err(computer_use_backend_error(config, Some(name)));
+        }
+        validate_computer_use_step(name, step)?;
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                let path = format!("{name}/{child_name}");
+                if !is_jcode && child.computer_use == Some(true) {
+                    return Err(computer_use_backend_error(config, Some(&path)));
+                }
+                validate_computer_use_step(&path, child)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn computer_use_backend_error(
+    config: &WorkflowConfig,
+    step_name: Option<&str>,
+) -> crate::error::CruiseError {
+    let subject = step_name.map_or_else(
+        || "workflow computer_use".to_string(),
+        |name| format!("step '{name}' computer_use"),
+    );
+    if config.sdk.as_deref() == Some("claude") {
+        crate::error::CruiseError::InvalidStepConfig(format!(
+            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key or use the default jcode backend"
+        ))
+    } else {
+        crate::error::CruiseError::InvalidStepConfig(format!(
+            "{subject} is unsupported: computer use requires the jcode backend because a command CLI manages its own tools"
+        ))
+    }
+}
+
+fn validate_computer_use_step(name: &str, step: &StepConfig) -> crate::error::Result<()> {
+    let Some(_) = step.computer_use else {
+        return Ok(());
+    };
+    let kind = if step.parallel.is_some() {
+        "parallel"
+    } else if step.group.is_some() {
+        "group"
+    } else if step.workflow_call.is_some() {
+        "workflow_call"
+    } else if step.command.is_some() {
+        "command"
+    } else if step.option.is_some() {
+        "option"
+    } else if step.prompt.is_some() || step.prompt_file.is_some() {
+        return Ok(());
+    } else {
+        "non-prompt"
+    };
+    Err(crate::error::CruiseError::InvalidStepConfig(format!(
+        "step '{name}' uses computer_use, which is only supported on prompt steps (found {kind})"
+    )))
+}
+
 /// Validate all timeout strings across steps, after-pr steps, and group inner steps.
 ///
 /// # Errors
@@ -1346,6 +1447,11 @@ fn validate_step_groups(
             if step.allow_commit {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses allow_commit on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.computer_use.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
                 )));
             }
             if step.output_file.is_some() {
@@ -1641,6 +1747,220 @@ steps:
         assert!(serialized.contains("allow_commit: true"));
     }
 
+    fn assert_computer_use_validation_error(yaml: &str, fragments: &[&str]) {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+        let Err(error) = validate_config(&config) else {
+            panic!("computer_use config should be rejected: {yaml}");
+        };
+        let message = error.to_string();
+        for fragment in fragments {
+            assert!(
+                message.contains(fragment),
+                "expected error to contain {fragment:?}, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn computer_use_defaults_off_and_step_none_is_omitted() {
+        let config = WorkflowConfig::from_yaml("steps:\n  review:\n    prompt: inspect\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!config.computer_use);
+        assert_eq!(config.steps["review"].computer_use, None);
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(serialized["computer_use"], false);
+        assert!(serialized["steps"]["review"].get("computer_use").is_none());
+    }
+
+    #[test]
+    fn computer_use_true_and_step_false_round_trip_without_losing_override() {
+        let config = WorkflowConfig::from_yaml(
+            "computer_use: true\nsteps:\n  desktop:\n    prompt: inspect\n    computer_use: true\n  private:\n    prompt: do not inspect\n    computer_use: false\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(config.computer_use);
+        assert_eq!(config.steps["desktop"].computer_use, Some(true));
+        assert_eq!(config.steps["private"].computer_use, Some(false));
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(serialized["computer_use"], true);
+        assert_eq!(serialized["steps"]["desktop"]["computer_use"], true);
+        assert_eq!(serialized["steps"]["private"]["computer_use"], false);
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_claude_workflow() {
+        assert_computer_use_validation_error(
+            "sdk: claude\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
+            &["computer_use", "interactive"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_claude_prompt_step_by_name() {
+        assert_computer_use_validation_error(
+            "sdk: claude\nsteps:\n  desktop-check:\n    prompt: inspect\n    computer_use: true\n",
+            &["desktop-check", "computer_use", "interactive"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_claude_after_pr_step() {
+        assert_computer_use_validation_error(
+            "sdk: claude\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  publish-check:\n    prompt: inspect\n    computer_use: true\n",
+            &["publish-check", "computer_use"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_claude_group_inner_step() {
+        assert_computer_use_validation_error(
+            "sdk: claude\ngroups:\n  review:\n    steps:\n      desktop-check:\n        prompt: inspect\n        computer_use: true\nsteps:\n  run-review:\n    group: review\n",
+            &["desktop-check", "computer_use"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_claude_parallel_prompt_child() {
+        assert_computer_use_validation_error(
+            "sdk: claude\nsteps:\n  checks:\n    parallel:\n      desktop-check:\n        prompt: inspect\n        computer_use: true\n",
+            &["desktop-check", "computer_use"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_command_backend() {
+        assert_computer_use_validation_error(
+            "command: [custom-agent]\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
+            &["computer use", "jcode backend"],
+        );
+    }
+
+    #[test]
+    fn validate_config_accepts_explicit_false_for_claude_at_both_levels() {
+        let config = WorkflowConfig::from_yaml(
+            "sdk: claude\ncomputer_use: false\nsteps:\n  review:\n    prompt: inspect\n    computer_use: false\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!config.computer_use);
+        assert_eq!(config.steps["review"].computer_use, Some(false));
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_accepts_computer_use_with_jcode_backend() {
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n    computer_use: true\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(config.computer_use);
+        assert_eq!(config.steps["review"].computer_use, Some(true));
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_accepts_computer_use_with_default_jcode_backend() {
+        let config = WorkflowConfig::from_yaml(
+            "computer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(config.computer_use);
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_reports_invalid_sdk_before_computer_use_backend_error() {
+        assert_computer_use_validation_error(
+            "sdk: unknown\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
+            &["unknown"],
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_computer_use_on_non_prompt_kinds_even_when_false() {
+        let cases = [
+            (
+                "command-step",
+                "steps:\n  command-step:\n    command: echo run\n    computer_use: false\n",
+            ),
+            (
+                "option-step",
+                "steps:\n  option-step:\n    option:\n      - selector: continue\n    computer_use: false\n",
+            ),
+            (
+                "parallel-parent",
+                "steps:\n  parallel-parent:\n    computer_use: false\n    parallel:\n      child:\n        prompt: inspect\n",
+            ),
+            (
+                "command-child",
+                "steps:\n  parent:\n    parallel:\n      command-child:\n        command: echo run\n        computer_use: false\n",
+            ),
+            (
+                "group-call",
+                "groups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\nsteps:\n  group-call:\n    group: review\n    computer_use: false\n",
+            ),
+        ];
+
+        for (step_name, steps) in cases {
+            let yaml = format!("sdk: jcode\n{steps}");
+            assert_computer_use_validation_error(&yaml, &[step_name, "computer_use"]);
+        }
+    }
+
+    #[test]
+    fn validate_config_accepts_computer_use_on_parallel_prompt_child() {
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      desktop-check:\n        prompt: inspect\n        computer_use: true\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(
+            config.steps["checks"]
+                .parallel
+                .as_ref()
+                .map(|children| children["desktop-check"].computer_use),
+            Some(Some(true))
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn configured_claude_backend_after_environment_overrides_rejects_computer_use() {
+        let _process = lock_process();
+        let _guards = clear_all_override_envs();
+        let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
+        let mut config = WorkflowConfig::from_yaml(
+            "computer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_computer_use_validation_error_for_config(&config, &["computer_use", "interactive"]);
+    }
+
+    fn assert_computer_use_validation_error_for_config(
+        config: &WorkflowConfig,
+        fragments: &[&str],
+    ) {
+        let Err(error) = validate_config(config) else {
+            panic!("computer_use config should be rejected after env overrides");
+        };
+        let message = error.to_string();
+        for fragment in fragments {
+            assert!(
+                message.contains(fragment),
+                "expected error to contain {fragment:?}, got: {message}"
+            );
+        }
+    }
+
     #[test]
     fn test_plan_model_field() {
         let yaml = r"
@@ -1812,7 +2132,7 @@ steps:
             .as_ref()
             .unwrap_or_else(|| panic!("explicit retry policy should remain"));
         assert!(!retry.model_fallback);
-        assert!(retry.fallback_chains.is_empty());
+        assert_eq!(retry.fallback_chains, HashMap::new());
     }
 
     #[test]
@@ -1905,7 +2225,7 @@ steps:
             Some("Japanese")
         );
         assert_eq!(config.effective_pr_language(), "Japanese");
-        assert!(config.deprecated_language_warnings().is_empty());
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -1924,7 +2244,7 @@ steps:
             Some("Japanese")
         );
         assert_eq!(config.effective_plan_language(), "Japanese");
-        assert!(config.deprecated_language_warnings().is_empty());
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -2016,7 +2336,7 @@ steps:
     command: echo hi
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(config.deprecated_language_warnings().is_empty());
+        assert_eq!(config.deprecated_language_warnings(), [] as [String; 0]);
     }
 
     #[test]
@@ -2376,12 +2696,12 @@ steps:
     command: echo hello
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(config.env.is_empty());
+        assert_eq!(config.env, HashMap::new());
         let step = config
             .steps
             .get("step1")
             .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(step.env.is_empty());
+        assert_eq!(step.env, HashMap::new());
     }
 
     // --- timeout deserialization tests ---
@@ -2471,13 +2791,14 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml)
             .unwrap_or_else(|e| panic!("failed to parse cruise.yaml: {e:?}"));
         assert_eq!(config.sdk, None);
-        assert!(
-            config.command.is_empty(),
+        assert_eq!(
+            config.command,
+            [] as [String; 0],
             "command should be empty when no backend is named"
         );
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
-        assert!(!config.steps.is_empty(), "steps is empty");
+        assert_ne!(config.steps.len(), 0, "steps is empty");
         assert!(
             config.steps.contains_key("mise-trust"),
             "expected mise-trust step"
@@ -2488,7 +2809,7 @@ steps:
     fn test_empty_steps() {
         let yaml = "command: [echo]\nsteps: {}";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(config.steps.is_empty());
+        assert_eq!(config.steps.len(), 0);
     }
 
     #[test]
@@ -2510,7 +2831,7 @@ steps:
         // Old configs with `state` or `worktree` fields should still parse.
         let yaml = "command: [echo]\nworktree: true\nstate: .cruise/state.json\nsteps:\n  s1:\n    command: echo hi";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(!config.steps.is_empty());
+        assert_ne!(config.steps.len(), 0);
     }
 
     #[test]
@@ -2740,7 +3061,7 @@ steps:
         // When: parsed
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: after_pr defaults to empty IndexMap
-        assert!(config.after_pr.is_empty());
+        assert_eq!(config.after_pr.len(), 0);
     }
 
     #[test]
@@ -3499,6 +3820,7 @@ steps:
                 "languages",
                 "env",
                 "force_exec",
+                "computer_use",
                 "groups",
                 "steps",
                 "after-pr",
@@ -3654,6 +3976,7 @@ steps:
                 "model",
                 "prompt",
                 "allow_commit",
+                "computer_use",
                 "instruction",
                 "plan",
                 "option",
@@ -3675,6 +3998,66 @@ steps:
             !step_props.contains_key("fail-if-no-file-changes"),
             "removed fail-if-no-file-changes must not remain in the StepConfig schema"
         );
+    }
+
+    #[test]
+    fn test_schema_computer_use_is_boolean_and_available_to_parallel_children() {
+        let schema = load_schema();
+        assert_eq!(
+            schema["properties"]["computer_use"]["type"].as_str(),
+            Some("boolean")
+        );
+        let description = schema["properties"]["computer_use"]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("computer_use schema description must be a string"))
+            .to_lowercase();
+        for required_term in ["false", "jcode", "macos", "claude", "command"] {
+            assert!(
+                description.contains(required_term),
+                "computer_use schema description must mention {required_term}"
+            );
+        }
+        let child_property = &schema["$defs"]["ParallelChild"]["properties"]["computer_use"];
+        assert_eq!(
+            child_property["$ref"].as_str(),
+            Some("#/$defs/StepConfig/properties/computer_use")
+        );
+    }
+
+    #[test]
+    fn test_schema_computer_use_requires_prompt_and_excludes_non_prompt_steps() {
+        let schema = load_schema();
+        let rules = schema["$defs"]["StepConfig"]["allOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("StepConfig allOf must be an array"));
+
+        let rule = rules
+            .iter()
+            .find(|rule| {
+                rule["if"]["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|value| value == "computer_use"))
+            })
+            .unwrap_or_else(|| panic!("StepConfig schema must constrain computer_use steps"));
+        let prompt_alternatives = rule["then"]["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("computer_use steps must require a prompt form"));
+        for prompt_field in ["prompt", "prompt_file"] {
+            assert!(
+                prompt_alternatives
+                    .iter()
+                    .any(|alternative| alternative["required"] == serde_json::json!([prompt_field])),
+                "computer_use steps must accept {prompt_field} prompts"
+            );
+        }
+
+        for context in ["command", "option", "parallel", "group", "workflow_call"] {
+            assert_eq!(
+                rule["then"]["properties"][context]["type"].as_str(),
+                Some("null"),
+                "StepConfig schema must reject computer_use on {context} steps"
+            );
+        }
     }
 
     #[test]
@@ -4053,7 +4436,11 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         // Then: sdk is set and command defaults to empty
         assert_eq!(config.sdk.as_deref(), Some("jcode"));
-        assert!(config.command.is_empty(), "command should default to empty");
+        assert_eq!(
+            config.command,
+            [] as [String; 0],
+            "command should default to empty"
+        );
     }
 
     #[test]
@@ -4665,7 +5052,11 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(!config.command.is_empty(), "precondition: command is set");
+        assert_ne!(
+            config.command,
+            [] as [String; 0],
+            "precondition: command is set"
+        );
 
         // When: CRUISE_SDK env var is applied
         config
@@ -4674,8 +5065,9 @@ steps:
 
         // Then: sdk is set and command is cleared so validate_sdk passes
         assert_eq!(config.sdk, Some("jcode".to_string()));
-        assert!(
-            config.command.is_empty(),
+        assert_eq!(
+            config.command,
+            [] as [String; 0],
             "command must be cleared when sdk is set via env"
         );
         assert!(
@@ -4693,7 +5085,11 @@ steps:
         // Given: config has command set (the default case when loaded from YAML)
         let mut config =
             WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(!config.command.is_empty(), "precondition: command is set");
+        assert_ne!(
+            config.command,
+            [] as [String; 0],
+            "precondition: command is set"
+        );
 
         // When: CRUISE_SDK=claude env var is applied
         config
@@ -4702,8 +5098,9 @@ steps:
 
         // Then: sdk is set to "claude", command is cleared, and validate_sdk passes
         assert_eq!(config.sdk, Some("claude".to_string()));
-        assert!(
-            config.command.is_empty(),
+        assert_eq!(
+            config.command,
+            [] as [String; 0],
             "command must be cleared when sdk is set via env"
         );
         assert!(
@@ -4803,7 +5200,7 @@ steps:
         assert_eq!(retry.base_delay_ms, 500);
         assert_eq!(retry.max_delay_ms, 300_000);
         assert!(retry.model_fallback);
-        assert!(retry.fallback_chains.is_empty());
+        assert_eq!(retry.fallback_chains, HashMap::new());
     }
 
     #[test]

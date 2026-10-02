@@ -42,6 +42,9 @@ const JCODE_CHECK_UPDATES_ENV: &str = "JCODE_CHECK_UPDATES";
 const OPENAI_SERVICE_TIER_ENV: &str = "JCODE_OPENAI_SERVICE_TIER";
 const JCODE_PROVIDER_ENV: &str = "JCODE_PROVIDER";
 const JCODE_MODEL_ENV: &str = "JCODE_MODEL";
+const JCODE_DISABLED_TOOLS_ENV: &str = "JCODE_DISABLED_TOOLS";
+const COMPUTER_USE_TOOL: &str = "macos_computer_use";
+const JCODE_CONFIG_FILE: &str = "config.toml";
 const OPENAI_SERVICE_TIER_DEFAULT: &str = "off";
 const SESSION_HOME_DIR: &str = ".cruise-sdk-sessions";
 const SESSION_ID_FILE: &str = ".cruise-session-id";
@@ -64,6 +67,7 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) env: HashMap<String, String>,
     pub(crate) cancel: Option<CancellationToken>,
     pub(crate) keep_session_home: bool,
+    pub(crate) computer_use: bool,
 }
 
 /// Cruise's `provider/model[:effort]` syntax, parsed once for each fallback
@@ -171,10 +175,26 @@ fn launch_client(
         inherit_logins: false,
         ..Default::default()
     };
+    let process_disabled_tools = if config.computer_use {
+        None
+    } else {
+        std::env::var(JCODE_DISABLED_TOOLS_ENV).ok()
+    };
+    let config_toml = if config.computer_use
+        || config.env.contains_key(JCODE_DISABLED_TOOLS_ENV)
+        || process_disabled_tools.is_some()
+    {
+        None
+    } else {
+        fs::read_to_string(home.storage_home.join(JCODE_CONFIG_FILE)).ok()
+    };
     options.env = launch_environment(
         &config.env,
         config.provider.as_deref(),
         config.model.as_deref(),
+        config.computer_use,
+        process_disabled_tools.as_deref(),
+        config_toml.as_deref(),
     );
     JcodeClient::launch(options).map_err(|error| {
         format!("could not start the jcode SDK runtime; install or upgrade jcode to 0.88.0 or newer: {error}")
@@ -185,6 +205,9 @@ fn launch_environment(
     workflow_env: &HashMap<String, String>,
     provider: Option<&str>,
     model: Option<&str>,
+    computer_use: bool,
+    process_disabled_tools: Option<&str>,
+    config_toml: Option<&str>,
 ) -> HashMap<OsString, OsString> {
     let mut env: HashMap<OsString, OsString> = workflow_env
         .iter()
@@ -210,7 +233,71 @@ fn launch_environment(
             OsString::from(routed_model_arg(provider, model).as_ref()),
         );
     }
+    if !computer_use {
+        let disabled_tools = computer_use_disabled_tools(
+            workflow_env
+                .get(JCODE_DISABLED_TOOLS_ENV)
+                .map(String::as_str),
+            process_disabled_tools,
+            config_toml,
+        );
+        env.insert(
+            OsString::from(JCODE_DISABLED_TOOLS_ENV),
+            OsString::from(disabled_tools),
+        );
+    }
     env
+}
+
+fn computer_use_disabled_tools(
+    workflow_value: Option<&str>,
+    process_value: Option<&str>,
+    config_toml: Option<&str>,
+) -> String {
+    let mut disabled_tools = workflow_value.or(process_value).map_or_else(
+        || config_toml.map_or_else(Vec::new, configured_disabled_tools),
+        |value| {
+            value
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|tool| !tool.is_empty())
+                .map(str::to_string)
+                .collect()
+        },
+    );
+
+    let mut unique_tools = Vec::with_capacity(disabled_tools.len() + 1);
+    for tool in disabled_tools.drain(..) {
+        if !unique_tools.contains(&tool) {
+            unique_tools.push(tool);
+        }
+    }
+    if !unique_tools.iter().any(|tool| tool == COMPUTER_USE_TOOL) {
+        unique_tools.push(COMPUTER_USE_TOOL.to_string());
+    }
+    unique_tools.join(",")
+}
+
+fn configured_disabled_tools(config_toml: &str) -> Vec<String> {
+    let Ok(config) = toml::from_str::<toml::Table>(config_toml) else {
+        return Vec::new();
+    };
+    config
+        .get("tools")
+        .and_then(toml::Value::as_table)
+        .and_then(|tools| tools.get("disabled"))
+        .and_then(toml::Value::as_array)
+        .map(|disabled| {
+            disabled
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .flat_map(|value| value.split([',', '\n']))
+                .map(str::trim)
+                .filter(|tool| !tool.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[expect(

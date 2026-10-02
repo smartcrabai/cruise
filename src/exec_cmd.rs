@@ -349,10 +349,7 @@ mod tests {
             "plan.md placeholder must exist so {{plan}} references don't fail"
         );
         let content = fs::read_to_string(&plan_path).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            content.is_empty(),
-            "placeholder plan.md should be empty, got: {content:?}"
-        );
+        assert_eq!(content, "", "placeholder plan.md should be empty");
     }
 
     #[test]
@@ -490,11 +487,9 @@ steps:
         );
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        assert!(
-            manager
-                .list()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .is_empty()
+        assert_eq!(
+            manager.list().unwrap_or_else(|e| panic!("{e:?}")),
+            [] as [SessionState; 0]
         );
     }
 

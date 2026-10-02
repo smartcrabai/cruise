@@ -22,6 +22,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
+computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
   plan: English           # Language for built-in planning prompts
@@ -80,6 +81,9 @@ Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command
 
 Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values. Claude receives its entries through `--mcp-config` alongside Cruise's own tools and continues loading the user's Claude MCP config. The combined values are written to a per-run private JSON file with mode `0600` on Unix; only its path is passed in CLI arguments. `${VAR}` expansion for the Claude backend is not guaranteed.
 
+`computer_use` defaults to `false` and is supported only with the `jcode`
+backend. When enabled, it allows prompt turns to use jcode's macOS computer-use
+tool; a prompt step can override the workflow setting (see [steps.md](steps.md)).
 ## `command` and the `{model}` placeholder
 
 `{model}` inside the `command` array is a special placeholder resolved at runtime. It is **not** a template variable and cannot be used inside `prompt` / `prompt_file` / `instruction` / `command` step fields.

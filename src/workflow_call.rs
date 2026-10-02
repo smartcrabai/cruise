@@ -217,6 +217,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("timeout", step.timeout.is_some()),
         ("env", !step.env.is_empty()),
         ("allow_commit", step.allow_commit),
+        ("computer_use", step.computer_use.is_some()),
         ("output_file", step.output_file.is_some()),
     ]
     .into_iter()
@@ -1214,6 +1215,47 @@ steps:
         let resolved = resolve_workflow_calls(config, dir.path())
             .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         assert!(resolved.steps["shared/one"].allow_commit);
+    }
+
+    #[test]
+    fn workflow_call_rejects_computer_use_on_call_site_even_when_false() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "steps:\n  inspect:\n    prompt: inspect\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "steps:\n  shared:\n    workflow_call: ./callee.yaml\n    computer_use: false\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let Err(error) = resolve_workflow_calls(config, dir.path()) else {
+            panic!("computer_use is not supported on a workflow_call site");
+        };
+        assert!(error.to_string().contains("computer_use"));
+    }
+
+    #[test]
+    fn resolved_workflow_ignores_callee_workflow_default_but_preserves_inner_override() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "computer_use: true\nsteps:\n  inspect:\n    prompt: inspect\n    computer_use: true\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "computer_use: false\nsteps:\n  shared:\n    workflow_call: ./callee.yaml\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let resolved =
+            resolve_workflow_calls(config, dir.path()).unwrap_or_else(|error| panic!("{error}"));
+        let step = serde_json::to_value(&resolved.steps["shared/inspect"])
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!resolved.computer_use);
+        assert_eq!(step["computer_use"], true);
     }
 
     #[test]

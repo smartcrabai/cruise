@@ -1214,6 +1214,7 @@ pub(crate) async fn run_prompt_step(
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode =
         executor.step_model_or_mode(step.model.as_deref(), compiled.model.as_deref());
+    let computer_use = step.computer_use.unwrap_or(compiled.computer_use);
 
     let commit_guard = if allow_commit {
         None
@@ -1286,6 +1287,7 @@ pub(crate) async fn run_prompt_step(
             tools,
             on_session_id: None,
             resume: None,
+            computer_use,
         });
 
         if let Some(duration) = timeout {
