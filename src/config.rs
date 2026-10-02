@@ -5758,7 +5758,7 @@ steps:
             .apply_env_overrides()
             .unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(config.sdk.as_deref(), Some("claude"));
-        assert!(config.command.is_empty());
+        assert_eq!(config.command, Vec::<String>::new());
         assert_workflow_has_mcp_servers(&config);
         assert!(validate_config(&config).is_ok());
     }

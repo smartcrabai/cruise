@@ -8,9 +8,15 @@
 //! model as `mcp__cruise__<tool>`.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use claude_agent_sdk::internal::client::user_message_frame;
 use claude_agent_sdk::tool::{AgentTool, AgentToolbox};
@@ -47,6 +53,8 @@ const NO_RESULT_MESSAGE: &str = "the claude CLI exited without reporting a resul
 /// exited at that point so 2s is plenty; the timeout exists only to prevent a
 /// runaway task from blocking the runtime.
 const STDERR_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const PRIVATE_MCP_CONFIG_FILE_PREFIX: &str = "cruise-claude-mcp-config-";
+static PRIVATE_MCP_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// One `sdk: claude` prompt run.
 ///
@@ -136,6 +144,102 @@ async fn until_cancelled(token: Option<&CancellationToken>) {
     }
 }
 
+/// Owns a private MCP config file until the CLI transport has shut down.
+struct PrivateMcpConfigFile {
+    path: PathBuf,
+}
+
+impl PrivateMcpConfigFile {
+    fn create(servers: &crate::config::McpServers) -> std::io::Result<Option<Self>> {
+        if servers.is_empty() {
+            return Ok(None);
+        }
+        let mcp_servers: serde_json::Map<String, serde_json::Value> = servers
+            .iter()
+            .map(|(name, server)| (name.clone(), server.to_backend_json()))
+            .collect();
+        let contents = serde_json::to_vec(&serde_json::json!({
+            "mcpServers": mcp_servers
+        }))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let directory = std::env::temp_dir();
+        for _ in 0..32 {
+            let sequence = PRIVATE_MCP_CONFIG_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(
+                "{PRIVATE_MCP_CONFIG_FILE_PREFIX}{}-{sequence}.json",
+                std::process::id()
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+
+            match options.open(&path) {
+                Ok(mut file) => {
+                    let guard = Self { path };
+                    let result = file.write_all(&contents);
+                    drop(file);
+                    if let Err(error) = result {
+                        drop(guard);
+                        return Err(error);
+                    }
+                    return Ok(Some(guard));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique temporary MCP configuration file",
+        ))
+    }
+}
+
+impl Drop for PrivateMcpConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Create workflow MCP options and connect while retaining the private file
+/// guard for the caller's transport lifetime.
+async fn connect_transport(
+    config: &ClaudeRunnerConfig,
+) -> Result<(Option<PrivateMcpConfigFile>, SubprocessCliTransport), String> {
+    let mcp_config_file = PrivateMcpConfigFile::create(&config.mcp_servers)
+        .map_err(|error| format!("failed to create private MCP config file: {error}"))?;
+    let mut options = build_options(config);
+    if let Some(file) = &mcp_config_file {
+        options.extra_args.insert(
+            "--mcp-config".into(),
+            Some(file.path.to_string_lossy().into_owned()),
+        );
+    }
+    let mut transport = SubprocessCliTransport::streaming(options);
+    if let Err(error) = transport.connect().await {
+        let _ = transport.close().await;
+        return Err(error.to_string());
+    }
+    Ok((mcp_config_file, transport))
+}
+
+/// Drain stderr into a bounded tail before any writes can fail or the child
+/// can close its output pipes.
+fn start_stderr_drain(
+    transport: &mut SubprocessCliTransport,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    transport.take_stderr_rx().map(|mut rx_stderr| {
+        let buf = Arc::clone(stderr_tail);
+        tokio::spawn(async move {
+            while let Some(line) = rx_stderr.recv().await {
+                push_stderr_line(&buf, line);
+            }
+        })
+    })
+}
+
 async fn run_async(config: ClaudeRunnerConfig, prompt: String, tx: &Sender<StreamChunk>) {
     let cancel = config.cancel.clone();
     // Streaming mode rather than `one_shot` / `--print`: with an SDK MCP
@@ -144,38 +248,30 @@ async fn run_async(config: ClaudeRunnerConfig, prompt: String, tx: &Sender<Strea
     // server is marked `failed` and cruise's tools never reach the model. One
     // path for tools and no-tools runs keeps the frame format and `end_input`
     // timing under the same tests either way.
-    let mut transport = SubprocessCliTransport::streaming(build_options(&config));
-    if let Err(e) = transport.connect().await {
-        // No stderr yet -- classify on the SDK message alone.
-        send_error_with_stderr(tx, &e.to_string(), &[]);
-        return;
-    }
+    let (_mcp_config_file, mut transport) = match connect_transport(&config).await {
+        Ok(connected) => connected,
+        Err(error) => {
+            send_error_with_stderr(tx, &error, &[]);
+            return;
+        }
+    };
 
-    // Drain stderr into a small ring buffer so it can be reported after a
-    // transport error or a premature stream end; without it the CLI's own
-    // diagnosis (rate limit, bad flag, auth failure) is silently dropped.
-    // Spawned before the write below so that a write failure -- typically the
-    // child dying mid-handshake -- still sees what the CLI emitted.
     let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let drain_handle: Option<tokio::task::JoinHandle<()>> =
-        transport.take_stderr_rx().map(|mut rx_stderr| {
-            let buf = Arc::clone(&stderr_tail);
-            tokio::spawn(async move {
-                while let Some(line) = rx_stderr.recv().await {
-                    push_stderr_line(&buf, line);
-                }
-            })
-        });
+    let drain_handle = start_stderr_drain(&mut transport, &stderr_tail);
 
     if let Err(e) = transport
         .write(&user_message_frame(&prompt, "default"))
         .await
     {
+        let _ = transport.close().await;
+        await_stderr_drain(drain_handle).await;
         let tail = snapshot_stderr_tail(&stderr_tail);
         send_error_with_stderr(tx, &e.to_string(), &tail);
         return;
     }
     if let Err(e) = transport.end_input().await {
+        let _ = transport.close().await;
+        await_stderr_drain(drain_handle).await;
         let tail = snapshot_stderr_tail(&stderr_tail);
         send_error_with_stderr(tx, &e.to_string(), &tail);
         return;
@@ -363,12 +459,8 @@ fn build_options(config: &ClaudeRunnerConfig) -> ClaudeAgentOptions {
     // touch, and there is no console to answer a permission prompt on, so a
     // prompt would deadlock the step until its `timeout:` fires.
     opts.permission_mode = Some(PermissionMode::BypassPermissions);
-    for (name, server) in &config.mcp_servers {
-        opts.mcp_servers.insert(
-            name.clone(),
-            claude_agent_sdk::McpServerConfig(server.to_backend_json()),
-        );
-    }
+    // Workflow MCP servers are passed to the CLI by `run_async` through a
+    // private config file, never through the SDK's inline `--mcp-config` JSON.
     if !config.tools.is_empty() {
         let tools: Vec<AgentTool> = config.tools.iter().map(cruise_tool_to_agent_tool).collect();
         opts.sdk_mcp_server = Some(AgentToolbox::new(CRUISE_TOOLBOX_NAME).with_tools(tools));
@@ -459,36 +551,60 @@ mod tests {
     }
 
     #[test]
-    fn build_options_combines_workflow_servers_and_cruise_tools_in_one_mcp_config() {
+    fn build_options_keeps_workflow_servers_in_a_private_config_file() {
+        const SECRET: &str = "credential-sentinel-never-in-argv";
         let mut mcp_servers = crate::config::McpServers::new();
         mcp_servers.insert(
             "remote_tool".to_string(),
             crate::config::McpServerConfig {
                 transport: Some(crate::config::McpTransport::Http),
                 url: Some("https://example.test/mcp".to_string()),
+                headers: indexmap::IndexMap::from([(
+                    "Authorization".to_string(),
+                    SECRET.to_string(),
+                )]),
                 ..Default::default()
             },
         );
-        let opts = build_options(&ClaudeRunnerConfig {
+        let config = ClaudeRunnerConfig {
             tools: vec![tool("submit_plan")],
             mcp_servers,
             ..Default::default()
-        });
-
-        assert_eq!(
-            opts.mcp_servers["remote_tool"].0["type"].as_str(),
-            Some("http")
+        };
+        let private_dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create private MCP config directory: {error}"));
+        let private_path = private_dir.path().join("workflow-mcp-config.json");
+        let mut opts = build_options(&config);
+        opts.extra_args.insert(
+            "--mcp-config".into(),
+            Some(private_path.to_string_lossy().into_owned()),
         );
+
         let args = SubprocessCliTransport::streaming(opts).build_args();
         let mcp_config_args: Vec<_> = args
             .windows(2)
             .filter(|pair| pair[0] == "--mcp-config")
+            .map(|pair| pair[1].as_str())
             .collect();
-        assert_eq!(mcp_config_args.len(), 1);
-        let config: serde_json::Value = serde_json::from_str(&mcp_config_args[0][1])
-            .unwrap_or_else(|error| panic!("invalid --mcp-config JSON: {error}"));
-        assert_eq!(config["mcpServers"]["remote_tool"]["type"], "http");
-        assert_eq!(config["mcpServers"]["cruise"]["type"], "sdk");
+        assert_eq!(mcp_config_args.len(), 2);
+        assert!(
+            !args.join("\n").contains(SECRET),
+            "credential must not appear in CLI arguments: {args:?}"
+        );
+        let private_path_arg = private_path.to_string_lossy();
+        assert!(mcp_config_args.contains(&private_path_arg.as_ref()));
+        let inline_config_arg = mcp_config_args
+            .iter()
+            .copied()
+            .find(|value| *value != private_path_arg.as_ref())
+            .unwrap_or_else(|| panic!("SDK inline MCP config was not passed"));
+        let inline_config: serde_json::Value = serde_json::from_str(inline_config_arg)
+            .unwrap_or_else(|error| panic!("invalid inline --mcp-config JSON: {error}"));
+        assert_eq!(inline_config["mcpServers"]["cruise"]["type"], "sdk");
+        assert_eq!(
+            inline_config["mcpServers"]["remote_tool"],
+            serde_json::Value::Null
+        );
         assert!(!args.iter().any(|arg| arg == "--strict-mcp-config"));
     }
 
@@ -775,18 +891,30 @@ mod tests {
             let args = std::fs::read_to_string(stub.dir.join("args.txt"))
                 .unwrap_or_else(|e| panic!("read captured CLI arguments: {e}"));
             let args: Vec<_> = args.lines().collect();
-            let config_flag = args
-                .iter()
-                .position(|arg| *arg == "--mcp-config")
-                .unwrap_or_else(|| panic!("CLI args omitted --mcp-config: {args:?}"));
+            let mcp_config_args: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--mcp-config")
+                .map(|pair| pair[1])
+                .collect();
+            assert_eq!(mcp_config_args.len(), 2);
             let config_path_arg = config_path.to_string_lossy();
-            assert_eq!(
-                args.get(config_flag + 1).copied(),
-                Some(config_path_arg.as_ref())
-            );
+            assert!(mcp_config_args.contains(&config_path_arg.as_ref()));
+            let inline_config_arg = mcp_config_args
+                .iter()
+                .copied()
+                .find(|value| *value != config_path_arg.as_ref())
+                .unwrap_or_else(|| panic!("SDK inline MCP config was not passed: {args:?}"));
             assert!(
                 !args.join("\n").contains(MCP_SENTINEL),
                 "credential must not appear in CLI arguments: {args:?}"
+            );
+
+            let inline_config: serde_json::Value = serde_json::from_str(inline_config_arg)
+                .unwrap_or_else(|e| panic!("parse inline MCP config: {e}"));
+            assert_eq!(inline_config["mcpServers"]["cruise"]["type"], "sdk");
+            assert_eq!(
+                inline_config["mcpServers"]["remote_tool"],
+                serde_json::Value::Null
             );
 
             let metadata = std::fs::metadata(&config_path)
@@ -801,7 +929,8 @@ mod tests {
                 config["mcpServers"]["remote_tool"]["headers"]["Authorization"],
                 MCP_SENTINEL
             );
-            assert_eq!(config["mcpServers"]["cruise"]["type"], "sdk");
+            assert_eq!(config["mcpServers"]["remote_tool"]["type"], "http");
+            assert_eq!(config["mcpServers"]["cruise"], serde_json::Value::Null);
             config_path
         }
 
@@ -931,10 +1060,10 @@ mod tests {
             ));
             let chunks = run(&stub, HashMap::new(), Vec::new());
             let kinds: Vec<String> = chunks.iter().map(|c| format!("{c:?}")).collect();
-            assert!(
-                matches!(chunks.last(), Some(StreamChunk::Done(text)) if text.is_empty()),
-                "expected Done, got {kinds:?}"
-            );
+            match chunks.last() {
+                Some(StreamChunk::Done(text)) => assert_eq!(text.as_str(), ""),
+                other => panic!("expected Done with empty text, got {other:?}"),
+            }
             assert!(
                 chunks
                     .iter()

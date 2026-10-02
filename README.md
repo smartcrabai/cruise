@@ -692,7 +692,7 @@ MCP entry values are passed through without Cruise `{variable}` template resolut
 
 With jcode, Cruise merges the workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Workflow entries replace same-named entries from that source file, and the source is never modified. jcode then applies its normal config merge order, so same-named servers from `~/.claude.json`, `~/.claude/mcp.json`, or project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json` take precedence over the workflow copy. jcode expands `${VAR}` and `${VAR:-default}` using the runtime environment, including workflow-level `env:` values.
 
-With `sdk: claude`, Cruise passes the entries via `--mcp-config` alongside its own `cruise` tools and leaves the user's Claude MCP configuration enabled. Config values are written to a per-run private JSON file with mode `0600` on Unix; the CLI receives the file path rather than the values in its process arguments. `${VAR}` expansion for these Claude entries is not guaranteed.
+With `sdk: claude`, workflow MCP entries are written to a per-run private JSON file with mode `0600` on Unix, and the file path is passed via `--mcp-config`; the SDK passes Cruise's in-process tools separately as its own inline `--mcp-config` value. The user's own Claude MCP configuration remains enabled. `${VAR}` expansion for these Claude entries is not guaranteed.
 
 ### Prompt Languages
 
