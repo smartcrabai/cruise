@@ -71,6 +71,29 @@ The structured action is available only on prompt steps that carry an `if.no-fil
 
 Command and option steps behave identically in both modes.
 
+## MCP servers
+
+The optional top-level `mcp_servers` map configures servers for all SDK prompt runs: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, and a `workflow_call` callee's top-level MCP settings are ignored. Stdio entries work with `sdk: jcode`, the default jcode backend, and `sdk: claude`. HTTP and SSE entries require `sdk: claude` because jcode currently supports stdio only.
+
+```yaml
+sdk: claude
+mcp_servers:
+  local_search:
+    command: npx
+    args: ["-y", "@example/search"]
+  remote_docs:
+    type: http
+    url: https://mcp.example.test/server
+    headers:
+      Authorization: "Bearer replace-with-your-token"
+```
+
+Entries use the Claude Code `mcpServers` shape and accept only `type`, `command`, `args`, `env`, `url`, and `headers`. Omitted `type` means `stdio`. Names must be non-empty and contain only ASCII letters, digits, `_`, or `-`; `cruise` is reserved. Stdio requires a non-blank `command` and rejects `url` and non-empty `headers`. HTTP/SSE require a URL starting with `http://` or `https://` and reject `command` and non-empty `args` or `env`. `mcp_servers` with the `command` backend is a validation error. Values are passed without Cruise `{variable}` resolution.
+
+For jcode, Cruise merges workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json`) without changing the source. Workflow entries replace same-named source entries. jcode subsequently loads `~/.claude.json`, `~/.claude/mcp.json`, and project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json`, so those later layers can replace a workflow server with the same name. jcode expands `${VAR}` and `${VAR:-default}` from the daemon's runtime environment, including workflow-level `env:` values.
+
+For Claude, Cruise passes entries via `--mcp-config`, alongside its in-process `cruise` tools. The user's own Claude MCP config remains enabled. Entry values are written to a per-run private JSON file with mode `0600` on Unix; the CLI receives the file path rather than the values in its process arguments. `${VAR}` expansion for this backend is not guaranteed.
+
 
 ## Rate limits and fallback
 

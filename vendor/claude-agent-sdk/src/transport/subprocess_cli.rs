@@ -3,9 +3,15 @@
 //! This is the Rust counterpart of
 //! `claude_agent_sdk._internal.transport.subprocess_cli.SubprocessCLITransport`.
 
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -21,6 +27,57 @@ use crate::types::{ClaudeAgentOptions, SystemPrompt};
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 1024 * 1024;
 const SDK_ENTRYPOINT: &str = "sdk-rust";
+const MCP_CONFIG_TEMP_FILE_PREFIX: &str = "cruise-claude-mcp-config-";
+static MCP_CONFIG_TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Owns the private file passed to Claude's `--mcp-config` flag.
+///
+/// The guard stays on the transport until the child exits, and is dropped on
+/// every early-return or cancellation path as well as normal completion.
+struct PrivateMcpConfigFile {
+    path: PathBuf,
+}
+
+impl PrivateMcpConfigFile {
+    fn create(contents: &str) -> Result<Self> {
+        let directory = std::env::temp_dir();
+        for _ in 0..32 {
+            let sequence = MCP_CONFIG_TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(
+                "{MCP_CONFIG_TEMP_FILE_PREFIX}{}-{sequence}.json",
+                std::process::id()
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+
+            match options.open(&path) {
+                Ok(mut file) => {
+                    let guarded_file = Self { path };
+                    if let Err(error) = file.write_all(contents.as_bytes()) {
+                        drop(file);
+                        drop(guarded_file);
+                        return Err(error.into());
+                    }
+                    drop(file);
+                    return Ok(guarded_file);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ClaudeSDKError::connection(
+            "could not allocate a unique temporary MCP configuration file",
+        ))
+    }
+}
+
+impl Drop for PrivateMcpConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// Subprocess-backed transport.
 ///
@@ -45,6 +102,8 @@ pub struct SubprocessCliTransport {
     /// Optional stderr collector; the receiver is taken when the caller asks
     /// for it via [`Self::take_stderr_rx`] (otherwise it's dropped at close).
     stderr_rx: Option<mpsc::Receiver<String>>,
+    /// Private `--mcp-config` file, retained until the spawned CLI is gone.
+    mcp_config_file: Option<PrivateMcpConfigFile>,
     /// Handler invoked from the demux loop for every `control_request` frame.
     /// When `None`, requests are answered with `ControlResponse::Error` so
     /// the CLI doesn't hang waiting forever.
@@ -82,6 +141,7 @@ impl SubprocessCliTransport {
             write_tx: None,
             stdout_rx: None,
             stderr_rx: None,
+            mcp_config_file: None,
             control_handler,
             closed: false,
         }
@@ -128,11 +188,39 @@ impl SubprocessCliTransport {
     /// Translate [`ClaudeAgentOptions`] into CLI arguments. Public for tests
     /// and for callers that want to assemble their own [`Command`].
     #[must_use]
+    pub fn build_args(&self) -> Vec<String> {
+        let mcp_config = self.mcp_config_json();
+        self.build_args_with_mcp_config(mcp_config.as_ref(), None)
+    }
+
+    fn mcp_config_json(&self) -> Option<serde_json::Value> {
+        let mut mcp_map: serde_json::Map<String, serde_json::Value> = self
+            .options
+            .mcp_servers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.0.clone()))
+            .collect();
+        if let Some(tb) = &self.options.sdk_mcp_server {
+            // Mirrors the Python SDK: in-process toolboxes are advertised as
+            // `{"type": "sdk", "name": "<name>"}` -- the actual handler runs
+            // here, not in the CLI.
+            mcp_map.insert(
+                tb.name.clone(),
+                serde_json::json!({"type": "sdk", "name": tb.name}),
+            );
+        }
+        (!mcp_map.is_empty()).then(|| serde_json::json!({"mcpServers": mcp_map}))
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one branch per CLI flag -- splitting hurts readability more than it helps"
     )]
-    pub fn build_args(&self) -> Vec<String> {
+    fn build_args_with_mcp_config(
+        &self,
+        mcp_config: Option<&serde_json::Value>,
+        mcp_config_path: Option<&Path>,
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec!["--output-format".into(), "stream-json".into()];
         args.extend(["--verbose".into()]);
 
@@ -220,25 +308,12 @@ impl SubprocessCliTransport {
             args.push("--add-dir".into());
             args.push(dir.to_string_lossy().into_owned());
         }
-        let mut mcp_map: serde_json::Map<String, serde_json::Value> = self
-            .options
-            .mcp_servers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.0.clone()))
-            .collect();
-        if let Some(tb) = &self.options.sdk_mcp_server {
-            // Mirrors the Python SDK: in-process toolboxes are advertised as
-            // `{"type": "sdk", "name": "<name>"}` -- the actual handler runs
-            // here, not in the CLI.
-            mcp_map.insert(
-                tb.name.clone(),
-                serde_json::json!({"type": "sdk", "name": tb.name}),
-            );
-        }
-        if !mcp_map.is_empty() {
-            let json = serde_json::json!({"mcpServers": mcp_map});
+        if let Some(mcp_config) = mcp_config {
             args.push("--mcp-config".into());
-            args.push(json.to_string());
+            args.push(mcp_config_path.map_or_else(
+                || mcp_config.to_string(),
+                |path| path.to_string_lossy().into_owned(),
+            ));
         }
         if self.options.strict_mcp_config {
             args.push("--strict-mcp-config".into());
@@ -278,7 +353,15 @@ impl Transport for SubprocessCliTransport {
             return Ok(());
         }
         let bin = self.resolve_bin();
-        let args = self.build_args();
+        let mcp_config = self.mcp_config_json();
+        let mcp_config_file = mcp_config
+            .as_ref()
+            .map(|config| PrivateMcpConfigFile::create(&config.to_string()))
+            .transpose()?;
+        let args = self.build_args_with_mcp_config(
+            mcp_config.as_ref(),
+            mcp_config_file.as_ref().map(|file| file.path.as_path()),
+        );
         let mut cmd = Command::new(&bin);
         cmd.args(&args)
             .stdin(Stdio::piped())
@@ -303,6 +386,7 @@ impl Transport for SubprocessCliTransport {
                 ClaudeSDKError::Connection(format!("failed to spawn {bin}: {e}"))
             }
         })?;
+        self.mcp_config_file = mcp_config_file;
 
         let stdin = child
             .stdin
@@ -432,6 +516,7 @@ impl Transport for SubprocessCliTransport {
         self.write_tx = None;
         self.stdout_rx = None;
         self.stderr_rx = None;
+        self.mcp_config_file = None;
         Ok(())
     }
 

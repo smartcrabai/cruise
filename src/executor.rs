@@ -56,6 +56,9 @@ pub struct PromptRun<'a> {
     /// Command mode passes these to the spawned process; `sdk: jcode` and
     /// `sdk: claude` pass them to the `jcode` / `claude` child process.
     pub env: &'a HashMap<String, String>,
+    /// MCP servers for the SDK backends; ignored in command mode, which
+    /// `validate_mcp_servers` rejects.
+    pub mcp_servers: &'a crate::config::McpServers,
     /// Callback invoked with human-readable progress notices: selected models,
     /// rate-limit retries, and model fallbacks.
     pub on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -368,6 +371,7 @@ fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRu
         resume_session_id: req.resume.clone(),
         tools: req.tools.clone(),
         env: req.env.clone(),
+        mcp_servers: req.mcp_servers.clone(),
         cancel: req.cancel_token.cloned(),
         cli_path: None,
     }
@@ -551,37 +555,45 @@ async fn run_with_fallback(
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
     run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
-        let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
-        let config = JcodeRunnerConfig {
-            model,
-            provider,
-            effort,
-            cwd: req.working_dir.map(Path::to_path_buf),
-            resume_session_id: req.resume.clone(),
-            tools: req.tools.clone(),
-            env: req.env.clone(),
-            cancel: req.cancel_token.cloned(),
-            keep_session_home: req.resume.is_some()
-                || req.on_session_id.is_some()
-                || req.tools.iter().any(|tool| {
-                    matches!(
-                        tool.name.as_str(),
-                        crate::sdk_tools::SUBMIT_PLAN_TOOL | crate::sdk_tools::UPDATE_PLAN_TOOL
-                    )
-                }),
-        };
+        let config = build_jcode_config(&req, model_ref)?;
         Ok(stream_jcode_agent(config, req.prompt.to_string()))
     })
     .await
 }
 
+fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<JcodeRunnerConfig> {
+    let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
+    Ok(JcodeRunnerConfig {
+        model,
+        provider,
+        effort,
+        cwd: req.working_dir.map(Path::to_path_buf),
+        resume_session_id: req.resume.clone(),
+        tools: req.tools.clone(),
+        env: req.env.clone(),
+        mcp_servers: req.mcp_servers.clone(),
+        cancel: req.cancel_token.cloned(),
+        keep_session_home: req.resume.is_some()
+            || req.on_session_id.is_some()
+            || req.tools.iter().any(|tool| {
+                matches!(
+                    tool.name.as_str(),
+                    crate::sdk_tools::SUBMIT_PLAN_TOOL | crate::sdk_tools::UPDATE_PLAN_TOOL
+                )
+            }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use crate::backend::effort::EffortLevel;
     use crate::backend::stream::LimitError;
+
+    static EMPTY_MCP_SERVERS: LazyLock<crate::config::McpServers> =
+        LazyLock::new(crate::config::McpServers::new);
 
     // -- Executor dispatch ----------------------------------------------------
 
@@ -638,6 +650,7 @@ mod tests {
                 model_or_mode: None,
                 max_retries: 0,
                 env: &env,
+                mcp_servers: &EMPTY_MCP_SERVERS,
                 on_notice: None,
                 cancel_token: None,
                 working_dir: None,
@@ -713,6 +726,7 @@ mod tests {
             model_or_mode: None,
             max_retries: 0,
             env,
+            mcp_servers: &EMPTY_MCP_SERVERS,
             on_notice: None,
             cancel_token: None,
             working_dir: None,
@@ -748,6 +762,14 @@ mod tests {
     fn build_claude_config_forwards_tools_env_working_dir_and_resume() {
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
+        let mut mcp_servers = crate::config::McpServers::new();
+        mcp_servers.insert(
+            "local_tool".to_string(),
+            crate::config::McpServerConfig {
+                command: Some("node".to_string()),
+                ..Default::default()
+            },
+        );
         let tool = CruiseTool::new(
             "echo",
             "Echo",
@@ -760,6 +782,7 @@ mod tests {
             model_or_mode: Some("claude-opus-4-6"),
             max_retries: 0,
             env: &env,
+            mcp_servers: &mcp_servers,
             on_notice: None,
             cancel_token: None,
             working_dir: Some(&dir),
@@ -774,6 +797,26 @@ mod tests {
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
         assert_eq!(config.tools.len(), 1);
         assert_eq!(config.tools[0].name, "echo");
+        assert_eq!(config.mcp_servers, mcp_servers);
+    }
+
+    #[test]
+    fn build_jcode_config_forwards_mcp_servers() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        let mut mcp_servers = crate::config::McpServers::new();
+        mcp_servers.insert(
+            "local_tool".to_string(),
+            crate::config::McpServerConfig {
+                command: Some("node".to_string()),
+                ..Default::default()
+            },
+        );
+        req.mcp_servers = &mcp_servers;
+
+        let config = build_jcode_config(&req, None).unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(config.mcp_servers, mcp_servers);
     }
 
     // -- run_with_fallback wiring ---------------------------------------------
@@ -931,6 +974,7 @@ mod tests {
                     model_or_mode: model,
                     max_retries: 0,
                     env: &env,
+                    mcp_servers: &EMPTY_MCP_SERVERS,
                     on_notice: Some(&on_notice),
                     cancel_token: None,
                     working_dir: None,

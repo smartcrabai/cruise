@@ -905,3 +905,272 @@ fn explicit_provider_and_model_override_environment_defaults_at_launch() {
         Some("claude-api:claude-opus")
     );
 }
+
+#[test]
+fn missing_global_mcp_leaves_absent_session_copy_absent() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let destination = storage_home.join("mcp.json");
+
+    write_session_mcp(
+        &source_home,
+        &storage_home,
+        &crate::config::McpServers::new(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(
+        !destination.exists(),
+        "no session MCP file should be created"
+    );
+}
+
+#[test]
+fn missing_global_mcp_removes_a_stale_session_copy() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let destination = storage_home.join("mcp.json");
+    fs::write(&destination, b"stale").unwrap_or_else(|error| panic!("{error}"));
+
+    write_session_mcp(
+        &source_home,
+        &storage_home,
+        &crate::config::McpServers::new(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(
+        !destination.exists(),
+        "stale session MCP config must be removed"
+    );
+}
+
+#[test]
+fn invalid_global_mcp_is_copied_verbatim_when_no_workflow_mcp_is_configured() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let source = source_home.join("mcp.json");
+    let destination = storage_home.join("mcp.json");
+    let contents = b"not valid JSON\n";
+    fs::write(&source, contents).unwrap_or_else(|error| panic!("{error}"));
+
+    write_session_mcp(
+        &source_home,
+        &storage_home,
+        &crate::config::McpServers::new(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        fs::read(destination).unwrap_or_else(|error| panic!("{error}")),
+        contents,
+        "an invalid source file must retain today's verbatim-copy behavior"
+    );
+}
+
+#[test]
+fn global_mcp_copy_strips_the_cruise_server_without_modifying_the_source() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let source = source_home.join("mcp.json");
+    let destination = storage_home.join("mcp.json");
+    let contents =
+        br#"{"mcpServers":{"cruise":{"command":"cruise"},"external":{"command":"node"}}}"#;
+    fs::write(&source, contents).unwrap_or_else(|error| panic!("{error}"));
+
+    write_session_mcp(
+        &source_home,
+        &storage_home,
+        &crate::config::McpServers::new(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+
+    let copied: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    assert!(copied["mcpServers"]["cruise"].is_null());
+    assert_eq!(
+        copied["mcpServers"]["external"]["command"].as_str(),
+        Some("node")
+    );
+    assert_eq!(
+        fs::read(source).unwrap_or_else(|error| panic!("{error}")),
+        contents,
+        "copying session MCP config must not modify the user's source"
+    );
+}
+
+fn workflow_mcp_servers() -> crate::config::McpServers {
+    let mut servers = crate::config::McpServers::new();
+    servers.insert(
+        "workflow_tool".to_string(),
+        crate::config::McpServerConfig {
+            command: Some("workflow-command".to_string()),
+            args: vec!["server.js".to_string()],
+            ..Default::default()
+        },
+    );
+    servers
+}
+
+#[test]
+fn workflow_mcp_is_written_when_global_config_is_missing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let destination = storage_home.join("mcp.json");
+
+    write_session_mcp(&source_home, &storage_home, &workflow_mcp_servers())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&destination).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(written.as_object().map(serde_json::Map::len), Some(1));
+    assert_eq!(
+        written["mcpServers"]["workflow_tool"]["type"].as_str(),
+        Some("stdio")
+    );
+    assert_eq!(
+        written["mcpServers"]["workflow_tool"]["command"].as_str(),
+        Some("workflow-command")
+    );
+    assert_eq!(
+        fs::metadata(destination)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn workflow_mcp_merges_over_global_servers_and_strips_cruise_without_modifying_source() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let source = source_home.join("mcp.json");
+    let destination = storage_home.join("mcp.json");
+    let source_contents = br#"{"mcpServers":{"cruise":{"command":"old-cruise"},"workflow_tool":{"command":"global-command"},"global_tool":{"command":"global"}},"other":"preserved"}"#;
+    fs::write(&source, source_contents).unwrap_or_else(|error| panic!("{error}"));
+
+    write_session_mcp(&source_home, &storage_home, &workflow_mcp_servers())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    assert!(written["mcpServers"]["cruise"].is_null());
+    assert_eq!(
+        written["mcpServers"]["workflow_tool"]["command"].as_str(),
+        Some("workflow-command")
+    );
+    assert_eq!(
+        written["mcpServers"]["global_tool"]["command"].as_str(),
+        Some("global")
+    );
+    assert_eq!(written["other"].as_str(), Some("preserved"));
+    assert!(written.get("servers").is_none());
+    assert_eq!(
+        fs::read(source).unwrap_or_else(|error| panic!("{error}")),
+        source_contents
+    );
+}
+
+#[test]
+fn workflow_mcp_preserves_the_existing_servers_alias() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let source = source_home.join("mcp.json");
+    let destination = storage_home.join("mcp.json");
+    fs::write(
+        &source,
+        br#"{"servers":{"global_tool":{"command":"global"}}}"#,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+
+    write_session_mcp(&source_home, &storage_home, &workflow_mcp_servers())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    assert!(written.get("mcpServers").is_none());
+    assert_eq!(
+        written["servers"]["workflow_tool"]["command"].as_str(),
+        Some("workflow-command")
+    );
+    assert_eq!(
+        written["servers"]["global_tool"]["command"].as_str(),
+        Some("global")
+    );
+}
+
+#[test]
+fn invalid_global_mcp_errors_when_workflow_servers_need_merging() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    let source = source_home.join("mcp.json");
+    let source_contents = b"invalid source JSON\n";
+    fs::write(&source, source_contents).unwrap_or_else(|error| panic!("{error}"));
+
+    let Err(error) = write_session_mcp(&source_home, &storage_home, &workflow_mcp_servers()) else {
+        panic!("invalid source JSON must reject a workflow MCP merge");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot merge workflow mcp_servers")
+    );
+    assert_eq!(
+        fs::read(source).unwrap_or_else(|error| panic!("{error}")),
+        source_contents
+    );
+}
+
+#[test]
+fn workflow_mcp_merge_rejects_non_object_server_maps() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("source");
+    let storage_home = temp.path().join("session");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::write(source_home.join("mcp.json"), br#"{"mcpServers":[]}"#)
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let Err(error) = write_session_mcp(&source_home, &storage_home, &workflow_mcp_servers()) else {
+        panic!("a non-object mcpServers value must reject a workflow MCP merge");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("`mcpServers` must be a JSON object")
+    );
+}

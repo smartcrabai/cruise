@@ -65,6 +65,8 @@ pub(crate) struct ClaudeRunnerConfig {
     /// Custom in-process tools the model can call, registered as one SDK MCP
     /// toolbox (server name [`CRUISE_TOOLBOX_NAME`]).
     pub(crate) tools: Vec<CruiseTool>,
+    /// Workflow-configured MCP servers.
+    pub(crate) mcp_servers: crate::config::McpServers,
     /// Environment variables for the spawned `claude` process.
     pub(crate) env: HashMap<String, String>,
     /// Cancellation signal for the run. Firing it stops reading the CLI's
@@ -361,6 +363,12 @@ fn build_options(config: &ClaudeRunnerConfig) -> ClaudeAgentOptions {
     // touch, and there is no console to answer a permission prompt on, so a
     // prompt would deadlock the step until its `timeout:` fires.
     opts.permission_mode = Some(PermissionMode::BypassPermissions);
+    for (name, server) in &config.mcp_servers {
+        opts.mcp_servers.insert(
+            name.clone(),
+            claude_agent_sdk::McpServerConfig(server.to_backend_json()),
+        );
+    }
     if !config.tools.is_empty() {
         let tools: Vec<AgentTool> = config.tools.iter().map(cruise_tool_to_agent_tool).collect();
         opts.sdk_mcp_server = Some(AgentToolbox::new(CRUISE_TOOLBOX_NAME).with_tools(tools));
@@ -387,6 +395,9 @@ fn cruise_tool_to_agent_tool(tool: &CruiseTool) -> AgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn tool(name: &str) -> CruiseTool {
         CruiseTool::new(
@@ -445,6 +456,40 @@ mod tests {
         assert_eq!(toolbox.name, "cruise");
         let names: Vec<&str> = toolbox.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["ask_user", "submit_plan"]);
+    }
+
+    #[test]
+    fn build_options_combines_workflow_servers_and_cruise_tools_in_one_mcp_config() {
+        let mut mcp_servers = crate::config::McpServers::new();
+        mcp_servers.insert(
+            "remote_tool".to_string(),
+            crate::config::McpServerConfig {
+                transport: Some(crate::config::McpTransport::Http),
+                url: Some("https://example.test/mcp".to_string()),
+                ..Default::default()
+            },
+        );
+        let opts = build_options(&ClaudeRunnerConfig {
+            tools: vec![tool("submit_plan")],
+            mcp_servers,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            opts.mcp_servers["remote_tool"].0["type"].as_str(),
+            Some("http")
+        );
+        let args = SubprocessCliTransport::streaming(opts).build_args();
+        let mcp_config_args: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--mcp-config")
+            .collect();
+        assert_eq!(mcp_config_args.len(), 1);
+        let config: serde_json::Value = serde_json::from_str(&mcp_config_args[0][1])
+            .unwrap_or_else(|error| panic!("invalid --mcp-config JSON: {error}"));
+        assert_eq!(config["mcpServers"]["remote_tool"]["type"], "http");
+        assert_eq!(config["mcpServers"]["cruise"]["type"], "sdk");
+        assert!(!args.iter().any(|arg| arg == "--strict-mcp-config"));
     }
 
     #[test]
@@ -650,6 +695,211 @@ mod tests {
                 Some(StreamChunk::Error(m)) => m,
                 other => panic!("expected a terminal Error, got {other:?} in {chunks:?}"),
             }
+        }
+
+        const MCP_SENTINEL: &str = "credential-sentinel-never-in-argv";
+
+        fn mcp_servers_with_sentinel() -> crate::config::McpServers {
+            let mut servers = crate::config::McpServers::new();
+            servers.insert(
+                "remote_tool".to_string(),
+                crate::config::McpServerConfig {
+                    transport: Some(crate::config::McpTransport::Http),
+                    url: Some("https://example.test/mcp".to_string()),
+                    headers: indexmap::IndexMap::from([(
+                        "Authorization".to_string(),
+                        MCP_SENTINEL.to_string(),
+                    )]),
+                    ..Default::default()
+                },
+            );
+            servers
+        }
+
+        fn mcp_stub(body: &str) -> Stub {
+            stub(&format!(
+                concat!(
+                    "mcp_config=''\n",
+                    "expect_path=''\n",
+                    "for arg in \"$@\"; do\n",
+                    "  if [ \"$expect_path\" = yes ]; then mcp_config=\"$arg\"; expect_path=''; continue; fi\n",
+                    "  if [ \"$arg\" = '--mcp-config' ]; then expect_path=yes; fi\n",
+                    "done\n",
+                    "printf '%s\\n' \"$@\" > \"$CRUISE_STUB_ARGS_FILE\"\n",
+                    "printf '%s\\n' \"$mcp_config\" > \"$CRUISE_STUB_MCP_CONFIG_PATH_FILE\"\n",
+                    "attempt=0\n",
+                    "while [ ! -f \"$CRUISE_STUB_RELEASE_FILE\" ] && [ $attempt -lt 300 ]; do sleep 0.01; attempt=$((attempt + 1)); done\n",
+                    "{body}"
+                ),
+                body = body
+            ))
+        }
+
+        fn mcp_stub_env(stub: &Stub) -> HashMap<String, String> {
+            HashMap::from([
+                (
+                    "CRUISE_STUB_ARGS_FILE".to_string(),
+                    stub.dir.join("args.txt").display().to_string(),
+                ),
+                (
+                    "CRUISE_STUB_MCP_CONFIG_PATH_FILE".to_string(),
+                    stub.dir.join("mcp-config-path.txt").display().to_string(),
+                ),
+                (
+                    "CRUISE_STUB_RELEASE_FILE".to_string(),
+                    stub.dir.join("release").display().to_string(),
+                ),
+            ])
+        }
+
+        fn wait_for_nonempty_file(path: &std::path::Path) -> String {
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            loop {
+                if let Ok(text) = std::fs::read_to_string(path)
+                    && !text.trim().is_empty()
+                {
+                    return text;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "stub did not write {}",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn assert_private_mcp_config(stub: &Stub) -> PathBuf {
+            let path_file = stub.dir.join("mcp-config-path.txt");
+            let config_path = PathBuf::from(wait_for_nonempty_file(&path_file).trim());
+            let args = std::fs::read_to_string(stub.dir.join("args.txt"))
+                .unwrap_or_else(|e| panic!("read captured CLI arguments: {e}"));
+            let args: Vec<_> = args.lines().collect();
+            let config_flag = args
+                .iter()
+                .position(|arg| *arg == "--mcp-config")
+                .unwrap_or_else(|| panic!("CLI args omitted --mcp-config: {args:?}"));
+            let config_path_arg = config_path.to_string_lossy();
+            assert_eq!(
+                args.get(config_flag + 1).copied(),
+                Some(config_path_arg.as_ref())
+            );
+            assert!(
+                !args.join("\n").contains(MCP_SENTINEL),
+                "credential must not appear in CLI arguments: {args:?}"
+            );
+
+            let metadata = std::fs::metadata(&config_path)
+                .unwrap_or_else(|e| panic!("read MCP config file metadata: {e}"));
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+            let contents = std::fs::read_to_string(&config_path)
+                .unwrap_or_else(|e| panic!("read MCP config file: {e}"));
+            let config: serde_json::Value = serde_json::from_str(&contents)
+                .unwrap_or_else(|e| panic!("parse MCP config file: {e}"));
+            assert_eq!(
+                config["mcpServers"]["remote_tool"]["headers"]["Authorization"],
+                MCP_SENTINEL
+            );
+            assert_eq!(config["mcpServers"]["cruise"]["type"], "sdk");
+            config_path
+        }
+
+        fn start_mcp_run(stub: &Stub, cancel: Option<CancellationToken>) -> Receiver<StreamChunk> {
+            stream_agent(
+                ClaudeRunnerConfig {
+                    cli_path: Some(stub.path.clone()),
+                    env: mcp_stub_env(stub),
+                    tools: vec![tool("probe")],
+                    mcp_servers: mcp_servers_with_sentinel(),
+                    cancel,
+                    ..Default::default()
+                },
+                "hi".to_string(),
+            )
+        }
+
+        fn receive_all(rx: &Receiver<StreamChunk>) -> Vec<StreamChunk> {
+            let mut chunks = Vec::new();
+            while let Ok(chunk) = rx.recv_timeout(STEP_TIMEOUT) {
+                chunks.push(chunk);
+            }
+            chunks
+        }
+
+        fn mcp_config_temp_files_for_current_process() -> Vec<PathBuf> {
+            let prefix = format!("cruise-claude-mcp-config-{}-", std::process::id());
+            std::fs::read_dir(std::env::temp_dir())
+                .unwrap_or_else(|e| panic!("read temp directory: {e}"))
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+                })
+                .collect()
+        }
+
+        #[test]
+        fn private_mcp_config_hides_credentials_and_is_removed_for_all_run_outcomes() {
+            for (body, expected_error) in [
+                (
+                    r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"sess-ok","result":"ok"}'"#,
+                    false,
+                ),
+                (
+                    r#"printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"sess-error","result":"expected failure"}'"#,
+                    true,
+                ),
+            ] {
+                let stub = mcp_stub(body);
+                let rx = start_mcp_run(&stub, None);
+                let config_path = assert_private_mcp_config(&stub);
+                std::fs::write(stub.dir.join("release"), "continue")
+                    .unwrap_or_else(|e| panic!("release stub CLI: {e}"));
+                let chunks = receive_all(&rx);
+                if expected_error {
+                    assert!(matches!(chunks.last(), Some(StreamChunk::Error(_))));
+                } else {
+                    assert!(matches!(chunks.last(), Some(StreamChunk::Done(_))));
+                }
+                assert!(
+                    !config_path.exists(),
+                    "MCP config file must be removed after run"
+                );
+            }
+
+            let stub = mcp_stub("sleep 60\n");
+            let cancel = CancellationToken::new();
+            let rx = start_mcp_run(&stub, Some(cancel.clone()));
+            let config_path = assert_private_mcp_config(&stub);
+            cancel.cancel();
+            assert!(matches!(
+                rx.recv_timeout(STEP_TIMEOUT),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            ));
+            assert!(
+                !config_path.exists(),
+                "MCP config file must be removed on cancellation"
+            );
+
+            let before = mcp_config_temp_files_for_current_process();
+            let failed_to_start = stream_agent(
+                ClaudeRunnerConfig {
+                    cli_path: Some(stub.dir.join("missing-claude")),
+                    mcp_servers: mcp_servers_with_sentinel(),
+                    ..Default::default()
+                },
+                "hi".to_string(),
+            );
+            let chunks = receive_all(&failed_to_start);
+            assert!(matches!(chunks.last(), Some(StreamChunk::Error(_))));
+            assert_eq!(
+                mcp_config_temp_files_for_current_process(),
+                before,
+                "MCP config file must be removed when the process cannot start"
+            );
         }
 
         #[test]

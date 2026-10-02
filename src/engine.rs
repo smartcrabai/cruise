@@ -1278,6 +1278,7 @@ pub(crate) async fn run_prompt_step(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: rate_limit_retries,
             env: prompt_env,
+            mcp_servers: &compiled.mcp_servers,
             on_notice: Some(&on_notice),
             cancel_token: Some(&prompt_cancel_token),
             working_dir,

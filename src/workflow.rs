@@ -168,6 +168,8 @@ pub struct CompiledWorkflow {
     pub pr_language: String,
     /// Language to use for planning prompts.
     pub plan_language: String,
+    /// MCP servers made available to every SDK prompt run.
+    pub mcp_servers: crate::config::McpServers,
     /// Remove the local git worktree and its branch automatically after the PR
     /// is created. Defaults to `false` (non-destructive). Only applies to
     /// worktree-mode sessions that successfully created a PR.
@@ -198,6 +200,7 @@ impl CompiledWorkflow {
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             cleanup_after_pr: self.cleanup_after_pr,
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
@@ -246,6 +249,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         env: config.env,
         pr_language,
         plan_language,
+        mcp_servers: config.mcp_servers,
         cleanup_after_pr: config.cleanup_after_pr,
         steps,
         after_pr,
@@ -414,6 +418,53 @@ after-pr:
         // Then: the planning language is preserved
         assert_eq!(after_pr.plan_language, "Japanese");
     }
+
+    #[test]
+    fn test_compile_carries_mcp_servers() {
+        let workflow = compiled(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: node
+    args: [server.js]
+steps:
+  main:
+    prompt: hi
+",
+        );
+
+        assert_eq!(
+            workflow.mcp_servers["local_tool"].command.as_deref(),
+            Some("node")
+        );
+    }
+
+    #[test]
+    fn test_after_pr_compiled_preserves_mcp_servers() {
+        let workflow = compiled(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: node
+steps:
+  main:
+    prompt: hi
+after-pr:
+  notify:
+    prompt: done
+",
+        );
+
+        let after_pr = workflow.to_after_pr_compiled();
+
+        assert_eq!(
+            after_pr.mcp_servers["local_tool"].command.as_deref(),
+            Some("node")
+        );
+    }
+
     #[test]
     fn test_compile_carries_cleanup_after_pr() {
         // Given: a workflow config that enables post-PR cleanup

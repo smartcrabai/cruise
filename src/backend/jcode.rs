@@ -60,6 +60,7 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) tools: Vec<CruiseTool>,
+    pub(crate) mcp_servers: crate::config::McpServers,
     pub(crate) env: HashMap<String, String>,
     pub(crate) cancel: Option<CancellationToken>,
     pub(crate) keep_session_home: bool,
@@ -125,6 +126,7 @@ fn run_attempt(
         source_home,
         &session_key,
         config.resume_session_id.as_deref(),
+        &config.mcp_servers,
     )?;
     let mut session_id = None;
     let run_result = match launch_client(config, &home) {
@@ -575,6 +577,7 @@ fn prepare_session_home(
     source_home: PathBuf,
     session_key: &str,
     resume_session_id: Option<&str>,
+    mcp_servers: &crate::config::McpServers,
 ) -> std::result::Result<SessionHome, String> {
     let storage_root = source_home.join(SESSION_HOME_DIR);
     ensure_private_dir(&storage_root).map_err(|error| error.to_string())?;
@@ -598,7 +601,8 @@ fn prepare_session_home(
     drop(root_lock);
     jcode_sdk::inherit_credentials(&source_home, &storage_home)
         .map_err(|error| error.to_string())?;
-    copy_global_mcp(&source_home, &storage_home).map_err(|error| error.to_string())?;
+    write_session_mcp(&source_home, &storage_home, mcp_servers)
+        .map_err(|error| error.to_string())?;
 
     #[cfg(unix)]
     let (sdk_home, temporary_alias, stable_alias_root) = {
@@ -1031,36 +1035,94 @@ fn write_session_id(home: &SessionHome, session_id: &str) -> std::io::Result<()>
     set_private_file(&path)
 }
 
-fn copy_global_mcp(source_home: &Path, storage_home: &Path) -> std::io::Result<()> {
+fn write_session_mcp(
+    source_home: &Path,
+    storage_home: &Path,
+    workflow: &crate::config::McpServers,
+) -> std::io::Result<()> {
     let source = source_home.join("mcp.json");
     let destination = storage_home.join("mcp.json");
-    let mut contents = match fs::read(&source) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match fs::symlink_metadata(&destination) {
-                Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
-                    fs::remove_file(&destination)?;
+    if workflow.is_empty() {
+        let mut contents = match fs::read(&source) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(&destination) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+                        fs::remove_file(&destination)?;
+                    }
+                    Ok(_) => {
+                        return Err(std::io::Error::other(
+                            "jcode mcp.json destination is not a file",
+                        ));
+                    }
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(missing) => return Err(missing),
                 }
-                Ok(_) => {
-                    return Err(std::io::Error::other(
-                        "jcode mcp.json destination is not a file",
-                    ));
-                }
-                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(missing) => return Err(missing),
+                return Ok(());
             }
-            return Ok(());
+            Err(error) => return Err(error),
+        };
+        if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&contents)
+            && let Some(servers) = value
+                .get_mut("mcpServers")
+                .and_then(serde_json::Value::as_object_mut)
+            && servers.remove(LEGACY_CRUISE_MCP_NAME).is_some()
+        {
+            contents = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
         }
+        fs::write(&destination, contents)?;
+        return set_private_file(&destination);
+    }
+
+    let contents = match fs::read(&source) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&contents)
-        && let Some(servers) = value
-            .get_mut("mcpServers")
-            .and_then(serde_json::Value::as_object_mut)
-        && servers.remove(LEGACY_CRUISE_MCP_NAME).is_some()
-    {
-        contents = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
+    let mut value = match contents {
+        Some(contents) => {
+            serde_json::from_slice::<serde_json::Value>(&contents).map_err(|error| {
+                std::io::Error::other(format!(
+                    "cannot merge workflow mcp_servers into {}: {error}",
+                    source.display()
+                ))
+            })?
+        }
+        None => serde_json::json!({}),
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Err(std::io::Error::other(format!(
+            "cannot merge workflow mcp_servers into {}: source must be a JSON object",
+            source.display()
+        )));
+    };
+    let server_key = if root.contains_key("mcpServers") {
+        "mcpServers"
+    } else if root.contains_key("servers") {
+        "servers"
+    } else {
+        "mcpServers"
+    };
+    if server_key == "mcpServers" {
+        root.remove("servers");
+    } else {
+        root.remove("mcpServers");
     }
+    let Some(servers) = root
+        .entry(server_key.to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        return Err(std::io::Error::other(format!(
+            "cannot merge workflow mcp_servers into {}: `{server_key}` must be a JSON object",
+            source.display()
+        )));
+    };
+    servers.remove(LEGACY_CRUISE_MCP_NAME);
+    for (name, server) in workflow {
+        servers.insert(name.clone(), server.to_backend_json());
+    }
+    let contents = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
     fs::write(&destination, contents)?;
     set_private_file(&destination)
 }

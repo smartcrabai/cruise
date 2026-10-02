@@ -709,6 +709,9 @@ model: ignored-model
 plan_model: ignored-plan-model
 pr_language: Japanese
 plan_language: Japanese
+mcp_servers:
+  callee-tool:
+    command: callee-mcp
 env:
   CALLEE_ONLY: ignored
 llm:
@@ -727,6 +730,9 @@ model: parent-model
 plan_model: parent-plan-model
 pr_language: English
 plan_language: English
+mcp_servers:
+  parent-tool:
+    command: parent-mcp
 env:
   PARENT_ONLY: kept
 steps:
@@ -762,6 +768,15 @@ steps:
             Some("kept")
         );
         assert!(!config.env.contains_key("CALLEE_ONLY"));
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(
+            serialized["mcp_servers"]["parent-tool"]["command"].as_str(),
+            Some("parent-mcp")
+        );
+        assert!(
+            serialized["mcp_servers"]["callee-tool"].is_null(),
+            "callee MCP settings must not replace or extend the parent's: {serialized:?}"
+        );
     }
 
     #[test]

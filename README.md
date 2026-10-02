@@ -552,6 +552,12 @@ env:                      # environment variables applied to all steps (optional
   API_KEY: sk-...
   PROJECT: myproject
 
+# MCP servers are available to SDK runs only; omit this block for command mode.
+# mcp_servers:
+#   local_search:
+#     command: npx
+#     args: ["-y", "@example/search"]
+
 groups:                   # step group definitions (optional)
   review:
     if:
@@ -651,6 +657,33 @@ interactive_planning: false   # tool-less, file-based planning
 ```
 
 `--grill` requires the interactive planning flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
+
+#### MCP servers (`mcp_servers`)
+
+The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, the default jcode backend when neither `sdk` nor `command` is set, and `sdk: claude`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
+
+Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. HTTP and SSE transports are supported only with `sdk: claude`:
+
+```yaml
+sdk: claude
+mcp_servers:
+  local_search:
+    command: npx
+    args: ["-y", "@example/search"]
+    env:
+      SEARCH_ROOT: ./docs
+  remote_docs:
+    type: http
+    url: https://mcp.example.test/server
+    headers:
+      Authorization: "Bearer replace-with-your-token"
+```
+
+MCP entry values are passed through without Cruise `{variable}` template resolution. Names must be non-empty and contain only ASCII letters, digits, `_` or `-`; `cruise` is reserved. Stdio entries require a non-blank `command` and cannot set `url` or provide non-empty `headers`. `http` and `sse` entries require a URL beginning with `http://` or `https://` and cannot set `command` or provide non-empty `args` or `env`. Unknown entry fields are rejected. A non-empty `mcp_servers` map with the `command` backend is a validation error.
+
+With jcode, Cruise merges the workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Workflow entries replace same-named entries from that source file, and the source is never modified. jcode then applies its normal config merge order, so same-named servers from `~/.claude.json`, `~/.claude/mcp.json`, or project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json` take precedence over the workflow copy. jcode expands `${VAR}` and `${VAR:-default}` using the runtime environment, including workflow-level `env:` values.
+
+With `sdk: claude`, Cruise passes the entries via `--mcp-config` alongside its own `cruise` tools and leaves the user's Claude MCP configuration enabled. Config values are written to a per-run private JSON file with mode `0600` on Unix; the CLI receives the file path rather than the values in its process arguments. `${VAR}` expansion for these Claude entries is not guaranteed.
 
 ### Prompt Languages
 
