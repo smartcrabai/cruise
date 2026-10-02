@@ -172,6 +172,8 @@ pub struct CompiledWorkflow {
     /// is created. Defaults to `false` (non-destructive). Only applies to
     /// worktree-mode sessions that successfully created a PR.
     pub cleanup_after_pr: bool,
+    /// Whether prompt turns may use jcode's macOS desktop-control tool by default.
+    pub computer_use: bool,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -199,6 +201,7 @@ impl CompiledWorkflow {
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
             cleanup_after_pr: self.cleanup_after_pr,
+            computer_use: self.computer_use,
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -247,6 +250,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         pr_language,
         plan_language,
         cleanup_after_pr: config.cleanup_after_pr,
+        computer_use: config.computer_use,
         steps,
         after_pr,
         invocations,
@@ -276,6 +280,11 @@ fn expand_steps(
             if step.allow_commit {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses allow_commit on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.computer_use.is_some() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
                 )));
             }
 
@@ -452,6 +461,26 @@ after-pr:
 
         // Then: the cleanup flag is preserved
         assert!(after_pr.cleanup_after_pr);
+    }
+
+    #[test]
+    fn compile_preserves_step_computer_use_in_expanded_steps() {
+        let compiled =
+            compiled("steps:\n  inspect:\n    prompt: inspect\n    computer_use: true\n");
+        let serialized = serde_json::to_value(&compiled.steps["inspect"])
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(serialized["computer_use"], true);
+    }
+
+    #[test]
+    fn compile_and_after_pr_compilation_preserve_workflow_computer_use_default() {
+        let compiled = compiled(
+            "computer_use: true\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  publish:\n    prompt: publish\n",
+        );
+
+        assert!(compiled.computer_use);
+        assert!(compiled.to_after_pr_compiled().computer_use);
     }
 
     #[test]
@@ -730,6 +759,33 @@ steps:
         let result = compile(parsed(yaml));
         assert!(result.is_err());
         assert!(err_string(result).contains("allow_commit"));
+    }
+
+    #[test]
+    fn compile_rejects_computer_use_on_group_call_site() {
+        let yaml = r"
+groups:
+  review:
+    steps:
+      inspect:
+        prompt: inspect
+steps:
+  review-pass:
+    group: review
+    computer_use: true
+";
+        let result = compile(parsed(yaml));
+
+        assert!(result.is_err(), "group call sites cannot set computer_use");
+        let message = err_string(result);
+        assert!(
+            message.contains("review-pass"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("computer_use"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

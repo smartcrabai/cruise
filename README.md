@@ -546,6 +546,7 @@ languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
+# computer_use: false     # jcode only, macOS: let prompts control the desktop (macos_computer_use)
 # Deprecated compatibility fields: pr_language and plan_language
 
 env:                      # environment variables applied to all steps (optional)
@@ -624,6 +625,14 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 
 `sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. At launch, Cruise validates the SDK handshake and required capabilities (`sessions`, plus `session_tools` when custom tools are registered); it does not probe the CLI version. Upgrade jcode when a required capability is missing. The `model`, `plan_model`, and per-step `model` fields accept `provider/model[:effort]`, a bare `model`, or no value. The effort suffix is applied through the SDK.
 
+##### Computer use
+
+Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Setting it to `true` with `sdk: claude` or `command:` is rejected during config validation.
+
+When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
+
+**Upgrade note:** On macOS, earlier Cruise versions exposed `macos_computer_use` to every jcode prompt implicitly. Set workflow-level `computer_use: true` to retain that behavior.
+
 The GitHub Action's shell bootstrap retains `jcode version --json`, `jcode login`, `jcode provider add`, and observational `jcode auth status`: it has no SDK client, and the SDK exposes neither the CLI version string nor these account/profile setup operations. The Cruise backend itself uses the SDK capability handshake after launch.
 
 Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/.jcode`. Each Cruise session gets an isolated SDK home that inherits credentials and config; resumed plan turns reuse it. The private runtime receives `JCODE_CHECK_UPDATES=0` without rewriting the copied config. Plan homes persist until their Cruise session is deleted or cleaned, while non-resumable prompt homes are removed after each turn. Unclaimed homes are pruned after 24 hours only when a cross-process lock proves no run is active. Before removing a private home, Cruise stops only a live `jcode serve` process whose command and `JCODE_HOME`/`JCODE_RUNTIME_DIR`/`JCODE_SOCKET` identify that runtime; it never trusts a registry PID alone. The absolute source-home path is saved with resumable plan sessions so deletion still works when Cruise is launched from another directory.
@@ -638,7 +647,7 @@ The backend exposes Cruise session tools through jcode's session-tools support.
 
 #### `sdk: claude` — the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on. Cruise's workflow tools are exposed through the SDK.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix, forwarded as `--effort`. A `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried. Cruise is verified against 2.1.250. Authentication is the claude CLI's own, using its stored credentials or `ANTHROPIC_API_KEY`, unrelated to `jcode login`. The CLI runs with permissions bypassed because Cruise workflows are unattended, so there is no console to answer a permission prompt on. Cruise's workflow tools are exposed through the SDK. `computer_use: true` is rejected at config load because Claude Code's computer use is only available in interactive sessions and Cruise cannot enable it.
 
 #### Tool-less (non-interactive) planning
 
@@ -688,6 +697,8 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 
+`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled.
+
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
 
@@ -723,6 +734,7 @@ steps:
     timeout: 10m                  # per-step timeout (optional; see Step Timeout)
     output_file: initial-state.md # save the final response as a session artifact (optional)
     allow_commit: false           # default: guard this prompt from moving Git HEAD in this repository
+    computer_use: true            # optional; jcode only; overrides top-level computer_use
     env:                          # environment variables for this step (optional)
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
@@ -827,7 +839,7 @@ steps:
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
   can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
-  set `output_file`, with distinct artifact names within the block. `prompt_file`
+  set `computer_use` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
   A child prompt that reads an artifact produced by a sibling in the same block
@@ -1113,6 +1125,7 @@ steps:
 - A call-site step (e.g. `review-pass: group: review`) cannot have its own `if:` condition.
 - A group call site cannot set `allow_commit: true`; set it on the inner prompt step instead.
 - A group call site cannot set `output_file` either; a dedicated error points you at the inner prompt step.
+- A group call site cannot set `computer_use`; set it on the inner prompt step instead.
 - A step inside a group definition cannot use `workflow_call:`; expand the called workflow at the top level instead.
 
 ### Workflow Composition (`workflow_call`)
@@ -1131,7 +1144,7 @@ steps:
     command: cargo publish
 ```
 
-The referenced file is a regular cruise config. Its top-level execution settings (`command`, `sdk`, `model`, `env`, etc.) are ignored -- only its `steps` are imported. The parent's settings apply to the expanded steps.
+The referenced file is a regular cruise config. Its top-level execution settings (`command`, `sdk`, `model`, `env`, `computer_use`, etc.) are ignored -- only its `steps` are imported. The parent's settings apply to the expanded steps, while per-step overrides inside the called workflow are preserved.
 
 #### Supported sources
 
@@ -1150,7 +1163,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `nex
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 

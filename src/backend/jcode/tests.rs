@@ -702,7 +702,7 @@ fn sdk_child_environment_keeps_workflow_env_and_forces_required_overrides() {
         (OPENAI_SERVICE_TIER_ENV.to_string(), String::new()),
         (JCODE_CHECK_UPDATES_ENV.to_string(), "1".to_string()),
     ]);
-    let env = launch_environment(&workflow, None, None);
+    let env = launch_environment(&workflow, None, None, true, None, None);
     assert_eq!(
         env.get(OsStr::new("CRUISE_GUARD_COMMON_DIR"))
             .and_then(|value| value.to_str()),
@@ -725,10 +725,113 @@ fn sdk_child_environment_keeps_workflow_env_and_forces_required_overrides() {
         Some("")
     );
 }
+
+#[test]
+fn launch_environment_preserves_the_workflow_disabled_tools_policy() {
+    let expected = "bash,macos_computer_use";
+    let env = launch_environment(
+        &HashMap::from([("JCODE_DISABLED_TOOLS".to_string(), expected.to_string())]),
+        None,
+        None,
+        true,
+        None,
+        None,
+    );
+
+    assert_eq!(
+        env.get(OsStr::new("JCODE_DISABLED_TOOLS"))
+            .and_then(|value| value.to_str()),
+        Some(expected)
+    );
+}
+
+#[test]
+fn launch_environment_disables_computer_use_by_default() {
+    let env = launch_environment(&HashMap::new(), None, None, false, None, None);
+
+    assert_eq!(
+        env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
+            .and_then(|value| value.to_str()),
+        Some(COMPUTER_USE_TOOL)
+    );
+}
+
+#[test]
+fn launch_environment_merges_jcode_config_disabled_tools() {
+    let env = launch_environment(
+        &HashMap::new(),
+        None,
+        None,
+        false,
+        None,
+        Some("[tools]\ndisabled = [\"bash\"]"),
+    );
+
+    assert_eq!(
+        env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
+            .and_then(|value| value.to_str()),
+        Some("bash,macos_computer_use")
+    );
+}
+
+#[test]
+fn computer_use_disabled_tools_uses_workflow_then_process_then_config_precedence() {
+    let config = "[tools]\ndisabled = [\"config-tool\"]";
+
+    assert_eq!(
+        computer_use_disabled_tools(Some("workflow-tool"), Some("process-tool"), Some(config)),
+        "workflow-tool,macos_computer_use"
+    );
+    assert_eq!(
+        computer_use_disabled_tools(None, Some("process-tool"), Some(config)),
+        "process-tool,macos_computer_use"
+    );
+    assert_eq!(
+        computer_use_disabled_tools(None, Some(""), Some(config)),
+        "macos_computer_use"
+    );
+}
+
+#[test]
+fn computer_use_disabled_tools_deduplicates_and_ignores_invalid_toml() {
+    assert_eq!(
+        computer_use_disabled_tools(
+            Some(" bash, macos_computer_use\nbash "),
+            None,
+            Some("not valid toml = ["),
+        ),
+        "bash,macos_computer_use"
+    );
+    assert_eq!(
+        computer_use_disabled_tools(None, None, Some("not valid toml = [")),
+        "macos_computer_use"
+    );
+}
+
+#[test]
+fn launch_environment_leaves_disabled_tool_policy_unchanged_when_enabled() {
+    let workflow = HashMap::from([(
+        JCODE_DISABLED_TOOLS_ENV.to_string(),
+        "bash, macos_computer_use".to_string(),
+    )]);
+    let env = launch_environment(&workflow, None, None, true, Some("process-tool"), None);
+
+    assert_eq!(
+        env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
+            .and_then(|value| value.to_str()),
+        Some("bash, macos_computer_use")
+    );
+    let env = launch_environment(&HashMap::new(), None, None, true, None, None);
+    assert!(!env.contains_key(OsStr::new(JCODE_DISABLED_TOOLS_ENV)));
+}
+
 #[test]
 fn private_runtime_disables_auto_update_with_environment_override() {
     let env = launch_environment(
         &HashMap::from([(JCODE_CHECK_UPDATES_ENV.to_string(), "1".to_string())]),
+        None,
+        None,
+        true,
         None,
         None,
     );
@@ -893,7 +996,14 @@ fn explicit_provider_and_model_override_environment_defaults_at_launch() {
         (JCODE_PROVIDER_ENV.to_string(), "wrong-provider".to_string()),
         (JCODE_MODEL_ENV.to_string(), "wrong-model".to_string()),
     ]);
-    let env = launch_environment(&workflow, Some("anthropic-api"), Some("claude-opus"));
+    let env = launch_environment(
+        &workflow,
+        Some("anthropic-api"),
+        Some("claude-opus"),
+        true,
+        None,
+        None,
+    );
     assert_eq!(
         env.get(OsStr::new(JCODE_PROVIDER_ENV))
             .and_then(|value| value.to_str()),
