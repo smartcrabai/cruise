@@ -658,6 +658,7 @@ async fn generate_title_via_sdk(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: 1,
             env: &env,
+            mcp_servers: &config.mcp_servers,
             on_notice,
             cancel_token,
             working_dir: None,

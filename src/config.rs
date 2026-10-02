@@ -155,6 +155,11 @@ pub struct WorkflowConfig {
     /// provider rate limits only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
+
+    /// MCP servers made available to every SDK prompt run (`sdk: jcode`, the
+    /// default backend, and `sdk: claude`). Rejected with a `command` backend.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub mcp_servers: McpServers,
 }
 
 /// A command value that can be either a single string or a list of strings.
@@ -433,6 +438,81 @@ pub struct RetryConfig {
     /// keeps the failing model id and swaps only the provider.
     #[serde(default)]
     pub fallback_chains: HashMap<String, Vec<String>>,
+}
+
+/// Workflow-level MCP servers, keyed by server name. `IndexMap` keeps YAML
+/// order and gives deterministic output for backend configuration.
+pub type McpServers = IndexMap<String, McpServerConfig>;
+
+/// MCP transport accepted by the Claude Code server configuration shape.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio,
+    Http,
+    Sse,
+}
+
+/// One MCP server, in the Claude Code `mcpServers` entry shape.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerConfig {
+    /// `stdio` (default when omitted), `http`, or `sse`.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<McpTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub env: IndexMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub headers: IndexMap<String, String>,
+}
+
+impl McpServerConfig {
+    #[must_use]
+    pub fn transport(&self) -> McpTransport {
+        self.transport.unwrap_or(McpTransport::Stdio)
+    }
+
+    /// Normalized backend JSON always includes an explicit transport type.
+    /// Empty `args`, `env`, and `headers` are omitted.
+    #[must_use]
+    pub(crate) fn to_backend_json(&self) -> serde_json::Value {
+        let mut value = serde_json::Map::new();
+        value.insert("type".to_string(), serde_json::json!(self.transport()));
+        if let Some(command) = &self.command {
+            value.insert("command".to_string(), serde_json::json!(command));
+        }
+        if !self.args.is_empty() {
+            value.insert("args".to_string(), serde_json::json!(self.args));
+        }
+        if !self.env.is_empty() {
+            value.insert("env".to_string(), string_map_to_backend_json(&self.env));
+        }
+        if let Some(url) = &self.url {
+            value.insert("url".to_string(), serde_json::json!(url));
+        }
+        if !self.headers.is_empty() {
+            value.insert(
+                "headers".to_string(),
+                string_map_to_backend_json(&self.headers),
+            );
+        }
+        serde_json::Value::Object(value)
+    }
+}
+
+fn string_map_to_backend_json(values: &IndexMap<String, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        values
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::json!(value)))
+            .collect(),
+    )
 }
 
 fn normalize_language(value: Option<&str>, default: &str) -> String {
@@ -783,6 +863,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
+    validate_mcp_servers(config)?;
     validate_computer_use(config)?;
     validate_output_file_usage(config)?;
     validate_parallel_steps(config)?;
@@ -792,6 +873,106 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_when(config)?;
     validate_retry(config)?;
     Ok(())
+}
+
+/// Validate workflow-level MCP entries against the selected backend.
+fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    if config.mcp_servers.is_empty() {
+        return Ok(());
+    }
+    if config.sdk.is_none() && !config.command.is_empty() {
+        return Err(CruiseError::InvalidStepConfig(
+            "`mcp_servers` requires an SDK backend (`sdk: jcode`, `sdk: claude`, or neither `sdk` nor `command`); the command backend cannot receive MCP servers".to_string(),
+        ));
+    }
+
+    let uses_jcode = config.sdk.as_deref() == Some("jcode")
+        || (config.sdk.is_none() && config.command.is_empty());
+    for (name, server) in &config.mcp_servers {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "invalid MCP server name '{name}'; names must be non-empty and contain only ASCII letters, digits, '_' or '-'"
+            )));
+        }
+        if name == "cruise" {
+            return Err(CruiseError::InvalidStepConfig(
+                "MCP server name 'cruise' is reserved".to_string(),
+            ));
+        }
+
+        match server.transport() {
+            McpTransport::Stdio => {
+                if server
+                    .command
+                    .as_deref()
+                    .is_none_or(|command| command.trim().is_empty())
+                {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` with type `stdio` requires a non-blank `command`"
+                    )));
+                }
+                if server.url.is_some() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` uses `url` with the stdio transport; set `type: http` or `type: sse` for URL-based servers"
+                    )));
+                }
+                if !server.headers.is_empty() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` uses `headers`, which are only allowed for `http` or `sse` transports"
+                    )));
+                }
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                let Some(url) = server.url.as_deref() else {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` with type `{}` requires a `url` starting with `http://` or `https://`",
+                        transport_name(server.transport())
+                    )));
+                };
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` URL must start with http:// or https://"
+                    )));
+                }
+                if server.command.is_some() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` with a remote transport cannot set `command`"
+                    )));
+                }
+                if !server.args.is_empty() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` with a remote transport cannot set `args`"
+                    )));
+                }
+                if !server.env.is_empty() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` with a remote transport cannot set `env`"
+                    )));
+                }
+                if uses_jcode {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` uses type `{}`, which the jcode backend does not support (stdio only); use a stdio server or `sdk: claude`",
+                        transport_name(server.transport())
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn transport_name(transport: McpTransport) -> &'static str {
+    match transport {
+        McpTransport::Stdio => "stdio",
+        McpTransport::Http => "http",
+        McpTransport::Sse => "sse",
+    }
 }
 
 /// Validate artifact output fields on every ordinary and group-defined step.
@@ -3643,8 +3824,110 @@ steps:
                 "groups",
                 "steps",
                 "after-pr",
+                "mcp_servers",
             ],
             "WorkflowConfig",
+        );
+    }
+
+    #[test]
+    fn test_schema_mcp_servers_is_a_named_server_map() {
+        let schema = load_schema();
+        let mcp_servers = &schema["properties"]["mcp_servers"];
+        assert_eq!(mcp_servers["type"].as_str(), Some("object"));
+        assert_eq!(
+            mcp_servers["propertyNames"]["pattern"].as_str(),
+            Some("^[A-Za-z0-9_-]+$")
+        );
+        assert_eq!(
+            mcp_servers["propertyNames"]["not"]["const"].as_str(),
+            Some("cruise")
+        );
+        assert_eq!(
+            mcp_servers["additionalProperties"]["$ref"].as_str(),
+            Some("#/$defs/McpServerConfig")
+        );
+    }
+
+    #[test]
+    fn test_schema_mcp_server_config_has_expected_fields() {
+        let schema = load_schema();
+        let server = &schema["$defs"]["McpServerConfig"];
+        let props = def_properties(schema, "McpServerConfig");
+        assert_has_fields(
+            props,
+            &["type", "command", "args", "env", "url", "headers"],
+            "McpServerConfig",
+        );
+        assert_eq!(server["additionalProperties"].as_bool(), Some(false));
+        let transports = server["properties"]["type"]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("McpServerConfig.type must define an enum"));
+        for transport in ["stdio", "http", "sse"] {
+            assert!(
+                transports
+                    .iter()
+                    .any(|value| value.as_str() == Some(transport)),
+                "McpServerConfig.type must include {transport}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_mcp_stdio_condition_covers_omitted_and_explicit_type() {
+        let schema = load_schema();
+        let all_of = schema["$defs"]["McpServerConfig"]["allOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("McpServerConfig.allOf must be an array"));
+        assert_eq!(all_of.len(), 2);
+        assert_eq!(
+            all_of[0]["if"]["anyOf"],
+            serde_json::json!([
+                {
+                    "properties": { "type": { "const": "stdio" } },
+                    "required": ["type"]
+                },
+                { "not": { "required": ["type"] } }
+            ])
+        );
+        assert_eq!(
+            all_of[0]["then"]["required"],
+            serde_json::json!(["command"])
+        );
+        assert_eq!(
+            all_of[0]["then"]["not"]["anyOf"],
+            serde_json::json!([
+                { "required": ["url"] },
+                {
+                    "properties": { "headers": { "minProperties": 1 } },
+                    "required": ["headers"]
+                }
+            ])
+        );
+        assert_eq!(
+            all_of[1],
+            serde_json::json!({
+                "if": {
+                    "properties": { "type": { "enum": ["http", "sse"] } },
+                    "required": ["type"]
+                },
+                "then": {
+                    "required": ["url"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["command"] },
+                            {
+                                "properties": { "args": { "minItems": 1 } },
+                                "required": ["args"]
+                            },
+                            {
+                                "properties": { "env": { "minProperties": 1 } },
+                                "required": ["env"]
+                            }
+                        ]
+                    }
+                }
+            })
         );
     }
 
@@ -4973,6 +5256,511 @@ steps:
             WorkflowConfig::from_yaml(yaml).is_err(),
             "unknown retry keys must not be silently ignored"
         );
+    }
+
+    fn assert_mcp_validation_error(yaml: &str, expected_fragment: &str) {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        let Err(error) = validate_config(&config) else {
+            panic!("expected MCP validation error containing {expected_fragment:?}");
+        };
+        assert!(
+            matches!(&error, crate::error::CruiseError::InvalidStepConfig(_)),
+            "MCP validation must report InvalidStepConfig, got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(expected_fragment),
+            "expected {expected_fragment:?} in validation error: {message}"
+        );
+    }
+
+    fn assert_workflow_has_mcp_servers(config: &WorkflowConfig) {
+        let serialized = serde_yaml::to_value(config).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            serialized["mcp_servers"].is_mapping(),
+            "serialized workflow must retain its mcp_servers map: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdio_and_remote_entries_parse_without_rewriting_values() {
+        let yaml = r#"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: node
+    args: ["server.js", "{input}"]
+    env:
+      TOKEN: "${TOKEN:-literal}"
+  remote_tool:
+    type: http
+    url: https://example.test/mcp
+    headers:
+      Authorization: "Bearer {secret}"
+steps:
+  s1:
+    prompt: hi
+"#;
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|error| panic!("{error:?}"));
+        let input: serde_yaml::Value =
+            serde_yaml::from_str(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(serialized["mcp_servers"], input["mcp_servers"]);
+    }
+
+    #[test]
+    fn test_mcp_backend_json_defaults_type_and_omits_empty_collections() {
+        let stdio = McpServerConfig {
+            command: Some("node".to_string()),
+            ..Default::default()
+        }
+        .to_backend_json();
+        assert_eq!(stdio["type"].as_str(), Some("stdio"));
+        assert_eq!(stdio["command"].as_str(), Some("node"));
+        assert!(stdio.get("args").is_none());
+        assert!(stdio.get("env").is_none());
+        assert!(stdio.get("headers").is_none());
+
+        let stdio_with_env = McpServerConfig {
+            command: Some("node".to_string()),
+            env: IndexMap::from([("SEARCH_ROOT".to_string(), "./docs".to_string())]),
+            ..Default::default()
+        }
+        .to_backend_json();
+        assert_eq!(
+            stdio_with_env["env"]["SEARCH_ROOT"].as_str(),
+            Some("./docs")
+        );
+
+        let mut headers = IndexMap::new();
+        headers.insert("Authorization".to_string(), "token".to_string());
+        let remote = McpServerConfig {
+            transport: Some(McpTransport::Http),
+            url: Some("https://example.test/mcp".to_string()),
+            headers,
+            ..Default::default()
+        }
+        .to_backend_json();
+        assert_eq!(remote["type"].as_str(), Some("http"));
+        assert_eq!(remote["url"].as_str(), Some("https://example.test/mcp"));
+        assert_eq!(remote["headers"]["Authorization"].as_str(), Some("token"));
+        assert!(remote.get("args").is_none());
+        assert!(remote.get("env").is_none());
+    }
+
+    #[test]
+    fn test_mcp_servers_omitted_by_default_and_not_serialized() {
+        let config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        let serialized = serde_yaml::to_value(&config).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            serialized.get("mcp_servers").is_none(),
+            "an omitted MCP map must remain omitted: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_round_trip_through_yaml() {
+        let yaml = r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    type: stdio
+    command: node
+    args: [server.js]
+  remote_tool:
+    type: sse
+    url: https://example.test/events
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error:?}"));
+        let reparsed =
+            WorkflowConfig::from_yaml(&serialized).unwrap_or_else(|error| panic!("{error:?}"));
+        let first = serde_yaml::to_value(config).unwrap_or_else(|error| panic!("{error:?}"));
+        let second = serde_yaml::to_value(reparsed).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(first["mcp_servers"], second["mcp_servers"]);
+    }
+
+    #[test]
+    fn test_mcp_server_entry_rejects_unknown_keys() {
+        let yaml = r"
+sdk: jcode
+mcp_servers:
+  local_tool:
+    command: node
+    arg: [server.js]
+steps:
+  s1:
+    prompt: hi
+";
+        assert!(
+            WorkflowConfig::from_yaml(yaml).is_err(),
+            "unknown MCP entry fields must not be silently ignored"
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_reject_command_backend() {
+        assert_mcp_validation_error(
+            r"
+command: [echo]
+mcp_servers:
+  local_tool:
+    command: node
+steps:
+  s1:
+    prompt: hi
+",
+            "command backend cannot receive MCP servers",
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_reject_reserved_cruise_name() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  cruise:
+    command: node
+steps:
+  s1:
+    prompt: hi
+",
+            "cruise",
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_reject_empty_name() {
+        assert_mcp_validation_error(
+            r#"
+sdk: claude
+mcp_servers:
+  "":
+    command: node
+steps:
+  s1:
+    prompt: hi
+"#,
+            "name",
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_reject_names_outside_allowed_characters() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  bad.name:
+    command: node
+steps:
+  s1:
+    prompt: hi
+",
+            "bad.name",
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdio_rejects_missing_command() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool: {}
+steps:
+  s1:
+    prompt: hi
+",
+            "command",
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdio_requires_nonblank_command() {
+        assert_mcp_validation_error(
+            r#"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: "  "
+steps:
+  s1:
+    prompt: hi
+"#,
+            "command",
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdio_rejects_url_and_hints_transport_type() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: node
+    url: https://example.test/mcp
+steps:
+  s1:
+    prompt: hi
+",
+            "type: http",
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdio_rejects_headers() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    command: node
+    headers:
+      Authorization: token
+steps:
+  s1:
+    prompt: hi
+",
+            "headers",
+        );
+    }
+
+    #[test]
+    fn test_mcp_empty_incompatible_collections_are_accepted() {
+        let yaml = r"
+sdk: claude
+mcp_servers:
+  implicit_stdio:
+    command: node
+    args: []
+    env: {}
+    headers: {}
+  explicit_stdio:
+    type: stdio
+    command: node
+    args: []
+    env: {}
+    headers: {}
+  http_tool:
+    type: http
+    url: https://example.test/mcp
+    args: []
+    env: {}
+  sse_tool:
+    type: sse
+    url: https://example.test/events
+    args: []
+    env: {}
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_explicit_mcp_stdio_rejects_url_and_nonempty_headers() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    type: stdio
+    command: node
+    url: https://example.test/mcp
+steps:
+  s1:
+    prompt: hi
+",
+            "url",
+        );
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  local_tool:
+    type: stdio
+    command: node
+    headers:
+      Authorization: token
+steps:
+  s1:
+    prompt: hi
+",
+            "headers",
+        );
+    }
+
+    #[test]
+    fn test_mcp_http_requires_url() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  remote_tool:
+    type: http
+steps:
+  s1:
+    prompt: hi
+",
+            "url",
+        );
+    }
+
+    #[test]
+    fn test_mcp_remote_url_must_use_http_or_https() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  remote_tool:
+    type: sse
+    url: ftp://example.test/events
+steps:
+  s1:
+    prompt: hi
+",
+            "http:// or https://",
+        );
+    }
+
+    #[test]
+    fn test_mcp_http_rejects_command() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  remote_tool:
+    type: http
+    url: https://example.test/mcp
+    command: node
+steps:
+  s1:
+    prompt: hi
+",
+            "command",
+        );
+    }
+
+    #[test]
+    fn test_mcp_http_rejects_args() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  remote_tool:
+    type: http
+    url: https://example.test/mcp
+    args: [server.js]
+steps:
+  s1:
+    prompt: hi
+",
+            "args",
+        );
+    }
+
+    #[test]
+    fn test_mcp_http_rejects_env() {
+        assert_mcp_validation_error(
+            r"
+sdk: claude
+mcp_servers:
+  remote_tool:
+    type: http
+    url: https://example.test/mcp
+    env:
+      TOKEN: value
+steps:
+  s1:
+    prompt: hi
+",
+            "env",
+        );
+    }
+
+    #[test]
+    fn test_mcp_remote_transports_are_rejected_by_jcode() {
+        for transport in ["http", "sse"] {
+            let yaml = format!(
+                "sdk: jcode\nmcp_servers:\n  remote_tool:\n    type: {transport}\n    url: https://example.test/mcp\nsteps:\n  s1:\n    prompt: hi\n"
+            );
+            assert_mcp_validation_error(&yaml, "jcode backend does not support");
+        }
+    }
+
+    #[test]
+    fn test_mcp_remote_transports_are_rejected_by_default_backend() {
+        assert_mcp_validation_error(
+            r"
+mcp_servers:
+  remote_tool:
+    type: http
+    url: https://example.test/mcp
+steps:
+  s1:
+    prompt: hi
+",
+            "jcode backend does not support",
+        );
+    }
+
+    #[test]
+    fn test_mcp_http_and_sse_are_accepted_by_claude_backend() {
+        let yaml = r"
+sdk: claude
+mcp_servers:
+  http_tool:
+    type: http
+    url: https://example.test/mcp
+    headers:
+      Authorization: token
+  sse_tool:
+    type: sse
+    url: https://example.test/events
+steps:
+  s1:
+    prompt: hi
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_workflow_has_mcp_servers(&config);
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_mcp_stdio_is_accepted_by_default_backend() {
+        let config = WorkflowConfig::from_yaml(
+            "mcp_servers:\n  local_tool:\n    command: node\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_workflow_has_mcp_servers(&config);
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_mcp_servers_survive_sdk_environment_override() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
+        let mut config = WorkflowConfig::from_yaml(
+            "command: [echo]\nmcp_servers:\n  local_tool:\n    command: node\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_eq!(config.command, Vec::<String>::new());
+        assert_workflow_has_mcp_servers(&config);
+        assert!(validate_config(&config).is_ok());
     }
 
     // --- resolve_effective_max_retries ---

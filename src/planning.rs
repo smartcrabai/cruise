@@ -362,6 +362,7 @@ pub async fn run_plan_prompt_template(
             model_or_mode: model_or_mode.as_deref(),
             max_retries: ctx.rate_limit_retries,
             env: &env,
+            mcp_servers: &ctx.config.mcp_servers,
             on_notice: Some(&on_notice),
             cancel_token: ctx.cancel_token,
             working_dir: ctx.working_dir,

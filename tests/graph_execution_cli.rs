@@ -160,6 +160,41 @@ steps:
 }
 
 #[test]
+fn exec_dry_run_rejects_mcp_servers_with_the_command_backend() {
+    let fixture = Fixture::new(
+        r"
+command: [echo]
+mcp_servers:
+  local_tool:
+    command: node
+steps:
+  run:
+    command: touch started.txt
+",
+    );
+
+    let output = fixture
+        .command()
+        .arg("--dry-run")
+        .output()
+        .unwrap_or_else(|error| panic!("exec --dry-run failed to start: {error}"));
+    let message = terminal(&output);
+
+    assert!(
+        !output.status.success(),
+        "command backend accepted MCP servers: {message}"
+    );
+    assert!(
+        message.contains("command backend cannot receive MCP servers"),
+        "diagnostic must identify the incompatible backend: {message}"
+    );
+    assert!(
+        !fixture.repo.join("started.txt").exists(),
+        "preflight validation must run before workflow commands"
+    );
+}
+
+#[test]
 fn exec_runs_a_cycle_until_its_conditional_exit_is_taken() {
     // Given: review changes the workspace only on its first visit. The first
     // change takes the back edge, while the second visit follows finish.

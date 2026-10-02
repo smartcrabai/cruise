@@ -232,6 +232,7 @@ async fn generate_pr_description(
             model_or_mode.as_deref(),
             rate_limit_retries,
             &env,
+            &compiled.mcp_servers,
             &spinner,
             cancel_token,
             on_step_log,
@@ -254,6 +255,7 @@ async fn generate_pr_description(
                 model_or_mode: model_or_mode.as_deref(),
                 max_retries: rate_limit_retries,
                 env: &env,
+                mcp_servers: &compiled.mcp_servers,
                 on_notice: Some(&on_notice),
                 cancel_token,
                 working_dir: Some(worktree_path),
@@ -291,7 +293,7 @@ async fn generate_pr_description(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "PR metadata execution needs the executor, worktree, prompt, retry, environment, spinner, and cancellation state"
+    reason = "PR metadata execution needs the executor, worktree, prompt, retry, environment, MCP servers, spinner, and cancellation state"
 )]
 async fn generate_pr_via_sdk_tool(
     executor: &crate::executor::Executor,
@@ -300,6 +302,7 @@ async fn generate_pr_via_sdk_tool(
     model_or_mode: Option<&str>,
     rate_limit_retries: usize,
     env: &std::collections::HashMap<String, String>,
+    mcp_servers: &crate::config::McpServers,
     spinner: &crate::spinner::Spinner,
     cancel_token: Option<&CancellationToken>,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
@@ -324,6 +327,7 @@ async fn generate_pr_via_sdk_tool(
             model_or_mode,
             max_retries: rate_limit_retries,
             env,
+            mcp_servers,
             on_notice: Some(&on_notice),
             cancel_token,
             working_dir: Some(worktree_path),
@@ -879,6 +883,7 @@ mod tests {
             env: HashMap::new(),
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),
+            mcp_servers: IndexMap::new(),
             cleanup_after_pr: false,
             computer_use: false,
             steps: IndexMap::new(),
@@ -1003,6 +1008,7 @@ mod tests {
         ];
         let executor = crate::executor::Executor::new(None, &command);
         let env = std::collections::HashMap::new();
+        let mcp_servers = crate::config::McpServers::new();
         let spinner = crate::spinner::Spinner::start("test");
 
         let _ = generate_pr_via_sdk_tool(
@@ -1012,6 +1018,7 @@ mod tests {
             None,
             0,
             &env,
+            &mcp_servers,
             &spinner,
             None,
             None,

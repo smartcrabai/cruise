@@ -23,6 +23,17 @@
       "enum": ["jcode", "claude"],
       "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode`, the default backend. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. SDK model references support `provider/model[:effort]` or a bare model."
     },
+    "mcp_servers": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "not": { "const": "cruise" }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/McpServerConfig"
+      },
+      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend; remote http and sse transports require sdk: claude."
+    },
     "model": {
       "oneOf": [
         {
@@ -500,6 +511,87 @@
           "description": "Fallback chains keyed by `provider/model`, `provider/*`, `model`, or `default`, each listing the model references to try next. A `provider/*` entry keeps the failing model id and swaps only the provider."
         }
       }
+    },
+    "McpServerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["stdio", "http", "sse"],
+          "description": "MCP transport. Defaults to stdio when omitted."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Command for a stdio MCP server."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "HTTP or SSE MCP server URL."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": { "type": { "const": "stdio" } },
+                "required": ["type"]
+              },
+              { "not": { "required": ["type"] } }
+            ]
+          },
+          "then": {
+            "required": ["command"],
+            "not": {
+              "anyOf": [
+                { "required": ["url"] },
+                {
+                  "properties": { "headers": { "minProperties": 1 } },
+                  "required": ["headers"]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["http", "sse"] } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["url"],
+            "not": {
+              "anyOf": [
+                { "required": ["command"] },
+                {
+                  "properties": { "args": { "minItems": 1 } },
+                  "required": ["args"]
+                },
+                {
+                  "properties": { "env": { "minProperties": 1 } },
+                  "required": ["env"]
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
   }
 }
