@@ -19,9 +19,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::fs;
-#[cfg(unix)]
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -52,6 +50,21 @@ const LEGACY_CRUISE_MCP_NAME: &str = "cruise";
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const STALE_SESSION_HOME_AGE: Duration = Duration::from_hours(24);
 const HOME_LOCK_FILE: &str = ".cruise-session.lock";
+const MODEL_CATALOG_CACHE_FILES: &[&str] = &[
+    "openai_model_catalog_cache.json",
+    "anthropic_model_catalog_cache.json",
+    "copilot_models_cache.json",
+    "gemini_models_cache.json",
+    "cursor_models_cache.json",
+    "antigravity_models_cache.json",
+    "bedrock_models_cache.json",
+];
+
+struct MaterializedExternalCredential {
+    original_canonical_path: String,
+    copy_canonical_path: String,
+}
+
 const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// One `sdk: jcode` prompt attempt. Deliberately not `Debug`: `env` may contain
 /// provider credentials.
@@ -167,6 +180,8 @@ fn launch_client(
     config: &JcodeRunnerConfig,
     home: &SessionHome,
 ) -> std::result::Result<JcodeClient, String> {
+    #[cfg(unix)]
+    validate_sdk_socket_paths(&home.sdk_home)?;
     clear_private_daemon(&home.storage_home)
         .map_err(|error| format!("could not clean up stale private jcode runtime: {error}"))?;
     let mut options = LaunchOptions {
@@ -197,7 +212,17 @@ fn launch_client(
         config_toml.as_deref(),
     );
     JcodeClient::launch(options).map_err(|error| {
-        format!("could not start the jcode SDK runtime; install or upgrade jcode to 0.88.0 or newer: {error}")
+        let hint = if matches!(
+            &error.kind,
+            &jcode_sdk::ErrorKind::JcodeNotFound
+                | &jcode_sdk::ErrorKind::HandshakeFailed
+                | &jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
+        ) {
+            "; install or upgrade jcode to 0.88.0 or newer"
+        } else {
+            ""
+        };
+        format!("could not start the jcode SDK runtime{hint}: {error}")
     })
 }
 
@@ -686,7 +711,14 @@ fn prepare_session_home(
     ensure_private_dir(&storage_home).map_err(|error| error.to_string())?;
     let active_lock = lock_session_home(&storage_home).map_err(|error| error.to_string())?;
     drop(root_lock);
-    jcode_sdk::inherit_credentials(&source_home, &storage_home)
+    let linked_credentials = jcode_sdk::inherit_credentials(&source_home, &storage_home)
+        .map_err(|error| error.to_string())?;
+    copy_private_model_catalog_caches(&source_home, &storage_home)
+        .map_err(|error| error.to_string())?;
+    let copied_external_credentials =
+        materialize_external_credentials(&storage_home, &linked_credentials)
+            .map_err(|error| error.to_string())?;
+    copy_external_auth_trust(&storage_home, &copied_external_credentials)
         .map_err(|error| error.to_string())?;
     write_session_mcp(&source_home, &storage_home, mcp_servers)
         .map_err(|error| error.to_string())?;
@@ -694,9 +726,9 @@ fn prepare_session_home(
     #[cfg(unix)]
     let (sdk_home, temporary_alias, stable_alias_root) = {
         let alias_root = short_home_alias_root();
-        ensure_private_dir(&alias_root).map_err(|error| error.to_string())?;
+        ensure_private_alias_root(&alias_root).map_err(|error| error.to_string())?;
         let alias_key = resume_session_id.map_or_else(
-            || session_key.to_string(),
+            || session_key[..16].to_string(),
             |id| stable_alias_key(&source_home, id),
         );
         let alias = alias_root.join(alias_key);
@@ -718,6 +750,142 @@ fn prepare_session_home(
         resume_session_found,
         _active_lock: active_lock,
     })
+}
+fn copy_private_model_catalog_caches(
+    source_home: &Path,
+    storage_home: &Path,
+) -> std::io::Result<()> {
+    let source_dir = if std::env::var_os(JCODE_HOME_ENV).is_some() {
+        source_home.join("config/jcode")
+    } else {
+        jcode_sdk::user_app_config_dir()
+    };
+    let destination_dir = storage_home.join("config/jcode");
+    ensure_private_dir(&destination_dir)?;
+    for name in MODEL_CATALOG_CACHE_FILES {
+        let source = source_dir.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let destination = destination_dir.join(name);
+        let _ = fs::remove_file(&destination);
+        fs::copy(&source, &destination)?;
+        set_private_file(&destination)?;
+    }
+    Ok(())
+}
+
+fn materialize_external_credentials(
+    storage_home: &Path,
+    linked_credentials: &[PathBuf],
+) -> std::io::Result<Vec<MaterializedExternalCredential>> {
+    let mut copied = Vec::new();
+    for linked_path in linked_credentials {
+        if !linked_path.starts_with("external") {
+            continue;
+        }
+        copied.push(materialize_external_credential(
+            &storage_home.join(linked_path),
+        )?);
+    }
+    Ok(copied)
+}
+
+fn materialize_external_credential(
+    link_path: &Path,
+) -> std::io::Result<MaterializedExternalCredential> {
+    let original = fs::canonicalize(link_path)?;
+    let _ = fs::remove_file(link_path);
+    fs::copy(&original, link_path)?;
+    set_private_file(link_path)?;
+    let copy = fs::canonicalize(link_path)?;
+    Ok(MaterializedExternalCredential {
+        original_canonical_path: original.to_string_lossy().to_ascii_lowercase(),
+        copy_canonical_path: copy.to_string_lossy().to_ascii_lowercase(),
+    })
+}
+
+fn copy_external_auth_trust(
+    storage_home: &Path,
+    copied: &[MaterializedExternalCredential],
+) -> std::io::Result<()> {
+    if copied.is_empty() {
+        return Ok(());
+    }
+    let config_path = storage_home.join(JCODE_CONFIG_FILE);
+    let config = match fs::read_to_string(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let Ok(mut instance_config) = toml::from_str::<toml::Table>(&config) else {
+        return Ok(());
+    };
+    // jcode ignores path trust when the inherited config is unparsable.
+    let trusted_source_paths = instance_config
+        .get("auth")
+        .and_then(toml::Value::as_table)
+        .and_then(|auth| auth.get("trusted_external_source_paths"))
+        .and_then(toml::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+    let Some(trusted_source_paths) = trusted_source_paths else {
+        return Ok(());
+    };
+    let auth = instance_config
+        .entry("auth")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let Some(auth) = auth.as_table_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "jcode config auth setting must be a table",
+        ));
+    };
+    let trusted_instance_paths = auth
+        .entry("trusted_external_source_paths")
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let Some(trusted_instance_paths) = trusted_instance_paths.as_array_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "jcode trusted_external_source_paths setting must be an array",
+        ));
+    };
+    let mut changed = false;
+    for credential in copied {
+        for source_entry in &trusted_source_paths {
+            let Some((source_id, source_path)) = source_entry.trim().split_once('|') else {
+                continue;
+            };
+            if source_id.trim().is_empty()
+                || !source_path
+                    .trim()
+                    .eq_ignore_ascii_case(&credential.original_canonical_path)
+            {
+                continue;
+            }
+            let instance_entry = format!("{}|{}", source_id.trim(), credential.copy_canonical_path);
+            if !trusted_instance_paths.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|entry| entry.trim().eq_ignore_ascii_case(&instance_entry))
+            }) {
+                trusted_instance_paths.push(toml::Value::String(instance_entry));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let serialized = toml::to_string(&instance_config)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        fs::write(&config_path, serialized)?;
+        set_private_file(&config_path)?;
+    }
+    Ok(())
 }
 
 fn finish_session_home(
@@ -1249,7 +1417,7 @@ fn stable_alias_key(source_home: &Path, session_id: &str) -> String {
     let mut key = source_home.as_os_str().as_encoded_bytes().to_vec();
     key.push(0);
     key.extend_from_slice(session_id.as_bytes());
-    sha256_hex(&key)
+    sha256_hex(&key)[..16].to_string()
 }
 
 fn sha256_hex(input: &[u8]) -> String {
@@ -1279,12 +1447,40 @@ fn session_lock(path: &Path) -> Arc<Mutex<()>> {
 #[cfg(unix)]
 fn short_home_alias_root() -> PathBuf {
     let uid = unsafe { libc::getuid() };
-    std::env::temp_dir().join(format!("cruise-jcode-{uid}"))
+    PathBuf::from(format!("/tmp/cruise-jcode-{uid}"))
 }
 
 #[cfg(not(unix))]
 fn short_home_alias_root() -> PathBuf {
     std::env::temp_dir().join("cruise-jcode")
+}
+
+#[cfg(unix)]
+fn ensure_private_alias_root(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    ensure_private_dir(path)?;
+    let uid = unsafe { libc::getuid() };
+    if fs::symlink_metadata(path)?.uid() != uid {
+        return Err(std::io::Error::other(format!(
+            "jcode home alias root must be owned by uid {uid}: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_sdk_socket_paths(sdk_home: &Path) -> std::result::Result<(), String> {
+    let path = sdk_home.join("run/jcode-debug.sock");
+    std::os::unix::net::SocketAddr::from_pathname(&path)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "jcode SDK socket path is not supported: {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {

@@ -842,6 +842,254 @@ fn private_runtime_disables_auto_update_with_environment_override() {
     );
 }
 
+fn assert_private_copied_file(path: &Path, contents: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path).unwrap_or_else(|error| panic!("{error}"));
+    assert!(metadata.file_type().is_file());
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::read(path).unwrap_or_else(|error| panic!("{error}")),
+        contents
+    );
+}
+
+fn assert_private_model_catalog_copies(storage_home: &Path, fixtures: &[(&str, &[u8])]) {
+    let catalog_dir = storage_home.join("config/jcode");
+    for (name, contents) in fixtures {
+        assert_private_copied_file(&catalog_dir.join(name), contents);
+    }
+    assert!(
+        !catalog_dir.join("gemini_models_cache.json").exists(),
+        "catalog caches absent from the source must stay absent"
+    );
+}
+
+fn assert_external_auth_trust(
+    storage_home: &Path,
+    trusted_hosts_entry: &str,
+    untrusted_apps_entry: &str,
+    expected_hosts_entries: usize,
+) {
+    let config_path = storage_home.join(JCODE_CONFIG_FILE);
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&config_path).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    let trusted_paths = config
+        .get("auth")
+        .and_then(toml::Value::as_table)
+        .and_then(|auth| auth.get("trusted_external_source_paths"))
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("private config trust list missing"));
+    assert_eq!(
+        trusted_paths
+            .iter()
+            .filter(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|entry| entry.eq_ignore_ascii_case(trusted_hosts_entry))
+            })
+            .count(),
+        expected_hosts_entries
+    );
+    assert!(!trusted_paths.iter().any(|entry| {
+        entry
+            .as_str()
+            .is_some_and(|entry| entry.eq_ignore_ascii_case(untrusted_apps_entry))
+    }));
+    assert!(
+        trusted_paths
+            .iter()
+            .any(|entry| entry.as_str() == Some("manual-source"))
+    );
+    assert_eq!(
+        config
+            .get("tools")
+            .and_then(toml::Value::as_table)
+            .and_then(|tools| tools.get("disabled"))
+            .and_then(toml::Value::as_array)
+            .and_then(|tools| tools.first())
+            .and_then(toml::Value::as_str),
+        Some("bash")
+    );
+}
+
+fn path_trust_entry(source_id: &str, path: &Path) -> String {
+    format!(
+        "{source_id}|{}",
+        fs::canonicalize(path)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .to_string_lossy()
+            .to_ascii_lowercase()
+    )
+}
+
+fn write_trusted_external_config(source_home: &Path, hosts_path: &Path) {
+    let source_entry = path_trust_entry("copilot_hosts_json", hosts_path);
+    let config = format!(
+        "[tools]\ndisabled = [\"bash\"]\n[auth]\ntrusted_external_source_paths = [\
+         {source_entry:?}, \"manual-source\"]\n"
+    );
+    fs::write(source_home.join(JCODE_CONFIG_FILE), config)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn private_home_copies_catalogs_and_external_auth_idempotently() {
+    let _process_lock = crate::test_support::lock_process();
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home_dir = temp.path().join("user-home");
+    let source_home = temp.path().join("source-home");
+    let app_config_dir = source_home.join("config/jcode");
+    let github_config_dir = home_dir.join(".config/github-copilot");
+    fs::create_dir_all(&app_config_dir).unwrap_or_else(|error| panic!("{error}"));
+    fs::create_dir_all(&github_config_dir).unwrap_or_else(|error| panic!("{error}"));
+    let _home = crate::test_support::EnvGuard::set(
+        "HOME",
+        home_dir
+            .to_str()
+            .unwrap_or_else(|| panic!("test home path is not UTF-8")),
+    );
+    let _jcode_home = crate::test_support::EnvGuard::set(
+        JCODE_HOME_ENV,
+        source_home
+            .to_str()
+            .unwrap_or_else(|| panic!("test jcode home path is not UTF-8")),
+    );
+
+    let catalog_fixtures: [(&str, &[u8]); 3] = [
+        ("openai_model_catalog_cache.json", b"openai-cache"),
+        ("anthropic_model_catalog_cache.json", b"anthropic-cache"),
+        ("copilot_models_cache.json", b"copilot-cache"),
+    ];
+    for (name, contents) in catalog_fixtures {
+        fs::write(app_config_dir.join(name), contents).unwrap_or_else(|error| panic!("{error}"));
+    }
+    let hosts_path = github_config_dir.join("hosts.json");
+    let apps_path = github_config_dir.join("apps.json");
+    fs::write(&hosts_path, b"trusted copilot credentials")
+        .unwrap_or_else(|error| panic!("{error}"));
+    fs::write(&apps_path, b"untrusted copilot credentials")
+        .unwrap_or_else(|error| panic!("{error}"));
+    write_trusted_external_config(&source_home, &hosts_path);
+
+    let session_id = "external-auth-copy-test";
+    let session_key = session_storage_key(session_id);
+    let mcp_servers = crate::config::McpServers::default();
+    let mut home = prepare_session_home(source_home.clone(), &session_key, None, &mcp_servers)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let storage_home = home.storage_home.clone();
+    let private_hosts = storage_home.join("external/.config/github-copilot/hosts.json");
+    let private_apps = storage_home.join("external/.config/github-copilot/apps.json");
+    assert_private_copied_file(&private_hosts, b"trusted copilot credentials");
+    assert_private_copied_file(&private_apps, b"untrusted copilot credentials");
+    assert_private_model_catalog_copies(&storage_home, &catalog_fixtures);
+    let private_hosts_entry = path_trust_entry("copilot_hosts_json", &private_hosts);
+    let private_apps_entry = path_trust_entry("copilot_apps_json", &private_apps);
+    assert_external_auth_trust(&storage_home, &private_hosts_entry, &private_apps_entry, 1);
+
+    fs::write(
+        app_config_dir.join("openai_model_catalog_cache.json"),
+        b"updated openai cache",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    fs::write(&hosts_path, b"updated trusted credentials")
+        .unwrap_or_else(|error| panic!("{error}"));
+    fs::write(&apps_path, b"updated untrusted credentials")
+        .unwrap_or_else(|error| panic!("{error}"));
+    finish_session_home(&mut home, Some(session_id), true)
+        .unwrap_or_else(|error| panic!("{error}"));
+    drop(home);
+
+    let mut resumed =
+        prepare_session_home(source_home, &session_key, Some(session_id), &mcp_servers)
+            .unwrap_or_else(|error| panic!("{error}"));
+    let updated_catalog_fixtures = [
+        (
+            "openai_model_catalog_cache.json",
+            &b"updated openai cache"[..],
+        ),
+        (
+            "anthropic_model_catalog_cache.json",
+            &b"anthropic-cache"[..],
+        ),
+        ("copilot_models_cache.json", &b"copilot-cache"[..]),
+    ];
+    assert_private_copied_file(&private_hosts, b"updated trusted credentials");
+    assert_private_copied_file(&private_apps, b"updated untrusted credentials");
+    assert_private_model_catalog_copies(&storage_home, &updated_catalog_fixtures);
+    assert_external_auth_trust(&storage_home, &private_hosts_entry, &private_apps_entry, 1);
+    finish_session_home(&mut resumed, None, false).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn fresh_and_resumed_session_alias_socket_paths_are_valid() {
+    let _process_lock = crate::test_support::lock_process();
+
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let source_home = temp.path().join("Users").join("cruise-user").join(".jcode");
+    fs::create_dir_all(&source_home).unwrap_or_else(|error| panic!("{error}"));
+    let user_home = temp.path().join("user-home");
+    let _home = crate::test_support::EnvGuard::set(
+        "HOME",
+        user_home.to_str().unwrap_or_else(|| panic!("utf8")),
+    );
+    let _jcode_home = crate::test_support::EnvGuard::set(
+        JCODE_HOME_ENV,
+        source_home.to_str().unwrap_or_else(|| panic!("utf8")),
+    );
+    let mcp_servers = crate::config::McpServers::default();
+    let assert_alias = |sdk_home: &Path| {
+        let socket = sdk_home.join("run/jcode-api.sock");
+        assert!(sdk_home.starts_with(short_home_alias_root()));
+        assert_eq!(
+            sdk_home.file_name().and_then(OsStr::to_str).map(str::len),
+            Some(16)
+        );
+        assert!(
+            std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok(),
+            "{} is too long",
+            socket.display()
+        );
+    };
+    let fresh_key = uuid::Uuid::new_v4().simple().to_string();
+    let mut fresh = prepare_session_home(source_home.clone(), &fresh_key, None, &mcp_servers)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_alias(&fresh.sdk_home);
+    finish_session_home(&mut fresh, None, false).unwrap_or_else(|error| panic!("{error}"));
+
+    let session_id = "resumed-session-for-socket-path-regression";
+    let storage_home = source_home
+        .join(SESSION_HOME_DIR)
+        .join(session_storage_key(session_id));
+    fs::create_dir_all(&storage_home).unwrap_or_else(|error| panic!("{error}"));
+    fs::write(storage_home.join(SESSION_ID_FILE), session_id)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut resumed = prepare_session_home(
+        source_home,
+        &session_storage_key(session_id),
+        Some(session_id),
+        &mcp_servers,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(resumed.resume_session_found);
+    assert_alias(&resumed.sdk_home);
+    finish_session_home(&mut resumed, None, false).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn sdk_socket_path_preflight_rejects_an_overlong_home() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let sdk_home = temp.path().join("x".repeat(120));
+    let Err(error) = validate_sdk_socket_paths(&sdk_home) else {
+        panic!("expected overlong socket path to fail")
+    };
+    let debug_socket = sdk_home.join("run/jcode-debug.sock");
+    assert!(error.contains("jcode SDK socket path"));
+    assert!(error.contains(&debug_socket.display().to_string()));
+}
+
 #[test]
 fn non_resumable_prompt_home_is_removed_after_the_turn() {
     let (_temp, mut home) = session_home();
