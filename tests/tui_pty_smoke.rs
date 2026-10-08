@@ -182,7 +182,11 @@ impl Fixture {
         self.seed_current_branch_session(
             "20260831000000003_00000000000000000000000000000003",
             "Resumable terminal session",
-            "sleep 2; echo resumed",
+            concat!(
+                "touch ../resume-started; ",
+                "while [ ! -f ../resume-release ]; do sleep 0.05; done; ",
+                "echo resumed"
+            ),
         )
     }
 
@@ -417,6 +421,17 @@ impl PtySession {
 
     fn wait_for_output(&self, expected: &str, timeout: Duration) {
         self.wait_for_screen(timeout, |screen| screen.contains(expected));
+    }
+
+    fn wait_for_planned_session(&self, input: &str, timeout: Duration) {
+        // The Plan tab and task title appear before planning completes.
+        self.wait_for_screen(timeout, |screen| {
+            screen.contains("Plan  Markdown")
+                && screen.contains(input)
+                && screen
+                    .lines()
+                    .any(|line| line.contains('\u{25b8}') && line.contains("Planned"))
+        });
     }
 
     fn wait_for_screen<F>(&self, timeout: Duration, predicate: F) -> String
@@ -912,8 +927,7 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     tui.wait_for_output("even with uncommitted changes?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\x15");
-    tui.wait_for_output("Plan  Markdown", START_TIMEOUT);
-    tui.wait_for_output("planned through terminal e2e", START_TIMEOUT);
+    tui.wait_for_planned_session("planned through terminal e2e", START_TIMEOUT);
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -946,9 +960,7 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
     tui.wait_for_output("What should cruise do?", START_TIMEOUT);
     tui.send(b"first planned through terminal");
     tui.send(b"\x15");
-    // A Planned session opens on its Plan tab; step back to Info for the phase.
-    tui.send(b"[[");
-    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.wait_for_planned_session("first planned through terminal", START_TIMEOUT);
 
     tui.send(b"n");
     tui.wait_for_output("What should cruise do?", START_TIMEOUT);
@@ -960,8 +972,7 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
     tui.send(b"\x1b");
     tui.send(b"second planned through terminal");
     tui.send(b"\x15");
-    tui.send(b"[[");
-    tui.wait_for_output("Phase    Planned", START_TIMEOUT);
+    tui.wait_for_planned_session("second planned through terminal", START_TIMEOUT);
     tui.send(b"q");
 
     let (status, transcript) = tui.finish();
@@ -1058,6 +1069,8 @@ fn suspended_session_can_be_resumed_through_the_pty() {
     }
     let fixture = Fixture::new();
     let id = fixture.seed_resumable_session();
+    let started_path = fixture.root.path().join("resume-started");
+    let release_path = fixture.root.path().join("resume-release");
     let mut tui = fixture.start(120, 30, true);
 
     tui.wait_for_output("Resumable terminal session", START_TIMEOUT);
@@ -1066,6 +1079,7 @@ fn suspended_session_can_be_resumed_through_the_pty() {
     tui.send(b"j\r");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
         screen.contains("Running")
+            && started_path.exists()
             && fixture
                 .manager
                 .load(&id)
@@ -1081,6 +1095,8 @@ fn suspended_session_can_be_resumed_through_the_pty() {
                 .load(&id)
                 .is_ok_and(|state| state.phase == SessionPhase::Suspended)
     });
+    std::fs::write(&release_path, b"resume")
+        .unwrap_or_else(|error| panic!("failed to release resumed command: {error}"));
     tui.send(b"a");
     tui.wait_for_output("Resume", START_TIMEOUT);
     tui.send(b"\r");

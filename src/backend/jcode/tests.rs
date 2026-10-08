@@ -137,7 +137,7 @@ fn session_home() -> (TempDir, SessionHome) {
             stable_alias_root: None,
             fresh: true,
             resume_session_found: false,
-            _active_lock: None,
+            active_lock: None,
         },
     )
 }
@@ -998,6 +998,11 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
         .unwrap_or_else(|error| panic!("{error}"));
     fs::write(&apps_path, b"updated untrusted credentials")
         .unwrap_or_else(|error| panic!("{error}"));
+    // Simulate a concurrent fork retaining the same open file description through owner teardown.
+    let inherited_lock = home.active_lock.as_ref().map(|file| {
+        file.try_clone()
+            .unwrap_or_else(|error| panic!("failed to clone session home lock: {error}"))
+    });
     finish_session_home(&mut home, Some(session_id), true)
         .unwrap_or_else(|error| panic!("{error}"));
     drop(home);
@@ -1005,6 +1010,7 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
     let mut resumed =
         prepare_session_home(source_home, &session_key, Some(session_id), &mcp_servers)
             .unwrap_or_else(|error| panic!("{error}"));
+    drop(inherited_lock);
     let updated_catalog_fixtures = [
         (
             "openai_model_catalog_cache.json",
