@@ -10,6 +10,13 @@ Thank you for your interest in contributing.
 4. Run the repository's formatter, linter, and test commands before opening a pull request.
 5. Open a pull request with a clear summary and any relevant context.
 
+## Test Synchronization
+
+- Hook tests: ignore only `ErrorKind::BrokenPipe`; assert exit code and stderr with oversized input
+- TUI creation: wait for the selected `Planned` session, then verify persisted state
+- Cancellation: wait for command-start markers and release completion explicitly
+- Unix session homes: retain a duplicate lock descriptor across teardown; require immediate resume and live-owner exclusion
+
 ## Pull Request Guidelines
 
 - Keep pull requests small and reviewable.

@@ -682,7 +682,17 @@ struct SessionHome {
     stable_alias_root: Option<PathBuf>,
     fresh: bool,
     resume_session_found: bool,
-    _active_lock: Option<std::fs::File>,
+    active_lock: Option<std::fs::File>,
+}
+
+#[cfg(unix)]
+impl Drop for SessionHome {
+    fn drop(&mut self) {
+        // A fork can retain the open file description until exec; explicitly unlock when its owner ends.
+        if let Some(file) = self.active_lock.as_ref() {
+            let _ = lock_file(file, libc::LOCK_UN);
+        }
+    }
 }
 
 fn prepare_session_home(
@@ -748,7 +758,7 @@ fn prepare_session_home(
         stable_alias_root,
         fresh,
         resume_session_found,
-        _active_lock: active_lock,
+        active_lock,
     })
 }
 fn copy_private_model_catalog_caches(

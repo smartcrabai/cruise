@@ -716,7 +716,12 @@ mod tests {
             .take()
             .unwrap_or_else(|| panic!("hook stdin unavailable"))
             .write_all(input.as_bytes())
-            .unwrap_or_else(|error| panic!("failed to write hook input: {error}"));
+            .unwrap_or_else(|error| {
+                assert!(
+                    error.kind() == std::io::ErrorKind::BrokenPipe,
+                    "failed to write hook input: {error}"
+                );
+            });
         child
             .wait_with_output()
             .unwrap_or_else(|error| panic!("failed to wait for hook: {error}"))
@@ -777,8 +782,9 @@ mod tests {
         let common_dir = probe_common_dir(repo.path());
         let input = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
 
-        let no_identity = run_hook(repo.path(), "preparing", &input, &[]);
-        assert!(!no_identity.status.success());
+        // Stress beyond normal pipe capacity so the hook's early rejection closes stdin.
+        let no_identity = run_hook(repo.path(), "preparing", &input.repeat(16 * 1024), &[]);
+        assert_eq!(no_identity.status.code(), Some(1));
         assert!(
             String::from_utf8_lossy(&no_identity.stderr).contains("cruise commit guard:"),
             "unexpected hook stderr: {}",
