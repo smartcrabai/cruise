@@ -40,6 +40,7 @@ jobs:
           name: cruise-bin-${{ matrix.arch }}
           path: bin/${{ matrix.arch }}/cruise
           if-no-files-found: error
+          retention-days: 7
 
   docker:
     needs: build-binary
