@@ -65,6 +65,35 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine and open it in the default browser.
     Webui(WebuiArgs),
+    /// Author workflow YAML files.
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkflowCommands {
+    /// Generate a new workflow YAML file from a description using the configured backend.
+    Generate(WorkflowGenerateArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowGenerateArgs {
+    /// Description of the workflow to generate.
+    pub description: String,
+
+    /// File stem for the new workflow (`<name>.yaml`).
+    #[arg(long, value_parser = crate::workflow_generate::validate_name)]
+    pub name: String,
+
+    /// Save into the user workflow directory instead of `./.cruise`.
+    #[arg(long)]
+    pub user: bool,
+
+    /// Backend config used for generation.
+    #[arg(long)]
+    pub config: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -1140,6 +1169,63 @@ mod tests {
                 );
             }
             _ => panic!("expected Ssh subcommand"),
+        }
+    }
+
+    #[test]
+    fn workflow_generate_cli_parses_name_user_and_config() {
+        let cli = Cli::try_parse_from(["cruise", "workflow", "generate", "build/tests", "--name", "ci"]).unwrap();
+        match cli.command {
+            Some(Commands::Workflow {
+                command: WorkflowCommands::Generate(args),
+            }) => {
+                assert_eq!(args.description, "build/tests");
+                assert_eq!(args.name, "ci");
+                assert!(!args.user);
+                assert_eq!(args.config, None);
+            }
+            other => panic!("expected workflow generate, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "cruise", "workflow", "generate", "d", "--name", "ci", "--user", "--config", "path.yaml",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Workflow {
+                command: WorkflowCommands::Generate(args),
+            }) => {
+                assert!(args.user);
+                assert_eq!(args.config.as_deref(), Some("path.yaml"));
+            }
+            other => panic!("expected workflow generate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_generate_requires_name() {
+        assert!(Cli::try_parse_from(["cruise", "workflow", "generate", "desc"]).is_err());
+    }
+
+    #[test]
+    fn workflow_generate_rejects_empty_and_path_names() {
+        for bad in ["", "a/b", ".", ".."] {
+            assert!(
+                Cli::try_parse_from(["cruise", "workflow", "generate", "desc", "--name", bad]).is_err(),
+                "name {bad:?} must be rejected at parse time"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_generate_help_lists_options() {
+        let mut cmd = Cli::command();
+        let generate = cmd
+            .find_subcommand_mut("workflow")
+            .and_then(|w| w.find_subcommand_mut("generate"))
+            .map(|g| g.render_long_help().to_string())
+            .unwrap_or_default();
+        for flag in ["--name", "--user", "--config"] {
+            assert!(generate.contains(flag), "help missing {flag}");
         }
     }
 }

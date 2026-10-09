@@ -91,3 +91,7 @@ After writing or editing a config, verify each of the following:
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
 12. **Retry loops**: Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
+
+## Generated configs
+
+`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
