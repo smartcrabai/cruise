@@ -78,6 +78,8 @@ pub struct PromptRun<'a> {
     /// Allow jcode's macOS desktop-control tool for this turn. This is jcode
     /// backend only and is validated by [`crate::config::validate_computer_use`].
     pub computer_use: bool,
+    /// Agent permission mode for this run.
+    pub permission: crate::config::PermissionMode,
 }
 
 /// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the
@@ -190,6 +192,25 @@ impl Executor {
     /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
     /// cruise does not implement.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+        if req.permission != crate::config::PermissionMode::ReadOnly {
+            return self.dispatch(req).await;
+        }
+        // Detection only (not a sandbox or rollback): any change inside the
+        // FileTracker scope fails the step, whatever the backend returned.
+        const GUARD: &str = "read-only";
+        let root = req
+            .working_dir
+            .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
+        let mut tracker = crate::file_tracker::FileTracker::with_root(root);
+        tracker.take_snapshot(GUARD)?;
+        let result = self.dispatch(req).await;
+        if tracker.has_files_changed(GUARD)? {
+            return Err(CruiseError::ReadOnlyWorkspaceChanged);
+        }
+        result
+    }
+
+    async fn dispatch(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         match self {
             Executor::Command { .. } if req.computer_use => {
                 Err(CruiseError::InvalidStepConfig(
@@ -387,6 +408,7 @@ fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRu
         mcp_servers: req.mcp_servers.clone(),
         cancel: req.cancel_token.cloned(),
         cli_path: None,
+        permission: req.permission,
     }
 }
 
@@ -586,6 +608,7 @@ fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<Jc
         env: req.env.clone(),
         mcp_servers: req.mcp_servers.clone(),
         computer_use: req.computer_use,
+        permission: req.permission,
         cancel: req.cancel_token.cloned(),
         keep_session_home: req.resume.is_some()
             || req.on_session_id.is_some()
@@ -673,6 +696,7 @@ mod tests {
                 on_session_id: None,
                 resume: None,
                 computer_use: false,
+                permission: crate::config::PermissionMode::Full,
             })
             .await;
         let Err(err) = result else {
@@ -750,6 +774,7 @@ mod tests {
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         }
     }
 
@@ -840,6 +865,7 @@ mod tests {
             on_session_id: None,
             resume: Some("sess-1".to_string()),
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         };
         let config = build_claude_config(&req, req.model_or_mode);
         assert_eq!(config.cwd, Some(dir));
@@ -1033,6 +1059,7 @@ mod tests {
                     on_session_id: None,
                     resume: None,
                     computer_use: false,
+                    permission: crate::config::PermissionMode::Full,
                 })
                 .await
                 .unwrap_or_else(|e| panic!("command run failed: {e}"));
@@ -1715,5 +1742,180 @@ mod tests {
             "got: {error}"
         );
         assert_eq!(recorded(&models), ["test-executor-closed/primary"]);
+    }
+
+    // -- read-only workspace guard -------------------------------------------
+
+    #[cfg(unix)]
+    fn sh_executor(script: &str) -> Executor {
+        Executor::Command {
+            command: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
+        }
+    }
+
+    #[cfg(unix)]
+    async fn run_in(
+        executor: &Executor,
+        dir: &Path,
+        permission: crate::config::PermissionMode,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<PromptOutcome> {
+        let env = HashMap::new();
+        executor
+            .run(PromptRun {
+                prompt: "go",
+                model_or_mode: None,
+                max_retries: 0,
+                env: &env,
+                mcp_servers: &EMPTY_MCP_SERVERS,
+                on_notice: None,
+                cancel_token: cancel,
+                working_dir: Some(dir),
+                stream: None,
+                tools: Vec::new(),
+                on_session_id: None,
+                resume: None,
+                computer_use: false,
+                permission,
+            })
+            .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_run_returns_backend_result_when_workspace_is_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap_or_else(|e| panic!("{e}"));
+        let executor = sh_executor("cat >/dev/null; printf ok");
+        let outcome = run_in(
+            &executor,
+            dir.path(),
+            crate::config::PermissionMode::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("unchanged workspace must succeed: {e}"));
+        assert_eq!(outcome.result.output, "ok");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_run_fails_when_a_file_is_created_modified_or_deleted() {
+        for script in [
+            "cat >/dev/null; echo new > created.txt",
+            "cat >/dev/null; echo changed > existing.txt",
+            "cat >/dev/null; rm existing.txt",
+        ] {
+            let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(dir.path().join("existing.txt"), "old")
+                .unwrap_or_else(|e| panic!("{e}"));
+            let result = run_in(
+                &sh_executor(script),
+                dir.path(),
+                crate::config::PermissionMode::ReadOnly,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CruiseError::ReadOnlyWorkspaceChanged)),
+                "{script}: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_run_prefers_permission_error_over_backend_failure() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let executor = sh_executor("cat >/dev/null; echo new > created.txt; exit 3");
+        let result = run_in(
+            &executor,
+            dir.path(),
+            crate::config::PermissionMode::ReadOnly,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CruiseError::ReadOnlyWorkspaceChanged)),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_run_keeps_backend_failure_when_workspace_is_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let executor = sh_executor("cat >/dev/null; exit 3");
+        let result = run_in(
+            &executor,
+            dir.path(),
+            crate::config::PermissionMode::ReadOnly,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!matches!(
+            result,
+            Err(CruiseError::ReadOnlyWorkspaceChanged)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_run_prefers_permission_error_over_cancellation() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let token = CancellationToken::new();
+        let executor = sh_executor("cat >/dev/null; echo new > created.txt; sleep 30");
+        let canceller = token.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            canceller.cancel();
+        });
+        let result = run_in(
+            &executor,
+            dir.path(),
+            crate::config::PermissionMode::ReadOnly,
+            Some(&token),
+        )
+        .await;
+        handle.await.unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(result, Err(CruiseError::ReadOnlyWorkspaceChanged)),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_and_full_runs_may_change_the_workspace() {
+        for mode in [
+            crate::config::PermissionMode::Edit,
+            crate::config::PermissionMode::Full,
+        ] {
+            let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+            let executor = sh_executor("cat >/dev/null; echo new > created.txt; printf done");
+            let outcome = run_in(&executor, dir.path(), mode, None)
+                .await
+                .unwrap_or_else(|e| panic!("{mode:?} must not be guarded: {e}"));
+            assert_eq!(outcome.result.output, "done");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_guard_ignores_excluded_directories() {
+        let dir = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let executor = sh_executor(
+            "cat >/dev/null; mkdir -p target node_modules; echo x > target/o; echo y > node_modules/m; printf ok",
+        );
+        let outcome = run_in(
+            &executor,
+            dir.path(),
+            crate::config::PermissionMode::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("excluded dirs are outside the snapshot: {e}"));
+        assert_eq!(outcome.result.output, "ok");
     }
 }

@@ -5,6 +5,8 @@ description: Use when running, operating, or troubleshooting the `cruise` CLI or
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
 
+Prompt steps accept `permission: read-only | edit | full` (default `full`; see the **cruise-config** skill). A `read-only` step that changes the workspace fails with "read-only step changed the workspace". This is snapshot-diff detection, not a sandbox, and it applies to `read-only` only. The command backend rejects restricted modes at validation.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
