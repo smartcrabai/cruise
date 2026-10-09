@@ -102,6 +102,21 @@ pub(crate) struct SessionRowVm {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSyncVm {
+    pub(crate) id: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunAllControlVm {
+    pub(crate) run_all_active: bool,
+    pub(crate) runnable_count: usize,
+    pub(crate) run_all_confirm: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SidebarVm {
     pub(crate) version: &'static str,
     pub(crate) selected_id: Option<String>,
@@ -147,6 +162,7 @@ pub(crate) struct TabHrefs {
 pub(crate) struct SessionDetailVm {
     pub(crate) id: String,
     pub(crate) header: RawHtml,
+    pub(crate) sync: RawHtml,
     pub(crate) ask_panel: RawHtml,
     pub(crate) settings: RawHtml,
     pub(crate) editor: RawHtml,

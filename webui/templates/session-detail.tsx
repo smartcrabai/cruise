@@ -2,6 +2,7 @@ export default function SessionDetail(props) {
   return (
     <div id="session-detail" data-session-id={props.id} class="h-full flex flex-col">
       {props.header}
+      {props.sync}
       <div id={`ask-panel-${props.id}`}>
         {props.askPanel}
       </div>

@@ -2781,6 +2781,36 @@ impl CruiseApplication {
         Ok(state)
     }
 
+    /// Opaque token that changes whenever the session view's disk inputs change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be loaded.
+    pub fn session_view_version(&self, id: &str) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+
+        let (mut state, mut fingerprint) = self.manager.load_with_fingerprint(id)?;
+        if self
+            .manager
+            .reconcile_running_phase(&mut state, self.runtime.active_identity(id).is_some())
+        {
+            fingerprint = self.manager.load_with_fingerprint(id)?.1;
+        }
+        let mut hasher = std::hash::DefaultHasher::new();
+        fingerprint.hash(&mut hasher);
+        for path in [
+            state.plan_path(&self.manager.sessions_dir()),
+            self.manager.dag_path(id),
+        ] {
+            std::fs::metadata(&path)
+                .ok()
+                .map(|meta| (meta.len(), meta.modified().ok()))
+                .hash(&mut hasher);
+        }
+        self.runtime.active_operation(id).hash(&mut hasher);
+        Ok(format!("{:016x}", hasher.finish()))
+    }
+
     /// Publish a session plan as an issue.
     ///
     /// # Errors
@@ -4200,6 +4230,69 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!replanned_plan.contains("Quint"));
         assert!(!replanned_plan.contains("Alloy"));
+    }
+
+    #[test]
+    fn session_view_version_tracks_external_disk_changes() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let data = temp.path().join("data");
+        let manager = SessionManager::new(data.clone());
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "version".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create failed: {error}"));
+        let app = CruiseApplication::new(manager.clone());
+        let version = |app: &CruiseApplication| {
+            app.session_view_version(&id)
+                .unwrap_or_else(|error| panic!("version failed: {error}"))
+        };
+
+        let v0 = version(&app);
+        assert_eq!(
+            v0,
+            version(&app),
+            "token must be stable when nothing changed"
+        );
+
+        let other = SessionManager::new(data.clone());
+        let mut external = other
+            .load(&id)
+            .unwrap_or_else(|error| panic!("load failed: {error}"));
+        external.title = Some("changed by another process".to_string());
+        other
+            .save(&external)
+            .unwrap_or_else(|error| panic!("save failed: {error}"));
+        let v1 = version(&app);
+        assert_ne!(v0, v1, "external state save must change the token");
+
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        std::fs::write(&plan_path, "# plan\n")
+            .unwrap_or_else(|error| panic!("write plan failed: {error}"));
+        let v2 = version(&app);
+        assert_ne!(v1, v2, "plan.md write must change the token");
+
+        let dag_path = manager.dag_path(&id);
+        std::fs::write(&dag_path, "{}").unwrap_or_else(|error| panic!("write dag failed: {error}"));
+        let v3 = version(&app);
+        assert_ne!(v2, v3, "graph file write must change the token");
+    }
+
+    #[test]
+    fn session_view_version_errors_for_missing_session() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let app = CruiseApplication::new(SessionManager::new(temp.path().join("data")));
+        assert!(app.session_view_version("20260101000000").is_err());
     }
 
     #[test]

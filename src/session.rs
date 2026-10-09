@@ -174,7 +174,7 @@ pub struct SessionState {
     pub exec: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionStateFingerprint([u8; 32]);
 
 impl SessionStateFingerprint {

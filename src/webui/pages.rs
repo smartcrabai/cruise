@@ -96,7 +96,7 @@ pub(crate) fn empty_state_html(state: &WebState) -> Result<String> {
     )
 }
 
-fn error_page_html(state: &WebState, message: &str) -> Result<String> {
+pub(crate) fn error_page_html(state: &WebState, message: &str) -> Result<String> {
     state.templates.render(
         "error-page",
         &ErrorPageVm {
@@ -241,12 +241,14 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
 }
 
 pub(crate) fn session_detail_html(state: &WebState, id: &str, tab: &str) -> Result<String> {
+    let version = state.application.session_view_version(id)?;
     let header = partials::header_html(state, id, None)?;
     let ask_panel = partials::ask_panel_html(state, id)?;
     let tab_panel = tab_panel_html(state, id, tab)?;
     let vm = SessionDetailVm {
         id: id.to_string(),
         header: RawHtml::new(header),
+        sync: RawHtml::new(partials::session_sync_html(state, id, &version)?),
         ask_panel: RawHtml::new(ask_panel),
         settings: RawHtml::empty(),
         editor: RawHtml::empty(),

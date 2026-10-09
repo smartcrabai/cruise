@@ -13,9 +13,9 @@ use crate::error::Result;
 use super::WebState;
 use super::templates::escape_html;
 use super::view::{
-    AskPanelVm, ChoiceVm, OptionDialogVm, PhaseBadgeVm, SessionHeaderVm, SidebarVm, TabLogVm,
-    TabPlanVm, ToastKind, ToastVm, is_planning, runnable_count, session_row, sort_sessions,
-    truncate,
+    AskPanelVm, ChoiceVm, OptionDialogVm, PhaseBadgeVm, RunAllControlVm, SessionHeaderVm,
+    SessionSyncVm, SidebarVm, TabLogVm, TabPlanVm, ToastKind, ToastVm, is_planning, runnable_count,
+    session_row, sort_sessions, truncate,
 };
 
 /// One message pushed over the SSE connection.
@@ -116,6 +116,16 @@ pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<
         .application
         .list_sessions()?
         .into_iter()
+        .map(|session| {
+            if matches!(session.phase, crate::session::SessionPhase::Running) {
+                state
+                    .application
+                    .reconcile_session(&session.id)
+                    .unwrap_or(session)
+            } else {
+                session
+            }
+        })
         .map(|session| super::dto::session_dto(&state.application, session, false))
         .collect();
     sort_sessions(&mut sessions);
@@ -142,17 +152,54 @@ pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<
     })
 }
 
-pub(crate) fn sidebar_rows_html(state: &WebState, selected_id: Option<&str>) -> Result<String> {
-    let vm = sidebar_vm(state, selected_id)?;
-    state.templates.render("sidebar-rows", &vm)
-}
-
 /// `<hx-partial>` refreshing the sidebar list container.
 pub(crate) fn sidebar_list_partial(state: &WebState, selected_id: Option<&str>) -> Result<String> {
-    Ok(by_id(
-        "session-list",
-        &sidebar_rows_html(state, selected_id)?,
+    let vm = sidebar_vm(state, selected_id)?;
+    let rows = state.templates.render("sidebar-rows", &vm)?;
+    Ok(format!(
+        "{}{}",
+        by_id("session-list", &rows),
+        run_all_control_partial(state, &vm)?
     ))
+}
+
+/// `<hx-partial>` refreshing the sidebar Run All control.
+pub(crate) fn run_all_control_partial(state: &WebState, sidebar: &SidebarVm) -> Result<String> {
+    let vm = RunAllControlVm {
+        run_all_active: sidebar.run_all_active,
+        runnable_count: sidebar.runnable_count,
+        run_all_confirm: sidebar.run_all_confirm.clone(),
+    };
+    let html = state.templates.render("components/run-all-control", &vm)?;
+    Ok(replace("run-all-control", &html))
+}
+
+/// The hidden poller carrying the session view version token.
+pub(crate) fn session_sync_html(state: &WebState, id: &str, version: &str) -> Result<String> {
+    let vm = SessionSyncVm {
+        id: id.to_string(),
+        url: format!("/webui/sessions/{id}/sync?v={version}"),
+    };
+    state.templates.render("components/session-sync", &vm)
+}
+
+/// Server-owned regions of the session view, re-rendered from disk.
+pub(crate) fn session_sync_partials(state: &WebState, id: &str, version: &str) -> Result<String> {
+    let mut out = replace(
+        &format!("session-header-{id}"),
+        &header_html(state, id, None)?,
+    );
+    for tab in ["info", "plan", "dag", "log"] {
+        out.push_str(&replace(
+            &format!("tab-{tab}-{id}"),
+            &super::pages::tab_panel_html(state, id, tab)?,
+        ));
+    }
+    out.push_str(&replace(
+        &format!("session-sync-{id}"),
+        &session_sync_html(state, id, version)?,
+    ));
+    Ok(out)
 }
 
 pub(crate) fn row_partial(state: &WebState, session_id: &str) -> Result<String> {
