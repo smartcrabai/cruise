@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -289,6 +289,7 @@ pub struct ApplicationRuntime {
     /// late cancellation cannot turn a committed operation into Cancelled.
     commit_gate: Mutex<()>,
     next_identity: AtomicU64,
+    shutting_down: AtomicBool,
 }
 
 impl std::fmt::Debug for ApplicationRuntime {
@@ -486,7 +487,43 @@ impl ApplicationRuntime {
             batch: Mutex::new(None),
             commit_gate: Mutex::new(()),
             next_identity: AtomicU64::new(1),
+            shutting_down: AtomicBool::new(false),
         }
+    }
+
+    /// Cancel every active operation and refuse new ones.
+    #[must_use]
+    pub fn begin_shutdown(&self) -> usize {
+        let ids: Vec<String> = {
+            let claims = self
+                .claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.shutting_down.store(true, Ordering::Release);
+            claims.keys().cloned().collect()
+        };
+        let batch = usize::from(self.cancel_batch(None));
+        let sessions = ids
+            .iter()
+            .filter(|id| self.cancel_session(id.as_str()))
+            .count();
+        batch + sessions
+    }
+
+    /// Whether no session claim and no batch claim is held.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        let claims_empty = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        let batch_empty = self
+            .batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        claims_empty && batch_empty
     }
 
     /// Begin one session operation. A duplicate never replaces the owner.
@@ -507,6 +544,9 @@ impl ApplicationRuntime {
             .claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(CruiseError::Interrupted);
+        }
         if claims.contains_key(&session_id) {
             return Err(CruiseError::Busy(format!(
                 "session {session_id} is already busy"
@@ -689,6 +729,9 @@ impl ApplicationRuntime {
             .batch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(CruiseError::Interrupted);
+        }
         if batch.is_some() {
             return Err(CruiseError::Busy(
                 "a Run All operation is already active".to_string(),
@@ -814,6 +857,9 @@ impl ApplicationRuntime {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.unregister_prompt(request_id, session_id, claim_identity);
+                    if token.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(CruiseError::Interrupted);
+                    }
                     return Err(CruiseError::Other(
                         "prompt response channel closed".to_string(),
                     ));
@@ -3997,6 +4043,128 @@ mod tests {
             },
         );
         assert!(option.is_err());
+    }
+
+    fn shutdown_runtime() -> Arc<ApplicationRuntime> {
+        Arc::new(ApplicationRuntime::new(SessionManager::new(
+            std::env::temp_dir().join(format!("cruise-{}", Uuid::new_v4().simple())),
+        )))
+    }
+
+    #[test]
+    fn begin_shutdown_cancels_all_claims_and_batch() {
+        let runtime = shutdown_runtime();
+        let a = runtime
+            .try_begin("a", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let b = runtime
+            .try_begin("b", OperationKind::Fix)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let batch = runtime.try_begin_batch().unwrap_or_else(|e| panic!("{e}"));
+
+        let signalled = runtime.begin_shutdown();
+
+        assert!(a.token().is_cancelled());
+        assert!(b.token().is_cancelled());
+        assert!(batch.token().is_cancelled());
+        assert_eq!(signalled, 3);
+    }
+
+    #[test]
+    fn begin_shutdown_refuses_new_claims() {
+        let runtime = shutdown_runtime();
+        let _ = runtime.begin_shutdown();
+        assert!(matches!(
+            runtime.try_begin("late", OperationKind::Run),
+            Err(CruiseError::Interrupted)
+        ));
+        assert!(matches!(
+            runtime.try_begin_batch(),
+            Err(CruiseError::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn begin_shutdown_skips_committed_claims() {
+        let runtime = shutdown_runtime();
+        let claim = runtime
+            .try_begin("done", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let committed = runtime
+            .commit_if_active(&claim, || Ok(()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(committed);
+
+        let signalled = runtime.begin_shutdown();
+
+        assert_eq!(signalled, 0);
+        assert!(!claim.token().is_cancelled());
+    }
+
+    #[test]
+    fn is_idle_tracks_claim_and_batch_release() {
+        let runtime = shutdown_runtime();
+        assert!(runtime.is_idle());
+        let claim = runtime
+            .try_begin("s", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runtime.is_idle());
+        drop(claim);
+        assert!(runtime.is_idle());
+        let batch = runtime.try_begin_batch().unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runtime.is_idle());
+        drop(batch);
+        assert!(runtime.is_idle());
+    }
+
+    #[test]
+    fn cancelled_prompt_wait_returns_interrupted() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = SessionManager::new_session_id();
+        let state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "prompt".to_string(),
+        );
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let runtime = Arc::new(ApplicationRuntime::new(manager));
+        let claim = runtime
+            .try_begin(&id, OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (request_id, receiver) = runtime
+            .register_prompt(&id, claim.identity(), PendingKind::Ask, Some("q?"), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let token = claim.token();
+        let identity = claim.identity();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = {
+            let runtime = Arc::clone(&runtime);
+            let id = id.clone();
+            std::thread::spawn(move || {
+                let result =
+                    runtime.wait_prompt(&id, &request_id, identity, &receiver, Some(&token));
+                let _ = done_tx.send(result.map(|_| ()));
+            })
+        };
+        std::thread::sleep(Duration::from_millis(120));
+
+        let _ = runtime.begin_shutdown();
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|e| panic!("prompt wait did not finish: {e}"));
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "{result:?}"
+        );
+        let _ = waiter.join();
     }
 
     #[test]

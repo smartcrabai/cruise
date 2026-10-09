@@ -409,3 +409,118 @@ mod event_partials {
         )));
     }
 }
+
+#[tokio::test]
+async fn shutdown_begin_ends_open_sse_stream() {
+    let harness = harness();
+    let Ok(request) = Request::builder().uri("/webui/events").body(Body::empty()) else {
+        panic!("SSE request");
+    };
+    let response = match router(harness.state.clone()).oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+
+    super::shutdown::begin(&harness.state);
+
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
+            Ok(None) => break,
+            Ok(Some(_)) => {}
+            Err(error) => panic!("SSE stream stayed open after shutdown: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn serve_returns_after_signal_even_with_open_sse_client() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let harness = harness();
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+        panic!("bind");
+    };
+    let Ok(addr) = listener.local_addr() else {
+        panic!("local addr");
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
+        let _ = rx.await;
+    }));
+
+    let Ok(mut client) = tokio::net::TcpStream::connect(addr).await else {
+        panic!("connect");
+    };
+    if let Err(error) = client
+        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+    {
+        panic!("write request: {error}");
+    }
+    let mut received = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !String::from_utf8_lossy(&received).contains("\r\n\r\n") {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
+            Ok(Ok(0)) => panic!("closed before headers"),
+            Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+            Ok(Err(error)) => panic!("read headers: {error}"),
+            Err(error) => panic!("timed out waiting for headers: {error}"),
+        }
+    }
+    let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("text/event-stream"), "{head}");
+
+    let _ = tx.send(());
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
+        Ok(Err(error)) => panic!("server task failed: {error}"),
+        Err(error) => panic!("serve did not return after signal: {error}"),
+    }
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => break,
+            Ok(Ok(_)) => {}
+            Err(error) => panic!("client connection stayed open: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn serve_waits_for_operations_to_release_after_cancel() {
+    let harness = harness();
+    let runtime = harness.state.application.runtime();
+    let claim = runtime
+        .try_begin("busy", crate::application::OperationKind::Run)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let token = claim.token();
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+        panic!("bind");
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let mut server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
+        let _ = rx.await;
+    }));
+    let _ = tx.send(());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !token.is_cancelled() {
+        assert!(std::time::Instant::now() < deadline, "claim not cancelled");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut server)
+            .await
+            .is_err(),
+        "serve returned while an operation was still active"
+    );
+    drop(claim);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
+        Ok(Err(error)) => panic!("server task failed: {error}"),
+        Err(error) => panic!("serve did not return after release: {error}"),
+    }
+}

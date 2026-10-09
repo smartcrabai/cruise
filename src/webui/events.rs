@@ -19,23 +19,42 @@ const SUBSCRIBER_CAPACITY: usize = 256;
 /// buffering a whole run's output in memory.
 #[derive(Debug, Default)]
 pub(crate) struct EventHub {
-    subscribers: Mutex<Vec<mpsc::Sender<ApplicationEvent>>>,
+    state: Mutex<HubState>,
+}
+
+#[derive(Debug, Default)]
+struct HubState {
+    closed: bool,
+    subscribers: Vec<mpsc::Sender<ApplicationEvent>>,
 }
 
 impl EventHub {
     pub(crate) fn subscribe(&self) -> mpsc::Receiver<ApplicationEvent> {
         let (tx, rx) = mpsc::channel(SUBSCRIBER_CAPACITY);
-        self.subscribers
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(tx);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.closed {
+            state.subscribers.push(tx);
+        }
         rx
     }
 
+    pub(crate) fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.closed = true;
+        state.subscribers.clear();
+    }
+
     pub(crate) fn broadcast(&self, event: &ApplicationEvent) {
-        self.subscribers
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .subscribers
             .retain(|tx| match tx.try_send(event.clone()) {
                 Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
@@ -44,9 +63,10 @@ impl EventHub {
 
     #[cfg(test)]
     pub(crate) fn subscriber_count(&self) -> usize {
-        self.subscribers
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .subscribers
             .len()
     }
 
@@ -156,5 +176,42 @@ mod tests {
         });
         assert!(a.try_recv().is_ok());
         assert!(b.try_recv().is_ok());
+    }
+
+    async fn recv_within(
+        rx: &mut tokio::sync::mpsc::Receiver<ApplicationEvent>,
+    ) -> Option<ApplicationEvent> {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+            Ok(event) => event,
+            Err(error) => panic!("receiver did not end after close: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_ends_existing_subscribers() {
+        let hub = Arc::new(EventHub::default());
+        let mut rx = hub.subscribe();
+        hub.close();
+        assert!(recv_within(&mut rx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_after_close_is_already_closed() {
+        let hub = Arc::new(EventHub::default());
+        hub.close();
+        let mut rx = hub.subscribe();
+        assert!(recv_within(&mut rx).await.is_none());
+    }
+
+    #[test]
+    fn broadcast_after_close_is_noop_and_sink_still_ok() {
+        let hub = Arc::new(EventHub::default());
+        hub.close();
+        let (sink, _log) = hub.sinks();
+        let result = sink.send(ApplicationEvent::RunStarted {
+            session_id: "s1".to_string(),
+        });
+        assert!(result.is_ok());
+        assert_eq!(hub.subscriber_count(), 0);
     }
 }
