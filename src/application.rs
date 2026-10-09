@@ -1703,7 +1703,7 @@ async fn run_plan_prompt(
     let planning_interactive =
         request.interactive.is_enabled() && crate::planning::sdk_plan_tools_enabled(config);
     let mut vars = crate::planning::setup_plan_vars(
-        context.state.input_with_attachments(),
+        context.state.template_input(&manager.sessions_dir()),
         context.staged_plan_path.clone(),
         config,
     );
@@ -3185,7 +3185,8 @@ struct RunInputs {
 
 fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
-    let mut vars = crate::variable::VariableStore::new(setup.state.input_with_attachments());
+    let mut vars =
+        crate::variable::VariableStore::new(setup.state.template_input(&manager.sessions_dir()));
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
@@ -4200,6 +4201,161 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!replanned_plan.contains("Quint"));
         assert!(!replanned_plan.contains("Alloy"));
+    }
+
+    #[cfg(unix)]
+    fn skip_planning_app(
+        temp: &tempfile::TempDir,
+        input: &str,
+    ) -> (CruiseApplication, SessionState) {
+        let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
+        let session = app
+            .create_session(NewSessionRequest {
+                input: input.to_string(),
+                base_dir: temp.path().to_path_buf(),
+                config_path: None,
+                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+        (app, session)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_skip_planning_persists_empty_input_and_keeps_text_in_plan() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "skip planning original task");
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+
+        app.generate(
+            &session.id,
+            PlanRequest {
+                skip_planning: true,
+                ..PlanRequest::default()
+            },
+            sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let loaded = SessionManager::new(temp.path().join("sessions"))
+            .load(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "");
+        assert!(loaded.input_as_plan);
+        assert!(
+            loaded
+                .title
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        );
+        assert_eq!(
+            app.session_plan(&session.id)
+                .unwrap_or_else(|e| panic!("{e}")),
+            "skip planning original task"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replan_of_input_as_plan_session_uses_plan_md_as_input() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "zebra-unicorn distinctive task");
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+        app.generate(
+            &session.id,
+            PlanRequest {
+                skip_planning: true,
+                ..PlanRequest::default()
+            },
+            Arc::clone(&sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        app.replan(
+            &session.id,
+            PlanRequest {
+                feedback: Some("tighten it".to_string()),
+                ..PlanRequest::default()
+            },
+            sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let plan = app
+            .session_plan(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(plan.contains("zebra-unicorn distinctive task"), "{plan}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_input_as_plan_persists_empty_input_for_webui_path() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "webui draft task");
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let mut draft = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        draft.phase = SessionPhase::Draft;
+        manager.save(&draft).unwrap_or_else(|e| panic!("{e}"));
+
+        app.use_input_as_plan(&session.id, &|_event: ApplicationEvent| Ok(()))
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let loaded = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "");
+        assert!(loaded.input_as_plan);
+        assert!(
+            loaded
+                .title
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        );
+        assert_eq!(
+            app.session_plan(&session.id)
+                .unwrap_or_else(|e| panic!("{e}")),
+            "webui draft task"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_input_as_plan_failure_keeps_original_input() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "keep me");
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let mut state = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        state.phase = SessionPhase::Planned;
+        manager.save(&state).unwrap_or_else(|e| panic!("{e}"));
+
+        let result = app.use_input_as_plan(&session.id, &|_event: ApplicationEvent| Ok(()));
+
+        assert!(result.is_err());
+        let loaded = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "keep me");
+        assert!(!loaded.input_as_plan);
     }
 
     #[test]

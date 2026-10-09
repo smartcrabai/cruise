@@ -78,7 +78,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 ### `--skip-planning`
 
-`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, `--formal-spec`, and `--image` opt out.
+`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, `--formal-spec`, and `--image` opt out. Such sessions store an empty `input` with `input_as_plan: true` in `state.json`; `plan.md` holds the task text and `{input}` resolves to the current `plan.md` content.
 
 ### `--grill` (interview planning)
 

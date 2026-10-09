@@ -914,7 +914,7 @@ pub(crate) async fn start_run_all(
             .run_all_candidates()
             .unwrap_or_default()
             .into_iter()
-            .map(|session| (session.id.clone(), session.input))
+            .map(|session| (session.id.clone(), session.input_or_title().to_string()))
             .collect();
         state.run_all.start(titles);
         let sink: Arc<dyn crate::application::ApplicationEventSink> =

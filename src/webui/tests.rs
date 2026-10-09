@@ -313,6 +313,36 @@ async fn session_tabs_render_their_contract_ids() {
     }
 }
 
+#[test]
+fn header_omits_input_paragraph_for_input_as_plan_session() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let manager = SessionManager::new(harness.dir.path().to_path_buf());
+    let mut stored = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+    stored.input = String::new();
+    stored.input_as_plan = true;
+    stored.title = Some("plan title".to_string());
+    manager.save(&stored).unwrap_or_else(|e| panic!("{e}"));
+
+    let html = super::partials::header_html(&harness.state, &session.id, None)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    assert!(html.contains("plan title"), "{html}");
+    assert!(!html.contains("<p "), "{html}");
+}
+
+#[test]
+fn header_shows_input_paragraph_for_normal_session() {
+    let harness = harness();
+    let session = create_session(&harness);
+
+    let html = super::partials::header_html(&harness.state, &session.id, None)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    assert!(html.contains("<p "), "{html}");
+    assert!(html.contains("add a webui"), "{html}");
+}
+
 mod event_partials {
     use super::{create_session, harness};
     use crate::application::{

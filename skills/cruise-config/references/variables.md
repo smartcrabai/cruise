@@ -9,7 +9,7 @@ variable is an error.
 
 | Variable | Description |
 |----------|-------------|
-| `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here |
+| `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here; for `--skip-planning` / input-as-plan sessions (`input_as_plan: true`) it resolves to the current `plan.md` content |
 | `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |

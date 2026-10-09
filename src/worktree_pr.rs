@@ -156,8 +156,14 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let pr_attempt =
-        attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body, cancel_token).await?;
+    let pr_attempt = attempt_pr_creation(
+        ctx,
+        session.input_or_title(),
+        &pr_title,
+        &pr_body,
+        cancel_token,
+    )
+    .await?;
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {

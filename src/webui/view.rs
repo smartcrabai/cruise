@@ -120,7 +120,7 @@ pub(crate) struct SidebarVm {
 pub(crate) struct SessionHeaderVm {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) input: String,
+    pub(crate) input: Option<String>,
     pub(crate) badge: PhaseBadgeVm,
     pub(crate) current_step: Option<String>,
     pub(crate) phase_error: Option<String>,
@@ -660,6 +660,7 @@ pub(crate) fn session_row(
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
+            .filter(|_| !session.input.trim().is_empty())
             .map(|_| truncate(&session.input, 80)),
         dir_label: dir_label(&session.base_dir),
         time_label: format_local_time(session.updated_at.as_ref().unwrap_or(&session.created_at)),
