@@ -36,6 +36,7 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
+mod github_review;
 mod graph;
 mod herdr;
 mod issue_publish;

@@ -104,7 +104,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/StepConfig"
       },
-      "description": "Steps to run after a PR is created"
+      "description": "Steps to run after a PR is created. The github-review step type is allowed only here."
     },
     "cleanup_after_pr": {
       "type": "boolean",
@@ -229,7 +229,28 @@
         },
         "output_file": {
           "type": ["string", "null"],
-          "description": "Relative session artifact file receiving the final output of a prompt step. Mutually exclusive with command, option, parallel, group, and workflow_call."
+          "description": "Relative session artifact file receiving the final output of a prompt step, or the iteration report (JSON) of a github-review step. Mutually exclusive with command, option, parallel, group, and workflow_call."
+        },
+        "github-review": {
+          "type": ["object", "null"],
+          "description": "Opt-in GitHub review bot loop. Only valid directly in after-pr; requires exactly one of prompt or prompt_file and a timeout bounding the whole loop. Cannot be combined with command, option, parallel, group, or workflow_call.",
+          "additionalProperties": false,
+          "required": ["bots"],
+          "properties": {
+            "bots": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Bot logins (case-insensitive, no duplicates). Any one reviewing the current PR head commit ends the wait."
+            },
+            "max-iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 3,
+              "description": "Maximum number of review/fix iterations before the step fails."
+            }
+          }
         },
         "timeout": {
           "type": "string",
@@ -241,6 +262,23 @@
         {
           "not": {
             "required": ["prompt", "prompt_file"]
+          }
+        },
+        {
+          "if": { "required": ["github-review"] },
+          "then": {
+            "required": ["timeout"],
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
           }
         },
         {

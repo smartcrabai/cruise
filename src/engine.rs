@@ -867,6 +867,24 @@ async fn execute_step_kind(
             log_step_result(step_start.elapsed(), !outcome.failed);
             Ok(outcome)
         }
+        StepKind::GitHubReview(step) => {
+            crate::github_review::run_step(
+                ctx,
+                step,
+                vars,
+                merged_env,
+                timeout,
+                current_step,
+                allow_commit,
+            )
+            .await?;
+            log_step_result(step_start.elapsed(), true);
+            Ok(StepExecOutcome {
+                option_next: None,
+                failed: false,
+                skip_step_reason: None,
+            })
+        }
         StepKind::Prompt(step) => {
             let result = Box::pin(run_prompt_step(
                 vars,
@@ -1477,6 +1495,8 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
 
         let kind_label = if step.parallel.is_some() {
             "parallel"
+        } else if step.github_review.is_some() {
+            "github-review"
         } else if step.prompt.is_some() || step.prompt_file.is_some() {
             "prompt"
         } else if step.command.is_some() && step.option.is_none() {

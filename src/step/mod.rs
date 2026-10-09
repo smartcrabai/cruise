@@ -16,6 +16,18 @@ pub enum StepKind {
     Option(OptionStep),
     /// Executes named children concurrently and waits for every child.
     Parallel(indexmap::IndexMap<String, StepConfig>),
+    /// Opt-in GitHub review bot loop (after-pr only).
+    GitHubReview(GitHubReviewStep),
+}
+
+/// Parameters for a `github-review` step.
+#[derive(Debug, Clone)]
+pub struct GitHubReviewStep {
+    pub review: crate::config::GitHubReviewConfig,
+    /// Prompt run once per iteration; its `output_file` is always `None`.
+    pub prompt: PromptStep,
+    /// Session artifact receiving the iteration report.
+    pub report_file: Option<String>,
 }
 
 /// Parameters for a prompt step.
@@ -64,6 +76,10 @@ pub struct OptionStep {
 impl TryFrom<StepConfig> for StepKind {
     type Error = CruiseError;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat dispatch over every step kind"
+    )]
     fn try_from(config: StepConfig) -> Result<Self> {
         crate::config::validate_parallel_step("parallel", &config)?;
         if let Some(output_file) = config.output_file.as_deref() {
@@ -103,6 +119,25 @@ impl TryFrom<StepConfig> for StepKind {
         }
         if let Some(children) = config.parallel {
             return Ok(StepKind::Parallel(children));
+        }
+        if let Some(review) = config.github_review {
+            let Some(prompt) = config.prompt else {
+                return Err(CruiseError::InvalidStepConfig(
+                    "github-review requires a prompt (prompt_file must be resolved before execution)"
+                        .to_string(),
+                ));
+            };
+            return Ok(StepKind::GitHubReview(GitHubReviewStep {
+                review,
+                prompt: PromptStep {
+                    model: config.model,
+                    prompt,
+                    instruction: config.instruction,
+                    output_file: None,
+                    computer_use: config.computer_use,
+                },
+                report_file: config.output_file,
+            }));
         }
         if config.prompt_file.is_some() {
             return Err(CruiseError::InvalidStepConfig(
@@ -327,7 +362,10 @@ mod tests {
                     OptionChoice::TextInput { .. } => panic!("Expected Selector"),
                 }
             }
-            StepKind::Prompt(_) | StepKind::Command(_) | StepKind::Parallel(_) => {
+            StepKind::Prompt(_)
+            | StepKind::Command(_)
+            | StepKind::Parallel(_)
+            | StepKind::GitHubReview(_) => {
                 panic!("Expected Option step")
             }
         }
@@ -355,7 +393,10 @@ mod tests {
                     OptionChoice::Selector { .. } => panic!("Expected TextInput choice"),
                 }
             }
-            StepKind::Prompt(_) | StepKind::Command(_) | StepKind::Parallel(_) => {
+            StepKind::Prompt(_)
+            | StepKind::Command(_)
+            | StepKind::Parallel(_)
+            | StepKind::GitHubReview(_) => {
                 panic!("Expected Option step")
             }
         }

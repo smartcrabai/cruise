@@ -21,6 +21,8 @@ variable is an error.
 | `{pr.url}` | PR URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
 
+In a `github-review` step, `{pr.number}` is available in the prompt, and cruise appends the PR head commit OID and the unresolved review threads (JSON) to the prompt automatically.
+
 ## Parser behavior
 
 The substitution is done by a hand-written parser, with Rust-`format!`-style brace escaping. Keep these behaviors in mind:

@@ -290,6 +290,29 @@ pub struct StepConfig {
     /// Session artifact file receiving the final output of a prompt step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_file: Option<String>,
+
+    /// Opt-in GitHub review bot loop (after-pr only).
+    #[serde(
+        default,
+        rename = "github-review",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub github_review: Option<GitHubReviewConfig>,
+}
+
+/// Configuration of the `github-review` step.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewConfig {
+    /// Bot logins whose review of the current head is awaited.
+    pub bots: Vec<String>,
+    /// Maximum number of loop iterations (default 3).
+    #[serde(rename = "max-iterations", default = "default_github_review_iterations")]
+    pub max_iterations: usize,
+}
+
+fn default_github_review_iterations() -> usize {
+    3
 }
 
 fn deserialize_prompt_file<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -866,6 +889,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_mcp_servers(config)?;
     validate_computer_use(config)?;
     validate_output_file_usage(config)?;
+    validate_github_review(config)?;
     validate_parallel_steps(config)?;
     validate_groups(config)?;
     validate_if_conditions(config)?;
@@ -1016,6 +1040,74 @@ pub(crate) fn validate_output_file_usage(config: &WorkflowConfig) -> crate::erro
             return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                 "step '{name}' uses output_file, which is only supported on prompt steps (found {kind})"
             )));
+        }
+    }
+    Ok(())
+}
+
+/// `github-review` is an opt-in composite step that is only valid directly in
+/// `after-pr`, with exactly one prompt source and a mandatory loop timeout.
+pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    let nested = config
+        .steps
+        .iter()
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+        .chain(
+            config
+                .steps
+                .iter()
+                .chain(&config.after_pr)
+                .chain(config.groups.values().flat_map(|group| &group.steps))
+                .filter_map(|(_, step)| step.parallel.as_ref())
+                .flat_map(|children| children.iter()),
+        );
+    for (name, step) in nested {
+        if step.github_review.is_some() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses github-review, which is only supported directly in after-pr"
+            )));
+        }
+    }
+    for (name, step) in &config.after_pr {
+        let Some(review) = &step.github_review else {
+            continue;
+        };
+        let invalid = |detail: &str| {
+            CruiseError::InvalidStepConfig(format!("after-pr step '{name}': {detail}"))
+        };
+        if step.command.is_some()
+            || step.option.is_some()
+            || step.group.is_some()
+            || step.workflow_call.is_some()
+            || step.parallel.is_some()
+        {
+            return Err(invalid(
+                "github-review cannot be combined with command, option, group, workflow_call, or parallel",
+            ));
+        }
+        if step.prompt.is_some() == step.prompt_file.is_some() {
+            return Err(invalid(
+                "github-review requires exactly one of prompt or prompt_file",
+            ));
+        }
+        if step.timeout.is_none() {
+            return Err(invalid("github-review requires timeout"));
+        }
+        if review.max_iterations == 0 {
+            return Err(invalid("github-review max-iterations must be positive"));
+        }
+        if review.bots.is_empty() {
+            return Err(invalid("github-review bots must not be empty"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for bot in &review.bots {
+            if bot.trim().is_empty() {
+                return Err(invalid("github-review bots must not contain empty logins"));
+            }
+            if !seen.insert(bot.to_ascii_lowercase()) {
+                return Err(invalid(&format!("github-review bot '{bot}' is duplicated")));
+            }
         }
     }
     Ok(())
@@ -1745,6 +1837,112 @@ steps:
         assert!(config.steps["s1"].allow_commit);
         let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(serialized.contains("allow_commit: true"));
+    }
+
+    fn github_review_validation(yaml: &str) -> crate::error::Result<()> {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        validate_config(&config)?;
+        crate::workflow::compile(config).map(|_| ())
+    }
+
+    fn github_review_after_pr(body: &str) -> String {
+        format!("command: [echo]\nsteps:\n  s1:\n    prompt: hi\nafter-pr:\n  review:\n{body}")
+    }
+
+    const GH_REVIEW_OK: &str = "    github-review:\n      bots: [\"coderabbitai[bot]\"]\n    prompt: fix\n    timeout: 30m\n";
+
+    fn assert_invalid_step_config(result: crate::error::Result<()>, what: &str) {
+        assert!(
+            matches!(result, Err(crate::error::CruiseError::InvalidStepConfig(_))),
+            "{what}: expected InvalidStepConfig, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn github_review_accepts_valid_after_pr_step_with_default_iterations() {
+        let config = WorkflowConfig::from_yaml(&github_review_after_pr(GH_REVIEW_OK))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        validate_config(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        let review = config.after_pr["review"]
+            .github_review
+            .as_ref()
+            .unwrap_or_else(|| panic!("github-review must deserialize"));
+        assert_eq!(review.bots, ["coderabbitai[bot]"]);
+        assert_eq!(review.max_iterations, 3);
+    }
+
+    #[test]
+    fn github_review_requires_after_pr_prompt_and_timeout() {
+        let no_prompt = "    github-review:\n      bots: [a]\n    timeout: 30m\n";
+        let no_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n";
+        let both = "    github-review:\n      bots: [a]\n    prompt: fix\n    prompt_file: x.md\n    timeout: 30m\n";
+        let bad_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: soon\n";
+        let zero_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: 0\n";
+        for (body, what) in [
+            (no_prompt, "no prompt"),
+            (no_timeout, "no timeout"),
+            (both, "prompt and prompt_file"),
+            (bad_timeout, "bad timeout"),
+            (zero_timeout, "zero timeout"),
+        ] {
+            assert_invalid_step_config(github_review_validation(&github_review_after_pr(body)), what);
+        }
+    }
+
+    #[test]
+    fn github_review_rejects_empty_or_duplicate_bots() {
+        for bots in ["[]", "[\"Bot[bot]\", \"bot[BOT]\"]", "[\"\"]"] {
+            let body = format!(
+                "    github-review:\n      bots: {bots}\n    prompt: fix\n    timeout: 30m\n"
+            );
+            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), bots);
+        }
+    }
+
+    #[test]
+    fn github_review_rejects_zero_iterations() {
+        let body = "    github-review:\n      bots: [a]\n      max-iterations: 0\n    prompt: fix\n    timeout: 30m\n";
+        assert_invalid_step_config(github_review_validation(&github_review_after_pr(body)), "zero");
+    }
+
+    #[test]
+    fn github_review_rejects_use_in_steps_groups_and_parallel() {
+        let in_steps = "command: [echo]\nsteps:\n  review:\n    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: 30m\n";
+        let in_group = "command: [echo]\ngroups:\n  g:\n    steps:\n      review:\n        github-review:\n          bots: [a]\n        prompt: fix\n        timeout: 30m\nsteps:\n  s1:\n    group: g\n";
+        let in_parallel = "command: [echo]\nsteps:\n  par:\n    parallel:\n      review:\n        github-review:\n          bots: [a]\n        prompt: fix\n        timeout: 30m\n";
+        let in_after_pr_parallel = "command: [echo]\nsteps:\n  s1:\n    prompt: hi\nafter-pr:\n  par:\n    parallel:\n      review:\n        github-review:\n          bots: [a]\n        prompt: fix\n        timeout: 30m\n";
+        for (yaml, what) in [
+            (in_steps, "steps"),
+            (in_group, "group"),
+            (in_parallel, "parallel"),
+            (in_after_pr_parallel, "after-pr parallel"),
+        ] {
+            assert_invalid_step_config(github_review_validation(yaml), what);
+        }
+    }
+
+    #[test]
+    fn github_review_rejects_mixing_with_other_step_kinds() {
+        for extra in ["    command: echo hi\n", "    parallel:\n      a:\n        prompt: x\n"] {
+            let body = format!("{GH_REVIEW_OK}{extra}");
+            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), extra);
+        }
+    }
+
+    #[test]
+    fn github_review_report_file_uses_artifact_path_validation() {
+        let ok = format!("{GH_REVIEW_OK}    output_file: review-report.json\n");
+        github_review_validation(&github_review_after_pr(&ok)).unwrap_or_else(|e| panic!("{e:?}"));
+        for name in ["../escape.json", "/abs.json"] {
+            let body = format!("{GH_REVIEW_OK}    output_file: \"{name}\"\n");
+            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), name);
+        }
+    }
+
+    #[test]
+    fn builtin_workflow_does_not_use_github_review() {
+        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(config.after_pr.values().all(|s| s.github_review.is_none()));
     }
 
     fn assert_computer_use_validation_error(yaml: &str, fragments: &[&str]) {

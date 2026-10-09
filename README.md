@@ -967,6 +967,26 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default, with the same repository scope and the same fail-closed behaviour. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD` in the session repository; command and option steps are unaffected.
 
+#### Review bot loop (`github-review`)
+
+An explicit, opt-in `after-pr` step lets review bots such as CodeRabbit be handled without a human in the loop. It is never added to the built-in workflow.
+
+```yaml
+after-pr:
+  coderabbit:
+    github-review:
+      bots: ["coderabbitai[bot]"]   # any one of these reviewing the current PR head ends the wait
+      max-iterations: 3             # default 3
+    prompt: |
+      Fix the review comments and commit the changes.
+      Reply with the requested JSON describing each thread.
+    allow_commit: true
+    timeout: 30m                    # required; bounds the whole loop
+    output_file: review-report.json # optional iteration report in the session artifacts
+```
+
+Each iteration waits for a review of the current head commit by a listed bot, fetches the unresolved threads started by those bots (all pages), and runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no unresolved bot threads remain and fails when they remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` failures (warnings only), this failure marks the run `Failed`; rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+
 ### Flow Control
 
 #### Explicit next step
