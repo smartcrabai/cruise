@@ -49,6 +49,7 @@ mod paths;
 mod plan_cmd;
 mod planning;
 mod platform;
+mod pr_merge;
 mod repo_clone;
 mod resolver;
 mod retry;

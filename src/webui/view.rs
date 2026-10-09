@@ -439,6 +439,26 @@ pub(crate) struct PublishDialogVm {
     pub(crate) submit_url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeCheckVm {
+    pub(crate) name: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergePrDialogVm {
+    pub(crate) id: String,
+    pub(crate) submit_url: String,
+    pub(crate) state: String,
+    pub(crate) mergeable: String,
+    pub(crate) review_decision: String,
+    pub(crate) checks: Vec<MergeCheckVm>,
+    pub(crate) no_checks: bool,
+    pub(crate) can_merge: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToastKind {
     InputRequired,

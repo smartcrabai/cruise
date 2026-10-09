@@ -36,7 +36,7 @@ cruise webui
 
 The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
-- `--host <ADDR>` -- interface to bind (default `127.0.0.1`; the WebUI has no authentication, so do not bind it to an untrusted network).
+- `--host <ADDR>` -- interface to bind (default `127.0.0.1`; the WebUI has no authentication, so do not bind it to an untrusted network). The Merge PR route is served by the same unauthenticated server, and its on-screen confirmation is not access control: never expose the WebUI to a network you do not trust.
 - `--port <PORT>` -- TCP port to listen on (default `8484`).
 - `--no-open` -- do not open the browser automatically.
 - `--webui-dir <DIR>` -- serve `templates/` and `static/` from disk for development. For example, `cruise webui --webui-dir webui`; templates are re-read on every request, so edit and reload without restarting.
@@ -141,7 +141,7 @@ The TUI has three views:
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
-The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 For interactive planning questions, line breaks are rendered as adjacent lines in the selected session's Plan tab. The answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
 
@@ -488,9 +488,9 @@ The interactive session list shows a menu of actions depending on the session's 
 | **Running** | Resume, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
-| **Completed** | Open PR*, Reset to Planned, Delete, Back |
+| **Completed** | Open PR*, Merge PR*, Reset to Planned, Delete, Back |
 
-\* Open PR is shown only when the session has a PR URL.
+\* Open PR and Merge PR are shown only when the session has a PR URL.
 
 `cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. These display states are backed by `AwaitingApproval`: `Edit Settings`, `Delete`, and `Back` are always available, while `Approve` and `Publish as Issue` appear only when a non-empty `plan.md` is available and there is no `plan_error`.
 
@@ -500,6 +500,7 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Run / Resume** -- Execute (or continue) the session.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
 - **Open PR** -- Open the session's pull request in the browser via `gh pr view --web`.
+- **Merge PR** -- Human-initiated merge of the session's pull request (also available in the TUI and WebUI). Cruise first shows the PR's state, mergeability, review decision, and each CI check. You then choose `Squash` (the default), `Merge`, or `Rebase` and confirm; the confirmation names the chosen method. Cruise runs `gh pr merge <url> --squash|--merge|--rebase` and never adds `--auto`, `--admin`, or `--delete-branch`. If GitHub reports the PR as Closed or Merged afterwards, only that session and its worktree (and any `--repo` clone) are cleaned up, as `cruise clean` would. If the PR is still Open (for example in a merge queue) the session is kept and `cruise clean` can remove it later. A PR that is already Closed or Merged is not merged again: run `cruise clean`. Merging is never automatic. To opt into GitHub auto-merge, see [`after-pr`](skills/cruise-config/references/after-pr.md).
 - **Reset to Planned** -- Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
 - **Delete** -- Permanently remove the session.
 - **Back** -- Return to the session list.

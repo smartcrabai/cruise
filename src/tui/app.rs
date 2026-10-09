@@ -238,6 +238,10 @@ pub enum Modal {
     Publish {
         trigger_cruise: bool,
     },
+    MergePr {
+        status: crate::application::PrMergeStatus,
+        method: crate::application::PrMergeMethod,
+    },
     Resize,
 }
 
@@ -2171,6 +2175,7 @@ impl TuiApp {
                 self.handle_run_all_parallelism_modal(editor, error, action)
             }
             Modal::Publish { trigger_cruise } => self.handle_publish_modal(trigger_cruise, action),
+            Modal::MergePr { status, method } => self.handle_merge_pr_modal(status, method, action),
         }
     }
 
@@ -2360,6 +2365,76 @@ impl TuiApp {
         }
         false
     }
+    fn handle_merge_pr_modal(
+        &mut self,
+        status: crate::application::PrMergeStatus,
+        method: crate::application::PrMergeMethod,
+        action: Action,
+    ) -> bool {
+        use crate::application::PrMergeMethod::{Merge, Rebase, Squash};
+        match action {
+            Action::Down | Action::Character('j') => {
+                let method = match method {
+                    Squash => Merge,
+                    Merge => Rebase,
+                    Rebase => Squash,
+                };
+                self.modal = Some(Modal::MergePr { status, method });
+            }
+            Action::Up | Action::Character('k') => {
+                let method = match method {
+                    Squash => Rebase,
+                    Merge => Squash,
+                    Rebase => Merge,
+                };
+                self.modal = Some(Modal::MergePr { status, method });
+            }
+            Action::Enter => self.apply_merge_pr(method),
+            Action::Escape => {}
+            _ => self.modal = Some(Modal::MergePr { status, method }),
+        }
+        false
+    }
+
+    fn open_merge_pr_preview(&mut self) {
+        let Some(id) = self.active_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        match self.application.inspect_pr_for_merge(&id) {
+            Ok(status) if status.state == "OPEN" => {
+                self.modal = Some(Modal::MergePr {
+                    status,
+                    method: crate::application::PrMergeMethod::Squash,
+                });
+            }
+            Ok(status) => self.set_error(format!(
+                "Pull request is {}. Run clean to remove the session.",
+                status.state
+            )),
+            Err(error) => self.set_error(error.to_string()),
+        }
+    }
+
+    fn apply_merge_pr(&mut self, method: crate::application::PrMergeMethod) {
+        use crate::application::MergePrOutcome;
+        let Some(id) = self.active_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        match self.application.merge_pr(&id, method) {
+            Ok(MergePrOutcome::Cleaned) => {
+                self.invalidate(&id, true, true, true);
+                self.status = Some(format!("Merged PR and cleaned up {id}"));
+                self.refresh();
+            }
+            Ok(MergePrOutcome::Pending) => {
+                self.invalidate(&id, true, true, true);
+                self.status = Some("PR is still open (merge queue?); session kept".to_string());
+                self.refresh();
+            }
+            Err(error) => self.set_error(error.to_string()),
+        }
+    }
+
     fn enter_action(&mut self) -> bool {
         match self.view {
             View::NewSession => {
@@ -2554,7 +2629,8 @@ impl TuiApp {
             | SessionAction::RunCurrentBranch
             | SessionAction::Retry
             | SessionAction::Resume
-            | SessionAction::OpenPr => self.apply_command(PendingCommand::Session(action)),
+            | SessionAction::OpenPr
+            | SessionAction::MergePr => self.apply_command(PendingCommand::Session(action)),
         }
     }
 
@@ -2781,6 +2857,7 @@ impl TuiApp {
                 }
                 Err(error) => self.set_error(error.to_string()),
             },
+            SessionAction::MergePr => self.open_merge_pr_preview(),
             SessionAction::OpenPr => match self.application.open_pr(&id) {
                 Ok(url) => match open_url(&url) {
                     Ok(()) => self.status = Some(format!("Opening {url}")),
@@ -3181,6 +3258,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::EditCurrentStep => "Edit Current Step",
         SessionAction::Resume => "Resume",
         SessionAction::OpenPr => "Open Pull Request",
+        SessionAction::MergePr => "Merge PR",
     }
 }
 
@@ -4394,6 +4472,175 @@ mod tests {
         run_all.view = View::RunAll;
         assert!(!run_all.handle_key(key(KeyCode::Char('c'))));
         assert!(run_all.modal.is_none());
+    }
+
+    #[cfg(unix)]
+    mod merge_pr {
+        use super::*;
+        use crate::pr_merge::fake_gh::{FakeGh, view_json};
+
+        const URL: &str = "https://github.com/owner/repo/pull/5";
+        const ID: &str = "20261009110000";
+
+        struct Env {
+            _tmp: TempDir,
+            gh: FakeGh,
+            manager: crate::session::SessionManager,
+            app: TuiApp,
+            _path: EnvGuard,
+        }
+
+        fn env(pr_url: Option<&str>, phase: SessionPhase) -> Env {
+            let lock = lock_process();
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+            let gh = FakeGh::install(tmp.path());
+            gh.set(
+                "view.out",
+                r#"{"state":"OPEN","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
+            );
+            let path = EnvGuard::set(
+                "PATH",
+                std::env::join_paths(std::iter::once(gh.bin()).chain(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                )))
+                .unwrap_or_else(|e| panic!("{e}")),
+            );
+            let manager = crate::session::SessionManager::new(tmp.path().join("sessions"));
+            let mut state = SessionState::new(
+                ID.to_string(),
+                PathBuf::from("."),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                "task".to_string(),
+            );
+            state.phase = phase;
+            state.pr_url = pr_url.map(str::to_string);
+            manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+            let application = CruiseApplication::new(manager.clone());
+            let (events, _) = tokio::sync::mpsc::unbounded_channel();
+            let (logs, _) = tokio::sync::mpsc::channel(2);
+            let mut app = TuiApp::new_for_test_with_lock(application, events, logs, Some(lock));
+            app.sessions = vec![state];
+            Env {
+                _tmp: tmp,
+                gh,
+                manager,
+                app,
+                _path: path,
+            }
+        }
+
+        fn screen(app: &mut TuiApp) -> String {
+            let backend = ratatui::backend::TestBackend::new(140, 40);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap_or_else(|e| panic!("{e}"));
+            terminal
+                .draw(|frame| crate::tui::ui::draw(frame, app))
+                .unwrap_or_else(|e| panic!("{e}"));
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(140)
+                .map(|row| {
+                    row.iter()
+                        .map(ratatui::buffer::Cell::symbol)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        #[test]
+        fn merge_pr_action_only_offered_for_completed_session_with_pr() {
+            let mut with_pr = env(Some(URL), SessionPhase::Completed);
+            with_pr.app.open_palette();
+            let Some(Modal::Palette { actions, .. }) = with_pr.app.modal.as_ref() else {
+                panic!("palette expected");
+            };
+            assert!(actions.contains(&SessionAction::MergePr));
+
+            let mut no_pr = env(None, SessionPhase::Completed);
+            no_pr.app.open_palette();
+            let Some(Modal::Palette { actions, .. }) = no_pr.app.modal.as_ref() else {
+                panic!("palette expected");
+            };
+            assert!(!actions.contains(&SessionAction::MergePr));
+        }
+
+        #[test]
+        fn merge_pr_confirmation_shows_status_and_method() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+
+            e.app.apply_action(SessionAction::MergePr);
+            let text = screen(&mut e.app);
+
+            assert!(e.app.modal.is_some(), "a confirmation modal must open");
+            assert!(text.contains("MERGEABLE"), "{text}");
+            assert!(text.contains("unit-tests"), "{text}");
+            assert!(text.contains("Squash"), "{text}");
+            assert!(text.contains("Merge"), "{text}");
+            assert!(text.contains("Rebase"), "{text}");
+            assert!(e.gh.merge_calls().is_empty(), "preview must not merge");
+        }
+
+        #[test]
+        fn merge_pr_cancel_does_not_run_gh_merge() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+            e.app.apply_action(SessionAction::MergePr);
+
+            assert!(!e.app.handle_key(key(KeyCode::Esc)));
+
+            assert!(e.app.modal.is_none());
+            assert!(e.gh.merge_calls().is_empty());
+            assert!(e.manager.load(ID).is_ok());
+        }
+
+        #[test]
+        fn merge_pr_not_open_does_not_offer_confirmation() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+            e.gh.set("view.out", &view_json("MERGED"));
+
+            e.app.apply_action(SessionAction::MergePr);
+            assert!(!e.app.handle_key(key(KeyCode::Enter)));
+
+            assert!(e.gh.merge_calls().is_empty());
+        }
+
+        #[test]
+        fn merge_pr_status_failure_does_not_offer_confirmation() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+            e.gh.set("view.exit", "1");
+
+            e.app.apply_action(SessionAction::MergePr);
+            assert!(!e.app.handle_key(key(KeyCode::Enter)));
+
+            assert!(e.gh.merge_calls().is_empty());
+        }
+
+        #[test]
+        fn merge_pr_confirm_uses_squash_by_default_and_cleans_session() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+            e.gh.set("view_after.out", &view_json("MERGED"));
+            e.app.apply_action(SessionAction::MergePr);
+
+            assert!(!e.app.handle_key(key(KeyCode::Enter)));
+
+            assert_eq!(e.gh.merge_calls(), vec![format!("pr merge {URL} --squash")]);
+            assert!(e.manager.load(ID).is_err(), "session deleted");
+            assert!(e.app.sessions.is_empty(), "list refreshed after cleanup");
+            assert!(e.app.modal.is_none());
+        }
+
+        #[test]
+        fn merge_pr_pending_keeps_selected_session() {
+            let mut e = env(Some(URL), SessionPhase::Completed);
+            e.app.apply_action(SessionAction::MergePr);
+
+            assert!(!e.app.handle_key(key(KeyCode::Enter)));
+
+            assert_eq!(e.gh.merge_calls().len(), 1);
+            assert!(e.manager.load(ID).is_ok());
+            assert_eq!(e.app.active_session().map(|s| s.id.as_str()), Some(ID));
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {

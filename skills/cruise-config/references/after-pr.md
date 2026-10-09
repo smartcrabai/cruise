@@ -40,6 +40,18 @@ after-pr:
 This opt-out is limited to that prompt step and bypasses all commit-guard behavior for it. Guarded prompt attempts to move `HEAD` fail with a commit-guard violation; cruise may restore the original branch reference without resetting the index or worktree, but the step still fails. Command and option steps are not guarded. `allow_commit: true` cannot be placed on a group or workflow-call invocation; put it on the expanded prompt step.
 
 
+## Opt-in auto-merge
+
+Cruise never merges automatically and the built-in `after-pr` has no merge step. To have GitHub auto-merge the PR once its requirements are met, write the command yourself:
+
+```yaml
+after-pr:
+  auto-merge:
+    command: "gh pr merge {pr.number} --auto --squash"
+```
+
+This runs only because you wrote it in your workflow. Because `after-pr` errors are downgraded to warnings (see below), a failing `gh pr merge --auto` (for example when auto-merge is disabled for the repository) will not fail the run. For a manual merge, use **Merge PR** in `cruise list`, the TUI, or the WebUI.
+
 ## Constraints
 
 - **Errors are downgraded to warnings, except cancellation**: non-`Interrupted` errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast). `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase. The model fits side effects like pushing labels, posting notifications, etc.

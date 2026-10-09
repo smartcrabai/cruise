@@ -11,8 +11,8 @@ use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
 use crate::application::{
-    CurrentStepUpdateDto, Interactive, NewSessionRequest, OperationKind, PlanRequest, RunRequest,
-    SessionSettingsRequest,
+    CurrentStepUpdateDto, Interactive, MergePrOutcome, NewSessionRequest, OperationKind,
+    PlanRequest, PrMergeMethod, RunRequest, SessionSettingsRequest,
 };
 use crate::error::{CruiseError, Result};
 use crate::session::WorkspaceMode;
@@ -22,8 +22,9 @@ use super::WebState;
 use super::partials;
 use super::templates::RawHtml;
 use super::view::{
-    AttachmentListVm, AttachmentVm, DirectorySuggestionsVm, EditorVm, PublishDialogVm,
-    RepoOptionsVm, SessionSettingsVm, SettingsVm, ToastVm,
+    AttachmentListVm, AttachmentVm, DirectorySuggestionsVm, EditorVm, MergeCheckVm,
+    MergePrDialogVm, PublishDialogVm, RepoOptionsVm, SessionSettingsVm, SettingsVm, ToastKind,
+    ToastVm,
 };
 
 const HX_PUSH_URL: HeaderName = HeaderName::from_static("hx-push-url");
@@ -877,6 +878,84 @@ pub(crate) async fn publish(
         ));
         body.push_str(&partials::sidebar_list_partial(&state, None)?);
         Ok(push_url(html(body), "/"))
+    })
+}
+
+pub(crate) async fn merge_pr_preview(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+) -> Response {
+    run(&state, "Merge PR", || {
+        let status = state.application.inspect_pr_for_merge(&id)?;
+        let vm = MergePrDialogVm {
+            submit_url: format!("/webui/sessions/{id}/merge-pr"),
+            id,
+            can_merge: status.state == "OPEN",
+            state: status.state,
+            mergeable: status.mergeable,
+            review_decision: status.review_decision,
+            no_checks: status.checks.is_empty(),
+            checks: status
+                .checks
+                .into_iter()
+                .map(|check| MergeCheckVm {
+                    name: check.name,
+                    status: check.status,
+                })
+                .collect(),
+        };
+        Ok(html(state.templates.render("merge-pr-dialog", &vm)?))
+    })
+}
+
+pub(crate) async fn merge_pr(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    axum::extract::Form(pairs): Form,
+) -> Response {
+    let fields = Fields::from(pairs);
+    run(&state, "Merge PR", || {
+        let method = match fields.get("method") {
+            Some("merge") => PrMergeMethod::Merge,
+            Some("squash") => PrMergeMethod::Squash,
+            Some("rebase") => PrMergeMethod::Rebase,
+            _ => {
+                return Err(CruiseError::Other(
+                    "merge method must be merge, squash or rebase".to_string(),
+                ));
+            }
+        };
+        let outcome = state.application.merge_pr(&id, method)?;
+        let mut body = partials::targeted(&format!("#dialog-merge-pr-{id}"), "delete", "");
+        match outcome {
+            MergePrOutcome::Cleaned => {
+                body.push_str(&partials::toast(
+                    &state,
+                    &ToastVm::new(ToastKind::Completed, "PR merged", None),
+                ));
+                body.push_str(&partials::by_id(
+                    "main",
+                    &super::pages::empty_state_html(&state)?,
+                ));
+                body.push_str(&partials::sidebar_list_partial(&state, None)?);
+                Ok(push_url(html(body), "/"))
+            }
+            MergePrOutcome::Pending => {
+                body.push_str(&partials::toast(
+                    &state,
+                    &ToastVm::new(
+                        ToastKind::Completed,
+                        "Merge requested",
+                        Some(
+                            "PR is still open (for example in a merge queue); session kept"
+                                .to_string(),
+                        ),
+                    ),
+                ));
+                body.push_str(&partials::header_and_row(&state, &id, None)?);
+                Ok(html(body))
+            }
+        }
     })
 }
 
