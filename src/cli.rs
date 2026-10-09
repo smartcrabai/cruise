@@ -65,6 +65,23 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine and open it in the default browser.
     Webui(WebuiArgs),
+    #[command(hide = true)]
+    Internal(InternalArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct InternalArgs {
+    #[command(subcommand)]
+    pub command: InternalCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InternalCommand {
+    /// Merge the PR base branch into the current branch.
+    SyncBase {
+        /// Pull request number.
+        pr_number: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -342,6 +359,27 @@ mod tests {
     #[test]
     fn test_cli_verify() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn internal_sync_base_parses_pr_number_and_is_hidden() {
+        let cli = Cli::try_parse_from(["cruise", "internal", "sync-base", "42"])
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        match cli.command {
+            Some(Commands::Internal(InternalArgs {
+                command: InternalCommand::SyncBase { pr_number },
+            })) => assert_eq!(pr_number, "42"),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+        let internal = Cli::command()
+            .find_subcommand("internal")
+            .map(clap::Command::is_hide_set);
+        assert_eq!(internal, Some(true), "internal must be a hidden subcommand");
+    }
+
+    #[test]
+    fn internal_sync_base_requires_pr_number() {
+        assert!(Cli::try_parse_from(["cruise", "internal", "sync-base"]).is_err());
     }
 
     #[test]

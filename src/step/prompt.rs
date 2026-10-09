@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use command_group::{AsyncCommandGroup as _, AsyncGroupChild};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
@@ -90,24 +91,12 @@ async fn maybe_cancelled(token: Option<&CancellationToken>) {
 }
 
 /// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
-#[cfg(unix)]
-fn terminate_process_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        // The prompt shell is its own process group; kill descendants that may
-        // otherwise retain inherited output pipes after cancellation.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-}
-
-/// Spawn the LLM process, write the prompt to stdin, and capture stdout and stderr.
 fn spawn_prompt_command<S: std::hash::BuildHasher>(
     command: &[String],
     model: Option<&str>,
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
-) -> Result<tokio::process::Child> {
+) -> Result<AsyncGroupChild> {
     if command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
             "command list is empty".to_string(),
@@ -119,11 +108,6 @@ fn spawn_prompt_command<S: std::hash::BuildHasher>(
         cmd_args.push(m.to_string());
     }
     let mut cmd = Command::new(&command[0]);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.as_std_mut().process_group(0);
-    }
     cmd.args(&cmd_args)
         .envs(env)
         .stdin(std::process::Stdio::piped())
@@ -132,17 +116,17 @@ fn spawn_prompt_command<S: std::hash::BuildHasher>(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.spawn().map_err(|e| {
+    cmd.group_spawn().map_err(|e| {
         CruiseError::ProcessSpawnError(format!("failed to spawn '{}': {e}", command[0]))
     })
 }
 
 async fn write_prompt(
-    child: &mut tokio::process::Child,
+    child: &mut AsyncGroupChild,
     prompt: &str,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.inner().stdin.take() {
         tokio::select! {
             result = stdin.write_all(prompt.as_bytes()) => match result {
                 Ok(()) => {}
@@ -150,10 +134,7 @@ async fn write_prompt(
                 Err(error) => return Err(CruiseError::IoError(error)),
             },
             () = maybe_cancelled(cancel_token) => {
-                #[cfg(unix)]
-                terminate_process_group(child.id());
                 let _ = child.kill().await;
-                let _ = child.wait().await;
                 return Err(CruiseError::Interrupted);
             }
         }
@@ -203,13 +184,8 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
 ) -> Result<(String, String)> {
     let mut child = spawn_prompt_command(command, model, env, cwd)?;
     write_prompt(&mut child, prompt, cancel_token).await?;
-    // `Child::id()` becomes None once wait completes, even when descendants
-    // are still holding the output pipes open.
-    #[cfg(unix)]
-    let process_group = child.id();
-
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let stdout_pipe = child.inner().stdout.take();
+    let stderr_pipe = child.inner().stderr.take();
     let drain_stdout = drain_output(
         stdout_pipe,
         stream_callbacks.and_then(|callbacks| callbacks.on_stdout),
@@ -226,7 +202,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
     tokio::select! {
         (s, (o, e)) = async {
             tokio::join!(
-                child.wait(),
+                child.inner().wait(),
                 async { tokio::join!(drain_stdout, drain_stderr) },
             )
         } => {
@@ -235,10 +211,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
             stderr_buf = e;
         }
         () = maybe_cancelled(cancel_token) => {
-            #[cfg(unix)]
-            terminate_process_group(process_group);
             let _ = child.kill().await;
-            let _ = child.wait().await;
             return Err(CruiseError::Interrupted);
         }
     }
@@ -288,6 +261,39 @@ mod tests {
         let command = vec!["claude".to_string(), "-p".to_string()];
         let args = build_command_args(&command, Some("claude-opus-4-5"));
         assert_eq!(args, vec!["claude", "-p", "--model", "claude-opus-4-5"]);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timed_out_windows_prompt_kills_process_tree() {
+        let _guard = crate::test_support::lock_process();
+        let command = vec![
+            "cmd.exe".to_string(),
+            "/C".to_string(),
+            "start /b cmd /c ping -n 30 127.0.0.1 >nul & ping -n 30 127.0.0.1 >nul".to_string(),
+        ];
+        // `run_prompt` has no timeout, so the tree is stopped via cancellation.
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let result = run_prompt(
+            &command,
+            None,
+            "prompt",
+            0,
+            &HashMap::new(),
+            None::<&fn(&str)>,
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(CruiseError::Interrupted)), "{result:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
     }
 
     #[cfg(unix)]

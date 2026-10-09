@@ -109,6 +109,9 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::SyncBase { pr_number },
+        })) => worktree_pr::sync_base(&pr_number),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),

@@ -2426,6 +2426,24 @@ steps:
     }
 
     #[test]
+    fn builtin_after_pr_sync_base_uses_internal_cli_without_shell_syntax() {
+        let doc: serde_yaml::Value = serde_yaml::from_str(BUILTIN_CONFIG_YAML)
+            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
+        let command = doc["after-pr"]["sync-base"]["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("after-pr.sync-base must keep a command"));
+        assert!(
+            command.contains("internal sync-base {pr.number}"),
+            "sync-base must call the hidden CLI: {command}"
+        );
+        assert!(
+            !command.contains("$base"),
+            "sync-base must not rely on Bash variable expansion: {command}"
+        );
+        assert!(doc["after-pr"]["fix-ci-error"]["if"]["file-changed"] == "sync-base");
+    }
+
+    #[test]
     fn test_builtin_config_yaml_parses_and_validates() {
         // Given / When: the embedded built-in config YAML is parsed
         let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)

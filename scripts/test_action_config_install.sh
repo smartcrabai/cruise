@@ -348,6 +348,59 @@ assert_contains "install: CRUISE_VERSION=latest passes CRUISE_UNMANAGED_INSTALL/
 assert_eq "install: CRUISE_VERSION=latest appends the install dir to GITHUB_PATH" \
   "$IDIR/cruise-bin" "$(cat "$GITHUB_PATH")"
 
+# --- Windows runner: PowerShell installer, platform, failure, version floor --
+stub powershell <<'SH'
+#!/usr/bin/env bash
+printf 'powershell %s\n' "$*" >> "$STUB_LOG"
+printf 'ps-env CRUISE_UNMANAGED_INSTALL=%s\n' "$CRUISE_UNMANAGED_INSTALL" >> "$STUB_LOG"
+mkdir -p "$CRUISE_UNMANAGED_INSTALL"
+cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<BIN
+#!/bin/sh
+echo "cruise ${FAKE_PS_VERSION:-0.2.0}"
+BIN
+chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
+[ "${FAKE_PS_FAIL:-0}" = "1" ] && exit 1
+exit 0
+SH
+export FAKE_PS_VERSION=0.2.0
+
+new_case
+: > "$GITHUB_PATH"
+IDIR_WIN="$TMP/install-windows"
+mkdir -p "$IDIR_WIN"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_OS=Windows RUNNER_TEMP="$IDIR_WIN" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_status "install: a Windows runner succeeds via the PowerShell installer" 0 "$status" "$status_out"
+assert_contains "install: a Windows runner fetches the .ps1 installer through powershell"   "$(cat "$STUB_LOG")" "releases/latest/download/cruise-installer.ps1"
+if grep -q '^curl ' "$STUB_LOG"; then
+  fail "install: a Windows runner never pipes the shell installer through curl" "$(cat "$STUB_LOG")"
+else
+  pass "install: a Windows runner never pipes the shell installer through curl"
+fi
+assert_eq "install: a Windows runner appends the install dir to GITHUB_PATH" \
+  "$IDIR_WIN/cruise-bin" "$(cat "$GITHUB_PATH")"
+
+new_case
+: > "$GITHUB_PATH"
+IDIR_WIN2="$TMP/install-windows-fail"
+mkdir -p "$IDIR_WIN2"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_OS=Windows RUNNER_TEMP="$IDIR_WIN2" FAKE_PS_FAIL=1 CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: a failing Windows installer makes the step fail" "$status" "status=$status"
+assert_contains "install: a failing Windows installer reports a clear ::error:: annotation" \
+  "$status_out" "::error::cruise installer failed for version 'latest'"
+
+new_case
+: > "$GITHUB_PATH"
+IDIR_WIN3="$TMP/install-windows-old"
+mkdir -p "$IDIR_WIN3"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_OS=Windows RUNNER_TEMP="$IDIR_WIN3" FAKE_PS_VERSION=0.1.9 CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
+status=$?
+assert_nonzero_status "install: a Windows install below the version floor is rejected" "$status" "status=$status"
+assert_contains "install: a Windows install below the floor names the too-old version" \
+  "$status_out" "cruise 0.1.9 is too old"
+unset FAKE_PS_VERSION
+
 # --- CRUISE_VERSION unset: defaults to the same 'latest' behaviour --------
 new_case
 : > "$GITHUB_PATH"
@@ -624,6 +677,27 @@ assert_file_absent "install-jcode: installer does not write the caller's HOME" \
   "$TMP/user-home/jcode-installer-home-marker"
 assert_eq "install-jcode: JCODE_VERSION=latest appends the install dir to GITHUB_PATH" \
   "$JDIR/jcode-bin" "$(cat "$GITHUB_PATH")"
+
+# --- RUNNER_OS=Windows: installer LOCALAPPDATA is isolated ----------------
+new_case
+: > "$GITHUB_PATH"
+write_ok_jcode_installer
+cat >> "$FAKE_INSTALLER" <<'EOF'
+printf 'jcode-installer LOCALAPPDATA=%s\n' "$LOCALAPPDATA" >> "$STUB_LOG"
+mkdir -p "$LOCALAPPDATA"
+touch "$LOCALAPPDATA/jcode-installer-localappdata-marker"
+EOF
+JDIRW="$TMP/jcode-windows"
+mkdir -p "$TMP/user-localappdata"
+status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" HOME="$TMP/user-home" LOCALAPPDATA="$TMP/user-localappdata" RUNNER_OS=Windows RUNNER_TEMP="$JDIRW" JCODE_VERSION=latest bash action/scripts/install-jcode.sh 2>&1)
+status=$?
+assert_status "install-jcode: Windows runner install succeeds" 0 "$status" "$status_out"
+assert_contains "install-jcode: Windows installer LOCALAPPDATA is isolated under RUNNER_TEMP" \
+  "$(cat "$STUB_LOG")" "LOCALAPPDATA=$JDIRW/jcode-install-home/LocalAppData"
+assert_file_absent "install-jcode: Windows installer does not write the caller's LOCALAPPDATA" \
+  "$TMP/user-localappdata/jcode-installer-localappdata-marker"
+assert_eq "install-jcode: Windows runner appends the install dir to GITHUB_PATH" \
+  "$JDIRW/jcode-bin" "$(cat "$GITHUB_PATH")"
 
 # --- JCODE_VERSION unset: same as "latest" --------------------------------
 new_case

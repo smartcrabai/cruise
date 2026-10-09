@@ -112,7 +112,7 @@ workflow, relative non-URL values are resolved as paths in the remote directory;
 
 ## Command step (shell execution)
 
-`command:` may be a single string or an array. Arrays are run sequentially and stop on the first failure.
+`command:` may be a single string or an array. Arrays are run sequentially and stop on the first failure. On Windows the string runs through `cmd.exe /C`, so write cmd.exe syntax (or call `powershell -Command` / `bash -c` explicitly).
 
 ```yaml
 steps:

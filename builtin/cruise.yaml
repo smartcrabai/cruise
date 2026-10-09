@@ -567,10 +567,8 @@ after-pr:
     command: |-
       gh pr ready {pr.number}
   sync-base:
-    command: |
-      base=$(gh pr view {pr.number} --json baseRefName -q '.baseRefName')
-      git fetch origin "$base"
-      git merge "origin/$base" --no-edit
+    command: |-
+      cruise internal sync-base {pr.number}
   resolve-conflict:
     skip: prev.success
     allow_commit: true

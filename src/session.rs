@@ -3357,6 +3357,44 @@ mod tests {
         assert!(!state.is_runner_alive());
     }
 
+    #[cfg(windows)]
+    fn windows_runner_state(id: &str) -> SessionState {
+        SessionState::new(
+            id.to_string(),
+            PathBuf::from("C:/repo"),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runner_alive_requires_matching_pid_and_start_time() {
+        let mut state = windows_runner_state("20260511000020");
+        state.set_runner_to_current_process();
+        assert!(state.is_runner_alive());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runner_pid_reuse_is_stale() {
+        let mut state = windows_runner_state("20260511000021");
+        state.set_runner_to_current_process();
+        state.runner_started_at = state.runner_started_at.map(|ts| ts + 1);
+        assert!(!state.is_runner_alive());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_missing_runner_start_time_is_stale() {
+        let mut state = windows_runner_state("20260511000022");
+        state.runner_pid = Some(std::process::id());
+        state.runner_started_at = None;
+        assert!(!state.is_runner_alive());
+    }
+
     #[test]
     fn test_is_runner_alive_false_for_nonexistent_pid() {
         // Given: a session claiming a nonexistent PID

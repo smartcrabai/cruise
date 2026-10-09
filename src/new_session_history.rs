@@ -408,6 +408,12 @@ pub fn expand_tilde(path: &str) -> String {
     {
         return format!("{}/{}", home.to_string_lossy(), rest);
     }
+    #[cfg(windows)]
+    if let Some(rest) = path.strip_prefix("~\\")
+        && let Some(home) = home::home_dir()
+    {
+        return home.join(rest).to_string_lossy().to_string();
+    }
     #[cfg(unix)]
     if let Some(rest) = path.strip_prefix("~") {
         if rest.is_empty() || rest.starts_with('/') {
@@ -437,6 +443,43 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_expand_current_user_tilde_backslash() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _g = crate::test_support::set_fake_home(tmp.path());
+        assert_eq!(
+            std::path::PathBuf::from(expand_tilde("~")),
+            tmp.path().to_path_buf()
+        );
+        assert_eq!(
+            std::path::PathBuf::from(expand_tilde("~\\x")),
+            tmp.path().join("x")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_expand_current_user_tilde_forward_slash() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _g = crate::test_support::set_fake_home(tmp.path());
+        assert_eq!(
+            std::path::PathBuf::from(expand_tilde("~/x")),
+            tmp.path().join("x")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_named_user_tilde_is_not_expanded() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _g = crate::test_support::set_fake_home(tmp.path());
+        assert_eq!(expand_tilde("~alice\\x"), "~alice\\x");
+    }
 
     fn skipped_steps_to_default_indices(
         all_steps: &[&str],

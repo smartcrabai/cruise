@@ -46,6 +46,18 @@ fn xdg_or_home(xdg_var: &str, home_base: &[&str]) -> Result<PathBuf> {
     if let Some(val) = std::env::var_os(xdg_var) {
         return Ok(PathBuf::from(val).join("cruise"));
     }
+    #[cfg(windows)]
+    {
+        let native = if xdg_var == "XDG_CONFIG_HOME" {
+            std::env::var_os("APPDATA").map(|v| PathBuf::from(v).join("cruise"))
+        } else {
+            let sub = if xdg_var == "XDG_DATA_HOME" { "data" } else { "state" };
+            std::env::var_os("LOCALAPPDATA").map(|v| PathBuf::from(v).join("cruise").join(sub))
+        };
+        if let Some(path) = native {
+            return Ok(path);
+        }
+    }
     let home = home::home_dir()
         .ok_or_else(|| CruiseError::Other("cannot determine home directory".to_string()))?;
     let mut path = home;
@@ -61,6 +73,87 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_support::{EnvGuard, lock_process, set_fake_home};
+
+    // -- Windows defaults -----------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_use_xdg_override_before_appdata() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        let _appdata = EnvGuard::set("APPDATA", tmp.path().join("roaming").as_os_str());
+        let _local = EnvGuard::set("LOCALAPPDATA", tmp.path().join("local").as_os_str());
+        let _c = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("xc").as_os_str());
+        let _d = EnvGuard::set("XDG_DATA_HOME", tmp.path().join("xd").as_os_str());
+        let _s = EnvGuard::set("XDG_STATE_HOME", tmp.path().join("xs").as_os_str());
+        assert_eq!(config_dir().unwrap_or_default(), tmp.path().join("xc").join("cruise"));
+        assert_eq!(data_dir().unwrap_or_default(), tmp.path().join("xd").join("cruise"));
+        assert_eq!(state_dir().unwrap_or_default(), tmp.path().join("xs").join("cruise"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_default_config_to_appdata() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        let _appdata = EnvGuard::set("APPDATA", tmp.path().join("roaming").as_os_str());
+        assert_eq!(
+            config_dir().unwrap_or_default(),
+            tmp.path().join("roaming").join("cruise")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_default_data_and_state_to_separate_localappdata_subdirs() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        let _local = EnvGuard::set("LOCALAPPDATA", tmp.path().join("local").as_os_str());
+        let base = tmp.path().join("local").join("cruise");
+        assert_eq!(data_dir().unwrap_or_default(), base.join("data"));
+        assert_eq!(state_dir().unwrap_or_default(), base.join("state"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_fallback_to_home_when_native_env_missing() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home_guards = set_fake_home(tmp.path());
+        assert_eq!(
+            config_dir().unwrap_or_default(),
+            tmp.path().join(".config").join("cruise")
+        );
+        assert_eq!(
+            data_dir().unwrap_or_default(),
+            tmp.path().join(".local").join("share").join("cruise")
+        );
+        assert_eq!(
+            state_dir().unwrap_or_default(),
+            tmp.path().join(".local").join("state").join("cruise")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_set_fake_home_restores_native_env_on_drop() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _outer = EnvGuard::set("APPDATA", "outer-appdata");
+        let snapshot = || {
+            (
+                std::env::var_os("APPDATA"),
+                std::env::var_os("LOCALAPPDATA"),
+                std::env::var_os("USERPROFILE"),
+            )
+        };
+        let before = snapshot();
+        drop(set_fake_home(tmp.path()));
+        assert_eq!(before, snapshot());
+    }
 
     // -- config_dir() -------------------------------------------------------
 
