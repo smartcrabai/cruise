@@ -25,6 +25,13 @@ pub enum View {
     RunAll,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionsFocus {
+    #[default]
+    Sidebar,
+    Detail,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailTab {
     Info,
@@ -274,6 +281,8 @@ pub struct TuiApp {
     ask_active: std::collections::HashSet<String>,
     pub plan_scroll: usize,
     pub log_scroll: usize,
+    pub focus: SessionsFocus,
+    pub info_scroll: usize,
     pub status: Option<String>,
     pub last_error: Option<String>,
     pub dropped_logs: usize,
@@ -335,6 +344,8 @@ impl TuiApp {
             plan_cache: HashMap::new(),
             sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
+            focus: SessionsFocus::Sidebar,
+            info_scroll: 0,
             plan_scroll: 0,
             log_scroll: 0,
             status: None,
@@ -583,6 +594,7 @@ impl TuiApp {
                         self.tab = DetailTab::Info;
                         self.plan_prompts.clear_focus();
                         self.plan_scroll = 0;
+                        self.info_scroll = 0;
                         self.log_scroll = 0;
                         self.dag_selected = 0;
                     }
@@ -731,6 +743,14 @@ impl TuiApp {
             .then_some(session_id)
     }
 
+    fn plan_prompt_input_session_id(&self) -> Option<String> {
+        if self.focus == SessionsFocus::Detail {
+            self.plan_prompt_session_id()
+        } else {
+            None
+        }
+    }
+
     fn selected_session_has_external_plan_input(&self) -> bool {
         let Some(session) = self.active_session() else {
             return false;
@@ -782,16 +802,20 @@ impl TuiApp {
         self.selected = (self.selected.cast_signed() + delta)
             .rem_euclid(len)
             .cast_unsigned();
+        self.reset_session_view_state();
+        self.sync_selected_detail();
+        self.load_tab_data();
+    }
+    fn reset_session_view_state(&mut self) {
         self.log_scroll = 0;
         self.display.follow_log = true;
         self.dag_selected = 0;
-        self.sync_selected_detail();
-        self.load_tab_data();
     }
     pub fn select_home(&mut self) {
         if !self.sessions.is_empty() {
             self.plan_prompts.clear_focus();
             self.selected = 0;
+            self.reset_session_view_state();
             self.sync_selected_detail();
             self.load_tab_data();
         }
@@ -800,6 +824,7 @@ impl TuiApp {
         if !self.sessions.is_empty() {
             self.plan_prompts.clear_focus();
             self.selected = self.sessions.len() - 1;
+            self.reset_session_view_state();
             self.sync_selected_detail();
             self.load_tab_data();
         }
@@ -816,6 +841,8 @@ impl TuiApp {
         let Some(session) = self.active_session() else {
             self.detail_session_id = None;
             self.tab = DetailTab::Info;
+            self.focus = SessionsFocus::Sidebar;
+            self.info_scroll = 0;
             return;
         };
         let id = session.id.clone();
@@ -828,6 +855,9 @@ impl TuiApp {
 
         self.tab = tab;
         self.detail_session_id = Some(id);
+        if session_changed {
+            self.info_scroll = 0;
+        }
         if session_changed || enters_plan_automatically {
             self.plan_scroll = 0;
         }
@@ -999,6 +1029,7 @@ impl TuiApp {
                     let _ = self.application.clear_draft();
                     self.view = View::Sessions;
                     self.tab = DetailTab::Info;
+                    self.focus = SessionsFocus::Sidebar;
                     self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
@@ -1018,6 +1049,7 @@ impl TuiApp {
                     self.form.reset_after_creation();
                     self.view = View::Sessions;
                     self.tab = DetailTab::Info;
+                    self.focus = SessionsFocus::Sidebar;
                     self.plan_prompts.clear_focus();
                     self.refresh();
                     self.selected = self
@@ -1432,7 +1464,7 @@ impl TuiApp {
         if self.modal.is_some() {
             return None;
         }
-        let session_id = self.plan_prompt_session_id()?;
+        let session_id = self.plan_prompt_input_session_id()?;
         if self.plan_prompt_is_editing() {
             match key.code {
                 KeyCode::Enter => {
@@ -1685,7 +1717,7 @@ impl TuiApp {
     }
 
     fn handle_plan_prompt_action(&mut self, action: Action) -> bool {
-        let Some(session_id) = self.plan_prompt_session_id() else {
+        let Some(session_id) = self.plan_prompt_input_session_id() else {
             return false;
         };
         if self.plan_prompt_is_editing() {
@@ -1776,6 +1808,22 @@ impl TuiApp {
             Action::PageDown => self.navigate(8),
             Action::Home => self.navigate_home(),
             Action::End => self.navigate_end(),
+            Action::Left if self.view == View::Sessions => {
+                if self.focus == SessionsFocus::Detail {
+                    self.plan_prompts.clear_focus();
+                    self.set_detail_tab(self.tab.previous());
+                }
+                false
+            }
+            Action::Right if self.view == View::Sessions => {
+                if self.focus == SessionsFocus::Detail {
+                    self.plan_prompts.clear_focus();
+                    self.set_detail_tab(self.tab.next());
+                } else {
+                    self.focus_detail();
+                }
+                false
+            }
             Action::DetailPrevious | Action::Left => {
                 self.plan_prompts.clear_focus();
                 self.set_detail_tab(self.tab.previous());
@@ -1800,6 +1848,7 @@ impl TuiApp {
                 if selected_has_ask || selected_has_external_plan_input {
                     self.plan_prompts.clear_focus();
                     self.set_detail_tab(DetailTab::Plan);
+                    self.focus = SessionsFocus::Detail;
                 } else if self.prompts.active.is_none() && !self.prompts.is_empty() {
                     self.open_queued_prompt();
                 } else {
@@ -1855,6 +1904,12 @@ impl TuiApp {
             } else if !self.complete_current_path() {
                 self.advance_step();
             }
+        } else if self.view == View::Sessions {
+            self.plan_prompts.clear_focus();
+            self.focus = match self.focus {
+                SessionsFocus::Sidebar if !self.sessions.is_empty() => SessionsFocus::Detail,
+                _ => SessionsFocus::Sidebar,
+            };
         } else {
             self.plan_prompts.clear_focus();
             let tab = if next {
@@ -1865,6 +1920,13 @@ impl TuiApp {
             self.set_detail_tab(tab);
         }
         false
+    }
+
+    fn focus_detail(&mut self) {
+        if !self.sessions.is_empty() {
+            self.plan_prompts.clear_focus();
+            self.focus = SessionsFocus::Detail;
+        }
     }
 
     /// Space reaches here only on list steps; text steps consume it as input.
@@ -2108,6 +2170,10 @@ impl TuiApp {
                 step if step.is_choice() => self.choose(delta),
                 _ => {}
             }
+        } else if self.view == View::Sessions && self.focus == SessionsFocus::Sidebar {
+            self.select_move(delta);
+        } else if self.view == View::Sessions && self.tab == DetailTab::Info {
+            self.update_info_scroll(delta);
         } else if self.view == View::Sessions && self.tab == DetailTab::Dag {
             self.move_detail(delta);
         } else if self.view == View::Sessions && self.tab == DetailTab::Log {
@@ -2122,6 +2188,12 @@ impl TuiApp {
     fn navigate_home(&mut self) -> bool {
         if self.view == View::NewSession {
             self.form.rewind();
+        } else if self.view == View::Sessions && self.focus == SessionsFocus::Sidebar {
+            self.select_home();
+        } else if self.view == View::Sessions && self.tab == DetailTab::Info {
+            self.info_scroll = 0;
+        } else if self.view == View::Sessions && self.tab == DetailTab::Dag {
+            self.dag_selected = 0;
         } else if self.tab == DetailTab::Log {
             self.display.follow_log = false;
             self.log_scroll = self.current_line_count();
@@ -2135,6 +2207,16 @@ impl TuiApp {
     fn navigate_end(&mut self) -> bool {
         if self.view == View::NewSession {
             self.form.step = Step::Launch;
+        } else if self.view == View::Sessions && self.focus == SessionsFocus::Sidebar {
+            self.select_end();
+        } else if self.view == View::Sessions && self.tab == DetailTab::Info {
+            self.info_scroll = usize::MAX;
+        } else if self.view == View::Sessions && self.tab == DetailTab::Dag {
+            self.dag_selected = self.active_session().map_or(0, |session| {
+                self.dag_cache
+                    .get(&session.id)
+                    .map_or(0, |dag| dag.nodes.len().saturating_sub(1))
+            });
         } else if self.tab == DetailTab::Log {
             self.display.follow_log = true;
             self.log_scroll = 0;
@@ -2726,6 +2808,7 @@ impl TuiApp {
                 if selected_has_plan_input {
                     self.plan_prompts.clear_focus();
                     self.tab = DetailTab::Plan;
+                    self.focus = SessionsFocus::Detail;
                     self.load_tab_data();
                 } else {
                     self.open_queued_prompt();
@@ -2942,6 +3025,14 @@ impl TuiApp {
             self.log_scroll.saturating_add(delta.unsigned_abs())
         } else {
             self.log_scroll.saturating_sub(delta.cast_unsigned())
+        };
+    }
+
+    pub fn update_info_scroll(&mut self, delta: isize) {
+        self.info_scroll = if delta.is_negative() {
+            self.info_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.info_scroll.saturating_add(delta.cast_unsigned())
         };
     }
 
@@ -3790,6 +3881,11 @@ mod tests {
             assert_eq!(fixture.app.view, View::Sessions);
             assert_eq!(fixture.app.tab, DetailTab::Info, "key {key_code:?}");
             assert_eq!(fixture.app.manual_detail_tabs, HashMap::new());
+            assert_eq!(
+                fixture.app.focus,
+                SessionsFocus::Sidebar,
+                "key {key_code:?}"
+            );
         }
     }
 
@@ -3868,8 +3964,6 @@ mod tests {
     #[test]
     fn every_detail_navigation_key_registers_manual_selection_across_refresh() {
         let cases = [
-            (KeyCode::Tab, DetailTab::Log),
-            (KeyCode::BackTab, DetailTab::Dag),
             (KeyCode::Left, DetailTab::Dag),
             (KeyCode::Right, DetailTab::Log),
             (KeyCode::Char('['), DetailTab::Dag),
@@ -3879,6 +3973,8 @@ mod tests {
         for (key_code, expected) in cases {
             let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
             assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert!(!fixture.app.handle_key(key(KeyCode::Tab)));
+            assert_eq!(fixture.app.focus, SessionsFocus::Detail);
             assert!(!fixture.app.handle_key(key(key_code)));
             assert_eq!(fixture.app.tab, expected, "key {key_code:?}");
 
@@ -3889,6 +3985,404 @@ mod tests {
                 "manual tab selected with {key_code:?} was lost on refresh"
             );
         }
+    }
+
+    #[test]
+    fn tab_and_back_tab_toggle_focus_without_changing_tab_or_manual_selection() {
+        for key_code in [KeyCode::Tab, KeyCode::BackTab] {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            assert_eq!(fixture.app.focus, SessionsFocus::Sidebar);
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert_eq!(fixture.app.focus, SessionsFocus::Detail, "{key_code:?}");
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert!(fixture.app.manual_detail_tabs.is_empty());
+            assert!(!fixture.app.handle_key(key(key_code)));
+            assert_eq!(fixture.app.focus, SessionsFocus::Sidebar, "{key_code:?}");
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert!(fixture.app.manual_detail_tabs.is_empty());
+        }
+    }
+
+    #[test]
+    fn sidebar_focus_right_moves_focus_to_detail_and_left_does_nothing() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Left)));
+        assert_eq!(fixture.app.focus, SessionsFocus::Sidebar);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.focus, SessionsFocus::Detail);
+        assert_eq!(fixture.app.tab, DetailTab::Plan);
+        assert!(fixture.app.manual_detail_tabs.is_empty());
+    }
+
+    #[test]
+    fn detail_focus_left_right_wrap_through_tabs() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        fixture.app.focus = SessionsFocus::Detail;
+        fixture.app.tab = DetailTab::Info;
+        assert!(!fixture.app.handle_key(key(KeyCode::Left)));
+        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert_eq!(fixture.app.tab, DetailTab::Info);
+        assert_eq!(fixture.app.focus, SessionsFocus::Detail);
+    }
+
+    #[test]
+    fn brackets_switch_tabs_under_either_focus() {
+        for focus in [SessionsFocus::Sidebar, SessionsFocus::Detail] {
+            let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+            fixture.app.focus = focus;
+            assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
+            assert_eq!(fixture.app.tab, DetailTab::Log);
+            assert!(!fixture.app.handle_key(key(KeyCode::Char('['))));
+            assert_eq!(fixture.app.tab, DetailTab::Plan);
+            assert_eq!(fixture.app.focus, focus);
+        }
+    }
+
+    fn two_session_fixture() -> PersistedTuiFixture {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Planned),
+            (3, crate::session::SessionPhase::Planned),
+        ]);
+        fixture.app.refresh();
+        fixture.app.selected = 0;
+        fixture
+    }
+
+    #[test]
+    fn sidebar_focus_arrows_and_jk_switch_sessions_on_every_tab() {
+        for tab in [
+            DetailTab::Info,
+            DetailTab::Dag,
+            DetailTab::Plan,
+            DetailTab::Log,
+        ] {
+            for (down, up) in [
+                (KeyCode::Down, KeyCode::Up),
+                (KeyCode::Char('j'), KeyCode::Char('k')),
+            ] {
+                let mut fixture = two_session_fixture();
+                let id = fixture.app.sessions[0].id.clone();
+                fixture
+                    .app
+                    .plan_cache
+                    .insert(id.clone(), "a\nb\nc\nd".to_string());
+                fixture
+                    .app
+                    .logs
+                    .insert(id, (0..10).map(|i| format!("l{i}")).collect());
+                fixture.app.tab = tab;
+                fixture.app.manual_detail_tabs.clear();
+                fixture.app.plan_scroll = 0;
+                fixture.app.log_scroll = 0;
+                assert!(!fixture.app.handle_key(key(down)));
+                assert_eq!(fixture.app.selected, 1, "{tab:?} {down:?}");
+                assert_eq!(fixture.app.plan_scroll, 0);
+                assert_eq!(fixture.app.log_scroll, 0);
+                assert!(!fixture.app.handle_key(key(up)));
+                assert_eq!(fixture.app.selected, 0, "{tab:?} {up:?}");
+                assert_eq!(fixture.app.focus, SessionsFocus::Sidebar);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_focus_page_home_end_jump_between_sessions_on_every_tab() {
+        for tab in [
+            DetailTab::Info,
+            DetailTab::Dag,
+            DetailTab::Plan,
+            DetailTab::Log,
+        ] {
+            let mut fixture = two_session_fixture();
+            let id = fixture.app.sessions[0].id.clone();
+            fixture.app.plan_cache.insert(id, "a\nb\nc\nd".to_string());
+            fixture.app.tab = tab;
+            assert!(!fixture.app.handle_key(key(KeyCode::End)));
+            assert_eq!(fixture.app.selected, 2, "End on {tab:?}");
+            assert_eq!(fixture.app.plan_scroll, 0);
+            assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+            assert_eq!(fixture.app.selected, 0, "Home on {tab:?}");
+            assert!(!fixture.app.handle_key(key(KeyCode::PageDown)));
+            assert_ne!(fixture.app.selected, 0, "PageDown on {tab:?}");
+            assert_eq!(fixture.app.plan_scroll, 0);
+            assert_eq!(fixture.app.log_scroll, 0);
+        }
+    }
+
+    #[test]
+    fn sidebar_home_and_end_reset_per_session_view_state() {
+        let mut fixture = two_session_fixture();
+        fixture.app.log_scroll = 4;
+        fixture.app.display.follow_log = false;
+        fixture.app.dag_selected = 2;
+        assert!(!fixture.app.handle_key(key(KeyCode::End)));
+        assert_eq!(fixture.app.log_scroll, 0);
+        assert!(fixture.app.display.follow_log);
+        assert_eq!(fixture.app.dag_selected, 0);
+        fixture.app.log_scroll = 4;
+        fixture.app.display.follow_log = false;
+        fixture.app.dag_selected = 2;
+        assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+        assert_eq!(fixture.app.log_scroll, 0);
+        assert!(fixture.app.display.follow_log);
+        assert_eq!(fixture.app.dag_selected, 0);
+    }
+
+    fn sample_graph(count: usize) -> crate::graph::ExecutionGraph {
+        let nodes = (0..count)
+            .map(|index| {
+                let id = format!("n{index}");
+                (
+                    id.clone(),
+                    crate::graph::GraphNode {
+                        id,
+                        step_name: format!("step{index}"),
+                        successors: vec![],
+                        runtime: crate::graph::NodeRuntime::default(),
+                    },
+                )
+            })
+            .collect();
+        crate::graph::ExecutionGraph {
+            version: 1,
+            start: "n0".to_string(),
+            nodes,
+            predecessors: indexmap::IndexMap::new(),
+            max_retries: 0,
+            group_sites: std::collections::HashSet::new(),
+            state: crate::graph::ExecutionState::default(),
+        }
+    }
+
+    #[test]
+    fn detail_focus_up_down_scroll_without_switching_sessions() {
+        let mut fixture = two_session_fixture();
+        let id = fixture.app.sessions[0].id.clone();
+        fixture.app.focus = SessionsFocus::Detail;
+        fixture
+            .app
+            .plan_cache
+            .insert(id.clone(), "a\nb\nc\nd".to_string());
+        fixture
+            .app
+            .logs
+            .insert(id.clone(), (0..10).map(|i| format!("l{i}")).collect());
+        fixture.app.dag_cache.insert(id, sample_graph(4));
+
+        fixture.app.tab = DetailTab::Info;
+        assert!(!fixture.app.handle_key(key(KeyCode::Down)));
+        assert_eq!(fixture.app.info_scroll, 1);
+        assert!(!fixture.app.handle_key(key(KeyCode::Up)));
+        assert_eq!(fixture.app.info_scroll, 0);
+        assert!(!fixture.app.handle_key(key(KeyCode::Up)));
+        assert_eq!(fixture.app.info_scroll, 0, "info scroll saturates at zero");
+
+        fixture.app.tab = DetailTab::Dag;
+        assert!(!fixture.app.handle_key(key(KeyCode::Down)));
+        assert_eq!(fixture.app.dag_selected, 1);
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(fixture.app.dag_selected, 2);
+
+        fixture.app.tab = DetailTab::Plan;
+        assert!(!fixture.app.handle_key(key(KeyCode::Down)));
+        assert_eq!(fixture.app.plan_scroll, 1);
+        assert!(!fixture.app.handle_key(key(KeyCode::Up)));
+        assert_eq!(fixture.app.plan_scroll, 0);
+
+        fixture.app.tab = DetailTab::Log;
+        fixture.app.display.follow_log = true;
+        assert!(!fixture.app.handle_key(key(KeyCode::Up)));
+        assert_eq!(fixture.app.log_scroll, 1);
+        assert!(!fixture.app.display.follow_log);
+
+        assert_eq!(fixture.app.selected, 0);
+    }
+
+    #[test]
+    fn detail_focus_home_and_end_jump_within_each_tab() {
+        let mut fixture = two_session_fixture();
+        let id = fixture.app.sessions[0].id.clone();
+        fixture.app.focus = SessionsFocus::Detail;
+        fixture
+            .app
+            .plan_cache
+            .insert(id.clone(), "a\nb\nc\nd".to_string());
+        fixture
+            .app
+            .logs
+            .insert(id.clone(), (0..10).map(|i| format!("l{i}")).collect());
+        fixture.app.dag_cache.insert(id, sample_graph(4));
+
+        fixture.app.tab = DetailTab::Info;
+        assert!(!fixture.app.handle_key(key(KeyCode::End)));
+        assert!(fixture.app.info_scroll > 0);
+        assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+        assert_eq!(fixture.app.info_scroll, 0);
+
+        fixture.app.tab = DetailTab::Dag;
+        assert!(!fixture.app.handle_key(key(KeyCode::End)));
+        assert_eq!(fixture.app.dag_selected, 3);
+        assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+        assert_eq!(fixture.app.dag_selected, 0);
+
+        fixture.app.tab = DetailTab::Plan;
+        assert!(!fixture.app.handle_key(key(KeyCode::End)));
+        assert_eq!(fixture.app.plan_scroll, 3);
+        assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+        assert_eq!(fixture.app.plan_scroll, 0);
+
+        fixture.app.tab = DetailTab::Log;
+        assert!(!fixture.app.handle_key(key(KeyCode::Home)));
+        assert!(!fixture.app.display.follow_log);
+        assert_eq!(fixture.app.log_scroll, 10);
+        assert!(!fixture.app.handle_key(key(KeyCode::End)));
+        assert!(fixture.app.display.follow_log);
+        assert_eq!(fixture.app.log_scroll, 0);
+        assert_eq!(fixture.app.selected, 0);
+    }
+
+    #[test]
+    fn detail_focus_page_keys_scroll_by_a_page_per_tab() {
+        let mut fixture = two_session_fixture();
+        let id = fixture.app.sessions[0].id.clone();
+        fixture.app.focus = SessionsFocus::Detail;
+        fixture.app.plan_cache.insert(
+            id,
+            (0..30)
+                .map(|i| format!("p{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        fixture.app.tab = DetailTab::Plan;
+        assert!(!fixture.app.handle_key(key(KeyCode::PageDown)));
+        assert_eq!(fixture.app.plan_scroll, 8);
+        assert!(!fixture.app.handle_key(key(KeyCode::PageUp)));
+        assert_eq!(fixture.app.plan_scroll, 0);
+        assert_eq!(fixture.app.selected, 0);
+    }
+
+    #[test]
+    fn plan_ask_under_sidebar_focus_switches_sessions_and_enter_opens_palette() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        add_session(&mut app, "session-b", crate::session::SessionPhase::Planned);
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+        app.plan_cache
+            .insert("session-a".to_string(), "plan".to_string());
+        app.plan_prompts.enqueue(
+            "session-a".to_string(),
+            "ask-a".to_string(),
+            "Question?".to_string(),
+        );
+        assert_eq!(app.focus, SessionsFocus::Sidebar);
+
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert!(matches!(app.modal, Some(Modal::Palette { .. })));
+        assert!(!app.plan_prompts.is_editing("session-a"));
+        app.modal = None;
+
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn plan_ask_enter_edits_after_focusing_detail_and_tab_keeps_draft() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session-a",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.view = View::Sessions;
+        app.tab = DetailTab::Plan;
+        app.plan_cache
+            .insert("session-a".to_string(), "plan".to_string());
+        app.plan_prompts.enqueue(
+            "session-a".to_string(),
+            "ask-a".to_string(),
+            "Question?".to_string(),
+        );
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.focus, SessionsFocus::Detail);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert!(app.plan_prompts.is_editing("session-a"));
+        assert!(app.modal.is_none());
+        type_text(&mut app, "hello");
+
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.focus, SessionsFocus::Sidebar);
+        assert!(!app.plan_prompts.is_editing("session-a"));
+        assert_eq!(
+            app.plan_prompts.answer_text("session-a").as_deref(),
+            Some("hello")
+        );
+        assert_eq!(app.tab, DetailTab::Plan);
+    }
+
+    #[test]
+    fn open_and_answer_prompt_focus_the_detail_pane() {
+        let mut app = app();
+        add_session(
+            &mut app,
+            "session",
+            crate::session::SessionPhase::AwaitingInput,
+        );
+        app.sessions[0].awaiting_input = true;
+        app.sessions[0].pending_ask_question = Some("Q".to_string());
+        app.view = View::Sessions;
+        app.tab = DetailTab::Info;
+        assert_eq!(app.focus, SessionsFocus::Sidebar);
+        app.handle_action(Action::Open);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert_eq!(app.focus, SessionsFocus::Detail);
+
+        app.focus = SessionsFocus::Sidebar;
+        app.tab = DetailTab::Info;
+        app.apply_action(SessionAction::Answer);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert_eq!(app.focus, SessionsFocus::Detail);
+    }
+
+    #[test]
+    fn focus_returns_to_sidebar_when_the_session_list_becomes_empty() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        assert!(!fixture.app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(fixture.app.focus, SessionsFocus::Detail);
+        fixture
+            .manager
+            .delete(&test_session_id(1))
+            .unwrap_or_else(|error| panic!("{error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.sessions.len(), 0);
+        assert_eq!(fixture.app.focus, SessionsFocus::Sidebar);
+        assert_eq!(fixture.app.info_scroll, 0);
+    }
+
+    #[test]
+    fn switching_sessions_resets_info_scroll() {
+        let mut fixture = two_session_fixture();
+        fixture.app.info_scroll = 5;
+        fixture.app.select_move(1);
+        assert_eq!(fixture.app.info_scroll, 0);
+    }
+
+    #[test]
+    fn created_session_and_draft_events_return_focus_to_the_sidebar() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        fixture.app.focus = SessionsFocus::Detail;
+        let state = persisted_state(&fixture.manager, 2, crate::session::SessionPhase::Draft);
+        fixture
+            .app
+            .apply_event(UiEvent::DraftCreated { result: Ok(state) });
+        assert_eq!(fixture.app.focus, SessionsFocus::Sidebar);
     }
 
     #[test]
@@ -3958,7 +4452,7 @@ mod tests {
         );
         assert_eq!(fixture.app.tab, DetailTab::Plan);
 
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
 
         fixture.app.select_move(1);
@@ -4036,7 +4530,7 @@ mod tests {
     #[test]
     fn draft_created_does_not_inherit_the_previous_sessions_manual_tab() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
 
         let state = persisted_state(&fixture.manager, 2, crate::session::SessionPhase::Draft);
@@ -4057,7 +4551,7 @@ mod tests {
     #[tokio::test]
     async fn session_created_does_not_inherit_the_previous_sessions_manual_tab() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
 
         let state = persisted_state(
@@ -4096,7 +4590,7 @@ mod tests {
         ]);
         let selected_id = test_session_id(1);
         let other_id = test_session_id(2);
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
         let _claim = fixture
             .app
@@ -4138,7 +4632,7 @@ mod tests {
         assert_eq!(fixture.app.tab, DetailTab::Plan);
         assert_eq!(fixture.app.plan_scroll, 7);
 
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
         fixture.app.refresh();
         assert_eq!(fixture.app.tab, DetailTab::Log);
@@ -4168,7 +4662,7 @@ mod tests {
     #[test]
     fn refreshing_a_failed_session_list_keeps_the_current_manual_tab() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
         assert_eq!(fixture.app.tab, DetailTab::Log);
 
         let sessions_dir = fixture.manager.sessions_dir();
@@ -4276,7 +4770,7 @@ mod tests {
         for (phase, event) in manual_cases {
             let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
             let id = test_session_id(1);
-            assert!(!fixture.app.handle_key(key(KeyCode::Right)));
+            assert!(!fixture.app.handle_key(key(KeyCode::Char(']'))));
             assert_eq!(fixture.app.tab, DetailTab::Log);
             let _claim = fixture
                 .app
@@ -6106,6 +6600,7 @@ mod tests {
             (0..10).map(|index| format!("line-{index}")).collect(),
         );
 
+        app.focus = SessionsFocus::Detail;
         app.tab = DetailTab::Plan;
         app.update_plan_scroll(-2);
         assert_eq!(app.plan_scroll, 0);

@@ -64,7 +64,7 @@ jsxrs = "0.1.5"
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",
 ] }
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = "0.9.2"
 reedline = "0.52"
 seher-claude-agent-sdk = "=0.0.59"
