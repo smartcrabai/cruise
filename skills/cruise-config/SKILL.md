@@ -16,7 +16,7 @@ cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p`
 
 Config files are resolved in this priority order:
 
-1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` selects the built-in default workflow even when config files exist
+1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` (or `builtin:default`) selects the built-in default workflow even when config files exist; `-c builtin:simple` / `builtin:review` select the other catalog workflows (`cruise workflow list`; copy one to edit with `cruise workflow eject <name> [--to user|project]`)
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)

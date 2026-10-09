@@ -209,7 +209,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 `cruise plan`/`exec` resolve the **workflow YAML** in this order. `cruise run` loads the session's tagged `config` reference from `state.json`. A `kind: file` reference follows its absolute live `path`. `kind: builtin_snapshot`, `kind: repo_snapshot`, and `kind: inline_snapshot` references load only `sessions/<id>/config.yaml` and never rediscover or fall back to another config.
 
-1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` selects the built-in default workflow.
+1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` (or `builtin:default`) selects the built-in default workflow; `builtin:simple` / `builtin:review` select the other built-ins (`cruise workflow list`). `cruise workflow eject <name> [--to user|project]` copies a built-in to `$XDG_CONFIG_HOME/cruise/workflows/` (default) or `./.cruise/` and never overwrites an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
 4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.

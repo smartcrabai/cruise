@@ -1,0 +1,29 @@
+description: Implement, test, auto-fix failures, then commit
+command:
+  - claude
+  - -p
+
+groups:
+  fix-loop:
+    if:
+      file-changed: test
+    max_retries: 2
+    steps:
+      apply-fix:
+        prompt: |
+          The following test errors occurred. Please fix them:
+          ---
+          {prev.stderr}
+
+steps:
+  implement:
+    prompt: "{input}"
+
+  test:
+    command: cargo test
+
+  fix:
+    group: fix-loop
+
+  commit:
+    command: "git add -A && git commit -m 'feat: {input}'"

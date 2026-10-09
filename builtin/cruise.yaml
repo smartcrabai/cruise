@@ -1,3 +1,4 @@
+description: Plan, implement, verify, and open a pull request
 languages:
   pr: English
 cleanup_after_pr: true
