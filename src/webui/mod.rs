@@ -119,7 +119,7 @@ pub async fn run(args: WebuiArgs) -> Result<()> {
             "warning: the WebUI has no authentication; do not expose it on untrusted networks"
         );
     }
-    if !args.no_open
+    if args.open
         && let Err(error) = crate::platform::open_url(&url)
     {
         eprintln!("could not open a browser ({error}); open {url} manually");

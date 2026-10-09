@@ -63,7 +63,7 @@ pub enum Commands {
     Exec(ExecArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
-    /// Serve the browser UI from this machine and open it in the default browser.
+    /// Serve the browser UI from this machine (pass `--open` to launch the default browser).
     Webui(WebuiArgs),
 }
 
@@ -77,9 +77,9 @@ pub struct WebuiArgs {
     #[arg(long, default_value_t = 8484)]
     pub port: u16,
 
-    /// Do not open the browser automatically.
-    #[arg(long)]
-    pub no_open: bool,
+    /// Open the WebUI in the default browser after the server starts.
+    #[arg(short = 'o', long)]
+    pub open: bool,
 
     /// Serve templates and static files from this directory (containing
     /// `templates/` and `static/`) instead of the embedded copy; templates are
@@ -613,6 +613,46 @@ mod tests {
             }
             _ => panic!("expected List subcommand"),
         }
+    }
+
+    fn webui_open_flag(argv: &[&str]) -> bool {
+        use clap::CommandFactory;
+        let matches = Cli::command()
+            .try_get_matches_from(argv)
+            .expect("webui args should parse");
+        let (name, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(name, "webui");
+        sub.try_get_one::<bool>("open")
+            .expect("webui should define an `open` flag")
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_webui_open_defaults_to_false() {
+        assert!(!webui_open_flag(&["cruise", "webui"]));
+    }
+
+    #[test]
+    fn test_webui_open_long_flag_sets_true() {
+        assert!(webui_open_flag(&["cruise", "webui", "--open"]));
+    }
+
+    #[test]
+    fn test_webui_open_short_flag_sets_true() {
+        assert!(webui_open_flag(&["cruise", "webui", "-o"]));
+    }
+
+    #[test]
+    fn test_webui_open_short_flag_combines_with_port() {
+        assert!(webui_open_flag(&[
+            "cruise", "webui", "-o", "--port", "9000"
+        ]));
+    }
+
+    #[test]
+    fn test_webui_no_open_flag_is_rejected() {
+        assert!(Cli::try_parse_from(["cruise", "webui", "--no-open"]).is_err());
     }
 
     #[test]
