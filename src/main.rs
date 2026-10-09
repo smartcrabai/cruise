@@ -72,6 +72,8 @@ mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
+mod workflow_cmd;
+mod workflow_packages;
 mod workspace;
 mod worktree;
 mod worktree_pr;
@@ -109,6 +111,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
+        Some(cli::Commands::Workflow(args)) => workflow_cmd::run(args),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),
