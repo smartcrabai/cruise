@@ -207,9 +207,15 @@ pub(crate) async fn editor(
 ) -> Response {
     run(&state, "Editor", || {
         if kind == "publish" {
+            let supports_trigger = state
+                .application
+                .reconcile_session(&id)
+                .map(|session| crate::issue_publish::supports_trigger_cruise(&session))
+                .unwrap_or(true);
             let vm = PublishDialogVm {
                 id: id.clone(),
                 submit_url: format!("/webui/sessions/{id}/publish"),
+                supports_trigger,
             };
             return Ok(html(state.templates.render("publish-dialog", &vm)?));
         }
@@ -311,7 +317,7 @@ pub(crate) async fn new_steps(State(state): State<WebState>, Query(params): Para
 pub(crate) async fn repos(State(state): State<WebState>) -> Response {
     let repos = state
         .application
-        .list_github_repositories()
+        .list_repositories()
         .await
         .unwrap_or_default();
     fragment(&state, "Repositories", || {

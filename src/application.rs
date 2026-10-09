@@ -448,6 +448,10 @@ fn create_session_inner(
     );
     state.workspace_mode = request.workspace_mode;
     state.allow_dirty_working_tree = request.allow_dirty_working_tree;
+    state.forge = match repo.as_deref() {
+        Some(repo) => Some(crate::forge::resolve_repo_locator_env(repo)?.kind),
+        None => None,
+    };
     state.repo = repo;
     state.skipped_steps = request.skipped_steps;
     manager.create_with_config(&state, &config)?;
@@ -2209,12 +2213,36 @@ impl CruiseApplication {
         result
     }
 
-    /// List repositories visible to the GitHub CLI.
+    /// List repositories visible to the forge CLI (`gh`, or `glab` when `CRUISE_FORGE=gitlab`).
     ///
     /// # Errors
     ///
-    /// Returns an error when the GitHub CLI cannot run or reports failure.
-    pub async fn list_github_repositories(&self) -> Result<Vec<String>> {
+    /// Returns an error when the forge CLI cannot run or reports failure.
+    pub async fn list_repositories(&self) -> Result<Vec<String>> {
+        if crate::forge::forge_override_from_env()? == Some(crate::forge::ForgeKind::GitLab) {
+            let output = crate::step::command::run_process_output_cancelled(
+                "glab",
+                &["repo", "list", "--per-page", "100", "--output", "json"],
+                None,
+                None,
+            )
+            .await?;
+            if !output.status.success() {
+                return Err(CruiseError::Other(format!(
+                    "glab repo list failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|e| CruiseError::Other(format!("invalid glab repo list output: {e}")))?;
+            return Ok(value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.get("path_with_namespace").and_then(|p| p.as_str()))
+                .map(ToString::to_string)
+                .collect());
+        }
         let output = crate::step::command::run_process_output_cancelled(
             "gh",
             &[
@@ -3132,7 +3160,7 @@ fn setup_run_blocking(
         requested_mode.unwrap_or(state.workspace_mode)
     };
     if workspace_mode == WorkspaceMode::Worktree {
-        crate::worktree_pr::ensure_gh_available()?;
+        crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
     let (workspace, repo_clone_created) =
         prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;

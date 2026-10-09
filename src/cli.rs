@@ -24,7 +24,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_force_exec: bool,
 
-    /// GitHub repository (owner/repository) to clone into a temporary
+    /// Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary
     /// directory for planning and execution. The clone is removed after
     /// the plan is approved and again after the PR has been created.
     #[arg(long, value_name = "OWNER/REPO")]
@@ -131,7 +131,7 @@ pub struct PlanArgs {
     #[arg(long, conflicts_with = "grill")]
     pub no_interactive_planning: bool,
 
-    /// GitHub repository (owner/repository) to clone into a temporary
+    /// Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary
     /// directory for planning and execution. The clone is removed after the
     /// plan is approved and again after the PR has been created.
     #[arg(long, value_name = "OWNER/REPO")]

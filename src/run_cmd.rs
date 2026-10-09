@@ -484,7 +484,7 @@ async fn run_single(
         session.worktree_branch = None;
     }
     if effective_workspace_mode == WorkspaceMode::Worktree {
-        crate::worktree_pr::ensure_gh_available()?;
+        crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
     }
     if cancel_token.is_cancelled() {
         return Err(CruiseError::Interrupted);
@@ -1722,7 +1722,7 @@ steps:
         );
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "test task", "", "", None)
+        let result = attempt_pr_creation(&ctx, crate::forge::ForgeKind::GitHub, "test task", "", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1748,7 +1748,7 @@ steps:
         );
         let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, "add feature", "", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1800,7 +1800,7 @@ steps:
             "12345+octocat@users.noreply.github.com",
         );
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, "add feature", "", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1835,7 +1835,7 @@ steps:
         let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, "rerun without changes", "", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1899,7 +1899,7 @@ steps:
         );
 
         let pr_title = "feat: add user icon registration";
-        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, "implement user icon feature", pr_title, "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1933,7 +1933,7 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "", "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, fallback, "", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1967,7 +1967,7 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "", None)
+        let result = attempt_pr_creation(&f.ctx, crate::forge::ForgeKind::GitHub, fallback, "   ", "", None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
 

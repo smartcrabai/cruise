@@ -1,6 +1,6 @@
 # `after-pr`: steps that run after PR creation
 
-Steps that run automatically after `cruise run` creates a pull request via `gh pr create`. The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
+Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does). The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
 
 ## Basics
 

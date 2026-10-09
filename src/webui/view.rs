@@ -437,6 +437,7 @@ pub(crate) struct OptionDialogVm {
 pub(crate) struct PublishDialogVm {
     pub(crate) id: String,
     pub(crate) submit_url: String,
+    pub(crate) supports_trigger: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2785,6 +2785,76 @@ steps:
         assert_eq!(config.steps.len(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_builtin_wait_ci_gitlab_statuses_and_traces() {
+        // Given: fake glab returning a configurable pipeline status
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let Some(StringOrVec::Single(template)) = config
+            .after_pr
+            .get("wait-ci")
+            .and_then(|step| step.command.clone())
+        else {
+            panic!("wait-ci must be a single command");
+        };
+        let script = template
+            .replace("{pr.url}", "https://gitlab.com/g/p/-/merge_requests/7")
+            .replace("{pr.number}", "7");
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        crate::test_support::init_git_repo(tmp.path());
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e:?}"));
+        let glab = bin.join("glab");
+        std::fs::write(
+            &glab,
+            "#!/bin/sh\ncase \"$*\" in\n*\"ci trace\"*) echo \"TRACE-OUTPUT $*\";;\n*--with-job-details*) echo '{\"id\":99,\"status\":\"failed\",\"jobs\":[{\"id\":5,\"status\":\"failed\"},{\"id\":6,\"status\":\"success\"}]}';;\n*) echo \"{\\\"status\\\":\\\"$FAKE_STATUS\\\"}\";;\nesac\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut perms = std::fs::metadata(&glab)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&glab, perms).unwrap_or_else(|e| panic!("{e:?}"));
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |status: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(tmp.path())
+                .env("PATH", &path)
+                .env("FAKE_STATUS", status)
+                .output()
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        };
+
+        // Then: success exits 0
+        assert!(run("success").status.success());
+        // And: failed and other terminal statuses exit 1 with collected traces
+        for status in ["failed", "canceled", "skipped"] {
+            let out = run(status);
+            assert_eq!(out.status.code(), Some(1), "{status}");
+            let log = std::fs::read_to_string(tmp.path().join(".git/cruise-ci-traces.log"))
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(log.contains("TRACE-OUTPUT ci trace 5 --pipeline-id 99"), "{log}");
+            assert!(!log.contains("trace 6"), "{log}");
+        }
+        // And: the fix prompt points at the collected traces
+        let prompt = config
+            .after_pr
+            .get("fix-ci-error")
+            .and_then(|step| step.prompt.clone())
+            .unwrap_or_default();
+        assert!(prompt.contains("cruise-ci-traces.log"));
+    }
+
     #[test]
     fn test_parse_cruise_yaml() {
         let yaml = BUILTIN_CONFIG_YAML;
