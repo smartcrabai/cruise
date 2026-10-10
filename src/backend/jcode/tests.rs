@@ -1736,7 +1736,7 @@ fn restricted_computer_use_merges_user_disabled_tools_with_mode_tools() {
     let value = env
         .get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
         .and_then(|value| value.to_str())
-        .unwrap()
+        .unwrap_or_else(|| panic!("{JCODE_DISABLED_TOOLS_ENV} missing"))
         .to_string();
     let tools: Vec<&str> = value.split(',').collect();
     assert!(tools.contains(&"grep"));

@@ -1302,7 +1302,7 @@ mod tests {
             opts.permission_mode,
             Some(PermissionMode::BypassPermissions)
         ));
-        assert!(opts.disallowed_tools.is_empty());
+        assert_eq!(opts.disallowed_tools, Vec::<String>::new());
     }
 
     #[test]

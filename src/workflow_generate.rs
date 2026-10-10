@@ -50,6 +50,7 @@ pub(crate) async fn generate_yaml(
                 tools: Vec::new(),
                 on_session_id: None,
                 resume: None,
+                permission: crate::config::PermissionMode::Full,
                 computer_use: false,
             })
             .await?;

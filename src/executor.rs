@@ -192,12 +192,12 @@ impl Executor {
     /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
     /// cruise does not implement.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+        const GUARD: &str = "read-only";
         if req.permission != crate::config::PermissionMode::ReadOnly {
             return self.dispatch(req).await;
         }
         // Detection only (not a sandbox or rollback): any change inside the
         // FileTracker scope fails the step, whatever the backend returned.
-        const GUARD: &str = "read-only";
         let root = req
             .working_dir
             .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
