@@ -4887,7 +4887,7 @@ mod merge_pr_tests {
         let mut state = SessionState::new(
             ID.to_string(),
             repo,
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         state.phase = SessionPhase::Completed;
@@ -4944,7 +4944,7 @@ mod merge_pr_tests {
             f.app.merge_pr(ID, PrMergeMethod::Squash),
             Err(CruiseError::Other(_))
         ));
-        assert!(f.gh.merge_calls().is_empty());
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
 
         // Not Completed.
         let mut state = f.manager.load(ID).unwrap_or_else(|e| panic!("{e}"));
@@ -4955,7 +4955,7 @@ mod merge_pr_tests {
             f.app.merge_pr(ID, PrMergeMethod::Squash),
             Err(CruiseError::Other(_))
         ));
-        assert!(f.gh.merge_calls().is_empty());
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
     }
 
     #[test]
@@ -4967,7 +4967,7 @@ mod merge_pr_tests {
         let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
 
         assert!(matches!(result, Err(CruiseError::Other(_))), "{result:?}");
-        assert!(f.gh.merge_calls().is_empty());
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
         assert_kept(&f, &state);
     }
 
@@ -4984,7 +4984,7 @@ mod merge_pr_tests {
         let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
 
         assert!(matches!(result, Err(CruiseError::Busy(_))), "{result:?}");
-        assert!(f.gh.merge_calls().is_empty());
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
     }
 
     #[test]
@@ -5075,7 +5075,7 @@ mod merge_pr_tests {
         let mut other = SessionState::new(
             "20261009000001".to_string(),
             f.tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "other".to_string(),
         );
         other.phase = SessionPhase::Completed;

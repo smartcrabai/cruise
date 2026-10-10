@@ -4509,7 +4509,7 @@ mod tests {
             let mut state = SessionState::new(
                 ID.to_string(),
                 PathBuf::from("."),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "task".to_string(),
             );
             state.phase = phase;
@@ -4557,6 +4557,7 @@ mod tests {
                 panic!("palette expected");
             };
             assert!(actions.contains(&SessionAction::MergePr));
+            drop(with_pr);
 
             let mut no_pr = env(None, SessionPhase::Completed);
             no_pr.app.open_palette();
@@ -4590,7 +4591,7 @@ mod tests {
             assert!(!e.app.handle_key(key(KeyCode::Esc)));
 
             assert!(e.app.modal.is_none());
-            assert!(e.gh.merge_calls().is_empty());
+            assert_eq!(e.gh.merge_calls(), Vec::<String>::new());
             assert!(e.manager.load(ID).is_ok());
         }
 
@@ -4602,7 +4603,7 @@ mod tests {
             e.app.apply_action(SessionAction::MergePr);
             assert!(!e.app.handle_key(key(KeyCode::Enter)));
 
-            assert!(e.gh.merge_calls().is_empty());
+            assert_eq!(e.gh.merge_calls(), Vec::<String>::new());
         }
 
         #[test]
@@ -4613,7 +4614,7 @@ mod tests {
             e.app.apply_action(SessionAction::MergePr);
             assert!(!e.app.handle_key(key(KeyCode::Enter)));
 
-            assert!(e.gh.merge_calls().is_empty());
+            assert_eq!(e.gh.merge_calls(), Vec::<String>::new());
         }
 
         #[test]

@@ -514,7 +514,7 @@ mod merge_pr {
         .await;
 
         assert!(!body.contains("hx-post"), "{body}");
-        assert!(m.gh.merge_calls().is_empty());
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -581,7 +581,7 @@ mod merge_pr {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{form}: {body}");
         }
-        assert!(m.gh.merge_calls().is_empty());
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
         assert!(exists(&m));
     }
 
@@ -597,7 +597,7 @@ mod merge_pr {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(m.gh.merge_calls().is_empty());
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
         assert!(exists(&m));
     }
 

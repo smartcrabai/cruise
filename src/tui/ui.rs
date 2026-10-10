@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1011,7 +1013,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             render_publish_modal(frame, app, area, *trigger_cruise);
         }
         Modal::MergePr { status, method } => {
-            render_merge_pr_modal(frame, app, area, status, *method)
+            render_merge_pr_modal(frame, app, area, status, *method);
         }
         Modal::Palette { actions, selected } => {
             render_palette_modal(frame, app, area, actions, *selected);
@@ -1074,7 +1076,7 @@ fn render_merge_pr_modal(
         text.push_str(" none");
     }
     for check in &status.checks {
-        text.push_str(&format!("\n  {}: {}", check.name, check.status));
+        let _ = write!(text, "\n  {}: {}", check.name, check.status);
     }
     text.push_str("\n\nMethod:");
     for (candidate, label) in [
@@ -1083,7 +1085,7 @@ fn render_merge_pr_modal(
         (PrMergeMethod::Rebase, "Rebase"),
     ] {
         let mark = if candidate == method { ">" } else { " " };
-        text.push_str(&format!("\n {mark} {label}"));
+        let _ = write!(text, "\n {mark} {label}");
     }
     text.push_str("\n\n↑↓ method   Enter merge   Esc cancel");
     let height = u16::try_from(status.checks.len())
