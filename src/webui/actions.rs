@@ -22,6 +22,7 @@ pub(crate) struct SessionActionsVm {
     pub show_delete: bool,
     pub show_cancel: bool,
     pub show_generate_plan: bool,
+    pub show_merge_pr: bool,
     pub status: String,
 }
 
@@ -95,6 +96,8 @@ pub(crate) fn session_actions(
         && (session.phase == "Draft"
             || session.phase == "Awaiting Input"
             || (session.phase == "Awaiting Approval" && has_plan_error));
+    let show_merge_pr =
+        session.phase == "Completed" && session.pr_url.is_some() && active_operation.is_none();
 
     SessionActionsVm {
         show_approve,
@@ -110,6 +113,7 @@ pub(crate) fn session_actions(
         show_delete,
         show_cancel,
         show_generate_plan,
+        show_merge_pr,
         status: status.to_string(),
     }
 }
@@ -376,6 +380,39 @@ mod tests {
     }
 
     #[test]
+    fn completed_pr_offers_merge_action() {
+        let mut session = make_session("Completed");
+        session.pr_url = Some("https://github.com/owner/repo/pull/3".to_string());
+        assert!(session_actions(&session, None, false).show_merge_pr);
+
+        session.pr_url = None;
+        assert!(!session_actions(&session, None, false).show_merge_pr);
+
+        for phase in [
+            "Planned",
+            "Failed",
+            "Suspended",
+            "Awaiting Approval",
+            "Running",
+        ] {
+            let mut session = make_session(phase);
+            session.pr_url = Some("https://github.com/owner/repo/pull/3".to_string());
+            assert!(
+                !session_actions(&session, None, false).show_merge_pr,
+                "{phase}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_action_hidden_while_operation_is_active() {
+        let mut session = make_session("Completed");
+        session.pr_url = Some("https://github.com/owner/repo/pull/3".to_string());
+        let value = session_actions(&session, Some(OperationKind::Mutate), false);
+        assert!(!value.show_merge_pr);
+    }
+
+    #[test]
     fn serializes_all_fields_in_camel_case() {
         let Ok(value) = serde_json::to_value(actions("Draft", false, None, false)) else {
             panic!("actions serialize");
@@ -394,6 +431,7 @@ mod tests {
             "showDelete",
             "showCancel",
             "showGeneratePlan",
+            "showMergePr",
             "status",
         ] {
             assert!(value.get(key).is_some(), "missing {key}");
