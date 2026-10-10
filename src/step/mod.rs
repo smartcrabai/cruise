@@ -26,6 +26,7 @@ pub struct PromptStep {
     pub instruction: Option<String>,
     pub output_file: Option<String>,
     pub computer_use: Option<bool>,
+    pub permission: Option<crate::config::PermissionMode>,
 }
 
 /// Parameters for a command step.
@@ -101,6 +102,11 @@ impl TryFrom<StepConfig> for StepKind {
                 "computer_use is only supported on prompt steps".to_string(),
             ));
         }
+        if config.permission.is_some() && !is_prompt_step {
+            return Err(CruiseError::InvalidStepConfig(
+                "permission is only supported on prompt steps".to_string(),
+            ));
+        }
         if let Some(children) = config.parallel {
             return Ok(StepKind::Parallel(children));
         }
@@ -118,6 +124,7 @@ impl TryFrom<StepConfig> for StepKind {
                 instruction: config.instruction,
                 output_file: config.output_file,
                 computer_use: config.computer_use,
+                permission: config.permission,
             }));
         }
 
@@ -451,5 +458,29 @@ mod tests {
         // IfCondition does not affect StepKind conversion; the engine handles it.
         let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(kind, StepKind::Command(_)));
+    }
+
+    #[test]
+    fn test_permission_is_rejected_on_command_steps() {
+        let mut config = make_command_step();
+        config.permission = Some(crate::config::PermissionMode::Full);
+        let Err(error) = StepKind::try_from(config) else {
+            panic!("permission is only supported on prompt steps");
+        };
+        assert!(error.to_string().contains("permission"));
+    }
+
+    #[test]
+    fn test_prompt_step_carries_permission_override() {
+        let mut config = make_prompt_step();
+        config.permission = Some(crate::config::PermissionMode::ReadOnly);
+        let StepKind::Prompt(step) = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e}"))
+        else {
+            panic!("expected prompt step");
+        };
+        assert_eq!(
+            step.permission,
+            Some(crate::config::PermissionMode::ReadOnly)
+        );
     }
 }

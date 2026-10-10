@@ -576,6 +576,7 @@ languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
+# permission: full        # prompt permission: read-only | edit | full (default full)
 # computer_use: false     # jcode only, macOS: let prompts control the desktop (macos_computer_use)
 # Deprecated compatibility fields: pr_language and plan_language
 
@@ -666,6 +667,17 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Setting it to `true` with `sdk: claude` or `command:` is rejected during config validation.
 
 When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
+
+### Permission modes
+
+Workflow-level `permission` defaults to `full`. A prompt step may set `permission: read-only | edit | full` to override it. `full` keeps today's behavior. `edit` disables shell execution (Claude `Bash`, jcode `bash`) but keeps direct edit/write/patch tools. `read-only` also disables file mutation tools (Claude `Edit`/`Write`/`NotebookEdit`, jcode `edit`/`write`/`apply_patch`). Restricted modes force `macos_computer_use` off even with `computer_use: true`, and Claude runs them with `dontAsk` so no permission prompt can block an unattended run. Jcode's mode-specific tools are merged into the selected `JCODE_DISABLED_TOOLS` list.
+
+- `read-only` and `edit` are rejected with a `command:` backend, because cruise cannot control an arbitrary CLI's tools.
+- `read-only` combined with `allow_commit: true` is a configuration error. `allow_commit` only controls the HEAD/ref commit guard and never widens the permission mode.
+- A group call, `workflow_call`, or `parallel` wrapper cannot set `permission`. Set it on the inner prompt or parallel prompt child. A parallel block with any read-only child must contain only read-only prompt children.
+- A `workflow_call` callee's top-level `permission` is ignored (the caller's default applies), while per-step overrides inside the callee are kept.
+- A read-only step additionally fails with `ReadOnlyWorkspaceChanged` if the workspace snapshot changes during the step. This is change detection, not an OS sandbox or rollback, and it ignores `.git`, `target`, and `node_modules`.
+- Built-in planning, fix/ask, title, and PR-description turns always run with `full`.
 
 **Upgrade note:** On macOS, earlier Cruise versions exposed `macos_computer_use` to every jcode prompt implicitly. Set workflow-level `computer_use: true` to retain that behavior.
 
@@ -761,7 +773,7 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 
-`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled.
+`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true and the permission is `full`, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled. Restricted `permission` modes append their tools (`bash`, plus `edit`, `write`, `apply_patch` for `read-only`) to the selected list.
 
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
@@ -903,7 +915,7 @@ steps:
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
   can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
-  set `computer_use` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
+  set `computer_use` and `permission` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
   A child prompt that reads an artifact produced by a sibling in the same block
@@ -1227,7 +1239,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `nex
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 
