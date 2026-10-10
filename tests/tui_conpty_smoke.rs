@@ -1,18 +1,21 @@
 #![cfg(windows)]
 
 use std::io::Write as _;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use tempfile::TempDir;
 
 const EXIT_TIMEOUT: Duration = Duration::from_secs(20);
+const TRANSCRIPT_TAIL: usize = 4000;
 
 struct Tui {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn std::io::Write + Send>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
     _root: TempDir,
+    output: Arc<Mutex<Vec<u8>>>,
 }
 
 fn start_tui() -> Tui {
@@ -48,10 +51,22 @@ fn start_tui() -> Tui {
         .master
         .try_clone_reader()
         .unwrap_or_else(|error| panic!("reader failed: {error}"));
-    // Drain output so the ConPTY never blocks on a full pipe.
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&output);
+    // Drain output so the ConPTY never blocks on a full pipe, and keep it for
+    // failure messages.
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
-        while matches!(std::io::Read::read(&mut reader, &mut buffer), Ok(n) if n > 0) {}
+        loop {
+            match std::io::Read::read(&mut reader, &mut buffer) {
+                Ok(n) if n > 0 => {
+                    if let Ok(mut bytes) = sink.lock() {
+                        bytes.extend_from_slice(&buffer[..n]);
+                    }
+                }
+                _ => break,
+            }
+        }
     });
     std::thread::sleep(Duration::from_secs(3));
     Tui {
@@ -59,7 +74,18 @@ fn start_tui() -> Tui {
         writer,
         _master: pair.master,
         _root: root,
+        output,
     }
+}
+
+fn transcript(tui: &Tui) -> String {
+    let bytes = tui
+        .output
+        .lock()
+        .map(|bytes| bytes.clone())
+        .unwrap_or_default();
+    let start = bytes.len().saturating_sub(TRANSCRIPT_TAIL);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
 fn wait_for_exit(tui: &mut Tui) -> bool {
@@ -80,7 +106,11 @@ fn windows_tui_ctrl_c_cancels_busy_operation_and_restores_terminal() {
         .write_all(&[0x03])
         .unwrap_or_else(|error| panic!("{error}"));
     tui.writer.flush().unwrap_or_else(|error| panic!("{error}"));
-    assert!(wait_for_exit(&mut tui), "TUI did not exit after Ctrl+C");
+    assert!(
+        wait_for_exit(&mut tui),
+        "TUI did not exit after Ctrl+C; recent output: {}",
+        transcript(&tui)
+    );
 }
 
 #[test]
