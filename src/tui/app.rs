@@ -3314,7 +3314,7 @@ mod tests {
             let mut state = SessionState::new(
                 test_session_id(index),
                 manager.sessions_dir(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 format!("task {index}"),
             );
             state.phase = phase;
@@ -4435,7 +4435,7 @@ mod tests {
         let mut state = SessionState::new_draft(
             crate::session::SessionManager::new_session_id(),
             PathBuf::from("."),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         state.attachments = vec![PathBuf::from("/tmp/persisted-image.png")];
@@ -5403,7 +5403,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 format!("task {id}"),
             );
             state.phase = crate::session::SessionPhase::Planned;
@@ -5659,7 +5659,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 format!("task {id}"),
             );
             state.phase = crate::session::SessionPhase::Planned;
@@ -5686,7 +5686,7 @@ mod tests {
         let mut inserted = SessionState::new(
             inserted_id.to_string(),
             temp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "inserted task".to_string(),
         );
         inserted.phase = crate::session::SessionPhase::Planned;
@@ -5712,7 +5712,7 @@ mod tests {
             let mut state = SessionState::new(
                 id.to_string(),
                 temp.path().to_path_buf(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 format!("task {id}"),
             );
             // The surviving session is not a planning phase, so the detail pane

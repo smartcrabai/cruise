@@ -1526,7 +1526,7 @@ mod tests {
         let mut state = crate::session::SessionState::new(
             "2026092100000000_00000000000000000000000000000001".to_string(),
             temp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "rendered TUI session".to_string(),
         );
         state.phase = phase;
@@ -2239,7 +2239,7 @@ mod tests {
                     app.sessions.push(crate::session::SessionState::new(
                         "session-1".to_string(),
                         std::path::PathBuf::from("."),
-                        crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                        crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                         "task".to_string(),
                     ));
                 });
@@ -2261,7 +2261,7 @@ mod tests {
             app.sessions.push(crate::session::SessionState::new(
                 "session-1".to_string(),
                 std::path::PathBuf::from("."),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "task".to_string(),
             ));
         });

@@ -18,7 +18,10 @@ pub enum SessionConfigRef {
     /// A live, absolute path to a regular workflow file.
     File { path: PathBuf },
     /// The resolved built-in workflow captured for this session.
-    BuiltinSnapshot,
+    BuiltinSnapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// A resolved workflow originating in a temporary repository clone.
     RepoSnapshot { relative_path: PathBuf },
     /// A workflow supplied directly as YAML by a caller.
@@ -37,7 +40,12 @@ impl SessionConfigRef {
     /// when a clone-relative path cannot be represented.
     pub fn from_source(source: &ConfigSource, clone_root: Option<&Path>) -> Result<Self> {
         match source {
-            ConfigSource::Builtin => Ok(Self::BuiltinSnapshot),
+            ConfigSource::Builtin => Ok(Self::BuiltinSnapshot {
+                name: Some(crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string()),
+            }),
+            ConfigSource::NamedBuiltin(name) => Ok(Self::BuiltinSnapshot {
+                name: Some((*name).to_string()),
+            }),
             ConfigSource::Explicit(path)
             | ConfigSource::EnvVar(path)
             | ConfigSource::Local(path)
@@ -73,7 +81,7 @@ impl SessionConfigRef {
     pub fn display_label(&self) -> String {
         match self {
             Self::File { path } => path.display().to_string(),
-            Self::BuiltinSnapshot => "Built-in snapshot".to_string(),
+            Self::BuiltinSnapshot { .. } => "Built-in snapshot".to_string(),
             Self::RepoSnapshot { relative_path } => {
                 format!("Repo snapshot: {}", relative_path.display())
             }
@@ -86,7 +94,7 @@ impl SessionConfigRef {
     pub fn live_path(&self) -> Option<&Path> {
         match self {
             Self::File { path } => Some(path),
-            Self::BuiltinSnapshot | Self::RepoSnapshot { .. } | Self::InlineSnapshot => None,
+            Self::BuiltinSnapshot { .. } | Self::RepoSnapshot { .. } | Self::InlineSnapshot => None,
         }
     }
 
@@ -99,10 +107,20 @@ impl SessionConfigRef {
     pub fn selection_value(&self) -> Option<String> {
         match self {
             Self::File { path } => Some(path.to_string_lossy().into_owned()),
-            Self::BuiltinSnapshot => {
-                Some(crate::new_session_history::BUILTIN_CONFIG_KEY.to_string())
-            }
+            Self::BuiltinSnapshot { name } => Some(builtin_selector(name.as_deref())),
             Self::RepoSnapshot { .. } | Self::InlineSnapshot => None,
+        }
+    }
+
+    /// Return whether two refs select the same config. Built-in snapshots
+    /// compare by selector so legacy unnamed snapshots equal the default.
+    #[must_use]
+    pub fn same_selection(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::BuiltinSnapshot { .. }, Self::BuiltinSnapshot { .. }) => {
+                self.selection_value() == other.selection_value()
+            }
+            _ => self == other,
         }
     }
 
@@ -113,7 +131,7 @@ impl SessionConfigRef {
             Self::File { path } => {
                 crate::new_session_history::resolved_config_key_for_session(path)
             }
-            Self::BuiltinSnapshot => crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
+            Self::BuiltinSnapshot { name } => builtin_selector(name.as_deref()),
             Self::RepoSnapshot { relative_path } => {
                 let repo = repo
                     .filter(|value| !value.is_empty())
@@ -136,7 +154,7 @@ impl SessionConfigRef {
     pub const fn kind_label(&self) -> &'static str {
         match self {
             Self::File { .. } => "file",
-            Self::BuiltinSnapshot => "builtin snapshot",
+            Self::BuiltinSnapshot { .. } => "builtin snapshot",
             Self::RepoSnapshot { .. } => "repo snapshot",
             Self::InlineSnapshot => "inline snapshot",
         }
@@ -229,4 +247,94 @@ pub fn config_reloader_for_reference(
             retry_policy,
         }))
     }))
+}
+
+/// Selector value for a built-in snapshot: the legacy sentinel for the default.
+fn builtin_selector(name: Option<&str>) -> String {
+    match name {
+        None | Some(crate::builtin_workflows::DEFAULT_BUILTIN_NAME) => {
+            crate::new_session_history::BUILTIN_CONFIG_KEY.to_string()
+        }
+        Some(name) => format!("{}{name}", crate::resolver::BUILTIN_SELECTOR_PREFIX),
+    }
+}
+
+#[cfg(test)]
+mod builtin_name_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_snapshot_name_round_trips() {
+        let named = SessionConfigRef::BuiltinSnapshot {
+            name: Some("simple".to_string()),
+        };
+        let json = serde_json::to_value(&named).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "builtin_snapshot", "name": "simple"})
+        );
+        let back: SessionConfigRef =
+            serde_json::from_value(json).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(back, named);
+    }
+
+    #[test]
+    fn unnamed_builtin_snapshot_omits_name_when_serialized() {
+        let json = serde_json::to_value(SessionConfigRef::BuiltinSnapshot { name: None })
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(json, serde_json::json!({"kind": "builtin_snapshot"}));
+    }
+
+    #[test]
+    fn legacy_builtin_snapshot_without_name_loads() {
+        let loaded: SessionConfigRef = serde_json::from_str(r#"{"kind":"builtin_snapshot"}"#)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(loaded, SessionConfigRef::BuiltinSnapshot { name: None });
+        assert_eq!(
+            loaded.selection_value().as_deref(),
+            Some(crate::new_session_history::BUILTIN_CONFIG_KEY)
+        );
+        assert_eq!(
+            loaded.stable_identity(None, "sid"),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
+        );
+    }
+
+    #[test]
+    fn named_builtin_snapshot_uses_builtin_selector_identity() {
+        let simple = SessionConfigRef::BuiltinSnapshot {
+            name: Some("simple".to_string()),
+        };
+        assert_eq!(simple.selection_value().as_deref(), Some("builtin:simple"));
+        assert_eq!(simple.stable_identity(None, "sid"), "builtin:simple");
+        assert!(simple.is_snapshot());
+        assert!(simple.live_path().is_none());
+    }
+
+    #[test]
+    fn default_builtin_snapshot_keeps_legacy_identity() {
+        let default = SessionConfigRef::BuiltinSnapshot {
+            name: Some("default".to_string()),
+        };
+        assert_eq!(
+            default.selection_value().as_deref(),
+            Some(crate::new_session_history::BUILTIN_CONFIG_KEY)
+        );
+        assert_eq!(
+            default.stable_identity(None, "sid"),
+            crate::new_session_history::BUILTIN_CONFIG_KEY
+        );
+    }
+
+    #[test]
+    fn new_default_builtin_session_records_default_name() {
+        let reference = SessionConfigRef::from_source(&ConfigSource::Builtin, None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            reference,
+            SessionConfigRef::BuiltinSnapshot {
+                name: Some("default".to_string())
+            }
+        );
+    }
 }
