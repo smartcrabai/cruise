@@ -104,6 +104,9 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Forge (GitHub/GitLab) resolved when the session was created.
+    #[serde(default)]
+    pub forge: Option<crate::forge::ForgeKind>,
     /// ISO 8601 last-updated time (auto-set on every save).
     #[serde(default)]
     pub updated_at: Option<String>,
@@ -227,6 +230,7 @@ impl SessionState {
             target_branch: None,
             allow_dirty_working_tree: false,
             pr_url: None,
+            forge: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
@@ -997,25 +1001,10 @@ impl SessionManager {
             let Some(ref pr_url) = session.pr_url else {
                 continue;
             };
-            let output = std::process::Command::new("gh")
-                .args(["pr", "view", pr_url, "--json", "state", "--jq", ".state"])
-                .stdin(std::process::Stdio::null())
-                .output();
-            let state = match output {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).trim().to_uppercase()
-                }
-                Ok(out) => {
-                    crate::status_eprintln!(
-                        "warning: gh pr view failed for {}: {}",
-                        session.id,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                    report.skipped += 1;
-                    continue;
-                }
-                Err(e) => {
-                    crate::status_eprintln!("warning: failed to run gh for {}: {}", session.id, e);
+            let state = match fetch_pr_state(&session, pr_url) {
+                Ok(state) => state,
+                Err(message) => {
+                    crate::status_eprintln!("warning: {message}");
                     report.skipped += 1;
                     continue;
                 }
@@ -1233,6 +1222,52 @@ fn months_in_year(year: u16) -> [u8; 12] {
         30,
         31,
     ]
+}
+
+/// Query the upper-cased PR/MR state of a session via `gh` or `glab`.
+fn fetch_pr_state(session: &SessionState, pr_url: &str) -> std::result::Result<String, String> {
+    let gitlab = crate::forge::session_forge(session) == crate::forge::ForgeKind::GitLab
+        || pr_url.contains("/-/merge_requests/");
+    let (program, output) = if gitlab {
+        (
+            "glab",
+            std::process::Command::new("glab")
+                .args(["mr", "view", pr_url, "--output", "json"])
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+    } else {
+        (
+            "gh",
+            std::process::Command::new("gh")
+                .args(["pr", "view", pr_url, "--json", "state", "--jq", ".state"])
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+    };
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if gitlab {
+                Ok(serde_json::from_str::<serde_json::Value>(text.trim())
+                    .ok()
+                    .and_then(|v| {
+                        v.get("state")
+                            .and_then(|s| s.as_str())
+                            .map(str::to_uppercase)
+                    })
+                    .unwrap_or_default())
+            } else {
+                Ok(text.trim().to_uppercase())
+            }
+        }
+        Ok(out) => Err(format!(
+            "{program} view failed for {}: {}",
+            session.id,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Err(format!("failed to run {program} for {}: {e}", session.id)),
+    }
 }
 
 #[cfg(test)]
@@ -1847,9 +1882,35 @@ mod tests {
         assert_eq!(loaded.workspace_mode, WorkspaceMode::Worktree);
         assert_eq!(loaded.target_branch, None);
         assert_eq!(loaded.pr_url, None);
+        assert_eq!(loaded.forge, None);
         assert_eq!(loaded.title, None);
         assert_eq!(loaded.repo, None);
         assert_eq!(loaded.input, "old task");
+    }
+
+    #[test]
+    fn test_session_forge_roundtrips_and_keeps_pr_url() {
+        // Given: a session with a GitLab forge and MR URL
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut state = SessionState::new(
+            "20260306170001".to_string(),
+            PathBuf::from("/repo"),
+            SessionConfigRef::File {
+                path: PathBuf::from("/repo/cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        state.forge = Some(crate::forge::ForgeKind::GitLab);
+        state.pr_url = Some("https://gitlab.example.com/g/s/p/-/merge_requests/7".to_string());
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: loaded back
+        let loaded = manager.load(&state.id).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: forge and URL are preserved
+        assert_eq!(loaded.forge, Some(crate::forge::ForgeKind::GitLab));
+        assert_eq!(loaded.pr_url, state.pr_url);
     }
 
     // -- DAG fields (has_dag / current_step_is_node_id) -----------------------
@@ -2109,7 +2170,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2134,7 +2195,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2901,7 +2962,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         let config = crate::config::WorkflowConfig::from_yaml(
@@ -3354,6 +3415,44 @@ mod tests {
         state.runner_started_at = Some(1_700_000_000);
 
         // When/Then: is_runner_alive returns false (missing PID)
+        assert!(!state.is_runner_alive());
+    }
+
+    #[cfg(windows)]
+    fn windows_runner_state(id: &str) -> SessionState {
+        SessionState::new(
+            id.to_string(),
+            PathBuf::from("C:/repo"),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runner_alive_requires_matching_pid_and_start_time() {
+        let mut state = windows_runner_state("20260511000020");
+        state.set_runner_to_current_process();
+        assert!(state.is_runner_alive());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runner_pid_reuse_is_stale() {
+        let mut state = windows_runner_state("20260511000021");
+        state.set_runner_to_current_process();
+        state.runner_started_at = state.runner_started_at.map(|ts| ts + 1);
+        assert!(!state.is_runner_alive());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_missing_runner_start_time_is_stale() {
+        let mut state = windows_runner_state("20260511000022");
+        state.runner_pid = Some(std::process::id());
+        state.runner_started_at = None;
         assert!(!state.is_runner_alive());
     }
 
@@ -4030,6 +4129,103 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_by_pr_status_uses_forge_cli_output() {
+        // Given: fake gh/glab binaries returning canned states per URL
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let write_bin = |name: &str, script: &str| {
+            let path = bin_dir.join(name);
+            std::fs::write(&path, script).unwrap_or_else(|e| panic!("{e:?}"));
+            let mut permissions = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        };
+        write_bin(
+            "glab",
+            "#!/bin/sh\ncase \"$*\" in\n*/mr/opened*) echo '{\"state\":\"opened\"}';;\n*/mr/closed*) echo '{\"state\":\"closed\"}';;\n*/mr/merged*) echo '{\"state\":\"merged\"}';;\n*/mr/badjson*) echo 'not json';;\n*) exit 1;;\nesac\n",
+        );
+        write_bin(
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n*/pull/1*) echo MERGED;;\n*) echo OPEN;;\nesac\n",
+        );
+        let mut paths = vec![bin_dir.clone()];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = crate::test_support::EnvGuard::set(
+            "PATH",
+            std::env::join_paths(paths).unwrap_or_else(|e| panic!("{e:?}")),
+        );
+        let cases = [
+            (
+                "fc-opened",
+                "https://gitlab.com/g/p/-/merge_requests/1?/mr/opened",
+                false,
+            ),
+            (
+                "fc-closed",
+                "https://gitlab.com/g/p/-/merge_requests/2?/mr/closed",
+                true,
+            ),
+            (
+                "fc-merged",
+                "https://gitlab.com/g/p/-/merge_requests/3?/mr/merged",
+                true,
+            ),
+            (
+                "fc-badjson",
+                "https://gitlab.com/g/p/-/merge_requests/4?/mr/badjson",
+                false,
+            ),
+            (
+                "fc-fail",
+                "https://gitlab.com/g/p/-/merge_requests/5?/mr/fail",
+                false,
+            ),
+            ("fc-gh-merged", "https://github.com/o/r/pull/1", true),
+            ("fc-gh-open", "https://github.com/o/r/pull/2", false),
+        ];
+        for (id, url, _) in &cases {
+            let mut session = SessionState::new(
+                (*id).to_string(),
+                PathBuf::from("/repo"),
+                crate::session_config::SessionConfigRef::File {
+                    path: std::path::PathBuf::from("cruise.yaml"),
+                },
+                "task".to_string(),
+            );
+            session.phase = SessionPhase::Completed;
+            session.workspace_mode = WorkspaceMode::Worktree;
+            session.pr_url = Some((*url).to_string());
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+
+        // When: clean evaluates sessions
+        let report = manager
+            .cleanup_by_pr_status()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: only closed/merged sessions are deleted
+        for (id, _, deleted) in &cases {
+            assert_eq!(
+                !manager.sessions_dir().join(id).exists(),
+                *deleted,
+                "{id} deletion mismatch"
+            );
+        }
+        assert_eq!(report.deleted, 3);
+        assert_eq!(report.skipped, 4);
+    }
+
     #[test]
     fn test_cleanup_no_pr_removes_worktree_and_keeps_reset_exec_session() {
         // Given: a terminal current-branch session with a real worktree, plus
@@ -4102,7 +4298,7 @@ mod tests {
         let mut state = SessionState::new_draft(
             "20260830000001".to_string(),
             PathBuf::from("/tmp/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             String::new(),
         );
         state.attachments.push(PathBuf::from("image.png"));

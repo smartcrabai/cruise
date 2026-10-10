@@ -73,11 +73,17 @@ pub enum CruiseError {
     #[error("step '{step}' timed out after {after_secs}s")]
     StepTimeout { step: String, after_secs: u64 },
 
+    #[error("github-review step '{step}' failed: {detail}")]
+    GitHubReviewFailed { step: String, detail: String },
+
     #[error("interrupted by user (Ctrl+C)")]
     Interrupted,
 
     #[error("commit guard violation: {0}")]
     CommitGuardViolation(String),
+
+    #[error("read-only step changed the workspace")]
+    ReadOnlyWorkspaceChanged,
 
     #[error("{0}")]
     Other(String),

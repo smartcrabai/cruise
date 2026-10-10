@@ -448,6 +448,10 @@ fn create_session_inner(
     );
     state.workspace_mode = request.workspace_mode;
     state.allow_dirty_working_tree = request.allow_dirty_working_tree;
+    state.forge = match repo.as_deref() {
+        Some(repo) => Some(crate::forge::resolve_repo_locator_env(repo)?.kind),
+        None => None,
+    };
     state.repo = repo;
     state.skipped_steps = request.skipped_steps;
     manager.create_with_config(&state, &config)?;
@@ -1166,6 +1170,17 @@ impl Default for PlanRequest {
     }
 }
 
+pub use crate::pr_merge::{PrMergeMethod, PrMergeStatus};
+
+/// Result of a human-initiated PR merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergePrOutcome {
+    /// PR is Closed/Merged and the session and workspace were removed.
+    Cleaned,
+    /// PR is still Open (for example in a merge queue); the session is kept.
+    Pending,
+}
+
 /// Exact action policy for one persisted session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1188,6 +1203,7 @@ pub enum SessionAction {
     EditCurrentStep,
     Resume,
     OpenPr,
+    MergePr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2209,12 +2225,36 @@ impl CruiseApplication {
         result
     }
 
-    /// List repositories visible to the GitHub CLI.
+    /// List repositories visible to the forge CLI (`gh`, or `glab` when `CRUISE_FORGE=gitlab`).
     ///
     /// # Errors
     ///
-    /// Returns an error when the GitHub CLI cannot run or reports failure.
-    pub async fn list_github_repositories(&self) -> Result<Vec<String>> {
+    /// Returns an error when the forge CLI cannot run or reports failure.
+    pub async fn list_repositories(&self) -> Result<Vec<String>> {
+        if crate::forge::forge_override_from_env()? == Some(crate::forge::ForgeKind::GitLab) {
+            let output = crate::step::command::run_process_output_cancelled(
+                "glab",
+                &["repo", "list", "--per-page", "100", "--output", "json"],
+                None,
+                None,
+            )
+            .await?;
+            if !output.status.success() {
+                return Err(CruiseError::Other(format!(
+                    "glab repo list failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|e| CruiseError::Other(format!("invalid glab repo list output: {e}")))?;
+            return Ok(value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.get("path_with_namespace").and_then(|p| p.as_str()))
+                .map(ToString::to_string)
+                .collect());
+        }
         let output = crate::step::command::run_process_output_cancelled(
             "gh",
             &[
@@ -2650,6 +2690,7 @@ impl CruiseApplication {
             SessionPhase::Completed => {
                 if state.pr_url.is_some() {
                     actions.push(SessionAction::OpenPr);
+                    actions.push(SessionAction::MergePr);
                 }
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
@@ -2911,6 +2952,57 @@ impl CruiseApplication {
             .await
     }
 
+    /// Fetch the merge status of the session's pull request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session has no pull request or gh fails.
+    pub fn inspect_pr_for_merge(&self, id: &str) -> Result<PrMergeStatus> {
+        let state = self.manager.load(id)?;
+        let url = Self::mergeable_pr_url(&state)?;
+        crate::pr_merge::inspect(&url)
+    }
+
+    /// Merge the session's pull request with the chosen method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is not mergeable or gh fails.
+    pub fn merge_pr(&self, id: &str, method: PrMergeMethod) -> Result<MergePrOutcome> {
+        let _claim = self.runtime.try_begin(id, OperationKind::Mutate)?;
+        let state = self.manager.load(id)?;
+        let url = Self::mergeable_pr_url(&state)?;
+        let before = crate::pr_merge::inspect(&url)?;
+        if before.state != "OPEN" {
+            return Err(CruiseError::Other(format!(
+                "pull request is {}; run `cruise clean` to remove the session",
+                before.state
+            )));
+        }
+        crate::pr_merge::merge(&url, method)?;
+        let after = crate::pr_merge::inspect(&url).map_err(|e| {
+            CruiseError::Other(format!(
+                "merge was requested but the PR state could not be confirmed ({e}); run `cruise clean` to re-check"
+            ))
+        })?;
+        if after.state == "OPEN" {
+            return Ok(MergePrOutcome::Pending);
+        }
+        self.cleanup_session_workspace(&state)?;
+        self.manager.delete(id)?;
+        Ok(MergePrOutcome::Cleaned)
+    }
+
+    fn mergeable_pr_url(state: &SessionState) -> Result<String> {
+        match (&state.phase, &state.pr_url) {
+            (SessionPhase::Completed, Some(url)) => Ok(url.clone()),
+            _ => Err(CruiseError::Other(format!(
+                "session {} is not a completed session with a pull request",
+                state.id
+            ))),
+        }
+    }
+
     /// Return the pull request URL recorded for a session.
     ///
     /// # Errors
@@ -3132,7 +3224,7 @@ fn setup_run_blocking(
         requested_mode.unwrap_or(state.workspace_mode)
     };
     if workspace_mode == WorkspaceMode::Worktree {
-        crate::worktree_pr::ensure_gh_available()?;
+        crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
     let (workspace, repo_clone_created) =
         prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;
@@ -4306,7 +4398,7 @@ mod tests {
         let state = SessionState::new_draft(
             "s".to_string(),
             PathBuf::from("/tmp"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         let reservation = batch.reserve(&[state]);
@@ -4769,5 +4861,261 @@ mod tests {
             4,
             "all plan operations should append instead of overwrite: {log}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod merge_pr_tests {
+    use super::*;
+    use crate::pr_merge::fake_gh::{FakeGh, view_json};
+
+    const URL: &str = "https://github.com/owner/repo/pull/9";
+    const ID: &str = "20261009000000";
+
+    struct Fixture {
+        tmp: tempfile::TempDir,
+        gh: FakeGh,
+        app: CruiseApplication,
+        manager: SessionManager,
+        _lock: crate::test_support::ProcessLock,
+        _path: crate::test_support::EnvGuard,
+    }
+
+    fn fixture() -> Fixture {
+        let lock = crate::test_support::lock_process();
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let gh = FakeGh::install(tmp.path());
+        let path = crate::test_support::prepend_to_path(&gh.bin());
+        gh.set("view.out", &view_json("OPEN"));
+        let manager = SessionManager::new(tmp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        Fixture {
+            tmp,
+            gh,
+            app,
+            manager,
+            _lock: lock,
+            _path: path,
+        }
+    }
+
+    /// Persist a Completed session that owns a real git worktree.
+    fn completed_with_worktree(f: &Fixture, pr_url: Option<&str>) -> SessionState {
+        let repo = f.tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e}"));
+        crate::test_support::init_git_repo(&repo);
+        let (ctx, _) = crate::worktree::setup_session_worktree(
+            &repo,
+            ID,
+            "task",
+            &f.tmp.path().join("worktrees"),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut state = SessionState::new(
+            ID.to_string(),
+            repo,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Completed;
+        state.worktree_path = Some(ctx.path);
+        state.worktree_branch = Some(ctx.branch);
+        state.pr_url = pr_url.map(str::to_string);
+        f.manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+        state
+    }
+
+    fn assert_kept(f: &Fixture, state: &SessionState) {
+        assert!(f.manager.load(ID).is_ok(), "session record must remain");
+        let path = state
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("path"));
+        assert!(path.is_dir(), "worktree must remain");
+    }
+
+    #[test]
+    fn merge_pr_capability_requires_completed_with_pr_url() {
+        let f = fixture();
+        let mut state = completed_with_worktree(&f, Some(URL));
+        assert!(f.app.capabilities(&state).contains(&SessionAction::MergePr));
+
+        state.pr_url = None;
+        assert!(!f.app.capabilities(&state).contains(&SessionAction::MergePr));
+
+        state.pr_url = Some(URL.to_string());
+        state.phase = SessionPhase::Planned;
+        assert!(!f.app.capabilities(&state).contains(&SessionAction::MergePr));
+    }
+
+    #[test]
+    fn inspect_pr_for_merge_returns_status_for_session_pr() {
+        let f = fixture();
+        completed_with_worktree(&f, Some(URL));
+
+        let status = f
+            .app
+            .inspect_pr_for_merge(ID)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(status.state, "OPEN");
+        assert!(f.gh.log().contains(URL), "{}", f.gh.log());
+    }
+
+    #[test]
+    fn merge_pr_requires_completed_session_with_pr() {
+        let f = fixture();
+        // No PR URL.
+        completed_with_worktree(&f, None);
+        assert!(matches!(
+            f.app.merge_pr(ID, PrMergeMethod::Squash),
+            Err(CruiseError::Other(_))
+        ));
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
+
+        // Not Completed.
+        let mut state = f.manager.load(ID).unwrap_or_else(|e| panic!("{e}"));
+        state.pr_url = Some(URL.to_string());
+        state.phase = SessionPhase::Planned;
+        f.manager.save(&state).unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            f.app.merge_pr(ID, PrMergeMethod::Squash),
+            Err(CruiseError::Other(_))
+        ));
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn merge_pr_does_not_merge_when_pr_is_not_open() {
+        let f = fixture();
+        let state = completed_with_worktree(&f, Some(URL));
+        f.gh.set("view.out", &view_json("CLOSED"));
+
+        let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
+
+        assert!(matches!(result, Err(CruiseError::Other(_))), "{result:?}");
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
+        assert_kept(&f, &state);
+    }
+
+    #[test]
+    fn merge_pr_is_busy_when_session_has_active_operation() {
+        let f = fixture();
+        completed_with_worktree(&f, Some(URL));
+        let _claim = f
+            .app
+            .runtime
+            .try_begin(ID, OperationKind::Mutate)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
+
+        assert!(matches!(result, Err(CruiseError::Busy(_))), "{result:?}");
+        assert_eq!(f.gh.merge_calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn merge_pr_cleans_workspace_only_after_closed_or_merged() {
+        for after in ["MERGED", "CLOSED"] {
+            let f = fixture();
+            let state = completed_with_worktree(&f, Some(URL));
+            f.gh.set("view_after.out", &view_json(after));
+
+            let outcome = f
+                .app
+                .merge_pr(ID, PrMergeMethod::Rebase)
+                .unwrap_or_else(|e| panic!("{e}"));
+
+            assert_eq!(outcome, MergePrOutcome::Cleaned, "{after}");
+            assert_eq!(f.gh.merge_calls(), vec![format!("pr merge {URL} --rebase")]);
+            assert!(f.manager.load(ID).is_err(), "session must be deleted");
+            let path = state.worktree_path.unwrap_or_else(|| panic!("path"));
+            assert!(!path.exists(), "worktree must be removed");
+        }
+    }
+
+    #[test]
+    fn merge_pr_keeps_session_when_pr_stays_open() {
+        let f = fixture();
+        let state = completed_with_worktree(&f, Some(URL));
+
+        let outcome = f
+            .app
+            .merge_pr(ID, PrMergeMethod::Merge)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(outcome, MergePrOutcome::Pending);
+        assert_eq!(f.gh.merge_calls(), vec![format!("pr merge {URL} --merge")]);
+        assert_kept(&f, &state);
+    }
+
+    #[test]
+    fn merge_pr_keeps_session_when_recheck_fails() {
+        let f = fixture();
+        let state = completed_with_worktree(&f, Some(URL));
+        // Merge succeeds, then `gh pr view` starts failing.
+        f.gh.set("view_after.out", "not json");
+
+        let outcome = f.app.merge_pr(ID, PrMergeMethod::Squash);
+
+        assert!(
+            !matches!(outcome, Ok(MergePrOutcome::Cleaned)),
+            "{outcome:?}"
+        );
+        assert_kept(&f, &state);
+    }
+
+    #[test]
+    fn merge_pr_keeps_session_when_workspace_cleanup_fails() {
+        let f = fixture();
+        let mut state = completed_with_worktree(&f, Some(URL));
+        // Point cleanup at a non-git directory so `git worktree remove` fails.
+        let not_git = f.tmp.path().join("not-git");
+        std::fs::create_dir_all(&not_git).unwrap_or_else(|e| panic!("{e}"));
+        state.base_dir = not_git;
+        f.manager.save(&state).unwrap_or_else(|e| panic!("{e}"));
+        f.gh.set("view_after.out", &view_json("MERGED"));
+
+        let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
+
+        assert!(result.is_err(), "{result:?}");
+        assert!(f.manager.load(ID).is_ok(), "session record must remain");
+    }
+
+    #[test]
+    fn merge_pr_failure_keeps_session_and_workspace() {
+        let f = fixture();
+        let state = completed_with_worktree(&f, Some(URL));
+        f.gh.set("merge.exit", "1");
+        f.gh.set("view_after.out", &view_json("MERGED"));
+
+        let result = f.app.merge_pr(ID, PrMergeMethod::Squash);
+
+        assert!(matches!(result, Err(CruiseError::Other(_))), "{result:?}");
+        assert_kept(&f, &state);
+    }
+
+    #[test]
+    fn merge_pr_only_touches_target_session() {
+        let f = fixture();
+        completed_with_worktree(&f, Some(URL));
+        let mut other = SessionState::new(
+            "20261009000001".to_string(),
+            f.tmp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "other".to_string(),
+        );
+        other.phase = SessionPhase::Completed;
+        other.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+        f.manager.create(&other).unwrap_or_else(|e| panic!("{e}"));
+        f.gh.set("view_after.out", &view_json("MERGED"));
+
+        f.app
+            .merge_pr(ID, PrMergeMethod::Squash)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(f.manager.load(&other.id).is_ok(), "other session untouched");
+        assert!(!f.gh.log().contains("pull/10"), "{}", f.gh.log());
     }
 }

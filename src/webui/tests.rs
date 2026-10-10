@@ -112,6 +112,27 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
 }
 
 #[test]
+fn publish_dialog_hides_trigger_checkbox_when_unsupported() {
+    let harness = harness();
+    let render = |supports: bool| {
+        harness
+            .state
+            .templates
+            .render(
+                "publish-dialog",
+                &serde_json::json!({
+                    "id": "s1",
+                    "submitUrl": "/webui/sessions/s1/publish",
+                    "supportsTrigger": supports,
+                }),
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+    };
+    assert!(render(true).contains("triggerCruise"));
+    assert!(!render(false).contains("triggerCruise"));
+}
+
+#[test]
 fn templates_render_all_fixtures() {
     let harness = harness();
     let root = webui_root().join("templates");
@@ -137,7 +158,13 @@ fn templates_render_all_fixtures() {
             && entry.path().extension().is_some_and(|ext| ext == "tsx")
             && let Ok(relative) = entry.path().strip_prefix(&root)
         {
-            on_disk.push(relative.with_extension("").to_string_lossy().into_owned());
+            let name = relative
+                .with_extension("")
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            on_disk.push(name);
         }
     }
     on_disk.sort();
@@ -407,5 +434,213 @@ mod event_partials {
             message,
             SseMessage::Notify { body, .. } if body.contains("Plan ready")
         )));
+    }
+}
+
+#[cfg(unix)]
+mod merge_pr {
+    use super::*;
+    use crate::pr_merge::fake_gh::{FakeGh, view_json};
+
+    const URL: &str = "https://github.com/owner/repo/pull/8";
+
+    struct Merge {
+        harness: Harness,
+        session: SessionState,
+        gh: FakeGh,
+        _lock: crate::test_support::ProcessLock,
+        _path: crate::test_support::EnvGuard,
+    }
+
+    fn merge_harness(phase: crate::session::SessionPhase, pr_url: Option<&str>) -> Merge {
+        let lock = crate::test_support::lock_process();
+        let harness = harness();
+        let gh = FakeGh::install(harness.dir.path());
+        gh.set(
+            "view.out",
+            r#"{"state":"OPEN","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
+        );
+        let path = crate::test_support::prepend_to_path(&gh.bin());
+        let mut session = create_session(&harness);
+        session.phase = phase;
+        session.pr_url = pr_url.map(str::to_string);
+        let manager = SessionManager::new(harness.dir.path().to_path_buf());
+        let Ok(()) = manager.save(&session) else {
+            panic!("save session");
+        };
+        Merge {
+            harness,
+            session,
+            gh,
+            _lock: lock,
+            _path: path,
+        }
+    }
+
+    fn completed() -> Merge {
+        merge_harness(crate::session::SessionPhase::Completed, Some(URL))
+    }
+
+    fn exists(m: &Merge) -> bool {
+        SessionManager::new(m.harness.dir.path().to_path_buf())
+            .load(&m.session.id)
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn completed_session_header_offers_merge_pr() {
+        let m = completed();
+        let (status, _, body) = get(&m.harness, &format!("/sessions/{}", m.session.id), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Merge PR"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn session_header_without_pr_has_no_merge_pr() {
+        let m = merge_harness(crate::session::SessionPhase::Completed, None);
+        let (_, _, body) = get(&m.harness, &format!("/sessions/{}", m.session.id), &[]).await;
+        assert!(!body.contains("Merge PR"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn merge_preview_displays_status_before_confirm() {
+        let m = completed();
+
+        let (status, _, body) = get(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("MERGEABLE"), "{body}");
+        assert!(body.contains("APPROVED"), "{body}");
+        assert!(body.contains("unit-tests"), "{body}");
+        for method in ["merge", "squash", "rebase"] {
+            assert!(body.contains(method), "method {method} missing: {body}");
+        }
+        assert!(
+            body.contains("hx-post"),
+            "confirm affordance missing: {body}"
+        );
+        assert!(m.gh.merge_calls().is_empty(), "preview must not merge");
+        assert!(exists(&m));
+    }
+
+    #[tokio::test]
+    async fn merge_preview_for_non_open_pr_has_no_submit_affordance() {
+        let m = completed();
+        m.gh.set("view.out", &view_json("MERGED"));
+
+        let (_, _, body) = get(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            &[],
+        )
+        .await;
+
+        assert!(!body.contains("hx-post"), "{body}");
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn merge_preview_without_pr_is_rejected() {
+        let m = merge_harness(crate::session::SessionPhase::Completed, None);
+
+        let (status, _, body) = get(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.contains("hx-post"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn merge_post_uses_selected_method_and_removes_cleaned_session() {
+        let m = completed();
+        m.gh.set("view_after.out", &view_json("MERGED"));
+
+        let (status, _, body) = post(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            "method=rebase",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(m.gh.merge_calls(), vec![format!("pr merge {URL} --rebase")]);
+        assert!(!exists(&m), "session must be cleaned");
+        let (_, _, sidebar) = get(&m.harness, "/webui/sidebar", &[]).await;
+        assert!(!sidebar.contains(&m.session.id), "{sidebar}");
+    }
+
+    #[tokio::test]
+    async fn merge_post_pending_keeps_session() {
+        let m = completed();
+
+        let (status, _, body) = post(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            "method=squash",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(m.gh.merge_calls(), vec![format!("pr merge {URL} --squash")]);
+        assert!(exists(&m));
+        let (_, _, sidebar) = get(&m.harness, "/webui/sidebar", &[]).await;
+        assert!(sidebar.contains(&m.session.id), "{sidebar}");
+    }
+
+    #[tokio::test]
+    async fn merge_post_rejects_unknown_or_missing_method() {
+        let m = completed();
+        for form in ["method=fast-forward", "method=--auto", ""] {
+            let (status, _, body) = post(
+                &m.harness,
+                &format!("/webui/sessions/{}/merge-pr", m.session.id),
+                form,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{form}: {body}");
+        }
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
+        assert!(exists(&m));
+    }
+
+    #[tokio::test]
+    async fn merge_post_without_pr_is_rejected_without_merging() {
+        let m = merge_harness(crate::session::SessionPhase::Completed, None);
+
+        let (status, _, _) = post(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            "method=squash",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(m.gh.merge_calls(), Vec::<String>::new());
+        assert!(exists(&m));
+    }
+
+    #[tokio::test]
+    async fn merge_post_gh_failure_keeps_session_and_reports_error() {
+        let m = completed();
+        m.gh.set("merge.exit", "1");
+
+        let (status, _, body) = post(
+            &m.harness,
+            &format!("/webui/sessions/{}/merge-pr", m.session.id),
+            "method=squash",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(exists(&m));
     }
 }

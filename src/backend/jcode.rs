@@ -20,8 +20,6 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Command;
@@ -70,6 +68,7 @@ const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// provider credentials.
 #[derive(Default)]
 pub(crate) struct JcodeRunnerConfig {
+    pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
     pub(crate) effort: Option<EffortLevel>,
@@ -190,12 +189,14 @@ fn launch_client(
         inherit_logins: false,
         ..Default::default()
     };
-    let process_disabled_tools = if config.computer_use {
+    let skip_user_lists =
+        config.computer_use && config.permission == crate::config::PermissionMode::Full;
+    let process_disabled_tools = if skip_user_lists {
         None
     } else {
         std::env::var(JCODE_DISABLED_TOOLS_ENV).ok()
     };
-    let config_toml = if config.computer_use
+    let config_toml = if skip_user_lists
         || config.env.contains_key(JCODE_DISABLED_TOOLS_ENV)
         || process_disabled_tools.is_some()
     {
@@ -210,6 +211,7 @@ fn launch_client(
         config.computer_use,
         process_disabled_tools.as_deref(),
         config_toml.as_deref(),
+        config.permission,
     );
     JcodeClient::launch(options).map_err(|error| {
         let hint = if matches!(
@@ -233,6 +235,7 @@ fn launch_environment(
     computer_use: bool,
     process_disabled_tools: Option<&str>,
     config_toml: Option<&str>,
+    permission: crate::config::PermissionMode,
 ) -> HashMap<OsString, OsString> {
     let mut env: HashMap<OsString, OsString> = workflow_env
         .iter()
@@ -258,20 +261,36 @@ fn launch_environment(
             OsString::from(routed_model_arg(provider, model).as_ref()),
         );
     }
-    if !computer_use {
-        let disabled_tools = computer_use_disabled_tools(
+    let restricted = permission != crate::config::PermissionMode::Full;
+    if restricted || !computer_use {
+        let mut disabled_tools = computer_use_disabled_tools(
             workflow_env
                 .get(JCODE_DISABLED_TOOLS_ENV)
                 .map(String::as_str),
             process_disabled_tools,
             config_toml,
         );
+        for tool in permission_disabled_tools(permission) {
+            if !disabled_tools.split(',').any(|existing| existing == *tool) {
+                disabled_tools.push(',');
+                disabled_tools.push_str(tool);
+            }
+        }
         env.insert(
             OsString::from(JCODE_DISABLED_TOOLS_ENV),
             OsString::from(disabled_tools),
         );
     }
     env
+}
+
+/// Tools a permission mode removes on top of the user's disabled list.
+fn permission_disabled_tools(permission: crate::config::PermissionMode) -> &'static [&'static str] {
+    match permission {
+        crate::config::PermissionMode::ReadOnly => &["bash", "edit", "write", "apply_patch"],
+        crate::config::PermissionMode::Edit => &["bash"],
+        crate::config::PermissionMode::Full => &[],
+    }
 }
 
 fn computer_use_disabled_tools(
@@ -685,12 +704,11 @@ struct SessionHome {
     active_lock: Option<std::fs::File>,
 }
 
-#[cfg(unix)]
 impl Drop for SessionHome {
     fn drop(&mut self) {
         // A fork can retain the open file description until exec; explicitly unlock when its owner ends.
         if let Some(file) = self.active_lock.as_ref() {
-            let _ = lock_file(file, libc::LOCK_UN);
+            let _ = fs2::FileExt::unlock(file);
         }
     }
 }
@@ -949,7 +967,7 @@ pub(crate) fn cleanup_session_home_at(source_home: &Path, session_id: &str) -> s
     fs::remove_dir_all(home)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn prune_unclaimed_session_homes_at(root: &Path, now: SystemTime) -> std::io::Result<()> {
     if !root.exists() {
         return Ok(());
@@ -987,7 +1005,6 @@ fn prune_unclaimed_session_homes_locked(root: &Path, now: SystemTime) -> std::io
     Ok(())
 }
 
-#[cfg(unix)]
 fn lock_session_root(root: &Path) -> std::io::Result<Option<File>> {
     let path = root.join(ROOT_LOCK_FILE);
     let file = OpenOptions::new()
@@ -997,16 +1014,10 @@ fn lock_session_root(root: &Path) -> std::io::Result<Option<File>> {
         .write(true)
         .open(&path)?;
     set_private_file(&path)?;
-    lock_file(&file, libc::LOCK_EX)?;
+    fs2::FileExt::lock_exclusive(&file)?;
     Ok(Some(file))
 }
 
-#[cfg(not(unix))]
-fn lock_session_root(_root: &Path) -> std::io::Result<Option<std::fs::File>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
 fn lock_session_home(home: &Path) -> std::io::Result<Option<File>> {
     let path = home.join(HOME_LOCK_FILE);
     let file = OpenOptions::new()
@@ -1016,9 +1027,9 @@ fn lock_session_home(home: &Path) -> std::io::Result<Option<File>> {
         .write(true)
         .open(&path)?;
     set_private_file(&path)?;
-    match lock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+    match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(std::io::Error::new(
+        Err(error) if is_lock_contended(&error) => Err(std::io::Error::new(
             std::io::ErrorKind::WouldBlock,
             "jcode session home is already active",
         )),
@@ -1026,12 +1037,6 @@ fn lock_session_home(home: &Path) -> std::io::Result<Option<File>> {
     }
 }
 
-#[cfg(not(unix))]
-fn lock_session_home(_home: &Path) -> std::io::Result<Option<std::fs::File>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
 fn lock_existing_session_home(home: &Path) -> std::io::Result<Option<File>> {
     let path = home.join(HOME_LOCK_FILE);
     let file = match OpenOptions::new().read(true).write(true).open(path) {
@@ -1039,26 +1044,16 @@ fn lock_existing_session_home(home: &Path) -> std::io::Result<Option<File>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    match lock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+    match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if is_lock_contended(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-#[cfg(not(unix))]
-fn lock_existing_session_home(_home: &Path) -> std::io::Result<Option<std::fs::File>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
-fn lock_file(file: &File, operation: i32) -> std::io::Result<()> {
-    // SAFETY: flock uses only the live file descriptor borrowed from `file`.
-    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn find_session_home(root: &Path, expected: &Path, session_id: &str) -> Option<PathBuf> {
@@ -1200,7 +1195,85 @@ fn private_daemon_pids(socket: &Path) -> std::io::Result<Vec<i32>> {
     Ok(pids)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn stop_private_daemon(home: &Path) -> std::io::Result<()> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let mut sockets = vec![home.join("run").join("jcode.sock")];
+    if let Ok(raw) = fs::read(home.join("servers.json"))
+        && let Ok(registry) = serde_json::from_slice::<serde_json::Value>(&raw)
+        && let Some(entries) = registry.as_object()
+    {
+        for entry in entries.values() {
+            if let Some(socket) = entry.get("socket").and_then(serde_json::Value::as_str) {
+                sockets.push(PathBuf::from(socket));
+            }
+        }
+    }
+    let identifiers: Vec<String> = std::iter::once(home.to_string_lossy().into_owned())
+        .chain(sockets.iter().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always)
+            .with_environ(UpdateKind::Always),
+    );
+    // Identity is the executable plus `serve` plus this private home, runtime
+    // or socket. A PID from `servers.json` alone is never trusted.
+    let matched: Vec<sysinfo::Pid> = system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            let is_jcode = process
+                .exe()
+                .and_then(Path::file_stem)
+                .or_else(|| {
+                    process
+                        .cmd()
+                        .first()
+                        .map(Path::new)
+                        .and_then(Path::file_stem)
+                })
+                .is_some_and(|stem| stem.eq_ignore_ascii_case("jcode"));
+            let serves = process.cmd().iter().any(|arg| arg == "serve");
+            let private = process
+                .cmd()
+                .iter()
+                .chain(process.environ())
+                .map(|value| value.to_string_lossy())
+                .any(|value| identifiers.iter().any(|id| value.contains(id.as_str())));
+            is_jcode && serves && private
+        })
+        .map(|(pid, _)| *pid)
+        .collect();
+    for root in matched {
+        // Stop the whole tree: descendants first, then the daemon.
+        let mut tree = vec![root];
+        let mut index = 0;
+        while index < tree.len() {
+            let parent = tree[index];
+            for (pid, process) in system.processes() {
+                if process.parent() == Some(parent) && !tree.contains(pid) {
+                    tree.push(*pid);
+                }
+            }
+            index += 1;
+        }
+        for pid in tree.into_iter().rev() {
+            if let Some(process) = system.process(pid) {
+                let _ = process.kill_and_wait();
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn stop_private_daemon(_home: &Path) -> std::io::Result<()> {
     Ok(())
 }
@@ -1507,6 +1580,8 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    crate::platform::set_owner_only_acl(path)?;
     Ok(())
 }
 
@@ -1554,8 +1629,149 @@ fn set_private_file(path: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(windows)]
+    crate::platform::set_owner_only_acl(path)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    const LOCK_PROBE_ENV: &str = "CRUISE_ROOT_LOCK_PROBE";
+
+    /// Child half of the cross-process lock test. A no-op unless spawned by it.
+    #[test]
+    fn windows_root_lock_child_probe() {
+        let Ok(spec) = std::env::var(LOCK_PROBE_ENV) else {
+            return;
+        };
+        let (mode, dir) = spec
+            .split_once('|')
+            .unwrap_or_else(|| panic!("bad probe spec"));
+        let file =
+            File::open(Path::new(dir).join(ROOT_LOCK_FILE)).unwrap_or_else(|e| panic!("{e}"));
+        let locked = fs2::FileExt::try_lock_exclusive(&file).is_ok();
+        println!("PROBE_RAN:{mode}:{locked}");
+        std::process::exit(i32::from(locked != (mode == "free")));
+    }
+
+    fn run_lock_probe(mode: &str, dir: &Path) -> bool {
+        let output =
+            std::process::Command::new(std::env::current_exe().unwrap_or_else(|e| panic!("{e}")))
+                .args([
+                    "--exact",
+                    "backend::jcode::windows_tests::windows_root_lock_child_probe",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(LOCK_PROBE_ENV, format!("{mode}|{}", dir.display()))
+                .output()
+                .unwrap_or_else(|e| panic!("{e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("PROBE_RAN:{mode}:")),
+            "probe did not run: {stdout}"
+        );
+        output.status.success()
+    }
+
+    #[test]
+    fn windows_root_lock_excludes_second_process() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let first = lock_session_root(dir.path())
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("expected lock"));
+        assert!(
+            run_lock_probe("blocked", dir.path()),
+            "child must not acquire a held lock"
+        );
+        drop(first);
+        assert!(
+            run_lock_probe("free", dir.path()),
+            "child must acquire a released lock"
+        );
+    }
+
+    #[test]
+    fn windows_runtime_directories_have_owner_only_dacl() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let nested = root.path().join("a").join("b");
+        ensure_private_dir(&nested).unwrap_or_else(|e| panic!("{e}"));
+        crate::platform::assert_owner_only_dacl(&nested);
+    }
+
+    #[test]
+    fn windows_private_files_have_owner_only_dacl() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let file = root.path().join("private.txt");
+        fs::write(&file, b"x").unwrap_or_else(|e| panic!("{e}"));
+        set_private_file(&file).unwrap_or_else(|e| panic!("{e}"));
+        crate::platform::assert_owner_only_dacl(&file);
+        let _held = lock_session_home(root.path()).unwrap_or_else(|e| panic!("{e}"));
+        crate::platform::assert_owner_only_dacl(&root.path().join(HOME_LOCK_FILE));
+    }
+
+    #[test]
+    fn windows_home_lock_is_released_when_session_home_drops() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let home = root.path().to_path_buf();
+        let lock = lock_session_home(&home).unwrap_or_else(|e| panic!("{e}"));
+        let session_home = SessionHome {
+            source_home: home.clone(),
+            storage_root: home.clone(),
+            storage_home: home.clone(),
+            expected_home: None,
+            sdk_home: home.clone(),
+            temporary_alias: None,
+            stable_alias_root: None,
+            fresh: true,
+            resume_session_found: false,
+            active_lock: lock,
+        };
+        assert!(lock_session_home(&home).is_err());
+        drop(session_home);
+        assert!(lock_session_home(&home).is_ok());
+    }
+
+    #[test]
+    fn windows_active_session_home_lock_returns_would_block() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let _held = lock_session_home(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+        let error = lock_session_home(dir.path()).expect_err("second lock must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn windows_stale_prune_skips_locked_home() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let home = root.path().join("home");
+        fs::create_dir(&home).unwrap_or_else(|e| panic!("{e}"));
+        let held = lock_session_home(&home).unwrap_or_else(|e| panic!("{e}"));
+        let later = SystemTime::now() + STALE_SESSION_HOME_AGE * 2;
+        prune_unclaimed_session_homes_at(root.path(), later).unwrap_or_else(|e| panic!("{e}"));
+        assert!(home.exists(), "locked home must not be pruned");
+        drop(held);
+        prune_unclaimed_session_homes_at(root.path(), later).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!home.exists(), "unlocked stale home must be pruned");
+    }
+
+    #[test]
+    fn windows_stale_home_cleanup_ignores_unrelated_registry_pid() {
+        let home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pid = std::process::id();
+        fs::write(
+            home.path().join("servers.json"),
+            format!(
+                "{{\"x\":{{\"pid\":{pid},\"socket\":\"{}\"}}}}",
+                "C:/nope/jcode.sock"
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        clear_private_daemon(home.path()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!home.path().join("servers.json").exists());
+    }
+}
