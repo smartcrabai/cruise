@@ -194,7 +194,7 @@ The CLI remains the canonical client for automation, JSON (`cruise list --json`)
 
 `cruise workflow add <owner/repo[/path][@ref]>` installs a single workflow YAML from GitHub into `~/.config/cruise/workflows/` (or `$XDG_CONFIG_HOME/cruise/workflows/`). The path defaults to `cruise.yaml` and the ref to the default branch. The ref is pinned to a commit SHA, and nested `workflow_call` steps and `prompt_file` contents are inlined, so the installed `<name>.yaml` never touches the network at run time. Provenance is stored next to it in `<name>.cruise-package.json`. Use `--name` to override the name (`[A-Za-z0-9_-]+`).
 
-`add` and `update` always print the source, commit SHA, and every command the workflow can run, warn that it may run arbitrary commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref, `remove <name>` deletes the YAML and manifest, and `list` shows installed packages. `update` and `remove` refuse packages whose YAML was edited by hand. Installed YAMLs appear in the normal config selector.
+`add` and `update` always print the source, commit SHA, and every command the workflow can run, warn that it may run arbitrary commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref, `remove <name>` deletes the YAML and manifest, and `list` shows the built-in workflows followed by installed packages. `update` and `remove` refuse packages whose YAML was edited by hand. Installed YAMLs appear in the normal config selector.
 
 ### CLI Reference
 

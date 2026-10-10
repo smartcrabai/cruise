@@ -112,7 +112,10 @@ pub fn parse_package_spec(input: &str) -> Result<PackageSpec, WorkflowPackageErr
         DEFAULT_WORKFLOW_PATH.to_string()
     } else {
         let path_parts = &parts[2..];
-        if path_parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+        if path_parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == "..")
+        {
             return Err(WorkflowPackageError::InvalidSpec);
         }
         let path = path_parts.join("/");
@@ -212,11 +215,7 @@ fn preview_text(manifest: &Manifest, config: &WorkflowConfig) -> String {
     }
     for (name, server) in &config.mcp_servers {
         if let Some(command) = &server.command {
-            commands.push(format!(
-                "mcp {name}: {} {}",
-                command,
-                server.args.join(" ")
-            ));
+            commands.push(format!("mcp {name}: {} {}", command, server.args.join(" ")));
         }
     }
     let mut text = format!(
@@ -337,9 +336,7 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), WorkflowPackageError> 
     Ok(())
 }
 
-pub fn commit_install(
-    prepared: PreparedPackage,
-) -> Result<InstalledPackage, WorkflowPackageError> {
+pub fn commit_install(prepared: PreparedPackage) -> Result<InstalledPackage, WorkflowPackageError> {
     let dir = workflows_dir()?;
     let name = &prepared.manifest.name;
     if !prepared.replace_existing {

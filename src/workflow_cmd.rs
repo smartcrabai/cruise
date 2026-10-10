@@ -4,7 +4,6 @@ use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::builtin_workflows::{BUILTIN_WORKFLOWS, find_builtin};
-use crate::cli::WorkflowAddArgs;
 use crate::error::{CruiseError, Result};
 use crate::workflow_packages::{self as packages, PreparedPackage, WorkflowPackageError};
 
@@ -82,11 +81,11 @@ pub fn eject_builtin(name: &str, destination_dir: &Path) -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns an error when the spec is invalid, fetching fails, or confirmation is refused.
-pub fn add(args: WorkflowAddArgs) -> Result<()> {
-    let spec = packages::parse_package_spec(&args.spec).map_err(to_cruise)?;
-    let name = args.name.unwrap_or_else(|| packages::default_name(&spec));
+pub fn add(spec: &str, name: Option<String>, yes: bool) -> Result<()> {
+    let spec = packages::parse_package_spec(spec).map_err(to_cruise)?;
+    let name = name.unwrap_or_else(|| packages::default_name(&spec));
     let prepared = packages::prepare_install(&spec, &name).map_err(to_cruise)?;
-    install(prepared, args.yes, "Installed")
+    install(prepared, yes, "Installed")
 }
 
 /// Update an installed workflow package.

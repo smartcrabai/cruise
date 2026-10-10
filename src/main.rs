@@ -113,16 +113,16 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => {
-            workflow_cmd::list()
-        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
             workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
             workflow_generate::run(args).await
         }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => workflow_cmd::add(args),
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
+            workflow_cmd::add(&args.spec, args.name, args.yes)
+        }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Update(args))) => {
             workflow_cmd::update(&args.name, args.yes)
         }

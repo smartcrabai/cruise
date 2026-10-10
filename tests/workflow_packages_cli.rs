@@ -222,16 +222,16 @@ fn add_rejects_manual_yaml_and_yml_collisions_without_touching_them() {
     let fx = Fixture::new();
     std::fs::create_dir_all(fx.workflows()).unwrap_or_else(|e| panic!("{e}"));
     let yaml = fx.yaml("same");
-    let yml = fx.workflows().join("other.yml");
+    let other_yml = fx.workflows().join("other.yml");
     std::fs::write(&yaml, "manual-yaml\n").unwrap_or_else(|e| panic!("{e}"));
-    std::fs::write(&yml, "manual-yml\n").unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&other_yml, "manual-yml\n").unwrap_or_else(|e| panic!("{e}"));
 
     for name in ["same", "other"] {
         let out = fx.cruise(&["workflow", "add", "org/repo", "--name", name, "--yes"]);
         assert!(!out.status.success(), "{name}: {}", text(&out));
     }
     assert_eq!(read(&yaml), "manual-yaml\n");
-    assert_eq!(read(&yml), "manual-yml\n");
+    assert_eq!(read(&other_yml), "manual-yml\n");
     assert!(!fx.manifest("same").exists());
 }
 
