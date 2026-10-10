@@ -65,17 +65,29 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine and open it in the default browser.
     Webui(WebuiArgs),
-    /// Author workflow YAML files.
-    Workflow {
-        #[command(subcommand)]
-        command: WorkflowCommands,
-    },
+    /// List, eject, and generate workflows.
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
 }
 
 #[derive(Subcommand, Debug)]
-pub enum WorkflowCommands {
+pub enum WorkflowCommand {
+    /// List the built-in workflows.
+    List,
+    /// Copy a built-in workflow so it can be edited.
+    Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowEjectArgs {
+    /// Built-in workflow name (see `cruise workflow list`).
+    pub name: String,
+
+    /// Destination: `user` (`~/.config/cruise/workflows/`) or `project` (`./.cruise/`).
+    #[arg(long, value_enum, default_value_t = EjectDestination::User)]
+    pub to: EjectDestination,
 }
 
 #[derive(Parser, Debug)]
@@ -94,6 +106,12 @@ pub struct WorkflowGenerateArgs {
     /// Backend config used for generation.
     #[arg(long)]
     pub config: Option<String>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EjectDestination {
+    User,
+    Project,
 }
 
 #[derive(Parser, Debug)]
@@ -127,7 +145,8 @@ pub struct PlanArgs {
     pub input: Option<String>,
 
     /// Path to the workflow config file. The special value `__builtin__`
-    /// selects the built-in default workflow.
+    /// selects the built-in default workflow;
+    /// `builtin:<name>` selects a named built-in workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
@@ -186,7 +205,8 @@ pub struct DraftArgs {
     pub input: Option<String>,
 
     /// Path to the workflow config file. The special value `__builtin__`
-    /// selects the built-in default workflow.
+    /// selects the built-in default workflow, and `builtin:<name>` selects a
+    /// named built-in workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 }
@@ -289,7 +309,8 @@ pub struct ExecArgs {
     pub input: Option<String>,
 
     /// Path to the workflow config file. The special value `__builtin__`
-    /// selects the built-in default workflow.
+    /// selects the built-in default workflow, and `builtin:<name>` selects a
+    /// named built-in workflow.
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
@@ -1173,12 +1194,53 @@ mod tests {
     }
 
     #[test]
-    fn workflow_generate_cli_parses_name_user_and_config() {
-        let cli = Cli::try_parse_from(["cruise", "workflow", "generate", "build/tests", "--name", "ci"]).unwrap();
+    fn workflow_list_is_accepted() {
+        assert!(Cli::try_parse_from(["cruise", "workflow", "list"]).is_ok());
+    }
+
+    #[test]
+    fn workflow_eject_accepts_name_and_destinations() {
+        assert!(Cli::try_parse_from(["cruise", "workflow", "eject", "simple"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["cruise", "workflow", "eject", "simple", "--to", "project"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["cruise", "workflow", "eject", "review", "--to", "user"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn workflow_eject_rejects_unknown_destination_and_missing_name() {
+        assert!(
+            Cli::try_parse_from(["cruise", "workflow", "eject", "simple", "--to", "elsewhere"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["cruise", "workflow", "eject"]).is_err());
+    }
+
+    #[test]
+    fn builtin_sentinel_config_arg_is_unchanged() {
+        let cli = Cli::parse_from(["cruise", "plan", "-c", "__builtin__", "task"]);
         match cli.command {
-            Some(Commands::Workflow {
-                command: WorkflowCommands::Generate(args),
-            }) => {
+            Some(Commands::Plan(args)) => assert_eq!(args.config.as_deref(), Some("__builtin__")),
+            _ => panic!("expected Plan subcommand"),
+        }
+    }
+
+    #[test]
+    fn workflow_generate_cli_parses_name_user_and_config() {
+        let cli = Cli::try_parse_from([
+            "cruise",
+            "workflow",
+            "generate",
+            "build/tests",
+            "--name",
+            "ci",
+        ])
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        match cli.command {
+            Some(Commands::Workflow(WorkflowCommand::Generate(args))) => {
                 assert_eq!(args.description, "build/tests");
                 assert_eq!(args.name, "ci");
                 assert!(!args.user);
@@ -1187,13 +1249,19 @@ mod tests {
             other => panic!("expected workflow generate, got {other:?}"),
         }
         let cli = Cli::try_parse_from([
-            "cruise", "workflow", "generate", "d", "--name", "ci", "--user", "--config", "path.yaml",
+            "cruise",
+            "workflow",
+            "generate",
+            "d",
+            "--name",
+            "ci",
+            "--user",
+            "--config",
+            "path.yaml",
         ])
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         match cli.command {
-            Some(Commands::Workflow {
-                command: WorkflowCommands::Generate(args),
-            }) => {
+            Some(Commands::Workflow(WorkflowCommand::Generate(args))) => {
                 assert!(args.user);
                 assert_eq!(args.config.as_deref(), Some("path.yaml"));
             }
@@ -1210,7 +1278,8 @@ mod tests {
     fn workflow_generate_rejects_empty_and_path_names() {
         for bad in ["", "a/b", ".", ".."] {
             assert!(
-                Cli::try_parse_from(["cruise", "workflow", "generate", "desc", "--name", bad]).is_err(),
+                Cli::try_parse_from(["cruise", "workflow", "generate", "desc", "--name", bad])
+                    .is_err(),
                 "name {bad:?} must be rejected at parse time"
             );
         }

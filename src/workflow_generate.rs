@@ -172,6 +172,7 @@ pub(crate) async fn run(args: WorkflowGenerateArgs) -> Result<()> {
 }
 
 #[cfg(all(test, unix))]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::error::CruiseError;
@@ -424,11 +425,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     }
 
-    /// Set up cwd + env so `run` resolves a command-backend config via CRUISE_CONFIG.
-    fn run_env(
-        tmp: &TempDir,
-        outputs: &[&str],
-    ) -> (Vec<EnvGuard>, EnvGuard, PathBuf, PathBuf) {
+    /// Set up cwd + env so `run` resolves a command-backend config via `CRUISE_CONFIG`.
+    fn run_env(tmp: &TempDir, outputs: &[&str]) -> (Vec<EnvGuard>, EnvGuard, PathBuf, PathBuf) {
         let home = tmp.path().join("home");
         let proj = tmp.path().join("proj");
         let rec = tmp.path().join("rec");

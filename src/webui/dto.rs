@@ -280,6 +280,7 @@ pub struct DagEdgeDto {
 pub enum ConfigEntrySource {
     Local,
     User,
+    Builtin,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -334,6 +335,17 @@ pub(crate) fn config_entries(
                 description: entry.description,
             })
         })
+        .chain(
+            crate::builtin_workflows::BUILTIN_WORKFLOWS
+                .iter()
+                .filter(|w| w.name != crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+                .map(|w| ConfigEntryDto {
+                    path: format!("{}{}", crate::resolver::BUILTIN_SELECTOR_PREFIX, w.name),
+                    name: w.name.to_string(),
+                    description: Some(w.description.to_string()),
+                    source: Some(ConfigEntrySource::Builtin),
+                }),
+        )
         .collect()
 }
 
