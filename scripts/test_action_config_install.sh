@@ -225,7 +225,10 @@ if diff -q "$TMP/extracted-write-test-first.md" prompts/write-test-first.md >/de
   pass "resolve-config: write-test-first.md's prompt round-trips verbatim into the generated config"
 else
   fail "resolve-config: write-test-first.md's prompt round-trips verbatim into the generated config" \
-    "$(diff "$TMP/extracted-write-test-first.md" prompts/write-test-first.md)"
+    "$(diff "$TMP/extracted-write-test-first.md" prompts/write-test-first.md)
+$(wc -c < "$TMP/extracted-write-test-first.md") vs $(wc -c < prompts/write-test-first.md) bytes
+$(head -c 120 "$TMP/extracted-write-test-first.md" | od -c | head -4)
+$(head -c 120 prompts/write-test-first.md | od -c | head -4)"
 fi
 if diff -q "$TMP/extracted-implement-after-tests.md" prompts/implement-after-tests.md >/dev/null; then
   pass "resolve-config: implement-after-tests.md's prompt round-trips verbatim into the generated config"
