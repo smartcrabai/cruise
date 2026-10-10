@@ -365,7 +365,7 @@ fn guarded_common_dir(cwd: &Path, env: &HashMap<String, String>) -> Result<Strin
             "git common dir probe returned a malformed path",
         ));
     }
-    let common_dir = fs::canonicalize(cwd.join(probed)).map_err(|error| {
+    let common_dir = canonical_git_path(&cwd.join(probed)).map_err(|error| {
         guard_error(format!(
             "cannot resolve the guarded git common dir {probed}: {error}"
         ))
@@ -523,7 +523,7 @@ fn install_hook() -> Result<PathBuf> {
     })?;
     set_mode(&root, 0o700)?;
     set_mode(&hooks, 0o700)?;
-    let hooks = fs::canonicalize(&hooks).map_err(|error| {
+    let hooks = canonical_git_path(&hooks).map_err(|error| {
         guard_error(format!(
             "cannot resolve persistent hook directory {}: {error}",
             hooks.display()
@@ -597,6 +597,24 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
         let _ = (path, mode);
     }
     Ok(())
+}
+
+/// Canonical absolute path spelled the way Git and the sh hook expect. On
+/// Windows `fs::canonicalize` yields the `\\?\C:\...` verbatim form, which Git
+/// cannot spawn hooks from, so strip that prefix and use forward slashes.
+fn canonical_git_path(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        if let Some(text) = canonical.to_str() {
+            let plain = match text.strip_prefix(r"\\?\UNC\") {
+                Some(rest) => format!("//{rest}"),
+                None => text.strip_prefix(r"\\?\").unwrap_or(text).to_string(),
+            };
+            return Ok(PathBuf::from(plain.replace('\\', "/")));
+        }
+    }
+    Ok(canonical)
 }
 
 fn run_git<I, S>(cwd: &Path, env: &HashMap<String, String>, args: I) -> Result<Output>

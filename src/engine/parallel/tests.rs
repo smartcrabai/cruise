@@ -95,6 +95,8 @@ impl Fixture {
     }
 }
 
+// Commands use POSIX shell syntax (`;`, `[ -f ]`, `>&2`) that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_children_overlap_and_join_before_successor() {
     let _lock = crate::test_support::lock_process();
@@ -199,6 +201,8 @@ steps:
     assert!(!fixture.root.path().join("unexpected").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_parent_retries_all_children_and_handles_failure_once() {
     let _lock = crate::test_support::lock_process();
@@ -230,6 +234,8 @@ steps:
     assert!(fixture.root.path().join("done").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_fatal_prompt_error_waits_for_sibling_before_returning() {
     let _lock = crate::test_support::lock_process();
@@ -250,6 +256,8 @@ steps:
     assert!(!fixture.root.path().join("unexpected").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_multiple_command_failures_count_as_one_failed_step() {
     let _lock = crate::test_support::lock_process();
@@ -277,6 +285,8 @@ steps:
     assert_eq!(fixture.outputs()["second"]["success"], false);
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_child_timeout_does_not_cancel_sibling() {
     let _lock = crate::test_support::lock_process();
@@ -338,6 +348,8 @@ steps:
     assert!(!fixture.root.path().join("leaked").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_cancellation_keeps_parent_checkpoint_and_resume_reruns_block() {
     let _lock = crate::test_support::lock_process();
@@ -457,6 +469,8 @@ after-pr:
     assert!(fixture.root.path().join("notify").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_env_model_arrays_and_stdin_keep_child_boundaries() {
     let _lock = crate::test_support::lock_process();
@@ -511,6 +525,8 @@ steps:
     assert!(!fixture.root.path().join("unexpected").exists());
 }
 
+// Commands use POSIX shell syntax that cmd.exe cannot run.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_prompt_failure_recovery_waits_for_siblings() {
     let _lock = crate::test_support::lock_process();

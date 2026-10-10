@@ -1590,13 +1590,14 @@ steps:
         let file_dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
         let absolute = write_file(&file_dir, "impl.md", "absolute prompt\n");
         let absolute_string = absolute.to_string_lossy().to_string();
+        // Single-quoted YAML: Windows backslashes are literal there, not escapes.
         let yaml = format!(
-            r#"
+            r"
 command: [parent]
 steps:
   implement:
-    prompt_file: "{absolute_string}"
-"#
+    prompt_file: '{absolute_string}'
+"
         );
         let config =
             WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse failed: {e}"));

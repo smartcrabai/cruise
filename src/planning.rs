@@ -584,11 +584,14 @@ mod tests {
 
     #[test]
     fn write_input_as_plan_returns_err_on_invalid_path() {
-        // Given: a path whose parent directory does not exist
-        let plan_path = std::path::Path::new("/nonexistent/dir/plan.md");
+        // Given: a plan path whose parent is a regular file, so directory creation fails
+        let dir = make_temp_dir();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = blocker.join("plan.md");
 
-        // When / Then: error returned because fs::write fails
-        assert!(write_input_as_plan(plan_path, "some content").is_err());
+        // When / Then: error returned because the parent cannot be created
+        assert!(write_input_as_plan(&plan_path, "some content").is_err());
     }
 
     // -- template selection ---------------------------------------------------

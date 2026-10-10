@@ -485,7 +485,8 @@ mod tests {
                 .push((stream.to_string(), line.to_string()));
         };
         let result = run_commands(
-            &["echo stdout& echo stderr 1>&2".to_string()],
+            // cmd's echo keeps the space before a redirection, so write stderr without one.
+            &["echo stdout&echo stderr>&2".to_string()],
             0,
             &HashMap::new(),
             None,

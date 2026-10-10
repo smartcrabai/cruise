@@ -452,7 +452,7 @@ fn shorten_display_path(
     if let Ok(rel) = path.strip_prefix(cwd)
         && !rel.as_os_str().is_empty()
     {
-        return format!("./{}", rel.display());
+        return format!("./{}", slash_separated(rel));
     }
     // Guard `home.parent()`: when home is the filesystem root, every absolute path would match.
     if let Some(home) = home
@@ -460,9 +460,17 @@ fn shorten_display_path(
         && let Ok(rel) = path.strip_prefix(home)
         && !rel.as_os_str().is_empty()
     {
-        return format!("~/{}", rel.display());
+        return format!("~/{}", slash_separated(rel));
     }
     path.display().to_string()
+}
+
+/// Path components joined with `/`, so CLI labels read the same on every platform.
+fn slash_separated(path: &std::path::Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -857,11 +865,8 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e:?}"));
 
         let _dir_guard = DirGuard::new();
-        // `home` crate 0.5.x uses USERPROFILE on Windows, HOME on Unix.
-        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-        let _home_guard = EnvGuard::set(home_var, fake_home.path().as_os_str());
-        let _xdg_guard = EnvGuard::remove("XDG_CONFIG_HOME");
-        let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
+        // Also clears APPDATA/LOCALAPPDATA, which Windows config dirs prefer over HOME.
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
 
         // When: resolved against the empty repo dir
         let (yaml, source) =
