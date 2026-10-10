@@ -65,19 +65,25 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine and open it in the default browser.
     Webui(WebuiArgs),
-    /// List, eject, and generate workflows.
+    /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
 }
 
 #[derive(Subcommand, Debug)]
 pub enum WorkflowCommand {
-    /// List the built-in workflows.
+    /// List the built-in workflows and installed workflow packages.
     List,
     /// Copy a built-in workflow so it can be edited.
     Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
+    /// Install a workflow from GitHub: `owner/repo[/path][@ref]`.
+    Add(WorkflowAddArgs),
+    /// Remove an installed workflow package.
+    Remove(WorkflowNameArgs),
+    /// Update an installed workflow package to its requested ref's latest commit.
+    Update(WorkflowUpdateArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -106,6 +112,33 @@ pub struct WorkflowGenerateArgs {
     /// Backend config used for generation.
     #[arg(long)]
     pub config: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowAddArgs {
+    /// Package spec `owner/repo[/path][@ref]`.
+    pub spec: String,
+    /// Install under this name instead of the default.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Skip the confirmation prompt (the preview is still printed).
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowNameArgs {
+    /// Installed package name.
+    pub name: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowUpdateArgs {
+    /// Installed package name.
+    pub name: String,
+    /// Skip the confirmation prompt (the preview is still printed).
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,6 +696,51 @@ mod tests {
             }
             _ => panic!("expected List subcommand"),
         }
+    }
+
+    #[test]
+    fn workflow_subcommands_parse() {
+        let cli = Cli::parse_from(["cruise", "workflow", "add", "org/repo"]);
+        match cli.command {
+            Some(Commands::Workflow(WorkflowCommand::Add(args))) => {
+                assert_eq!(args.spec, "org/repo");
+                assert_eq!(args.name, None);
+                assert!(!args.yes);
+            }
+            _ => panic!("expected workflow add"),
+        }
+        let cli = Cli::parse_from([
+            "cruise",
+            "workflow",
+            "add",
+            "org/repo@v1",
+            "--name",
+            "review",
+            "--yes",
+        ]);
+        match cli.command {
+            Some(Commands::Workflow(WorkflowCommand::Add(args))) => {
+                assert_eq!(args.spec, "org/repo@v1");
+                assert_eq!(args.name.as_deref(), Some("review"));
+                assert!(args.yes);
+            }
+            _ => panic!("expected workflow add with flags"),
+        }
+        let cli = Cli::parse_from(["cruise", "workflow", "remove", "review"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workflow(WorkflowCommand::Remove(ref a))) if a.name == "review"
+        ));
+        let cli = Cli::parse_from(["cruise", "workflow", "update", "review"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workflow(WorkflowCommand::Update(ref a))) if a.name == "review"
+        ));
+        let cli = Cli::parse_from(["cruise", "workflow", "list"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workflow(WorkflowCommand::List))
+        ));
     }
 
     #[test]
