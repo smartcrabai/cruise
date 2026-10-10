@@ -1641,10 +1641,7 @@ mod tests {
         let label = shorten_display_path(&cwd.join(".cruise").join("t.yaml"), cwd, Some(home));
 
         // Then: ./ prefix with nested relative path
-        let expected = format!(
-            "./{}",
-            std::path::Path::new(".cruise").join("t.yaml").display()
-        );
+        let expected = "./.cruise/t.yaml";
         assert_eq!(label, expected);
     }
 
@@ -1662,13 +1659,7 @@ mod tests {
         );
 
         // Then: ~/ prefix
-        let expected = format!(
-            "~/{}",
-            std::path::Path::new(".config")
-                .join("cruise")
-                .join("a.yaml")
-                .display()
-        );
+        let expected = "~/.config/cruise/a.yaml";
         assert_eq!(label, expected);
     }
 
@@ -1794,10 +1785,7 @@ mod tests {
             .iter()
             .find(|c| matches!(c.source, CandidateKind::Local(_)))
             .unwrap_or_else(|| panic!("expected Local candidate"));
-        let expected = format!(
-            "./{}",
-            std::path::Path::new(".cruise").join("team.yaml").display()
-        );
+        let expected = "./.cruise/team.yaml";
         assert_eq!(local.label, expected);
     }
 
