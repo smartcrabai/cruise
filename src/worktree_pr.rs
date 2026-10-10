@@ -366,7 +366,8 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
+/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation and
+/// `Err(GitHubReviewFailed)` for the opt-in github-review step; other failures only warn.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
@@ -407,11 +408,36 @@ async fn run_after_pr_steps(
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+        Err(e @ CruiseError::GitHubReviewFailed { .. }) => Err(e),
         Err(e) => {
             crate::status_eprintln!("warning: after-pr steps failed: {e}");
             Ok(())
         }
     }
+}
+
+/// Test entry point mirroring the after-pr phase of `run_pr_flow`.
+#[cfg(test)]
+pub(crate) async fn run_after_pr_steps_for_test(
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    working_dir: &Path,
+    option_handler: &dyn OptionHandler,
+) -> Result<()> {
+    run_after_pr_steps(
+        compiled,
+        vars,
+        tracker,
+        10,
+        0,
+        working_dir,
+        &[],
+        None,
+        option_handler,
+        None,
+    )
+    .await
 }
 
 pub(crate) fn build_pr_prompt(

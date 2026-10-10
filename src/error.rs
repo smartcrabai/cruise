@@ -73,6 +73,9 @@ pub enum CruiseError {
     #[error("step '{step}' timed out after {after_secs}s")]
     StepTimeout { step: String, after_secs: u64 },
 
+    #[error("github-review step '{step}' failed: {detail}")]
+    GitHubReviewFailed { step: String, detail: String },
+
     #[error("interrupted by user (Ctrl+C)")]
     Interrupted,
 

@@ -230,6 +230,7 @@ steps:
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |
+| `github-review` | object \| null | Opt-in review bot loop, valid only directly in `after-pr`: `bots` (required, unique logins) and `max-iterations` (default `3`). Requires `timeout` and exactly one of `prompt` / `prompt_file`; cannot be combined with `command`, `option`, `parallel`, `group`, or `workflow_call`. `output_file` receives the iteration report (see [after-pr.md](after-pr.md#github-review)) |
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |

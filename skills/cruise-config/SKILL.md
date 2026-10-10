@@ -65,7 +65,7 @@ The full spec is split into the files below. Load only the sections you need.
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: jcode SDK (default, requires jcode CLI v0.88.0+) and claude-agent-sdk; model references, session tools, workflow-level MCP servers, and differences from command mode |
-| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel; child restrictions, `instruction`, `timeout` |
+| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
@@ -88,7 +88,7 @@ After writing or editing a config, verify each of the following:
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `prompt_file` / `command` / `if:`?
 6. **`if.no-file-changes`**: is the value either `retry` or `failed`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
 7. **`if.fail`**: is the value either an existing step name or a mapping? Only `{ retry: true }` retries the current step — `{}`, `{ retry: false }`, and mappings with unknown keys parse and simply fall through without retrying. Make sure it isn't used inside `after-pr` or in a group-level `if:`.
-8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`?
+8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`? A `github-review` step is valid only directly in `after-pr`, needs exactly one of `prompt` / `prompt_file`, a `timeout`, unique `bots`, and no `command` / `option` / `parallel` / `group` / `workflow_call`.
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
