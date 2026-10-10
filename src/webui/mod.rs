@@ -17,6 +17,7 @@ pub(crate) mod ops;
 pub(crate) mod pages;
 pub(crate) mod partials;
 pub(crate) mod run_all_state;
+pub(crate) mod shutdown;
 pub(crate) mod templates;
 pub(crate) mod view;
 
@@ -26,6 +27,7 @@ mod fixtures;
 mod tests;
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,7 +92,7 @@ impl WebState {
     }
 }
 
-/// Serve the `WebUI` until Ctrl-C.
+/// Serve the `WebUI` until Ctrl-C, then cancel active operations and drain.
 ///
 /// # Errors
 ///
@@ -100,6 +102,7 @@ pub async fn run(args: WebuiArgs) -> Result<()> {
     let assets = assets::prepare(args.webui_dir, &data_dir)?;
     let application = CruiseApplication::new(SessionManager::new(data_dir));
     let state = WebState::new(application, &assets)?;
+    let signals = shutdown::ShutdownSignals::new()?;
 
     let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port))
         .await
@@ -119,17 +122,37 @@ pub async fn run(args: WebuiArgs) -> Result<()> {
             "warning: the WebUI has no authentication; do not expose it on untrusted networks"
         );
     }
-    if !args.no_open
+    if args.open
         && let Err(error) = crate::platform::open_url(&url)
     {
         eprintln!("could not open a browser ({error}); open {url} manually");
     }
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+    serve(listener, state, shutdown::production_signal(signals)).await
+}
+
+/// Serve on `listener` until `signal` resolves, then cancel work and drain.
+///
+/// # Errors
+///
+/// Returns an error when the server fails.
+pub(crate) async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    state: WebState,
+    signal: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let shutdown_state = state.clone();
+    axum::serve(listener, router(state.clone()))
+        .with_graceful_shutdown(async move {
+            signal.await;
+            shutdown::begin(&shutdown_state);
         })
         .await
-        .map_err(|error| CruiseError::Other(error.to_string()))
+        .map_err(|error| CruiseError::Other(error.to_string()))?;
+    shutdown::wait_for_operations(&state.application).await;
+    Ok(())
 }
 
 /// Build the application router.
@@ -159,6 +182,7 @@ pub(crate) fn router(state: WebState) -> Router {
         )
         .route("/webui/sessions/{id}/tab/{tab}", get(handlers::tab))
         .route("/webui/sessions/{id}/log", get(handlers::session_log))
+        .route("/webui/sessions/{id}/sync", get(handlers::session_sync))
         .route(
             "/webui/sessions/{id}/settings",
             get(handlers::session_settings).post(handlers::update_settings),

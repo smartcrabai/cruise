@@ -340,6 +340,36 @@ async fn session_tabs_render_their_contract_ids() {
     }
 }
 
+#[test]
+fn header_omits_input_paragraph_for_input_as_plan_session() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let manager = SessionManager::new(harness.dir.path().to_path_buf());
+    let mut stored = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+    stored.input = String::new();
+    stored.input_as_plan = true;
+    stored.title = Some("plan title".to_string());
+    manager.save(&stored).unwrap_or_else(|e| panic!("{e}"));
+
+    let html = super::partials::header_html(&harness.state, &session.id, None)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    assert!(html.contains("plan title"), "{html}");
+    assert!(!html.contains("<p "), "{html}");
+}
+
+#[test]
+fn header_shows_input_paragraph_for_normal_session() {
+    let harness = harness();
+    let session = create_session(&harness);
+
+    let html = super::partials::header_html(&harness.state, &session.id, None)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    assert!(html.contains("<p "), "{html}");
+    assert!(html.contains("add a webui"), "{html}");
+}
+
 mod event_partials {
     use super::{create_session, harness};
     use crate::application::{
@@ -434,6 +464,279 @@ mod event_partials {
             message,
             SseMessage::Notify { body, .. } if body.contains("Plan ready")
         )));
+    }
+}
+
+fn external_edit(harness: &Harness, id: &str, edit: impl FnOnce(&mut SessionState)) {
+    let other = SessionManager::new(harness.dir.path().to_path_buf());
+    let mut state = other
+        .load(id)
+        .unwrap_or_else(|error| panic!("load: {error}"));
+    edit(&mut state);
+    other
+        .save(&state)
+        .unwrap_or_else(|error| panic!("save: {error}"));
+}
+
+fn current_version(harness: &Harness, id: &str) -> String {
+    harness
+        .state
+        .application
+        .session_view_version(id)
+        .unwrap_or_else(|error| panic!("version: {error}"))
+}
+
+#[tokio::test]
+async fn session_page_contains_sync_poller() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/sessions/{}", session.id);
+    let (status, _, body) = get(&harness, &uri, &[("hx-request", "true")]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("id=\"session-sync-{}\"", session.id)),
+        "{body}"
+    );
+    assert!(body.contains("hx-trigger=\"every 3s\""), "{body}");
+}
+
+#[tokio::test]
+async fn sync_with_current_token_is_no_content() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let token = current_version(&harness, &session.id);
+    let uri = format!("/webui/sessions/{}/sync?v={token}", session.id);
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty(), "{body}");
+}
+
+#[tokio::test]
+async fn sync_after_external_change_returns_fresh_partials() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.title = Some("Externally Renamed Title".to_string());
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("hx-target=\"#session-header-{id}\"")),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("hx-target=\"#tab-info-{id}\"")),
+        "{body}"
+    );
+    assert!(body.contains("Externally Renamed Title"), "{body}");
+    assert!(body.contains(&format!("session-sync-{id}")), "{body}");
+    assert!(
+        !body.contains(&format!("v={old}")),
+        "poller must carry the new token: {body}"
+    );
+    assert!(
+        body.contains(&format!("v={}", current_version(&harness, &id))),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn sync_after_external_run_starts_log_polling() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.set_runner_to_current_process();
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("hx-target=\"#tab-log-{id}\"")),
+        "{body}"
+    );
+    assert!(body.contains("hx-trigger=\"every 2s\""), "{body}");
+}
+
+#[tokio::test]
+async fn sync_reconciles_dead_runner_to_suspended() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.runner_pid = None;
+        state.runner_started_at = None;
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Suspended"), "{body}");
+    assert!(!body.contains(">Running<"), "{body}");
+}
+
+#[tokio::test]
+async fn sync_for_deleted_session_replaces_main_with_not_found() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let token = current_version(&harness, &id);
+    if let Err(error) = std::fs::remove_dir_all(harness.dir.path().join("sessions").join(&id)) {
+        panic!("remove session: {error}");
+    }
+
+    let uri = format!("/webui/sessions/{id}/sync?v={token}");
+    let (_, _, body) = get(&harness, &uri, &[]).await;
+    assert!(body.contains("<hx-partial id=\"main\""), "{body}");
+    assert!(body.contains("Session not found"), "{body}");
+}
+
+#[tokio::test]
+async fn sidebar_refreshes_run_all_control() {
+    let harness = harness();
+    create_session(&harness);
+    let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("hx-target=\"#run-all-control\""), "{body}");
+    assert!(body.contains("<hx-partial id=\"session-list\""), "{body}");
+}
+
+#[tokio::test]
+async fn sidebar_reconciles_stale_running_rows() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.runner_pid = None;
+        state.runner_started_at = None;
+    });
+    let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Suspended"), "{body}");
+}
+
+#[tokio::test]
+async fn shutdown_begin_ends_open_sse_stream() {
+    let harness = harness();
+    let Ok(request) = Request::builder().uri("/webui/events").body(Body::empty()) else {
+        panic!("SSE request");
+    };
+    let response = match router(harness.state.clone()).oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+
+    super::shutdown::begin(&harness.state);
+
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
+            Ok(None) => break,
+            Ok(Some(_)) => {}
+            Err(error) => panic!("SSE stream stayed open after shutdown: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn serve_returns_after_signal_even_with_open_sse_client() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let harness = harness();
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+        panic!("bind");
+    };
+    let Ok(addr) = listener.local_addr() else {
+        panic!("local addr");
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
+        let _ = rx.await;
+    }));
+
+    let Ok(mut client) = tokio::net::TcpStream::connect(addr).await else {
+        panic!("connect");
+    };
+    if let Err(error) = client
+        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+    {
+        panic!("write request: {error}");
+    }
+    let mut received = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !String::from_utf8_lossy(&received).contains("\r\n\r\n") {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
+            Ok(Ok(0)) => panic!("closed before headers"),
+            Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+            Ok(Err(error)) => panic!("read headers: {error}"),
+            Err(error) => panic!("timed out waiting for headers: {error}"),
+        }
+    }
+    let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("text/event-stream"), "{head}");
+
+    let _ = tx.send(());
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
+        Ok(Err(error)) => panic!("server task failed: {error}"),
+        Err(error) => panic!("serve did not return after signal: {error}"),
+    }
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => break,
+            Ok(Ok(_)) => {}
+            Err(error) => panic!("client connection stayed open: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn serve_waits_for_operations_to_release_after_cancel() {
+    let harness = harness();
+    let runtime = harness.state.application.runtime();
+    let claim = runtime
+        .try_begin("busy", crate::application::OperationKind::Run)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let token = claim.token();
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+        panic!("bind");
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let mut server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
+        let _ = rx.await;
+    }));
+    let _ = tx.send(());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !token.is_cancelled() {
+        assert!(std::time::Instant::now() < deadline, "claim not cancelled");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut server)
+            .await
+            .is_err(),
+        "serve returned while an operation was still active"
+    );
+    drop(claim);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
+        Ok(Err(error)) => panic!("server task failed: {error}"),
+        Err(error) => panic!("serve did not return after release: {error}"),
     }
 }
 

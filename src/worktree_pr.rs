@@ -159,7 +159,7 @@ pub async fn handle_worktree_pr_with_persistence(
     let pr_attempt = attempt_pr_creation(
         ctx,
         crate::forge::session_forge(session),
-        &session.input,
+        session.input_or_title(),
         &pr_title,
         &pr_body,
         cancel_token,

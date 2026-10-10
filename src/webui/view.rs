@@ -102,6 +102,21 @@ pub(crate) struct SessionRowVm {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSyncVm {
+    pub(crate) id: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunAllControlVm {
+    pub(crate) run_all_active: bool,
+    pub(crate) runnable_count: usize,
+    pub(crate) run_all_confirm: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SidebarVm {
     pub(crate) version: &'static str,
     pub(crate) selected_id: Option<String>,
@@ -120,7 +135,7 @@ pub(crate) struct SidebarVm {
 pub(crate) struct SessionHeaderVm {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) input: String,
+    pub(crate) input: Option<String>,
     pub(crate) badge: PhaseBadgeVm,
     pub(crate) current_step: Option<String>,
     pub(crate) phase_error: Option<String>,
@@ -147,6 +162,7 @@ pub(crate) struct TabHrefs {
 pub(crate) struct SessionDetailVm {
     pub(crate) id: String,
     pub(crate) header: RawHtml,
+    pub(crate) sync: RawHtml,
     pub(crate) ask_panel: RawHtml,
     pub(crate) settings: RawHtml,
     pub(crate) editor: RawHtml,
@@ -701,6 +717,7 @@ pub(crate) fn session_row(
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
+            .filter(|_| !session.input.trim().is_empty())
             .map(|_| truncate(&session.input, 80)),
         dir_label: dir_label(&session.base_dir),
         time_label: format_local_time(session.updated_at.as_ref().unwrap_or(&session.created_at)),

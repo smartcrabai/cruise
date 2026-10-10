@@ -11,7 +11,7 @@ use ratatui::widgets::{
 use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
 
-use super::app::{DetailTab, Modal, SidebarStatus, TuiApp, View, action_label};
+use super::app::{DetailTab, Modal, SessionsFocus, SidebarStatus, TuiApp, View, action_label};
 use super::forms::{Editor, Launch, SourceKind, Step};
 pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
@@ -130,7 +130,14 @@ fn footer_spans<'a>(app: &TuiApp, mut spans: Vec<Span<'a>>) -> Vec<Span<'a>> {
         View::Sessions => &[
             ("Enter", "actions"),
             ("c", "clean"),
-            ("Tab", "detail"),
+            (
+                "Tab",
+                if app.focus == SessionsFocus::Sidebar {
+                    "detail"
+                } else {
+                    "sidebar"
+                },
+            ),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -171,8 +178,26 @@ fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     }
     .spacing(1);
     let sections = layout.split(area);
+    if app.tab == DetailTab::Info {
+        clamp_info_scroll(app, sections[1]);
+    }
     render_sidebar(frame, app, sections[0]);
     render_detail(frame, app, sections[1]);
+}
+
+fn clamp_info_scroll(app: &mut TuiApp, detail: Rect) {
+    let max = app.active_session().map_or(0, |session| {
+        let inner = Block::bordered().inner(detail_body_area(detail));
+        Paragraph::new(info_lines(app, session))
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width)
+            .saturating_sub(usize::from(inner.height))
+    });
+    app.info_scroll = app.info_scroll.min(max);
+}
+
+fn detail_body_area(area: Rect) -> Rect {
+    Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area)[1]
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -200,10 +225,10 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ListState::default().with_selected((!app.sessions.is_empty()).then_some(app.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(panel(
+            .block(focus_panel(
                 app,
                 format!(" Sessions  {} ", app.sessions.len()),
-                true,
+                app.focus == SessionsFocus::Sidebar,
             ))
             .highlight_style(sidebar_selection(app))
             .highlight_symbol("▸ "),
@@ -239,17 +264,21 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Plan => 2,
         DetailTab::Log => 3,
     })
-    .block(panel(app, format!(" {} ", session.title_or_input()), false))
+    .block(focus_panel(
+        app,
+        format!(" {} ", session.title_or_input()),
+        app.focus == SessionsFocus::Detail,
+    ))
     .style(muted(app))
     .highlight_style(active_nav(app))
     .divider(Span::styled(" │ ", border(app, false)));
-    let vertical = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
-    frame.render_widget(tabs, vertical[0]);
+    let body = detail_body_area(area);
+    frame.render_widget(tabs, Rect { height: 3, ..area });
     match app.tab {
-        DetailTab::Info => render_info(frame, app, session, vertical[1]),
-        DetailTab::Dag => render_dag(frame, app, vertical[1]),
-        DetailTab::Plan => render_plan(frame, app, vertical[1]),
-        DetailTab::Log => render_log(frame, app, vertical[1]),
+        DetailTab::Info => render_info(frame, app, session, body),
+        DetailTab::Dag => render_dag(frame, app, body),
+        DetailTab::Plan => render_plan(frame, app, body),
+        DetailTab::Log => render_log(frame, app, body),
     }
 }
 
@@ -259,6 +288,16 @@ fn render_info(
     session: &crate::session::SessionState,
     area: Rect,
 ) {
+    frame.render_widget(
+        Paragraph::new(info_lines(app, session))
+            .block(panel(app, " Session information ", false))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(app.info_scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+}
+
+fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Vec<Line<'a>> {
     let mut lines = vec![
         labeled_line(app, "ID       ", Span::raw(session.id.as_str())),
         labeled_line(
@@ -307,8 +346,14 @@ fn render_info(
             "Issue    ",
             Span::raw(session.published_issue_url.as_deref().unwrap_or("—")),
         ),
-        labeled_line(app, "Input    ", Span::raw(session.input.as_str())),
     ];
+    if !session.input.trim().is_empty() {
+        lines.push(labeled_line(
+            app,
+            "Input    ",
+            Span::raw(session.input.as_str()),
+        ));
+    }
     if let SessionPhase::Failed(error) = &session.phase {
         lines.push(Line::from(vec![
             Span::styled("Run error", error_style(app)),
@@ -329,12 +374,7 @@ fn render_info(
         .collect::<Vec<_>>()
         .join(", ");
     lines.push(labeled_line(app, "Actions  ", Span::raw(actions)));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(app, " Session information ", false))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    lines
 }
 
 fn labeled_line<'a>(app: &TuiApp, name: &'a str, value: Span<'a>) -> Line<'a> {
@@ -538,6 +578,8 @@ fn render_plan_prompt(
 
     let answer_title = if prompt.editing {
         " Answer  editing "
+    } else if app.focus != SessionsFocus::Detail {
+        " Answer  Tab to focus, Enter to edit "
     } else {
         " Answer  press Enter to edit "
     };
@@ -555,6 +597,8 @@ fn render_plan_prompt(
 
     let mut guide = if prompt.editing {
         "Enter submit   Esc leave editing"
+    } else if app.focus != SessionsFocus::Detail {
+        "Tab focus detail   Enter edit   Esc leave"
     } else {
         "Enter edit   scroll ↑↓ PgUp/PgDn Home/End   Esc leave"
     };
@@ -1043,16 +1087,16 @@ fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let body = "n  new session, one question at a time     1/2/3  switch views
 Ctrl+P  planning     Ctrl+G  grill     Ctrl+U  input plan
 Ctrl+S  save draft   (each starts from any question)
-Tab / Shift-Tab  next / previous question, or detail tab
+Tab / Shift-Tab  next / previous question, or sidebar / detail focus
 Enter  next question; newline in the task and image editors
 Ctrl+Enter  next question from a multiline editor
-↑↓ / j/k  choose, recall history, or navigate
+↑↓ / j/k  sidebar: sessions  detail: scroll  dialogue: choose/history
 Space  toggle the current choice     PgUp/PgDn/Home/End  jump
-←→ / [ ]  detail tabs   p  Run All parallelism   f  follow log
+←→  detail tabs (→ in sidebar focuses detail)   [ ]  detail tabs
 a / Enter  actions   o  selected Ask → Plan; Option modal or URL
 c  clean sessions (Sessions only; asks for confirmation)   r  refresh
+p  Run All parallelism  f  follow log  Ctrl+R  toggle save/regenerate
 Ctrl+Enter  save multiline input in action dialogs
-Ctrl+R  toggle save/regenerate
 Plan Ask: Enter edit/submit   Esc leave editing; Option stays modal
 Esc  close, or back one question   ?  help   q/Ctrl-C  quit
 
@@ -1350,6 +1394,15 @@ fn panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> Block<'
         .border_style(border(app, focused))
 }
 
+fn focus_panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
+    let block = panel(app, title, focused);
+    if focused {
+        block.border_type(BorderType::Thick)
+    } else {
+        block
+    }
+}
+
 fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
     match phase {
         SessionPhase::Completed => success(app),
@@ -1438,6 +1491,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
 
+    use super::super::app::SessionsFocus;
     use super::*;
     use crate::session::SessionState;
 
@@ -1673,6 +1727,7 @@ mod tests {
             Some(crate::test_support::lock_process()),
         );
         configure_ask_sessions(&mut app, DetailTab::Plan, 0);
+        app.focus = SessionsFocus::Detail;
         (temp, app)
     }
 
@@ -2030,6 +2085,35 @@ mod tests {
     }
 
     #[test]
+    fn info_tab_omits_input_row_for_input_as_plan_session() {
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("skipped", SessionPhase::Planned);
+            state.input = String::new();
+            state.input_as_plan = true;
+            state.title = Some("skipped title".to_string());
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+
+        assert!(view.contains("Phase    Planned"));
+        assert!(!view.contains("Input    "));
+    }
+
+    #[test]
+    fn info_tab_shows_input_row_for_normal_session() {
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("normal", SessionPhase::Planned);
+            state.input = "normal task text".to_string();
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+
+        assert!(view.contains("Input    normal task text"));
+    }
+
+    #[test]
     fn config_step_shows_auto_and_cli_candidates_at_minimum_and_wide_sizes() {
         for width in [80, 120] {
             let view = rendered_view_with(width, 24, true, View::NewSession, |app| {
@@ -2298,6 +2382,121 @@ mod tests {
         assert!(missing.is_empty(), "missing Clean hint in {missing:?}");
     }
 
+    fn focus_app(no_color: bool, focus: SessionsFocus) -> TuiApp {
+        let mut app = style_test_app(no_color);
+        app.sessions
+            .push(sidebar_session("session-1", SessionPhase::Planned));
+        app.tab = DetailTab::Info;
+        app.focus = focus;
+        app
+    }
+
+    fn corner_cells(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16, String)> {
+        let area = buffer.area;
+        let mut cells = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let symbol = buffer[(x, y)].symbol().to_string();
+                if symbol == "┏" || symbol == "╭" {
+                    cells.push((y, x, symbol));
+                }
+            }
+        }
+        cells
+    }
+
+    fn draw_buffer(width: u16, height: u16, app: &mut TuiApp) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| draw(frame, app))
+            .unwrap_or_else(|error| panic!("{error}"));
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn focused_pane_uses_a_thick_border_corner_independent_of_color() {
+        for width in [80_u16, 120] {
+            for no_color in [false, true] {
+                let mut app = focus_app(no_color, SessionsFocus::Sidebar);
+                let buffer = draw_buffer(width, 30, &mut app);
+                let cells = corner_cells(&buffer);
+                let first = cells.iter().min().cloned();
+                assert_eq!(
+                    first.map(|cell| cell.2),
+                    Some("┏".to_string()),
+                    "sidebar focused at {width} no_color={no_color}"
+                );
+                assert_eq!(
+                    cells.iter().filter(|cell| cell.2 == "┏").count(),
+                    1,
+                    "exactly one thick pane at {width}"
+                );
+
+                app.focus = SessionsFocus::Detail;
+                let buffer = draw_buffer(width, 30, &mut app);
+                let cells = corner_cells(&buffer);
+                let first = cells.iter().min().cloned();
+                assert_eq!(
+                    first.map(|cell| cell.2),
+                    Some("╭".to_string()),
+                    "sidebar unfocused at {width} no_color={no_color}"
+                );
+                assert_eq!(
+                    cells.iter().filter(|cell| cell.2 == "┏").count(),
+                    1,
+                    "detail pane is the thick one at {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn footer_names_the_pane_that_tab_moves_focus_to() {
+        let mut app = focus_app(true, SessionsFocus::Sidebar);
+        let screen = screen_for_app(80, 24, &mut app);
+        assert!(screen.contains("Tab detail"), "{screen}");
+        assert!(screen.contains("c clean"), "{screen}");
+        app.focus = SessionsFocus::Detail;
+        let screen = screen_for_app(80, 24, &mut app);
+        assert!(screen.contains("Tab sidebar"), "{screen}");
+        assert!(screen.contains("c clean"), "{screen}");
+    }
+
+    #[test]
+    fn info_tab_scrolls_with_detail_focus_and_clamps_at_the_end() {
+        let mut app = focus_app(true, SessionsFocus::Sidebar);
+        let screen = screen_for_app(80, 24, &mut app);
+        assert!(screen.contains("ID"), "{screen}");
+
+        app.focus = SessionsFocus::Detail;
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        let screen = screen_for_app(80, 24, &mut app);
+        assert!(screen.contains("Actions"), "{screen}");
+        assert!(!screen.contains("ID       "), "{screen}");
+        let clamped = app.info_scroll;
+        assert!(clamped > 0);
+        assert_ne!(clamped, usize::MAX);
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        let _ = screen_for_app(80, 24, &mut app);
+        assert_eq!(app.info_scroll, clamped);
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(app.info_scroll, clamped - 1);
+    }
+
+    #[test]
+    fn plan_ask_panel_tells_the_user_to_focus_detail_when_sidebar_is_focused() {
+        let (_temp, mut app) = ask_plan_app();
+        app.focus = SessionsFocus::Sidebar;
+        let screen = screen_for_app(120, 30, &mut app);
+        assert!(screen.contains("Tab"), "{screen}");
+        assert!(screen.contains("Enter"), "{screen}");
+        assert!(screen.contains("Esc"), "{screen}");
+    }
+
     #[test]
     fn sessions_footer_keeps_clean_hint_visible_after_a_long_status() {
         let view = rendered_view_with(80, 24, true, View::Sessions, |app| {
@@ -2336,7 +2535,7 @@ mod tests {
         });
         for expected in [
             "switch views",
-            "next / previous question, or detail tab",
+            "next / previous question, or sidebar / detail focus",
             "save multiline input",
             "Ctrl+U  input plan",
             "toggle save/regenerate",
@@ -2602,8 +2801,14 @@ mod tests {
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.modal.is_none());
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.focus, SessionsFocus::Sidebar);
+        assert_eq!(app.tab, DetailTab::Plan);
+        assert!(!app.plan_prompts.is_editing("session-a"));
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(app.focus, SessionsFocus::Detail);
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
         assert_eq!(app.tab, DetailTab::Log);
-        assert!(!app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
         assert_eq!(app.tab, DetailTab::Plan);
         let restored_screen = screen_for_app(120, 24, &mut app);
         assert!(restored_screen.contains("q1n[]jk"));

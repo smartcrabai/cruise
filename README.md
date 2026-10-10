@@ -46,8 +46,9 @@ The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
 - `--host <ADDR>` -- interface to bind (default `127.0.0.1`; the WebUI has no authentication, so do not bind it to an untrusted network). The Merge PR route is served by the same unauthenticated server, and its on-screen confirmation is not access control: never expose the WebUI to a network you do not trust.
 - `--port <PORT>` -- TCP port to listen on (default `8484`).
-- `--no-open` -- do not open the browser automatically.
+- `-o`, `--open` -- open the WebUI in the default browser after the server starts (by default the browser is not opened; visit the printed URL yourself).
 - `--webui-dir <DIR>` -- serve `templates/` and `static/` from disk for development. For example, `cruise webui --webui-dir webui`; templates are re-read on every request, so edit and reload without restarting.
+- `Ctrl-C` -- stops the server. Active operations are cancelled (sessions become Suspended), the server exits within about 10 seconds, and a second `Ctrl-C` quits immediately.
 
 The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline.
 
@@ -149,7 +150,7 @@ The TUI has three views:
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
-The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab and focus the detail pane, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 For interactive planning questions, line breaks are rendered as adjacent lines in the selected session's Plan tab. The answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
 
@@ -170,8 +171,8 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `Ctrl-G` | Create the New Session from the current answers and start grill planning |
 | `Ctrl-U` | Create the New Session from the current answers using the input directly as the plan |
 | `Ctrl-S` | Save the New Session answers as a draft |
-| `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches, including arbitrary workflow config paths); move between detail tabs elsewhere |
-| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices |
+| `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches, including arbitrary workflow config paths); in Sessions, toggle focus between the sidebar and the detail pane |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices. In Sessions, with the sidebar focused they switch sessions (`Right` focuses the detail pane); with the detail pane focused, `Up` / `Down` / `PgUp` / `PgDn` / `Home` / `End` scroll Info, Plan, and Log or move the Graph node selection, and `Left` / `Right` switch detail tabs |
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
@@ -189,6 +190,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 - At **120 or more columns**, the layout uses a fixed **34-column sidebar** and a detail pane.
 - At **80--119 columns**, Sessions and Run All stack their two panes vertically (sidebar/summary above detail/log).
 - Below **80x24**, the TUI shows a resize notice.
+- In Sessions, the focused pane (sidebar or detail) has a thick border.
 - `NO_COLOR` is honored; labels and statuses are never conveyed by color alone.
 - Idle updates are event-driven. External state is polled every 3 seconds, and active work uses a 100 ms spinner.
 - The in-memory session log is bounded to the latest 10,000 lines; the Run All view is bounded to the latest 2,000 lines. Complete per-session run output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (by default `~/.local/share/cruise/sessions/<session-id>/run.log`).
@@ -218,7 +220,7 @@ Commands:
   config       Show or update application-level configuration (`~/.config/cruise/config.json`)
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve the browser UI from this machine and open it in the default browser
+  webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
@@ -426,6 +428,7 @@ Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.lo
 The other supported kinds are `builtin_snapshot` (with an optional `name` of the built-in catalog entry, e.g. `{"kind":"builtin_snapshot","name":"simple"}`; older sessions without `name` still load), `repo_snapshot` (with a
 clone-relative `relative_path`), and `inline_snapshot`. A `file` reference is
 live: edits to the file are picked up on the next load or execution reload.
+Sessions created with `--skip-planning` (input-as-plan) store `"input": ""` and `"input_as_plan": true`; `plan.md` holds the task text.
 Snapshot references read only the session-owned `sessions/<session-id>/config.yaml`
 and never rediscover or silently fall back to another config. Built-in, inline,
 and temporary-clone workflows are serialized there as resolved YAML so they
@@ -1290,7 +1293,7 @@ steps:
 
 | Variable | Description |
 |----------|-------------|
-| `{input}` | Initial input from CLI argument or stdin |
+| `{input}` | Initial input from CLI argument or stdin; for `--skip-planning` / input-as-plan sessions (`input_as_plan: true`) it resolves to the current `plan.md` content |
 | `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |

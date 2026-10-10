@@ -8,7 +8,7 @@ export default function SessionHeader(props) {
         <PhaseBadge badge={props.badge} />
       </div>
       {props.currentStep && <div class="text-sm text-gray-500 dark:text-gray-400">Step: <span class="font-medium text-gray-800 dark:text-gray-200">{props.currentStep}</span></div>}
-      <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{props.input}</p>
+      {props.input && <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{props.input}</p>}
       {props.prIsLink && <a href={props.prUrl} target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:text-blue-500">{props.prUrl}</a>}
       {props.prUrl && !props.prIsLink && <span class="text-sm text-gray-600 dark:text-gray-400">{props.prUrl}</span>}
       {props.phaseError && <div role="alert" class="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Run failed: {props.phaseError}</div>}

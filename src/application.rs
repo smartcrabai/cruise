@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -289,6 +289,7 @@ pub struct ApplicationRuntime {
     /// late cancellation cannot turn a committed operation into Cancelled.
     commit_gate: Mutex<()>,
     next_identity: AtomicU64,
+    shutting_down: AtomicBool,
 }
 
 impl std::fmt::Debug for ApplicationRuntime {
@@ -490,7 +491,43 @@ impl ApplicationRuntime {
             batch: Mutex::new(None),
             commit_gate: Mutex::new(()),
             next_identity: AtomicU64::new(1),
+            shutting_down: AtomicBool::new(false),
         }
+    }
+
+    /// Cancel every active operation and refuse new ones.
+    #[must_use]
+    pub fn begin_shutdown(&self) -> usize {
+        let ids: Vec<String> = {
+            let claims = self
+                .claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.shutting_down.store(true, Ordering::Release);
+            claims.keys().cloned().collect()
+        };
+        let batch = usize::from(self.cancel_batch(None));
+        let sessions = ids
+            .iter()
+            .filter(|id| self.cancel_session(id.as_str()))
+            .count();
+        batch + sessions
+    }
+
+    /// Whether no session claim and no batch claim is held.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        let claims_empty = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        let batch_empty = self
+            .batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        claims_empty && batch_empty
     }
 
     /// Begin one session operation. A duplicate never replaces the owner.
@@ -511,6 +548,9 @@ impl ApplicationRuntime {
             .claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(CruiseError::Interrupted);
+        }
         if claims.contains_key(&session_id) {
             return Err(CruiseError::Busy(format!(
                 "session {session_id} is already busy"
@@ -693,6 +733,9 @@ impl ApplicationRuntime {
             .batch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(CruiseError::Interrupted);
+        }
         if batch.is_some() {
             return Err(CruiseError::Busy(
                 "a Run All operation is already active".to_string(),
@@ -818,6 +861,9 @@ impl ApplicationRuntime {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.unregister_prompt(request_id, session_id, claim_identity);
+                    if token.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(CruiseError::Interrupted);
+                    }
                     return Err(CruiseError::Other(
                         "prompt response channel closed".to_string(),
                     ));
@@ -1719,7 +1765,7 @@ async fn run_plan_prompt(
     let planning_interactive =
         request.interactive.is_enabled() && crate::planning::sdk_plan_tools_enabled(config);
     let mut vars = crate::planning::setup_plan_vars(
-        context.state.input_with_attachments(),
+        context.state.template_input(&manager.sessions_dir()),
         context.staged_plan_path.clone(),
         config,
     );
@@ -2822,6 +2868,36 @@ impl CruiseApplication {
         Ok(state)
     }
 
+    /// Opaque token that changes whenever the session view's disk inputs change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be loaded.
+    pub fn session_view_version(&self, id: &str) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+
+        let (mut state, mut fingerprint) = self.manager.load_with_fingerprint(id)?;
+        if self
+            .manager
+            .reconcile_running_phase(&mut state, self.runtime.active_identity(id).is_some())
+        {
+            fingerprint = self.manager.load_with_fingerprint(id)?.1;
+        }
+        let mut hasher = std::hash::DefaultHasher::new();
+        fingerprint.hash(&mut hasher);
+        for path in [
+            state.plan_path(&self.manager.sessions_dir()),
+            self.manager.dag_path(id),
+        ] {
+            std::fs::metadata(&path)
+                .ok()
+                .map(|meta| (meta.len(), meta.modified().ok()))
+                .hash(&mut hasher);
+        }
+        self.runtime.active_operation(id).hash(&mut hasher);
+        Ok(format!("{:016x}", hasher.finish()))
+    }
+
     /// Publish a session plan as an issue.
     ///
     /// # Errors
@@ -3277,7 +3353,8 @@ struct RunInputs {
 
 fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
-    let mut vars = crate::variable::VariableStore::new(setup.state.input_with_attachments());
+    let mut vars =
+        crate::variable::VariableStore::new(setup.state.template_input(&manager.sessions_dir()));
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
@@ -4091,6 +4168,128 @@ mod tests {
         assert!(option.is_err());
     }
 
+    fn shutdown_runtime() -> Arc<ApplicationRuntime> {
+        Arc::new(ApplicationRuntime::new(SessionManager::new(
+            std::env::temp_dir().join(format!("cruise-{}", Uuid::new_v4().simple())),
+        )))
+    }
+
+    #[test]
+    fn begin_shutdown_cancels_all_claims_and_batch() {
+        let runtime = shutdown_runtime();
+        let a = runtime
+            .try_begin("a", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let b = runtime
+            .try_begin("b", OperationKind::Fix)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let batch = runtime.try_begin_batch().unwrap_or_else(|e| panic!("{e}"));
+
+        let signalled = runtime.begin_shutdown();
+
+        assert!(a.token().is_cancelled());
+        assert!(b.token().is_cancelled());
+        assert!(batch.token().is_cancelled());
+        assert_eq!(signalled, 3);
+    }
+
+    #[test]
+    fn begin_shutdown_refuses_new_claims() {
+        let runtime = shutdown_runtime();
+        let _ = runtime.begin_shutdown();
+        assert!(matches!(
+            runtime.try_begin("late", OperationKind::Run),
+            Err(CruiseError::Interrupted)
+        ));
+        assert!(matches!(
+            runtime.try_begin_batch(),
+            Err(CruiseError::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn begin_shutdown_skips_committed_claims() {
+        let runtime = shutdown_runtime();
+        let claim = runtime
+            .try_begin("done", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let committed = runtime
+            .commit_if_active(&claim, || Ok(()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(committed);
+
+        let signalled = runtime.begin_shutdown();
+
+        assert_eq!(signalled, 0);
+        assert!(!claim.token().is_cancelled());
+    }
+
+    #[test]
+    fn is_idle_tracks_claim_and_batch_release() {
+        let runtime = shutdown_runtime();
+        assert!(runtime.is_idle());
+        let claim = runtime
+            .try_begin("s", OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runtime.is_idle());
+        drop(claim);
+        assert!(runtime.is_idle());
+        let batch = runtime.try_begin_batch().unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runtime.is_idle());
+        drop(batch);
+        assert!(runtime.is_idle());
+    }
+
+    #[test]
+    fn cancelled_prompt_wait_returns_interrupted() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = SessionManager::new_session_id();
+        let state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "prompt".to_string(),
+        );
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("failed to create session: {error}"));
+        let runtime = Arc::new(ApplicationRuntime::new(manager));
+        let claim = runtime
+            .try_begin(&id, OperationKind::Run)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (request_id, receiver) = runtime
+            .register_prompt(&id, claim.identity(), PendingKind::Ask, Some("q?"), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let token = claim.token();
+        let identity = claim.identity();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = {
+            let runtime = Arc::clone(&runtime);
+            let id = id.clone();
+            std::thread::spawn(move || {
+                let result =
+                    runtime.wait_prompt(&id, &request_id, identity, &receiver, Some(&token));
+                let _ = done_tx.send(result.map(|_| ()));
+            })
+        };
+        std::thread::sleep(Duration::from_millis(120));
+
+        let _ = runtime.begin_shutdown();
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|e| panic!("prompt wait did not finish: {e}"));
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "{result:?}"
+        );
+        let _ = waiter.join();
+    }
+
     #[test]
     fn plan_request_no_interactive_planning_defaults_and_roundtrips() {
         let request: PlanRequest = serde_json::from_str("{}").unwrap_or_else(|e| panic!("{e}"));
@@ -4292,6 +4491,224 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!replanned_plan.contains("Quint"));
         assert!(!replanned_plan.contains("Alloy"));
+    }
+
+    #[cfg(unix)]
+    fn skip_planning_app(
+        temp: &tempfile::TempDir,
+        input: &str,
+    ) -> (CruiseApplication, SessionState) {
+        let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
+        let session = app
+            .create_session(NewSessionRequest {
+                input: input.to_string(),
+                base_dir: temp.path().to_path_buf(),
+                config_path: None,
+                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+        (app, session)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_skip_planning_persists_empty_input_and_keeps_text_in_plan() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "skip planning original task");
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+
+        app.generate(
+            &session.id,
+            PlanRequest {
+                skip_planning: true,
+                ..PlanRequest::default()
+            },
+            sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let loaded = SessionManager::new(temp.path().join("sessions"))
+            .load(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "");
+        assert!(loaded.input_as_plan);
+        assert!(
+            loaded
+                .title
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        );
+        assert_eq!(
+            app.session_plan(&session.id)
+                .unwrap_or_else(|e| panic!("{e}")),
+            "skip planning original task"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replan_of_input_as_plan_session_uses_plan_md_as_input() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "zebra-unicorn distinctive task");
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+        app.generate(
+            &session.id,
+            PlanRequest {
+                skip_planning: true,
+                ..PlanRequest::default()
+            },
+            Arc::clone(&sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        app.replan(
+            &session.id,
+            PlanRequest {
+                feedback: Some("tighten it".to_string()),
+                ..PlanRequest::default()
+            },
+            sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let plan = app
+            .session_plan(&session.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(plan.contains("zebra-unicorn distinctive task"), "{plan}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_input_as_plan_persists_empty_input_for_webui_path() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "webui draft task");
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let mut draft = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        draft.phase = SessionPhase::Draft;
+        manager.save(&draft).unwrap_or_else(|e| panic!("{e}"));
+
+        app.use_input_as_plan(&session.id, &|_event: ApplicationEvent| Ok(()))
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let loaded = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "");
+        assert!(loaded.input_as_plan);
+        assert!(
+            loaded
+                .title
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        );
+        assert_eq!(
+            app.session_plan(&session.id)
+                .unwrap_or_else(|e| panic!("{e}")),
+            "webui draft task"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_input_as_plan_failure_keeps_original_input() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let (app, session) = skip_planning_app(&temp, "keep me");
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let mut state = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        state.phase = SessionPhase::Planned;
+        manager.save(&state).unwrap_or_else(|e| panic!("{e}"));
+
+        let result = app.use_input_as_plan(&session.id, &|_event: ApplicationEvent| Ok(()));
+
+        assert!(result.is_err());
+        let loaded = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.input, "keep me");
+        assert!(!loaded.input_as_plan);
+    }
+
+    #[test]
+    fn session_view_version_tracks_external_disk_changes() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let data = temp.path().join("data");
+        let manager = SessionManager::new(data.clone());
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "version".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create failed: {error}"));
+        let app = CruiseApplication::new(manager.clone());
+        let version = |app: &CruiseApplication| {
+            app.session_view_version(&id)
+                .unwrap_or_else(|error| panic!("version failed: {error}"))
+        };
+
+        let v0 = version(&app);
+        assert_eq!(
+            v0,
+            version(&app),
+            "token must be stable when nothing changed"
+        );
+
+        let other = SessionManager::new(data.clone());
+        let mut external = other
+            .load(&id)
+            .unwrap_or_else(|error| panic!("load failed: {error}"));
+        external.title = Some("changed by another process".to_string());
+        other
+            .save(&external)
+            .unwrap_or_else(|error| panic!("save failed: {error}"));
+        let v1 = version(&app);
+        assert_ne!(v0, v1, "external state save must change the token");
+
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        std::fs::write(&plan_path, "# plan\n")
+            .unwrap_or_else(|error| panic!("write plan failed: {error}"));
+        let v2 = version(&app);
+        assert_ne!(v1, v2, "plan.md write must change the token");
+
+        let dag_path = manager.dag_path(&id);
+        std::fs::write(&dag_path, "{}").unwrap_or_else(|error| panic!("write dag failed: {error}"));
+        let v3 = version(&app);
+        assert_ne!(v2, v3, "graph file write must change the token");
+    }
+
+    #[test]
+    fn session_view_version_errors_for_missing_session() {
+        let temp =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let app = CruiseApplication::new(SessionManager::new(temp.path().join("data")));
+        assert!(app.session_view_version("20260101000000").is_err());
     }
 
     #[test]
