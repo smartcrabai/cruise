@@ -76,7 +76,7 @@ fn prepare_settings(
             (requested_config_path, config_ref, config)
         }
     };
-    let config_changed = config_ref != session.config;
+    let config_changed = !config_ref.same_selection(&session.config);
     if is_failed_or_suspended && config_changed {
         return Err(CruiseError::Other(
             "Cannot change config for a Failed or Suspended session. Only skip steps and current step can be edited.".to_string(),
@@ -528,7 +528,7 @@ mod tests {
 
         let manager = SessionManager::new(tmp.path().join(".cruise"));
         let mut session = make_session("20260619000012", &repo);
-        session.config = crate::session_config::SessionConfigRef::BuiltinSnapshot;
+        session.config = crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None };
         let builtin_config = crate::resolver::resolve_workflow_config(
             crate::config::BUILTIN_CONFIG_YAML,
             &crate::resolver::ConfigSource::Builtin,
@@ -557,7 +557,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             reloaded.config,
-            crate::session_config::SessionConfigRef::BuiltinSnapshot
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None }
         );
         assert!(!config_changed);
         let saved_config = fs::read_to_string(
@@ -796,6 +796,43 @@ mod tests {
             "Failed phase should allow skip-only edits: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_failed_phase_legacy_unnamed_builtin_snapshot_is_not_a_config_change() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        write_minimal_config(&repo);
+
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619000014", &repo);
+        session.phase = SessionPhase::Failed("build error".to_string());
+        session.config = crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None };
+        let builtin_config = crate::resolver::resolve_workflow_config(
+            crate::config::BUILTIN_CONFIG_YAML,
+            &crate::resolver::ConfigSource::Builtin,
+            &repo,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        manager
+            .create_with_config(&session, &builtin_config)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = update_session_settings(
+            &manager,
+            "20260619000014",
+            SessionSettingsUpdate {
+                config_path: Some("__builtin__".to_string()),
+                skipped_steps: vec![],
+                current_step_update: CurrentStepUpdate::Unchanged,
+            },
+        );
+
+        let (_, config_changed) = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!config_changed);
     }
 
     #[test]

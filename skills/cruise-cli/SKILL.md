@@ -5,6 +5,12 @@ description: Use when running, operating, or troubleshooting the `cruise` CLI or
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
 
+Prompt steps accept `permission: read-only | edit | full` (default `full`; see the **cruise-config** skill). A `read-only` step that changes the workspace fails with "read-only step changed the workspace". This is snapshot-diff detection, not a sandbox, and it applies to `read-only` only. The command backend rejects restricted modes at validation.
+
+## Generating workflow YAML
+
+`cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
@@ -44,6 +50,8 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI | `cruise webui` |
+| Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
+| Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
@@ -210,10 +218,10 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 `cruise plan`/`exec` resolve the **workflow YAML** in this order. `cruise run` loads the session's tagged `config` reference from `state.json`. A `kind: file` reference follows its absolute live `path`. `kind: builtin_snapshot`, `kind: repo_snapshot`, and `kind: inline_snapshot` references load only `sessions/<id>/config.yaml` and never rediscover or fall back to another config.
 
-1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` selects the built-in default workflow.
+1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` (or `builtin:default`) selects the built-in default workflow; `builtin:simple` / `builtin:review` select the other built-ins (`cruise workflow list`). `cruise workflow eject <name> [--to user|project]` copies a built-in to `$XDG_CONFIG_HOME/cruise/workflows/` (default) or `./.cruise/` and never overwrites an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.
+4. None found → a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time), adopted without prompting.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 

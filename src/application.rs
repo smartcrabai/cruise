@@ -4370,7 +4370,7 @@ mod tests {
         let state = SessionState::new_draft(
             "s".to_string(),
             PathBuf::from("/tmp"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         let reservation = batch.reserve(&[state]);
