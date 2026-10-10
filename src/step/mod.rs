@@ -141,6 +141,7 @@ impl TryFrom<StepConfig> for StepKind {
                     instruction: config.instruction,
                     output_file: None,
                     computer_use: config.computer_use,
+                    permission: config.permission,
                 },
                 report_file: config.output_file,
             }));

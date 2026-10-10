@@ -328,7 +328,10 @@ pub struct GitHubReviewConfig {
     /// Bot logins whose review of the current head is awaited.
     pub bots: Vec<String>,
     /// Maximum number of loop iterations (default 3).
-    #[serde(rename = "max-iterations", default = "default_github_review_iterations")]
+    #[serde(
+        rename = "max-iterations",
+        default = "default_github_review_iterations"
+    )]
     pub max_iterations: usize,
 }
 
@@ -1953,10 +1956,10 @@ steps:
     const GH_REVIEW_OK: &str = "    github-review:\n      bots: [\"coderabbitai[bot]\"]\n    prompt: fix\n    timeout: 30m\n";
 
     fn assert_invalid_step_config(result: crate::error::Result<()>, what: &str) {
-        assert!(
-            matches!(result, Err(crate::error::CruiseError::InvalidStepConfig(_))),
-            "{what}: expected InvalidStepConfig, got {result:?}"
-        );
+        match result {
+            Err(crate::error::CruiseError::InvalidStepConfig(_)) => {}
+            other => panic!("{what}: expected InvalidStepConfig, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1977,7 +1980,8 @@ steps:
         let no_prompt = "    github-review:\n      bots: [a]\n    timeout: 30m\n";
         let no_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n";
         let both = "    github-review:\n      bots: [a]\n    prompt: fix\n    prompt_file: x.md\n    timeout: 30m\n";
-        let bad_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: soon\n";
+        let bad_timeout =
+            "    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: soon\n";
         let zero_timeout = "    github-review:\n      bots: [a]\n    prompt: fix\n    timeout: 0\n";
         for (body, what) in [
             (no_prompt, "no prompt"),
@@ -1986,7 +1990,10 @@ steps:
             (bad_timeout, "bad timeout"),
             (zero_timeout, "zero timeout"),
         ] {
-            assert_invalid_step_config(github_review_validation(&github_review_after_pr(body)), what);
+            assert_invalid_step_config(
+                github_review_validation(&github_review_after_pr(body)),
+                what,
+            );
         }
     }
 
@@ -1996,14 +2003,20 @@ steps:
             let body = format!(
                 "    github-review:\n      bots: {bots}\n    prompt: fix\n    timeout: 30m\n"
             );
-            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), bots);
+            assert_invalid_step_config(
+                github_review_validation(&github_review_after_pr(&body)),
+                bots,
+            );
         }
     }
 
     #[test]
     fn github_review_rejects_zero_iterations() {
         let body = "    github-review:\n      bots: [a]\n      max-iterations: 0\n    prompt: fix\n    timeout: 30m\n";
-        assert_invalid_step_config(github_review_validation(&github_review_after_pr(body)), "zero");
+        assert_invalid_step_config(
+            github_review_validation(&github_review_after_pr(body)),
+            "zero",
+        );
     }
 
     #[test]
@@ -2024,9 +2037,15 @@ steps:
 
     #[test]
     fn github_review_rejects_mixing_with_other_step_kinds() {
-        for extra in ["    command: echo hi\n", "    parallel:\n      a:\n        prompt: x\n"] {
+        for extra in [
+            "    command: echo hi\n",
+            "    parallel:\n      a:\n        prompt: x\n",
+        ] {
             let body = format!("{GH_REVIEW_OK}{extra}");
-            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), extra);
+            assert_invalid_step_config(
+                github_review_validation(&github_review_after_pr(&body)),
+                extra,
+            );
         }
     }
 
@@ -2036,13 +2055,17 @@ steps:
         github_review_validation(&github_review_after_pr(&ok)).unwrap_or_else(|e| panic!("{e:?}"));
         for name in ["../escape.json", "/abs.json"] {
             let body = format!("{GH_REVIEW_OK}    output_file: \"{name}\"\n");
-            assert_invalid_step_config(github_review_validation(&github_review_after_pr(&body)), name);
+            assert_invalid_step_config(
+                github_review_validation(&github_review_after_pr(&body)),
+                name,
+            );
         }
     }
 
     #[test]
     fn builtin_workflow_does_not_use_github_review() {
-        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        let config =
+            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(config.after_pr.values().all(|s| s.github_review.is_none()));
     }
 

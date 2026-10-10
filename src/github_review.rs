@@ -148,7 +148,10 @@ async fn graphql(
         .and_then(Value::as_array)
         .is_some_and(|errors| !errors.is_empty())
     {
-        return Err(failed(format!("GitHub returned errors: {}", value["errors"])));
+        return Err(failed(format!(
+            "GitHub returned errors: {}",
+            value["errors"]
+        )));
     }
     Ok(value)
 }
@@ -398,10 +401,7 @@ struct RawAction {
 
 /// # Errors
 /// `GitHubReviewFailed` when the response is malformed or names unknown/duplicate threads.
-pub fn parse_review_actions(
-    response: &str,
-    threads: &[ReviewThread],
-) -> Result<Vec<ReviewAction>> {
+pub fn parse_review_actions(response: &str, threads: &[ReviewThread]) -> Result<Vec<ReviewAction>> {
     let parsed: RawResponse = serde_json::from_str(response.trim())
         .map_err(|e| failed(format!("invalid review action response: {e}")))?;
     let mut seen = std::collections::HashSet::new();
@@ -414,7 +414,10 @@ pub fn parse_review_actions(
             return Err(failed(format!("duplicate thread id '{}'", raw.thread_id)));
         }
         if raw.reply.as_deref().is_some_and(|r| r.trim().is_empty()) {
-            return Err(failed(format!("empty reply for thread '{}'", raw.thread_id)));
+            return Err(failed(format!(
+                "empty reply for thread '{}'",
+                raw.thread_id
+            )));
         }
         if raw.reply.is_none() && !raw.resolve {
             return Err(failed(format!(
@@ -465,10 +468,16 @@ pub async fn apply_actions(
             return Err(failed(format!("empty reply for thread '{}'", thread.id)));
         }
         if action.reply.is_some() && !thread.viewer_can_reply {
-            return Err(failed(format!("no permission to reply to thread '{}'", thread.id)));
+            return Err(failed(format!(
+                "no permission to reply to thread '{}'",
+                thread.id
+            )));
         }
         if action.resolve && !thread.viewer_can_resolve {
-            return Err(failed(format!("no permission to resolve thread '{}'", thread.id)));
+            return Err(failed(format!(
+                "no permission to resolve thread '{}'",
+                thread.id
+            )));
         }
     }
     if actions.is_empty() {
@@ -520,8 +529,9 @@ fn thread_json(thread: &ReviewThread) -> Value {
 }
 
 fn build_prompt(base: &str, head_oid: &str, threads: &[ReviewThread]) -> String {
-    let threads_json = serde_json::to_string_pretty(&threads.iter().map(thread_json).collect::<Vec<_>>())
-        .unwrap_or_else(|_| "[]".to_string());
+    let threads_json =
+        serde_json::to_string_pretty(&threads.iter().map(thread_json).collect::<Vec<_>>())
+            .unwrap_or_else(|_| "[]".to_string());
     let context = format!(
         "\n\n## GitHub review context\n\nPR head commit: {head_oid}\n\nUnresolved review threads from allowlisted bots (JSON):\n{threads_json}\n\nAfter making and committing any needed fixes, respond with ONLY a JSON object of the form {{\"actions\":[{{\"thread_id\":\"<id>\",\"reply\":\"<optional text>\",\"resolve\":true}}]}}. Use only thread ids listed above, at most once each. Each action needs a non-empty reply or resolve:true. An empty actions list is allowed.\n"
     );
@@ -537,7 +547,10 @@ async fn git_output(
     run_process("git", &args, pr, cancel).await
 }
 
-async fn git_head(pr: &PullRequestRef, cancel: Option<&CancellationToken>) -> Result<Option<String>> {
+async fn git_head(
+    pr: &PullRequestRef,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<String>> {
     let output = git_output(pr, &["rev-parse", "HEAD"], cancel).await?;
     Ok(output
         .status
@@ -576,7 +589,12 @@ async fn publish_prompt_commits(
     Ok(())
 }
 
-fn write_report(vars: &VariableStore, file: Option<&str>, iterations: &[Value], error: Option<&str>) -> Result<()> {
+fn write_report(
+    vars: &VariableStore,
+    file: Option<&str>,
+    iterations: &[Value],
+    error: Option<&str>,
+) -> Result<()> {
     let Some(file) = file else {
         return Ok(());
     };
@@ -617,7 +635,18 @@ pub(crate) async fn run_step(
             .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf),
     };
     let mut report = Vec::new();
-    let result = run_loop(ctx, step, vars, env, &pr, deadline, step_name, allow_commit, &mut report).await;
+    let result = run_loop(
+        ctx,
+        step,
+        vars,
+        env,
+        &pr,
+        deadline,
+        step_name,
+        allow_commit,
+        &mut report,
+    )
+    .await;
     match result {
         Ok(()) => {
             write_report(vars, step.report_file.as_deref(), &report, None)?;
@@ -625,7 +654,12 @@ pub(crate) async fn run_step(
         }
         Err(error) => {
             let error = with_step(error, step_name);
-            let _ = write_report(vars, step.report_file.as_deref(), &report, Some(&error.to_string()));
+            let _ = write_report(
+                vars,
+                step.report_file.as_deref(),
+                &report,
+                Some(&error.to_string()),
+            );
             Err(error)
         }
     }
@@ -770,8 +804,7 @@ esac
             f
         }
         fn write(&self, name: &str, content: &str) {
-            std::fs::write(self.tmp.path().join(name), content)
-                .unwrap_or_else(|e| panic!("{e:?}"));
+            std::fs::write(self.tmp.path().join(name), content).unwrap_or_else(|e| panic!("{e:?}"));
         }
         fn read(&self, name: &str) -> String {
             std::fs::read_to_string(self.tmp.path().join(name)).unwrap_or_default()
@@ -870,7 +903,10 @@ esac
         let f = Fixture::new();
         f.write("fail", "1");
         let result = head_oid(&pr(&f), None).await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(CruiseError::GitHubReviewFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -878,7 +914,10 @@ esac
         let f = Fixture::new();
         f.reviews(&[(BOT, "oldoid")]);
         let result = wait_for_review(&pr(&f), &bots(), OID, deadline_ms(400), None).await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(CruiseError::GitHubReviewFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -886,7 +925,10 @@ esac
         let f = Fixture::new();
         f.reviews(&[("some-human", OID)]);
         let result = wait_for_review(&pr(&f), &bots(), OID, deadline_ms(400), None).await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(CruiseError::GitHubReviewFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -952,9 +994,9 @@ esac
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(actions, vec![act("t1", Some("done"), true)]);
-        let empty = parse_review_actions(r#"{"actions":[]}"#, &threads)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(empty.is_empty());
+        let empty =
+            parse_review_actions(r#"{"actions":[]}"#, &threads).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(empty, Vec::new());
     }
 
     #[test]
@@ -967,7 +1009,7 @@ esac
             r#"{"actions":[{"thread_id":"t1","reply":"x"}]}"#,
             r#"{"actions":[{"thread_id":"t1","reply":"","resolve":false}]}"#,
             r#"{"actions":[{"thread_id":"t1","resolve":true}],"extra":1}"#,
-            r#"{}"#,
+            r"{}",
         ] {
             let result = parse_review_actions(bad, &threads);
             assert!(
@@ -983,9 +1025,15 @@ esac
         let threads = [thread("t1", false, true), thread("t2", true, false)];
         for action in [act("t1", Some("hi"), false), act("t2", None, true)] {
             let result = apply_actions(&pr(&f), &threads, &[action], None).await;
-            assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })));
+            assert!(matches!(
+                result,
+                Err(CruiseError::GitHubReviewFailed { .. })
+            ));
         }
-        assert_eq!(count(&f.read("replies.log")) + count(&f.read("resolves.log")), 0);
+        assert_eq!(
+            count(&f.read("replies.log")) + count(&f.read("resolves.log")),
+            0
+        );
     }
 
     #[tokio::test]
@@ -998,21 +1046,35 @@ esac
             None,
         )
         .await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })));
-        assert_eq!(count(&f.read("replies.log")) + count(&f.read("resolves.log")), 0);
+        assert!(matches!(
+            result,
+            Err(CruiseError::GitHubReviewFailed { .. })
+        ));
+        assert_eq!(
+            count(&f.read("replies.log")) + count(&f.read("resolves.log")),
+            0
+        );
     }
 
     #[tokio::test]
     async fn apply_actions_replies_and_resolves_only_selected_threads() {
         let f = Fixture::new();
         f.threads(
-            &[thread_node("t1", false, &[BOT]), thread_node("t2", false, &[BOT])],
+            &[
+                thread_node("t1", false, &[BOT]),
+                thread_node("t2", false, &[BOT]),
+            ],
             None,
         );
         let threads = [thread("t1", true, true), thread("t2", true, true)];
-        apply_actions(&pr(&f), &threads, &[act("t1", Some("fixed it"), true)], None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        apply_actions(
+            &pr(&f),
+            &threads,
+            &[act("t1", Some("fixed it"), true)],
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
         let replies = f.read("replies.log");
         let resolves = f.read("resolves.log");
         assert_eq!(count(&replies), 1);
@@ -1044,7 +1106,11 @@ esac
         apply_actions(&pr(&f), &threads, &actions, None)
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(count(&f.read("replies.log")), 1, "reply must not be duplicated");
+        assert_eq!(
+            count(&f.read("replies.log")),
+            1,
+            "reply must not be duplicated"
+        );
     }
 
     #[tokio::test]
@@ -1065,11 +1131,7 @@ esac
     use crate::option_handler::NoOpOptionHandler;
     use crate::variable::VariableStore;
 
-    async fn run_after_pr(
-        f: &Fixture,
-        yaml: &str,
-        command: &str,
-    ) -> (Result<()>, VariableStore) {
+    async fn run_after_pr(f: &Fixture, yaml: &str, command: &str) -> (Result<()>, VariableStore) {
         let mut config =
             crate::config::WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         config.command = vec!["sh".into(), "-c".into(), command.into()];
@@ -1118,7 +1180,10 @@ esac
             "echo '{\"actions\":[]}'",
         )
         .await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })), "{result:?}");
+        assert!(
+            matches!(result, Err(CruiseError::GitHubReviewFailed { .. })),
+            "{result:?}"
+        );
         let report = crate::artifacts::read(&f.path().join("artifacts"), "report.json")
             .unwrap_or_else(|e| panic!("report must be kept on failure: {e:?}"));
         assert!(report.contains("t1"));
@@ -1130,8 +1195,14 @@ esac
         f.reviews(&[(BOT, OID)]);
         f.threads(&[thread_node("t1", false, &[BOT])], None);
         let (result, _) = run_after_pr(&f, &review_yaml(""), "echo 'not json'").await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })), "{result:?}");
-        assert_eq!(count(&f.read("replies.log")) + count(&f.read("resolves.log")), 0);
+        assert!(
+            matches!(result, Err(CruiseError::GitHubReviewFailed { .. })),
+            "{result:?}"
+        );
+        assert_eq!(
+            count(&f.read("replies.log")) + count(&f.read("resolves.log")),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1139,11 +1210,18 @@ esac
         let f = Fixture::new();
         f.write("fail", "1");
         let (result, _) = run_after_pr(&f, &review_yaml(""), "echo '{\"actions\":[]}'").await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })), "{result:?}");
+        assert!(
+            matches!(result, Err(CruiseError::GitHubReviewFailed { .. })),
+            "{result:?}"
+        );
 
-        let regular = "steps:\n  main:\n    prompt: hi\nafter-pr:\n  boom:\n    command: \"exit 1\"\n";
+        let regular =
+            "steps:\n  main:\n    prompt: hi\nafter-pr:\n  boom:\n    command: \"exit 1\"\n";
         let (result, _) = run_after_pr(&f, regular, "true").await;
-        assert!(result.is_ok(), "regular after-pr failures stay warnings: {result:?}");
+        assert!(
+            result.is_ok(),
+            "regular after-pr failures stay warnings: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1156,10 +1234,17 @@ esac
             "if [ -e {m} ]; then echo 'not json'; else touch {m}; echo '{{\"actions\":[]}}'; fi",
             m = marker.display()
         );
-        let (result, _) = run_after_pr(&f, &review_yaml("    output_file: report.json\n"), &cmd).await;
-        assert!(matches!(result, Err(CruiseError::GitHubReviewFailed { .. })), "{result:?}");
+        let (result, _) =
+            run_after_pr(&f, &review_yaml("    output_file: report.json\n"), &cmd).await;
+        assert!(
+            matches!(result, Err(CruiseError::GitHubReviewFailed { .. })),
+            "{result:?}"
+        );
         let report = crate::artifacts::read(&f.path().join("artifacts"), "report.json")
             .unwrap_or_else(|e| panic!("report must be kept on failure: {e:?}"));
-        assert!(report.contains("\"iteration\": 1") && report.contains("t1"), "{report}");
+        assert!(
+            report.contains("\"iteration\": 1") && report.contains("t1"),
+            "{report}"
+        );
     }
 }
