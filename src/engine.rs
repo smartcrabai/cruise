@@ -867,6 +867,24 @@ async fn execute_step_kind(
             log_step_result(step_start.elapsed(), !outcome.failed);
             Ok(outcome)
         }
+        StepKind::GitHubReview(step) => {
+            crate::github_review::run_step(
+                ctx,
+                step,
+                vars,
+                merged_env,
+                timeout,
+                current_step,
+                allow_commit,
+            )
+            .await?;
+            log_step_result(step_start.elapsed(), true);
+            Ok(StepExecOutcome {
+                option_next: None,
+                failed: false,
+                skip_step_reason: None,
+            })
+        }
         StepKind::Prompt(step) => {
             let result = Box::pin(run_prompt_step(
                 vars,
@@ -1288,6 +1306,7 @@ pub(crate) async fn run_prompt_step(
             on_session_id: None,
             resume: None,
             computer_use,
+            permission: step.permission.unwrap_or(compiled.permission),
         });
 
         if let Some(duration) = timeout {
@@ -1477,6 +1496,8 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
 
         let kind_label = if step.parallel.is_some() {
             "parallel"
+        } else if step.github_review.is_some() {
+            "github-review"
         } else if step.prompt.is_some() || step.prompt_file.is_some() {
             "prompt"
         } else if step.command.is_some() && step.option.is_none() {
@@ -5282,5 +5303,49 @@ steps:
                 .as_deref(),
             Some("failed attempt")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_prompt_step_that_writes_fails_the_run_and_full_step_does_not() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = |permission: &str| {
+            format!(
+                "command: [sh, -c, 'cat >/dev/null; echo x > written.txt']\nsteps:\n  review:\n    prompt: review\n    permission: {permission}\n"
+            )
+        };
+        let result = run_config_inner(
+            &yaml("read-only"),
+            "",
+            None,
+            dir.path().to_path_buf(),
+            0,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CruiseError::ReadOnlyWorkspaceChanged)),
+            "{result:?}"
+        );
+
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_config_inner(
+            &yaml("full"),
+            "",
+            None,
+            dir.path().to_path_buf(),
+            0,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
     }
 }

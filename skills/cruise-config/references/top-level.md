@@ -22,6 +22,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
+permission: full           # Optional: prompt permission read-only | edit | full (default: full)
 computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
@@ -30,7 +31,7 @@ languages:                # Optional: prompt languages; defaults to English
 env:                      # Optional: environment variables applied to every step
   API_KEY: sk-...
 
-# Optional MCP servers for every SDK prompt run (not supported with command:)
+# Optional MCP servers for every SDK prompt run (not supported with command:). On Windows, command: steps run via cmd.exe /C.
 # mcp_servers:
 #   local_search:
 #     command: npx
@@ -79,7 +80,7 @@ There are three prompt-execution backends:
 
 Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command`. HTTP and SSE entries use `type: http` or `type: sse`, require an `http://` or `https://` URL, and are supported only with `sdk: claude`. Stdio entries cannot set `url` or provide non-empty `headers`; remote entries cannot set `command` or provide non-empty `args` or `env`. Names must use only ASCII letters, digits, `_`, or `-`, and `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
 
-Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values. Claude receives workflow entries through a per-run private JSON file with mode `0600` on Unix, passed by path via `--mcp-config`; Cruise's own in-process tools are passed separately as the SDK's inline `--mcp-config` value, and the user's Claude MCP config remains enabled. `${VAR}` expansion for the Claude backend is not guaranteed.
+Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values. Claude receives workflow entries through a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows), passed by path via `--mcp-config`; Cruise's own in-process tools are passed separately as the SDK's inline `--mcp-config` value, and the user's Claude MCP config remains enabled. `${VAR}` expansion for the Claude backend is not guaranteed.
 
 `computer_use` defaults to `false` and is supported only with the `jcode`
 backend. When enabled, it allows prompt turns to use jcode's macOS computer-use

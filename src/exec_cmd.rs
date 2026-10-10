@@ -131,6 +131,8 @@ mod tests {
         prev_xdg_config_home: Option<std::ffi::OsString>,
         prev_xdg_state_home: Option<std::ffi::OsString>,
         prev_dir: PathBuf,
+        // Windows keeps the data dir under LOCALAPPDATA, so isolate it as well.
+        _data_dirs: Vec<crate::test_support::EnvGuard>,
         lock: crate::test_support::ProcessLock,
     }
 
@@ -159,6 +161,10 @@ mod tests {
                 prev_xdg_config_home,
                 prev_xdg_state_home,
                 prev_dir,
+                _data_dirs: vec![
+                    crate::test_support::EnvGuard::remove("APPDATA"),
+                    crate::test_support::EnvGuard::remove("LOCALAPPDATA"),
+                ],
                 lock,
             }
         }

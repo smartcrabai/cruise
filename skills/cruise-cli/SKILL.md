@@ -5,6 +5,16 @@ description: Use when running, operating, or troubleshooting the `cruise` CLI or
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
 
+## Forges
+
+GitHub (`gh`) and GitLab (`glab`) are supported. The forge is detected from the repo host (`github.com`, `gitlab.com`); set `CRUISE_FORGE=github|gitlab` for other hosts. `--repo` accepts `owner/repo`, `group/sub/project` (with `CRUISE_FORGE=gitlab`, host from `GITLAB_HOST`), or a full URL. On GitLab the PR is a merge request and the `@cruise run` issue-trigger toggle is unavailable.
+
+Prompt steps accept `permission: read-only | edit | full` (default `full`; see the **cruise-config** skill). A `read-only` step that changes the workspace fails with "read-only step changed the workspace". This is snapshot-diff detection, not a sandbox, and it applies to `read-only` only. The command backend rejects restricted modes at validation.
+
+## Generating workflow YAML
+
+`cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
@@ -44,6 +54,8 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
+| Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
+| Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
@@ -68,17 +80,17 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
    - **Fix** → give feedback; the plan step reruns with your input.
    - **Ask** → ask a question; the answer is captured internally, then the menu reappears without displaying it.
    - **Execute now** → skip approval and run immediately.
-   - **Publish as Issue** → publish `plan.md` as a GitHub issue and delete the local session (see [Publish as Issue](#cruise-list--phase--available-actions)).
+   - **Publish as Issue** → publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session (see [Publish as Issue](#cruise-list--phase--available-actions)).
 
    After **Approve** or **Execute now**, the step-skip selector lets you omit steps for this run; cancelling it returns to the action menu without approving or executing.
 
-3. **Run.** `cruise run` without an ID selects a non-exec `Planned`, `Running`, `Failed`, or `Suspended` session (prompting when several qualify), prompts for a **workspace mode** (below), reuses/creates the worktree, executes or resumes the workflow steps, creates a PR with `gh pr create`, then runs any `after-pr` steps. The session ends as `Completed` (or `Failed`). If `gh pr create` fails, a `--repo` session becomes `Failed` (retryable); a plain worktree session logs a warning and still ends `Completed` with no PR, skipping `after-pr`. A paused step leaves the session `Running`; Ctrl+C leaves it `Suspended`. Transient exec sessions are excluded from automatic selection and `run --all`; resume them only with an explicit ID.
+3. **Run.** `cruise run` without an ID selects a non-exec `Planned`, `Running`, `Failed`, or `Suspended` session (prompting when several qualify), prompts for a **workspace mode** (below), reuses/creates the worktree, executes or resumes the workflow steps, creates a PR with `gh pr create` (`glab mr create` on GitLab), then runs any `after-pr` steps. The session ends as `Completed` (or `Failed`). If `gh pr create` fails, a `--repo` session becomes `Failed` (retryable); a plain worktree session logs a warning and still ends `Completed` with no PR, skipping `after-pr`. A paused step leaves the session `Running`; Ctrl+C leaves it `Suspended`. Transient exec sessions are excluded from automatic selection and `run --all`; resume them only with an explicit ID.
 
-4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` and deletes the session + worktree (and any leftover `--repo` clone) once the PR is merged or closed.
+4. **Clean up.** `cruise clean` checks each `Completed` session's PR via `gh pr view` (or `glab mr view` on GitLab) and deletes the session + worktree (and any leftover `--repo` clone) once the PR is merged or closed.
 
 ### `--skip-planning`
 
-`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, `--formal-spec`, and `--image` opt out.
+`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, `--formal-spec`, and `--image` opt out. Such sessions store an empty `input` with `input_as_plan: true` in `state.json`; `plan.md` holds the task text and `{input}` resolves to the current `plan.md` content.
 
 ### `--grill` (interview planning)
 
@@ -98,7 +110,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 ### `--repo` (GitHub repo sessions)
 
-`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub repository instead of the current directory. cruise clones it via `gh repo clone` into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **planning worktree, local branch, and clone removed on approval** (only the branch name remains in session state) → `cruise run` re-clones and recreates the worktree/branch → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and only clone-contained or builtin configs are copied to `sessions/<id>/config.yaml` so they survive clone removal (including inlined `prompt_file` contents); external `-c` or `CRUISE_CONFIG` paths are recorded as the session's config path and are not snapshotted. The WebUI equivalent is the **Directory / GitHub Repository** source toggle (repository picker backed by `gh repo list`).
+`cruise plan --repo owner/repo "task"` (also `cruise --plan "task" --repo owner/repo`) targets a GitHub or GitLab repository instead of the current directory. cruise clones it via `gh repo clone` (or `glab repo clone` on GitLab) into `$XDG_DATA_HOME/cruise/clones/<session-id>/` and uses the clone as the session's base dir, so worktrees and PR creation work unchanged. Lifecycle: clone → plan → **planning worktree, local branch, and clone removed on approval** (only the branch name remains in session state) → `cruise run` re-clones and recreates the worktree/branch → execute → PR created → **clone removed again**. On failure/suspend the clone is kept so the session can resume; PR-creation failure marks the session `Failed` (retryable). Repo sessions are **pinned to worktree mode** (no current-branch option — the PR is the only output), and only clone-contained or builtin configs are copied to `sessions/<id>/config.yaml` so they survive clone removal (including inlined `prompt_file` contents); external `-c` or `CRUISE_CONFIG` paths are recorded as the session's config path and are not snapshotted. The WebUI equivalent is the **Directory / Repository (GitHub or GitLab)** source toggle (repository picker backed by `gh repo list`, or `glab repo list` when `CRUISE_FORGE=gitlab`).
 
 ## Workspace modes (chosen at `cruise run`)
 
@@ -110,7 +122,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 | Mode | What it does | When to use |
 |------|--------------|-------------|
-| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched and supports independent PR-backed sessions. **Requires `gh` CLI.** |
+| **Worktree** (default) | Isolated git worktree under `$XDG_DATA_HOME/cruise/worktrees/<id>/`, new branch `cruise/<id>-<slug>`, auto-PR via `gh`. | The normal choice. Keeps your working copy untouched and supports independent PR-backed sessions. **Requires `gh` CLI** (`glab` for GitLab repositories)**.** |
 | **Current branch** | Runs in place on the active branch. No worktree, no auto-PR. | Quick iterations on the current branch. Fresh normal runs reject **tracked** working-tree changes (untracked files are ignored) and need an **attached branch** (not detached HEAD); `exec`/`force_exec` and the TUI's dirty-tree allowance may start dirty. On resume the branch must match. |
 
 A single `cruise run` respects the workspace mode already persisted on the session; the prompt (or, with non-terminal stdin, the Worktree default) applies only to fresh sessions still on the default Worktree mode. `cruise run --all` and `--repo` sessions always force worktree mode (for `--repo` the prompt is skipped entirely). Repo sessions snapshot the resolved workflow config before clone cleanup, so workflow-call expansions remain usable.
@@ -130,14 +142,15 @@ The interactive menu changes with the session's phase:
 | **Running** | Resume, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
-| **Completed** | Open PR*, Reset to Planned, Delete, Back |
+| **Completed** | Open PR*, Merge PR*, Reset to Planned, Delete, Back |
 | **Planning** / **Plan Failed** | Edit Settings, Delete, Back (Approve/Publish as Issue appear only once a non-empty `plan.md` exists and planning has no error) |
 
-\* Open PR shows only when the session has a PR URL.
+\* Open PR and Merge PR show only when the session has a PR URL.
 
+- **Merge PR** previews the PR (state, mergeability, review decision, checks), asks for a method (`Squash` default, `Merge`, `Rebase`), confirms, then runs `gh pr merge <url> <method flag>` (never `--auto`/`--admin`/`--delete-branch`). If the PR is then Closed/Merged, that session and its worktree are removed; if it is still Open (merge queue), the session is kept and `cruise clean` re-checks later. Closed/Merged PRs are not merged again: use `cruise clean`.
 - **Reset to Planned** clears the current step so the session re-runs from the start — the go-to recovery for a wedged `Running`/`Failed` session.
 - **Replan** regenerates the plan from feedback while staying `Planned`.
-- **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate.
+- **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue (or GitLab issue) in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate (the `@cruise run` comment prompt is skipped on GitLab).
 
 ## `cruise` — interactive keyboard client
 
@@ -147,7 +160,7 @@ cruise
 
 Typical flow: run `cruise`, press `n` to open **New Session** at the task question, type the task, then either press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**.
 
-Bare `cruise` opens the official keyboard-only client beside the CLI and WebUI. It exposes the WebUI's session-management workflows in a terminal. It requires an interactive TTY on macOS or Linux; non-TTY use is not supported. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh`.
+Bare `cruise` opens the official keyboard-only client beside the CLI and WebUI. It exposes the WebUI's session-management workflows in a terminal. It requires an interactive TTY on macOS, Linux, or Windows (Ctrl+C is handled on Windows); non-TTY use is not supported. On Windows, desktop notifications are not sent, `cruise ssh` needs the Windows OpenSSH client, herdr reporting is limited, and `command:` steps run through `cmd.exe /C`. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh` (`glab` for GitLab repositories).
 
 ### TUI screens and workflows
 
@@ -157,9 +170,9 @@ The TUI has exactly three views:
 - **New Session** — Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the CLI's prioritized candidates plus **Auto-detect** and **Built-in default**. GitHub sessions omit caller-local candidates and defer Auto-detect until the repository is cloned. The config editor also accepts a typed path instead of a listed candidate. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained.
 - **Run All** — Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI `run_all_parallelism` setting, type a positive integer, and press `Enter` to save or `Esc` to cancel. The value is persisted in `$XDG_CONFIG_HOME/cruise/config.json` and can be changed while a batch is active; a new limit applies at the next scheduling point and does not cancel workers already running. The CLI's `cruise run --all --parallelism <N>` remains a separate one-run override. Plan and run streams continue while navigating between views.
 
-Ask and Option prompts are handled in the TUI. An SDK planning question pauses its session without a modal: the session is marked **Awaiting Input**, and the question appears in that session's **Plan** tab. Press `o` or choose **Answer Prompt** to open it, `Enter` to edit, `Enter` again to submit, and `Esc` to keep the draft. Execution-time `Option` requests remain in the modal queue; a single-run Option opens automatically, while Run All shows a queue badge. Multiline questions are shown as adjacent lines, with an inline, session-scoped answer field. PR and Issue URLs are shown as text except that a successful Publish as Issue opens its URL; dedicated URL actions use `open` on macOS or `xdg-open` on Linux, while other Markdown links remain textual. CLI-only `config` and `exec` operations remain CLI commands.
+Ask and Option prompts are handled in the TUI. An SDK planning question pauses its session without a modal: the session is marked **Awaiting Input**, and the question appears in that session's **Plan** tab. Press `o` or choose **Answer Prompt** to open the Plan tab and focus the detail pane, `Enter` to edit, `Enter` again to submit, and `Esc` to keep the draft. Execution-time `Option` requests remain in the modal queue; a single-run Option opens automatically, while Run All shows a queue badge. Multiline questions are shown as adjacent lines, with an inline, session-scoped answer field. PR and Issue URLs are shown as text except that a successful Publish as Issue opens its URL; dedicated URL actions use `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux, while other Markdown links remain textual. CLI-only `config` and `exec` operations remain CLI commands.
 
-The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates. Only Delete, Discard, Reset to Planned, Publish as Issue, Clean, Run All / Cancel Run All, and quitting with active work ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. In New Session, a non-blank task or at least one image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates. Only Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (preview modal with method choice, then Enter), Clean, Run All / Cancel Run All, and quitting with active work ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. In New Session, a non-blank task or at least one image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 ### TUI keyboard map
 
@@ -178,8 +191,8 @@ Keys are fixed and cannot be configured:
 | `Ctrl-U` | Create the New Session from the current answers using the input directly as the plan |
 | `Ctrl-S` | Save the New Session answers as a draft |
 | `Ctrl-R` | Toggle save / regenerate in the multiline Edit Settings input |
-| `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches, including workflow config paths); move between detail tabs elsewhere |
-| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices, and `Left` / `Right` move between detail tabs |
+| `Tab` / `Shift-Tab` | Next / previous question (Tab completes a path first when one matches, including workflow config paths); in Sessions, toggle focus between the sidebar and the detail pane |
+| Arrow keys / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | Navigate lists and choices. In the dialogue, `Up` / `Down` select workflow config candidates, recall recent directories or `gh` repositories, or move through the skipped-step list. In text questions, `Left` / `Right` / `Home` / `End` edit text, and `j` / `k` are entered as text; `j` / `k` navigate non-text choices, and in Sessions, arrow keys follow focus: the sidebar switches sessions (`Right` focuses the detail pane), and the detail pane scrolls and `Left` / `Right` move between detail tabs |
 | `[` / `]` / `Left` / `Right` | Move between detail tabs (`Left` / `Right` only outside text questions, where they edit text instead) |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
@@ -209,10 +222,10 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 `cruise plan`/`exec` resolve the **workflow YAML** in this order. `cruise run` loads the session's tagged `config` reference from `state.json`. A `kind: file` reference follows its absolute live `path`. `kind: builtin_snapshot`, `kind: repo_snapshot`, and `kind: inline_snapshot` references load only `sessions/<id>/config.yaml` and never rediscover or fall back to another config.
 
-1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` selects the built-in default workflow.
+1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` (or `builtin:default`) selects the built-in default workflow; `builtin:simple` / `builtin:review` select the other built-ins (`cruise workflow list`). `cruise workflow eject <name> [--to user|project]` copies a built-in to `$XDG_CONFIG_HOME/cruise/workflows/` (default) or `./.cruise/` and never overwrites an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.
+4. None found → a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time), adopted without prompting.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 
@@ -244,11 +257,14 @@ These process environment variables are read directly at runtime and are not wor
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the execution graph is persisted as `sessions/<id>/dag.json`) |
 | State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
+On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data) and `%LOCALAPPDATA%\cruise\state` (state); missing variables fall back to the `~/` defaults, and `~\` is expanded like `~/`.
+
 > Older versions kept everything under `~/.cruise/`. If migrating, move workflow YAMLs to `~/.config/cruise/workflows/`, `config.json` to `~/.config/cruise/`, `sessions/`+`worktrees/` to `~/.local/share/cruise/`, and use `git worktree move`/`repair` for worktrees. Cruise also warns if workflow YAMLs are left directly in `~/.config/cruise/` (legacy location) instead of the `workflows/` subdirectory.
 
 ## Operational notes & gotchas
 
-- **`gh` CLI is required** for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
+- **`gh` CLI is required** (`glab` for GitLab repositories) for worktree mode (PR creation) and PR-backed `cruise clean` checks. Current-branch and `exec` don't need it.
+- **`github-review` after-pr steps** run during `cruise run` after the PR is created. Unlike other after-pr steps, a failure marks the session `Failed`. They require `gh` to be authenticated.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`, plus Planned CurrentBranch sessions with no `current_step` when `plan.md` is missing or contains only whitespace; resumable sessions and ordinary planned sessions are retained.
 - **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value governs the **WebUI and TUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **WebUI and TUI**).

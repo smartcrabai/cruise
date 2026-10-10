@@ -49,11 +49,11 @@ Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/
 
 **Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
 
-The backend exposes Cruise session tools through jcode's session-tools support.
+The backend exposes Cruise session tools through jcode's session-tools support. Restricted `permission` modes force `macos_computer_use` off and disable the jcode tool `bash`. `read-only` additionally disables `edit`, `write` and `apply_patch`.
 
 ## `sdk: claude` — the claude CLI in-process
 
-`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. The CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on. Cruise's workflow tools are exposed through the SDK.
+`sdk: claude` drives the `claude` CLI in-process through claude-agent-sdk. Model references are plain `claude --model` names with the optional `:effort` suffix (forwarded as `--effort`; a `claude` CLI without that flag fails the step with `unknown option '--effort'`, which is classified permanent and never retried — cruise is verified against 2.1.250). Authentication is the claude CLI's own — its stored credentials or `ANTHROPIC_API_KEY` — unrelated to `jcode login`. With `permission: full` (the default) the CLI runs with permissions bypassed -- cruise workflows are unattended, so there is no console to answer a permission prompt on. `read-only` and `edit` run as `dontAsk` with tool deny lists. Cruise's workflow tools are exposed through the SDK.
 
 ## Differences from command mode
 
@@ -92,7 +92,7 @@ Entries use the Claude Code `mcpServers` shape and accept only `type`, `command`
 
 For jcode, Cruise merges workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json`) without changing the source. Workflow entries replace same-named source entries. jcode subsequently loads `~/.claude.json`, `~/.claude/mcp.json`, and project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json`, so those later layers can replace a workflow server with the same name. jcode expands `${VAR}` and `${VAR:-default}` from the daemon's runtime environment, including workflow-level `env:` values.
 
-For Claude, Cruise writes workflow entries to a per-run private JSON file with mode `0600` on Unix and passes the file path via `--mcp-config`; the SDK passes its in-process `cruise` tools separately as its own inline `--mcp-config` value. The user's own Claude MCP config remains enabled. `${VAR}` expansion for this backend is not guaranteed.
+For Claude, Cruise writes workflow entries to a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows) and passes the file path via `--mcp-config`; the SDK passes its in-process `cruise` tools separately as its own inline `--mcp-config` value. The user's own Claude MCP config remains enabled. `${VAR}` expansion for this backend is not guaranteed.
 
 
 ## Rate limits and fallback

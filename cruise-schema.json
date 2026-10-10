@@ -104,7 +104,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/StepConfig"
       },
-      "description": "Steps to run after a PR is created"
+      "description": "Steps to run after a PR is created. The github-review step type is allowed only here."
     },
     "cleanup_after_pr": {
       "type": "boolean",
@@ -118,6 +118,10 @@
     "force_exec": {
       "type": "boolean",
       "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
+    },
+    "permission": {
+      "$ref": "#/$defs/PermissionMode",
+      "description": "Default agent permission mode for prompt steps. Default: full. read-only and edit are unsupported with command: backends; read-only cannot be combined with allow_commit. Not a sandbox: read-only is enforced by tool restrictions plus a workspace snapshot diff."
     },
     "computer_use": {
       "type": "boolean",
@@ -144,6 +148,10 @@
         "allow_commit": {
           "type": "boolean",
           "description": "Allow this prompt step to create commits or otherwise advance Git HEAD. Defaults to false and is omitted when false during serialization. Only applies to prompt steps; group-call and workflow-call steps cannot set it to true."
+        },
+        "permission": {
+          "$ref": "#/$defs/PermissionMode",
+          "description": "Override the workflow-level permission mode for this prompt step. Not allowed on group, workflow_call, or parallel wrapper steps."
         },
         "computer_use": {
           "type": "boolean",
@@ -229,7 +237,28 @@
         },
         "output_file": {
           "type": ["string", "null"],
-          "description": "Relative session artifact file receiving the final output of a prompt step. Mutually exclusive with command, option, parallel, group, and workflow_call."
+          "description": "Relative session artifact file receiving the final output of a prompt step, or the iteration report (JSON) of a github-review step. Mutually exclusive with command, option, parallel, group, and workflow_call."
+        },
+        "github-review": {
+          "type": ["object", "null"],
+          "description": "Opt-in GitHub review bot loop. Only valid directly in after-pr; requires exactly one of prompt or prompt_file and a timeout bounding the whole loop. Cannot be combined with command, option, parallel, group, or workflow_call.",
+          "additionalProperties": false,
+          "required": ["bots"],
+          "properties": {
+            "bots": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Bot logins (case-insensitive, no duplicates). Any one reviewing the current PR head commit ends the wait."
+            },
+            "max-iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 3,
+              "description": "Maximum number of review/fix iterations before the step fails."
+            }
+          }
         },
         "timeout": {
           "type": "string",
@@ -244,7 +273,40 @@
           }
         },
         {
+          "if": { "required": ["github-review"] },
+          "then": {
+            "required": ["timeout"],
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "required": ["computer_use"] },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["permission"] },
           "then": {
             "oneOf": [
               { "required": ["prompt"] },
@@ -274,6 +336,7 @@
               "plan": { "type": "null" },
               "output_file": { "type": "null" },
               "computer_use": { "type": "null" },
+              "permission": { "type": "null" },
               "allow_commit": { "const": false }
             }
           }
@@ -309,7 +372,8 @@
               "if": { "type": "null" },
               "allow_commit": { "const": false },
               "output_file": { "type": "null" },
-              "computer_use": { "type": "null" }
+              "computer_use": { "type": "null" },
+              "permission": { "type": "null" }
             }
           }
         },
@@ -331,11 +395,16 @@
               "prompt_file": { "type": "null" },
               "timeout": { "type": "null" },
               "output_file": { "type": "null" },
-              "computer_use": { "type": "null" }
+              "computer_use": { "type": "null" },
+              "permission": { "type": "null" }
             }
           }
         }
       ]
+    },
+    "PermissionMode": {
+      "type": "string",
+      "enum": ["read-only", "edit", "full"]
     },
     "ParallelChild": {
       "type": "object",
@@ -350,6 +419,7 @@
         "when": { "$ref": "#/$defs/StepConfig/properties/when" },
         "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
         "computer_use": { "$ref": "#/$defs/StepConfig/properties/computer_use" },
+        "permission": { "$ref": "#/$defs/StepConfig/properties/permission" },
         "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
         "allow_commit": { "const": false }
       },
@@ -363,7 +433,8 @@
           "if": { "required": ["command"] },
           "then": {
             "properties": {
-              "computer_use": { "type": "null" }
+              "computer_use": { "type": "null" },
+              "permission": { "type": "null" }
             }
           }
         },
