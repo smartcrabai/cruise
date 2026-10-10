@@ -467,6 +467,164 @@ mod event_partials {
     }
 }
 
+fn external_edit(harness: &Harness, id: &str, edit: impl FnOnce(&mut SessionState)) {
+    let other = SessionManager::new(harness.dir.path().to_path_buf());
+    let mut state = other
+        .load(id)
+        .unwrap_or_else(|error| panic!("load: {error}"));
+    edit(&mut state);
+    other
+        .save(&state)
+        .unwrap_or_else(|error| panic!("save: {error}"));
+}
+
+fn current_version(harness: &Harness, id: &str) -> String {
+    harness
+        .state
+        .application
+        .session_view_version(id)
+        .unwrap_or_else(|error| panic!("version: {error}"))
+}
+
+#[tokio::test]
+async fn session_page_contains_sync_poller() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/sessions/{}", session.id);
+    let (status, _, body) = get(&harness, &uri, &[("hx-request", "true")]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("id=\"session-sync-{}\"", session.id)),
+        "{body}"
+    );
+    assert!(body.contains("hx-trigger=\"every 3s\""), "{body}");
+}
+
+#[tokio::test]
+async fn sync_with_current_token_is_no_content() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let token = current_version(&harness, &session.id);
+    let uri = format!("/webui/sessions/{}/sync?v={token}", session.id);
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty(), "{body}");
+}
+
+#[tokio::test]
+async fn sync_after_external_change_returns_fresh_partials() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.title = Some("Externally Renamed Title".to_string());
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("hx-target=\"#session-header-{id}\"")),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("hx-target=\"#tab-info-{id}\"")),
+        "{body}"
+    );
+    assert!(body.contains("Externally Renamed Title"), "{body}");
+    assert!(body.contains(&format!("session-sync-{id}")), "{body}");
+    assert!(
+        !body.contains(&format!("v={old}")),
+        "poller must carry the new token: {body}"
+    );
+    assert!(
+        body.contains(&format!("v={}", current_version(&harness, &id))),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn sync_after_external_run_starts_log_polling() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.set_runner_to_current_process();
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!("hx-target=\"#tab-log-{id}\"")),
+        "{body}"
+    );
+    assert!(body.contains("hx-trigger=\"every 2s\""), "{body}");
+}
+
+#[tokio::test]
+async fn sync_reconciles_dead_runner_to_suspended() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let old = current_version(&harness, &id);
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.runner_pid = None;
+        state.runner_started_at = None;
+    });
+
+    let uri = format!("/webui/sessions/{id}/sync?v={old}");
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Suspended"), "{body}");
+    assert!(!body.contains(">Running<"), "{body}");
+}
+
+#[tokio::test]
+async fn sync_for_deleted_session_replaces_main_with_not_found() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    let token = current_version(&harness, &id);
+    if let Err(error) = std::fs::remove_dir_all(harness.dir.path().join("sessions").join(&id)) {
+        panic!("remove session: {error}");
+    }
+
+    let uri = format!("/webui/sessions/{id}/sync?v={token}");
+    let (_, _, body) = get(&harness, &uri, &[]).await;
+    assert!(body.contains("<hx-partial id=\"main\""), "{body}");
+    assert!(body.contains("Session not found"), "{body}");
+}
+
+#[tokio::test]
+async fn sidebar_refreshes_run_all_control() {
+    let harness = harness();
+    create_session(&harness);
+    let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("hx-target=\"#run-all-control\""), "{body}");
+    assert!(body.contains("<hx-partial id=\"session-list\""), "{body}");
+}
+
+#[tokio::test]
+async fn sidebar_reconciles_stale_running_rows() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let id = session.id.clone();
+    external_edit(&harness, &id, |state| {
+        state.phase = crate::session::SessionPhase::Running;
+        state.runner_pid = None;
+        state.runner_started_at = None;
+    });
+    let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Suspended"), "{body}");
+}
+
 #[tokio::test]
 async fn shutdown_begin_ends_open_sse_stream() {
     let harness = harness();

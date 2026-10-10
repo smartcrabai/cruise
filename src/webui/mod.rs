@@ -182,6 +182,7 @@ pub(crate) fn router(state: WebState) -> Router {
         )
         .route("/webui/sessions/{id}/tab/{tab}", get(handlers::tab))
         .route("/webui/sessions/{id}/log", get(handlers::session_log))
+        .route("/webui/sessions/{id}/sync", get(handlers::session_sync))
         .route(
             "/webui/sessions/{id}/settings",
             get(handlers::session_settings).post(handlers::update_settings),

@@ -12,9 +12,9 @@ use super::view::{
     AskPanelVm, AttachmentListVm, AttachmentVm, ChoiceVm, ConfigGroupVm, ConfigOptionVm,
     ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, MergeCheckVm,
     MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm, RepoOptionsVm,
-    RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm, SessionHeaderVm, SessionRowVm,
-    SessionSettingsVm, SettingsVm, ShellVm, SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs,
-    TabInfoVm, TabLogVm, TabPlanVm, ToastKind, ToastVm,
+    RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm, SessionHeaderVm,
+    SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm, ShellVm, SidebarVm, StepRowVm,
+    StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm, ToastKind, ToastVm,
 };
 use crate::application::DirectoryEntry;
 
@@ -178,6 +178,21 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
         ),
         ("sidebar", value(&sidebar())),
         ("sidebar-rows", value(&sidebar())),
+        (
+            "components/run-all-control",
+            value(&RunAllControlVm {
+                run_all_active: false,
+                runnable_count: 2,
+                run_all_confirm: "Run 2 pending session(s)?".to_string(),
+            }),
+        ),
+        (
+            "components/session-sync",
+            value(&SessionSyncVm {
+                id: "s1".to_string(),
+                url: "/webui/sessions/s1/sync?v=0".to_string(),
+            }),
+        ),
         ("components/session-row", json!({ "row": value(&row()) })),
         (
             "components/phase-badge",
@@ -206,6 +221,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
             value(&SessionDetailVm {
                 id: "s1".to_string(),
                 header: RawHtml::new("<header id=\"session-header-s1\"></header>"),
+                sync: RawHtml::new("<div id=\"session-sync-s1\"></div>"),
                 ask_panel: RawHtml::empty(),
                 settings: RawHtml::empty(),
                 editor: RawHtml::empty(),

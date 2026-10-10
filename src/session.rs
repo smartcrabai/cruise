@@ -181,7 +181,7 @@ pub struct SessionState {
     pub input_as_plan: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionStateFingerprint([u8; 32]);
 
 impl SessionStateFingerprint {

@@ -122,7 +122,13 @@ where
 pub(crate) async fn sidebar(State(state): State<WebState>, headers: HeaderMap) -> Response {
     let selected = super::pages::current_session_id(&headers);
     fragment(&state, "Sidebar", || {
-        partials::sidebar_rows_html(&state, selected.as_deref())
+        let vm = partials::sidebar_vm(&state, selected.as_deref())?;
+        let rows = state.templates.render("sidebar-rows", &vm)?;
+        Ok(format!(
+            "{}{}",
+            partials::by_id("session-list", &rows),
+            partials::run_all_control_partial(&state, &vm)?
+        ))
     })
 }
 
@@ -138,6 +144,26 @@ pub(crate) async fn tab(
 
 pub(crate) async fn session_log(State(state): State<WebState>, Path(id): Path<String>) -> Response {
     fragment(&state, "Log", || partials::log_tab_html(&state, &id, None))
+}
+
+pub(crate) async fn session_sync(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    Query(params): Params,
+) -> Response {
+    let client = Fields::from(params).text("v");
+    match state.application.session_view_version(&id) {
+        Err(_) => fragment(&state, "Sync", || {
+            Ok(partials::by_id(
+                "main",
+                &super::pages::error_page_html(&state, "Session not found")?,
+            ))
+        }),
+        Ok(version) if version == client => StatusCode::NO_CONTENT.into_response(),
+        Ok(version) => fragment(&state, "Sync", || {
+            partials::session_sync_partials(&state, &id, &version)
+        }),
+    }
 }
 
 pub(crate) async fn session_settings(
