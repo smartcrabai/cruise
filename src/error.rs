@@ -79,6 +79,9 @@ pub enum CruiseError {
     #[error("commit guard violation: {0}")]
     CommitGuardViolation(String),
 
+    #[error("read-only step changed the workspace")]
+    ReadOnlyWorkspaceChanged,
+
     #[error("{0}")]
     Other(String),
 

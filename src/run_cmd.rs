@@ -1285,7 +1285,7 @@ mod tests {
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1415,7 +1415,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo,
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1467,7 +1467,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Completed;
@@ -1493,7 +1493,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3280,7 +3280,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "run all conflict".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3844,7 +3844,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "run in place".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3899,7 +3899,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "save mode test".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4049,7 +4049,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "default to worktree".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4110,7 +4110,7 @@ steps:
         let mut session_1 = SessionState::new(
             session_id_1.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "first task".to_string(),
         );
         session_1.phase = SessionPhase::Planned;
@@ -4144,7 +4144,7 @@ steps:
             let mut session_2 = SessionState::new(
                 session_id_2.to_string(),
                 repo.clone(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "second task added mid-run".to_string(),
             );
             session_2.phase = SessionPhase::Planned;
@@ -4206,7 +4206,7 @@ steps:
         let session = SessionState::new(
             "20260826000000".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "unreadable state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4245,7 +4245,7 @@ steps:
         let session = SessionState::new(
             "20260826000001".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "deleted state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4275,7 +4275,7 @@ steps:
         let session = SessionState::new(
             "20260826000002".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "invalid state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4305,7 +4305,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;

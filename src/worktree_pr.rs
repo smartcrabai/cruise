@@ -272,6 +272,7 @@ async fn generate_pr_description(
                 on_session_id: None,
                 resume: None,
                 computer_use: false,
+                permission: crate::config::PermissionMode::Full,
             })
             .await
         {
@@ -344,6 +345,7 @@ async fn generate_pr_via_sdk_tool(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await
     {
@@ -986,6 +988,7 @@ mod tests {
             mcp_servers: IndexMap::new(),
             cleanup_after_pr: false,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

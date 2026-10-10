@@ -259,7 +259,12 @@ impl ConfigSelectVm {
             },
             ConfigOptionVm {
                 value: super::dto::BUILTIN_CONFIG_PATH.to_string(),
-                label: "Built-in default".to_string(),
+                label: format!(
+                    "Built-in default \u{2014} {}",
+                    crate::builtin_workflows::BUILTIN_WORKFLOWS
+                        .first()
+                        .map_or("", |w| w.description)
+                ),
                 selected: selected == super::dto::BUILTIN_CONFIG_PATH,
             },
         ];
@@ -289,6 +294,21 @@ impl ConfigSelectVm {
             groups.push(ConfigGroupVm {
                 label: format!("User workflows ({})", dir_of(&first.path)),
                 options: user_entries.iter().map(|entry| option(entry)).collect(),
+            });
+        }
+        let builtin: Vec<ConfigOptionVm> = entries
+            .iter()
+            .filter(|entry| entry.source == Some(ConfigEntrySource::Builtin))
+            .map(|entry| ConfigOptionVm {
+                value: entry.path.clone(),
+                label: config_option_label(entry, ""),
+                selected: selected == entry.path,
+            })
+            .collect();
+        if !builtin.is_empty() {
+            groups.push(ConfigGroupVm {
+                label: "Built-in workflows".to_string(),
+                options: builtin,
             });
         }
         let other: Vec<ConfigOptionVm> = entries
@@ -438,6 +458,26 @@ pub(crate) struct PublishDialogVm {
     pub(crate) id: String,
     pub(crate) submit_url: String,
     pub(crate) supports_trigger: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeCheckVm {
+    pub(crate) name: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergePrDialogVm {
+    pub(crate) id: String,
+    pub(crate) submit_url: String,
+    pub(crate) state: String,
+    pub(crate) mergeable: String,
+    pub(crate) review_decision: String,
+    pub(crate) checks: Vec<MergeCheckVm>,
+    pub(crate) no_checks: bool,
+    pub(crate) can_merge: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

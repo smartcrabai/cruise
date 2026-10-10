@@ -26,6 +26,19 @@ pub struct LanguagesConfig {
     pub plan: Option<String>,
 }
 
+/// Agent permission mode for prompt steps.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    /// No workspace mutation tools or shell.
+    ReadOnly,
+    /// Direct edit/write/patch tools, no shell.
+    Edit,
+    /// Full permissions (existing behavior).
+    #[default]
+    Full,
+}
+
 /// Top-level workflow configuration.
 ///
 /// `computer_use` defaults to `false` and controls access to jcode's macOS
@@ -124,6 +137,10 @@ pub struct WorkflowConfig {
     /// Defaults to `false`; only the jcode backend can enable it.
     #[serde(default)]
     pub computer_use: bool,
+
+    /// Default permission mode for prompt steps.
+    #[serde(default)]
+    pub permission: PermissionMode,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -228,6 +245,10 @@ pub struct StepConfig {
     /// Per-prompt override for the workflow-level computer-use setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
+
+    /// Per-prompt override for the workflow-level permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionMode>,
 
     /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
@@ -641,9 +662,9 @@ impl WorkflowConfig {
 
 /// Built-in default workflow config YAML, embedded at compile time.
 ///
-/// Single source: `builtin/cruise.yaml`. Editing that file changes the
+/// Single source: `builtin/default.yaml`. Editing that file changes the
 /// built-in default shipped to users with no config file.
-pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/cruise.yaml");
+pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/default.yaml");
 
 impl WorkflowConfig {
     /// Apply environment variable overrides and locale-derived language defaults.
@@ -865,6 +886,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
     validate_mcp_servers(config)?;
     validate_computer_use(config)?;
+    validate_permission(config)?;
     validate_output_file_usage(config)?;
     validate_parallel_steps(config)?;
     validate_groups(config)?;
@@ -1061,10 +1083,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.plan.is_some()
         || step.allow_commit
         || step.computer_use.is_some()
+        || step.permission.is_some()
         || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout; computer_use is only supported on prompt children"
+            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout; computer_use and permission are only supported on prompt children"
         )));
     }
     for (child_name, child) in children {
@@ -1088,10 +1111,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
             || child.plan.is_some()
             || child.allow_commit
             || (child.computer_use.is_some() && child.command.is_some())
+            || (child.permission.is_some() && child.command.is_some())
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, timeout, computer_use (prompt children only), \
+                 only model, env, skip, when, timeout, computer_use and permission (prompt children only), \
                  and output_file (prompt children only) may accompany it"
             )));
         }
@@ -1323,6 +1347,78 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
     Ok(())
 }
 
+/// Validate permission modes: prompt-only, unsupported on the command backend
+/// when restricted, independent of `allow_commit` only for writable modes, and
+/// never mixed with writable siblings in a parallel block.
+fn validate_permission(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let is_command_backend = matches!(
+        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
+        crate::executor::Executor::Command { .. }
+    );
+    let effective = |step: &StepConfig| step.permission.unwrap_or(config.permission);
+    let is_prompt = |step: &StepConfig| step.prompt.is_some() || step.prompt_file.is_some();
+    let check_prompt = |name: &str, step: &StepConfig| -> crate::error::Result<()> {
+        let mode = effective(step);
+        if mode == PermissionMode::Full {
+            return Ok(());
+        }
+        if is_command_backend {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses permission {mode:?} on the command backend, which cannot restrict a CLI's tools; use permission: full"
+            )));
+        }
+        if mode == PermissionMode::ReadOnly && step.allow_commit {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' combines read-only permission with allow_commit"
+            )));
+        }
+        Ok(())
+    };
+    let check_non_prompt = |name: &str, step: &StepConfig| -> crate::error::Result<()> {
+        if step.permission.is_some() && !is_prompt(step) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses permission, which is only supported on prompt steps"
+            )));
+        }
+        Ok(())
+    };
+
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        if let Some(children) = &step.parallel {
+            check_non_prompt(name, step)?;
+            let has_read_only = children
+                .values()
+                .any(|child| is_prompt(child) && effective(child) == PermissionMode::ReadOnly);
+            for (child_name, child) in children {
+                let path = format!("{name}/{child_name}");
+                check_non_prompt(&path, child)?;
+                if is_prompt(child) {
+                    check_prompt(&path, child)?;
+                }
+                if has_read_only
+                    && !(is_prompt(child) && effective(child) == PermissionMode::ReadOnly)
+                {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "parallel step '{name}' has a read-only child, so child '{child_name}' must also be a read-only prompt"
+                    )));
+                }
+            }
+        } else if is_prompt(step) {
+            check_prompt(name, step)?;
+        } else {
+            check_non_prompt(name, step)?;
+        }
+    }
+    Ok(())
+}
+
 fn computer_use_backend_error(
     config: &WorkflowConfig,
     step_name: Option<&str>,
@@ -1452,6 +1548,11 @@ fn validate_step_groups(
             if step.computer_use.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.permission.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses permission on a group call; set it on the inner prompt step"
                 )));
             }
             if step.output_file.is_some() {
@@ -2431,20 +2532,14 @@ steps:
         let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
             .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
-        // Then: it has the expected built-in defaults (source: builtin/cruise.yaml)
+        // Then: it has the expected built-in defaults (source: builtin/default.yaml)
         // The built-in workflow names no backend, so the default (`jcode`) runs
         // it, and both model fields are left to that backend's own default.
         assert_eq!(config.sdk, None);
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
-        assert_eq!(
-            config.languages.as_ref().and_then(|l| l.plan.as_deref()),
-            None
-        );
-        assert_eq!(
-            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
-            Some("English")
-        );
+        // Languages are left to the locale-derived defaults.
+        assert!(config.languages.is_none());
         assert!(config.cleanup_after_pr);
         // max_retries is unset so DEFAULT_MAX_RETRIES governs
         assert_eq!(config.max_retries, None);
@@ -2454,8 +2549,8 @@ steps:
         // after-pr automation must not auto-merge: merging stays a human action
         assert!(!config.after_pr.contains_key("merge"));
 
-        // And: the review group ends with a fixing review pass after the
-        // verification and simplification steps.
+        // And: the review group runs read-only analyzers in parallel, then
+        // consolidates their findings, then applies the worklist.
         let review = config
             .groups
             .get("verify-review")
@@ -2465,25 +2560,32 @@ steps:
             .keys()
             .map(std::string::String::as_str)
             .collect();
+        assert_eq!(order, vec!["analyze", "consolidate", "apply"]);
+        let analyzers: Vec<&str> = review.steps["analyze"]
+            .parallel
+            .as_ref()
+            .unwrap_or_else(|| panic!("'analyze' must be a parallel step"))
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         assert_eq!(
-            order,
+            analyzers,
             vec![
-                "verify-plan-implementation",
-                "verify-wiring",
-                "verify-docs",
-                "simplify-pass",
-                "review-pass"
+                "plan-implementation",
+                "wiring",
+                "simplify",
+                "review",
+                "docs"
             ]
         );
 
-        // And: review fixes re-enter the flow at plan verification, so a
-        // review-driven change is re-checked against {plan} before wiring.
+        // And: any applied fix re-enters the loop at the analyzers.
         assert_eq!(
             review
                 .if_condition
                 .as_ref()
                 .and_then(|c| c.file_changed.as_deref()),
-            Some("verify-review-pass/verify-plan-implementation")
+            Some("verify-review-pass/analyze")
         );
 
         // And: it passes full config validation
@@ -4938,12 +5040,12 @@ steps:
     }
 
     #[test]
-    fn test_builtin_config_infers_plan_language_but_keeps_pr_language_english() {
+    fn test_builtin_config_infers_plan_and_pr_language_from_locale() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
 
-        // Given: the built-in config leaves planning language unspecified
+        // Given: the built-in config leaves both languages unspecified
         let mut config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
             .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
@@ -4952,9 +5054,9 @@ steps:
             .apply_env_overrides()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: planning follows the locale while PR generation remains English
+        // Then: both planning and PR generation follow the locale
         assert_eq!(config.effective_plan_language(), "Japanese");
-        assert_eq!(config.effective_pr_language(), "English");
+        assert_eq!(config.effective_pr_language(), "Japanese");
     }
 
     #[test]
@@ -6496,6 +6598,224 @@ steps:
             validate_config(&config).is_ok(),
             "an option step whose choices all set next has no reachable \
              fall-through edge"
+        );
+    }
+
+    // -- permission ----------------------------------------------------------
+
+    fn assert_permission_invalid(yaml: &str, fragments: &[&str]) {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+        match validate_config(&config) {
+            Err(crate::error::CruiseError::InvalidStepConfig(message)) => {
+                for fragment in fragments {
+                    assert!(
+                        message.contains(fragment),
+                        "expected {fragment:?} in: {message}"
+                    );
+                }
+            }
+            other => panic!("expected InvalidStepConfig for {yaml}, got {other:?}"),
+        }
+    }
+
+    fn assert_permission_valid(yaml: &str) {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+        validate_config(&config).unwrap_or_else(|error| panic!("{yaml}: {error}"));
+    }
+
+    #[test]
+    fn test_permission_defaults_to_full_and_step_override_round_trips() {
+        let config = WorkflowConfig::from_yaml("steps:\n  a:\n    prompt: hi\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.permission, PermissionMode::Full);
+        assert_eq!(config.steps["a"].permission, None);
+        let serialized = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
+        assert!(serialized["steps"]["a"].get("permission").is_none());
+
+        let config = WorkflowConfig::from_yaml(
+            "permission: edit\nsteps:\n  a:\n    prompt: hi\n    permission: read-only\n  b:\n    prompt: hi\n    permission: full\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.permission, PermissionMode::Edit);
+        assert_eq!(config.steps["a"].permission, Some(PermissionMode::ReadOnly));
+        assert_eq!(config.steps["b"].permission, Some(PermissionMode::Full));
+        let yaml = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error}"));
+        let again = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(again.permission, PermissionMode::Edit);
+        assert_eq!(again.steps["a"].permission, Some(PermissionMode::ReadOnly));
+        assert_eq!(again.steps["b"].permission, Some(PermissionMode::Full));
+    }
+
+    #[test]
+    fn test_permission_rejects_unknown_value() {
+        assert!(WorkflowConfig::from_yaml("permission: root\nsteps: {}\n").is_err());
+        assert!(
+            WorkflowConfig::from_yaml("steps:\n  a:\n    prompt: hi\n    permission: readonly\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_permission_command_backend_rejects_restricted_workflow_default() {
+        for mode in ["read-only", "edit"] {
+            assert_permission_invalid(
+                &format!("command: [echo]\npermission: {mode}\nsteps:\n  a:\n    prompt: hi\n"),
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn test_permission_command_backend_rejects_restricted_step_override() {
+        assert_permission_invalid(
+            "command: [echo]\nsteps:\n  review:\n    prompt: hi\n    permission: read-only\n",
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_permission_command_backend_allows_full_and_command_steps_under_restricted_default() {
+        assert_permission_valid(
+            "command: [echo]\nsteps:\n  a:\n    prompt: hi\n    permission: full\n",
+        );
+        assert_permission_valid("command: [echo]\nsteps:\n  a:\n    prompt: hi\n");
+        // A step-level `full` rescues a restricted workflow default.
+        assert_permission_valid(
+            "command: [echo]\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n    permission: full\n",
+        );
+    }
+
+    #[test]
+    fn test_permission_command_backend_rejects_restricted_after_pr_prompt() {
+        assert_permission_invalid(
+            "command: [echo]\nsteps:\n  a:\n    prompt: hi\nafter-pr:\n  p:\n    prompt: hi\n    permission: edit\n",
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_permission_sdk_backends_accept_restricted_modes() {
+        for sdk in ["claude", "jcode"] {
+            assert_permission_valid(&format!(
+                "sdk: {sdk}\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n  b:\n    prompt: hi\n    permission: edit\n"
+            ));
+        }
+    }
+
+    #[test]
+    fn test_permission_rejected_on_non_prompt_steps() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  c:\n    command: echo\n    permission: full\n",
+            &["permission"],
+        );
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  o:\n    option:\n      - label: x\n        next: end\n    permission: full\n",
+            &["permission"],
+        );
+    }
+
+    #[test]
+    fn test_permission_rejected_on_group_call_and_workflow_call_sites() {
+        assert_permission_invalid(
+            "sdk: jcode\ngroups:\n  g:\n    steps:\n      i:\n        prompt: hi\nsteps:\n  run:\n    group: g\n    permission: read-only\n",
+            &["run", "permission"],
+        );
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  shared:\n    workflow_call: ./callee.yaml\n    permission: read-only\n",
+            &["permission"],
+        );
+    }
+
+    #[test]
+    fn test_permission_rejected_on_parallel_wrapper_but_allowed_on_prompt_child() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  checks:\n    permission: read-only\n    parallel:\n      a:\n        prompt: hi\n",
+            &["checks", "permission"],
+        );
+        assert_permission_valid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      a:\n        prompt: hi\n        permission: read-only\n",
+        );
+    }
+
+    #[test]
+    fn test_permission_parallel_all_read_only_prompt_children_is_valid() {
+        assert_permission_valid(
+            "sdk: jcode\npermission: read-only\nsteps:\n  checks:\n    parallel:\n      a:\n        prompt: one\n      b:\n        prompt: two\n",
+        );
+    }
+
+    #[test]
+    fn test_permission_parallel_rejects_read_only_mixed_with_writable_child() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      reader:\n        prompt: one\n        permission: read-only\n      writer:\n        prompt: two\n        permission: edit\n",
+            &["checks", "writer"],
+        );
+        // Workflow default full makes the unannotated sibling writable.
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      reader:\n        prompt: one\n        permission: read-only\n      other:\n        prompt: two\n",
+            &["checks", "other"],
+        );
+    }
+
+    #[test]
+    fn test_permission_parallel_rejects_read_only_mixed_with_command_child() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      reader:\n        prompt: one\n        permission: read-only\n      cmd:\n        command: echo\n",
+            &["checks", "cmd"],
+        );
+    }
+
+    #[test]
+    fn test_permission_parallel_rejects_read_only_mixed_with_skipped_writable_child() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      reader:\n        prompt: one\n        permission: read-only\n      writer:\n        prompt: two\n        skip: true\n",
+            &["checks", "writer"],
+        );
+    }
+
+    #[test]
+    fn test_permission_parallel_without_read_only_child_keeps_existing_rules() {
+        assert_permission_valid(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      a:\n        prompt: one\n        permission: edit\n      b:\n        prompt: two\n      c:\n        command: echo\n",
+        );
+    }
+
+    #[test]
+    fn test_permission_read_only_with_allow_commit_is_invalid_for_step_and_default() {
+        assert_permission_invalid(
+            "sdk: jcode\nsteps:\n  a:\n    prompt: hi\n    permission: read-only\n    allow_commit: true\n",
+            &["allow_commit"],
+        );
+        assert_permission_invalid(
+            "sdk: jcode\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n    allow_commit: true\n",
+            &["allow_commit"],
+        );
+    }
+
+    #[test]
+    fn test_permission_allow_commit_is_valid_with_edit_and_full() {
+        assert_permission_valid(
+            "sdk: jcode\nsteps:\n  a:\n    prompt: hi\n    permission: edit\n    allow_commit: true\n  b:\n    prompt: hi\n    allow_commit: true\n",
+        );
+        // A step-level override rescues a read-only workflow default.
+        assert_permission_valid(
+            "sdk: jcode\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n    permission: edit\n    allow_commit: true\n",
+        );
+    }
+
+    #[test]
+    fn test_permission_applies_to_group_inner_steps_and_after_pr() {
+        assert_permission_invalid(
+            "command: [echo]\npermission: read-only\ngroups:\n  g:\n    steps:\n      i:\n        prompt: hi\nsteps:\n  run:\n    group: g\n",
+            &[],
+        );
+        assert_permission_invalid(
+            "sdk: jcode\npermission: read-only\ngroups:\n  g:\n    steps:\n      i:\n        prompt: hi\n        allow_commit: true\nsteps:\n  run:\n    group: g\n",
+            &["allow_commit"],
+        );
+        assert_permission_invalid(
+            "sdk: jcode\npermission: read-only\nsteps:\n  m:\n    prompt: hi\nafter-pr:\n  p:\n    prompt: hi\n    allow_commit: true\n",
+            &["allow_commit"],
         );
     }
 }

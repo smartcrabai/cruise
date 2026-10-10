@@ -667,6 +667,7 @@ async fn generate_title_via_sdk(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await?;
 

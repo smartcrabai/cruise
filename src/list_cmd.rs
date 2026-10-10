@@ -290,6 +290,14 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
+                "Merge PR" => {
+                    if merge_pr_interactive(&manager, &session.id)? {
+                        break;
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
+                }
                 "Edit Settings" => {
                     match edit_session_settings_interactive(
                         &manager,
@@ -433,6 +441,7 @@ fn session_actions_with_plan_availability(
         SessionPhase::Completed => {
             if session.pr_url.is_some() {
                 actions.push("Open PR");
+                actions.push("Merge PR");
             }
             actions.push("Reset to Planned");
         }
@@ -583,6 +592,78 @@ async fn edit_session_settings_interactive(
     }
 
     Ok(())
+}
+
+/// Preview, choose a method, confirm and merge. Returns true when the session was cleaned up.
+fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Result<bool> {
+    use crate::application::{CruiseApplication, MergePrOutcome, PrMergeMethod};
+
+    let app = CruiseApplication::new(manager.clone());
+    let status = match app.inspect_pr_for_merge(id) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            return Ok(false);
+        }
+    };
+    eprintln!("PR state: {}", status.state);
+    eprintln!("Mergeable: {}", status.mergeable);
+    eprintln!("Review decision: {}", status.review_decision);
+    if status.checks.is_empty() {
+        eprintln!("Checks: none");
+    }
+    for check in &status.checks {
+        eprintln!("Check: {} ({})", check.name, check.status);
+    }
+    if status.state != "OPEN" {
+        eprintln!(
+            "{} PR is {}. Run `cruise clean` to remove the session.",
+            style("!").yellow(),
+            status.state
+        );
+        return Ok(false);
+    }
+    let methods = vec!["Squash", "Merge", "Rebase"];
+    let method_label = match inquire::Select::new("Merge method:", methods).prompt() {
+        Ok(m) => m,
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    };
+    let method = match method_label {
+        "Merge" => PrMergeMethod::Merge,
+        "Rebase" => PrMergeMethod::Rebase,
+        _ => PrMergeMethod::Squash,
+    };
+    let prompt = format!(
+        "Merge PR with {method_label} (mergeable: {}, review: {})?",
+        status.mergeable, status.review_decision
+    );
+    match inquire::Confirm::new(&prompt).with_default(false).prompt() {
+        Ok(true) => {}
+        Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+    match app.merge_pr(id, method) {
+        Ok(MergePrOutcome::Cleaned) => {
+            eprintln!("{} PR merged; session cleaned up.", style("v").green());
+            Ok(true)
+        }
+        Ok(MergePrOutcome::Pending) => {
+            eprintln!(
+                "{} PR is still open (for example in a merge queue). The session was kept.",
+                style("!").yellow()
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            Ok(false)
+        }
+    }
 }
 
 fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
@@ -1320,6 +1401,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_actions_completed_with_pr_offers_merge_pr() {
+        let mut with_pr = make_session("20261009100000", "task", SessionPhase::Completed);
+        with_pr.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+        let without_pr = make_session("20261009100001", "task", SessionPhase::Completed);
+        assert!(session_actions(&with_pr).contains(&"Merge PR"));
+        assert!(!session_actions(&without_pr).contains(&"Merge PR"));
+
+        for phase in [
+            SessionPhase::Planned,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Suspended,
+            SessionPhase::Failed("e".to_string()),
+        ] {
+            let mut session = make_session("20261009100002", "task", phase);
+            session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+            assert!(!session_actions(&session).contains(&"Merge PR"));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // session_actions -- Open PR coverage
     // -----------------------------------------------------------------------
@@ -1333,10 +1434,10 @@ mod tests {
         // When
         let actions = session_actions(&session);
 
-        // Then: order is ["Open PR", "Reset to Planned", "Delete", "Back"]
+        // Then: order is ["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
         assert_eq!(
             actions,
-            vec!["Open PR", "Reset to Planned", "Delete", "Back"]
+            vec!["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
         );
     }
 
