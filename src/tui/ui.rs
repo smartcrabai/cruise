@@ -291,7 +291,11 @@ fn render_info(
         ),
         labeled_line(
             app,
-            if session.pr_url.as_deref().is_some_and(|u| u.contains("/-/merge_requests/")) {
+            if session
+                .pr_url
+                .as_deref()
+                .is_some_and(|u| u.contains("/-/merge_requests/"))
+            {
                 "MR       "
             } else {
                 "PR/MR    "

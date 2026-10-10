@@ -72,7 +72,10 @@ fn resolve_repo(session: &SessionState) -> Result<(crate::forge::ForgeKind, Stri
 /// Whether the `@cruise run` trigger comment is available for `session`'s forge (GitHub only).
 #[must_use]
 pub fn supports_trigger_cruise(session: &SessionState) -> bool {
-    !matches!(resolve_repo(session), Ok((crate::forge::ForgeKind::GitLab, _)))
+    !matches!(
+        resolve_repo(session),
+        Ok((crate::forge::ForgeKind::GitLab, _))
+    )
 }
 
 /// Publish a session's generated plan as a GitHub issue, then delete the
@@ -148,7 +151,9 @@ pub fn publish_plan_issue_and_delete(
             .arg(&body_path)
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|e| CruiseError::Other(format!("failed to run {program} issue create: {e}")))?;
+            .map_err(|e| {
+                CruiseError::Other(format!("failed to run {program} issue create: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -159,9 +164,17 @@ pub fn publish_plan_issue_and_delete(
         }
 
         let url = gh_output_line(&output.stdout)
-            .and_then(|out| out.lines().rev().find(|l| l.trim().starts_with("http")).map(|l| l.trim().to_string()).or(Some(out)))
+            .and_then(|out| {
+                out.lines()
+                    .rev()
+                    .find(|l| l.trim().starts_with("http"))
+                    .map(|l| l.trim().to_string())
+                    .or(Some(out))
+            })
             .ok_or_else(|| {
-                CruiseError::Other(format!("{program} issue create succeeded but printed no URL"))
+                CruiseError::Other(format!(
+                    "{program} issue create succeeded but printed no URL"
+                ))
             })?;
 
         session.published_issue_url = Some(url.clone());

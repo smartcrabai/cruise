@@ -208,22 +208,24 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     }
                     crate::platform::reclaim_terminal_foreground();
                     let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
-                    let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session) {
-                        match inquire::Confirm::new(
-                        "Post an @cruise run comment after creating the issue?",
-                    )
-                    .with_default(default_trigger_cruise)
-                    .prompt()
+                    let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session)
                     {
-                        Ok(answer) => answer,
-                        Err(
-                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
-                        ) => {
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(CruiseError::Other(format!("selection error: {e}")));
-                        }
+                        match inquire::Confirm::new(
+                            "Post an @cruise run comment after creating the issue?",
+                        )
+                        .with_default(default_trigger_cruise)
+                        .prompt()
+                        {
+                            Ok(answer) => answer,
+                            Err(
+                                InquireError::OperationCanceled
+                                | InquireError::OperationInterrupted,
+                            ) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(CruiseError::Other(format!("selection error: {e}")));
+                            }
                         }
                     } else {
                         false

@@ -1251,7 +1251,11 @@ fn fetch_pr_state(session: &SessionState, pr_url: &str) -> std::result::Result<S
             if gitlab {
                 Ok(serde_json::from_str::<serde_json::Value>(text.trim())
                     .ok()
-                    .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_uppercase))
+                    .and_then(|v| {
+                        v.get("state")
+                            .and_then(|s| s.as_str())
+                            .map(str::to_uppercase)
+                    })
                     .unwrap_or_default())
             } else {
                 Ok(text.trim().to_uppercase())
@@ -1892,7 +1896,9 @@ mod tests {
         let mut state = SessionState::new(
             "20260306170001".to_string(),
             PathBuf::from("/repo"),
-            SessionConfigRef::File { path: PathBuf::from("/repo/cruise.yaml") },
+            SessionConfigRef::File {
+                path: PathBuf::from("/repo/cruise.yaml"),
+            },
             "task".to_string(),
         );
         state.forge = Some(crate::forge::ForgeKind::GitLab);
@@ -4122,11 +4128,31 @@ mod tests {
             std::env::join_paths(paths).unwrap_or_else(|e| panic!("{e:?}")),
         );
         let cases = [
-            ("fc-opened", "https://gitlab.com/g/p/-/merge_requests/1?/mr/opened", false),
-            ("fc-closed", "https://gitlab.com/g/p/-/merge_requests/2?/mr/closed", true),
-            ("fc-merged", "https://gitlab.com/g/p/-/merge_requests/3?/mr/merged", true),
-            ("fc-badjson", "https://gitlab.com/g/p/-/merge_requests/4?/mr/badjson", false),
-            ("fc-fail", "https://gitlab.com/g/p/-/merge_requests/5?/mr/fail", false),
+            (
+                "fc-opened",
+                "https://gitlab.com/g/p/-/merge_requests/1?/mr/opened",
+                false,
+            ),
+            (
+                "fc-closed",
+                "https://gitlab.com/g/p/-/merge_requests/2?/mr/closed",
+                true,
+            ),
+            (
+                "fc-merged",
+                "https://gitlab.com/g/p/-/merge_requests/3?/mr/merged",
+                true,
+            ),
+            (
+                "fc-badjson",
+                "https://gitlab.com/g/p/-/merge_requests/4?/mr/badjson",
+                false,
+            ),
+            (
+                "fc-fail",
+                "https://gitlab.com/g/p/-/merge_requests/5?/mr/fail",
+                false,
+            ),
             ("fc-gh-merged", "https://github.com/o/r/pull/1", true),
             ("fc-gh-open", "https://github.com/o/r/pull/2", false),
         ];

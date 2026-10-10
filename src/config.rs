@@ -2894,8 +2894,8 @@ steps:
         use std::os::unix::fs::PermissionsExt;
 
         let _lock = crate::test_support::lock_process();
-        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let config =
+            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
         let Some(StringOrVec::Single(template)) = config
             .after_pr
             .get("wait-ci")
@@ -2945,7 +2945,10 @@ steps:
             assert_eq!(out.status.code(), Some(1), "{status}");
             let log = std::fs::read_to_string(tmp.path().join(".git/cruise-ci-traces.log"))
                 .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(log.contains("TRACE-OUTPUT ci trace 5 --pipeline-id 99"), "{log}");
+            assert!(
+                log.contains("TRACE-OUTPUT ci trace 5 --pipeline-id 99"),
+                "{log}"
+            );
             assert!(!log.contains("trace 6"), "{log}");
         }
         // And: the fix prompt points at the collected traces

@@ -46,7 +46,9 @@ fn split_remote(url: &str) -> Result<(String, String)> {
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     if host.is_empty() || path.is_empty() {
-        return err(format!("remote URL has no host or repository path: `{url}`"));
+        return err(format!(
+            "remote URL has no host or repository path: `{url}`"
+        ));
     }
     Ok((host.to_ascii_lowercase(), path.to_string()))
 }
@@ -84,7 +86,11 @@ pub(crate) fn resolve_remote(url: &str, override_kind: Option<ForgeKind>) -> Res
             ));
         }
     };
-    Ok(ForgeContext { kind, host, repository })
+    Ok(ForgeContext {
+        kind,
+        host,
+        repository,
+    })
 }
 
 /// Parse a `CRUISE_FORGE` value (`github` / `gitlab`, case-insensitive; empty means unset).
@@ -93,7 +99,9 @@ pub(crate) fn parse_forge_override(value: Option<&str>) -> Result<Option<ForgeKi
         None | Some("") => Ok(None),
         Some(v) if v.eq_ignore_ascii_case("github") => Ok(Some(ForgeKind::GitHub)),
         Some(v) if v.eq_ignore_ascii_case("gitlab") => Ok(Some(ForgeKind::GitLab)),
-        Some(v) => err(format!("invalid CRUISE_FORGE `{v}`: expected github or gitlab")),
+        Some(v) => err(format!(
+            "invalid CRUISE_FORGE `{v}`: expected github or gitlab"
+        )),
     }
 }
 
@@ -121,8 +129,10 @@ pub(crate) fn ensure_forge_available(kind: ForgeKind) -> Result<()> {
             if ok {
                 Ok(())
             } else {
-                err("glab CLI is not installed. Install it from https://gitlab.com/gitlab-org/cli"
-                    .to_string())
+                err(
+                    "glab CLI is not installed. Install it from https://gitlab.com/gitlab-org/cli"
+                        .to_string(),
+                )
             }
         }
     }
@@ -133,7 +143,11 @@ pub(crate) fn session_forge(session: &crate::session::SessionState) -> ForgeKind
     if let Some(kind) = session.forge {
         return kind;
     }
-    if session.pr_url.as_deref().is_some_and(|u| u.contains("/-/merge_requests/")) {
+    if session
+        .pr_url
+        .as_deref()
+        .is_some_and(|u| u.contains("/-/merge_requests/"))
+    {
         return ForgeKind::GitLab;
     }
     if let Some(repo) = session.repo.as_deref()
@@ -141,7 +155,10 @@ pub(crate) fn session_forge(session: &crate::session::SessionState) -> ForgeKind
     {
         return ctx.kind;
     }
-    let dir = session.worktree_path.as_deref().unwrap_or(&session.base_dir);
+    let dir = session
+        .worktree_path
+        .as_deref()
+        .unwrap_or(&session.base_dir);
     if let Ok(url) = origin_url(dir)
         && let Ok(ctx) = resolve_remote(&url, forge_override_from_env().ok().flatten())
     {
@@ -204,12 +221,19 @@ fn resolve_repo_locator_with_host(
         ForgeKind::GitLab => gitlab_host
             .map(|h| {
                 let h = h.trim();
-                h.split_once("://").map_or(h, |(_, r)| r).trim_end_matches('/').to_string()
+                h.split_once("://")
+                    .map_or(h, |(_, r)| r)
+                    .trim_end_matches('/')
+                    .to_string()
             })
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "gitlab.com".to_string()),
     };
-    Ok(ForgeContext { kind, host, repository: locator.to_string() })
+    Ok(ForgeContext {
+        kind,
+        host,
+        repository: locator.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -230,7 +254,7 @@ mod tests {
         let state = crate::session::SessionState::new(
             "s".to_string(),
             dir.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         (dir, state)
@@ -258,25 +282,29 @@ mod tests {
 
     #[test]
     fn test_remote_github_https_with_git_suffix() {
-        let got = resolve_remote("https://github.com/owner/repo.git", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("https://github.com/owner/repo.git", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got, ctx(ForgeKind::GitHub, "github.com", "owner/repo"));
     }
 
     #[test]
     fn test_remote_github_scp_style() {
-        let got = resolve_remote("git@github.com:owner/repo.git", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("git@github.com:owner/repo.git", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got, ctx(ForgeKind::GitHub, "github.com", "owner/repo"));
     }
 
     #[test]
     fn test_remote_github_ssh_scheme() {
-        let got = resolve_remote("ssh://git@github.com/owner/repo.git", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("ssh://git@github.com/owner/repo.git", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got, ctx(ForgeKind::GitHub, "github.com", "owner/repo"));
     }
 
     #[test]
     fn test_remote_gitlab_com_nested_namespace() {
-        let got = resolve_remote("https://gitlab.com/group/sub/project.git", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("https://gitlab.com/group/sub/project.git", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             got,
             ctx(ForgeKind::GitLab, "gitlab.com", "group/sub/project")
@@ -285,7 +313,8 @@ mod tests {
 
     #[test]
     fn test_remote_gitlab_scp_nested_namespace() {
-        let got = resolve_remote("git@gitlab.com:group/sub/project.git", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("git@gitlab.com:group/sub/project.git", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             got,
             ctx(ForgeKind::GitLab, "gitlab.com", "group/sub/project")
@@ -312,16 +341,23 @@ mod tests {
 
     #[test]
     fn test_remote_explicit_override_wins_over_known_host() {
-        let got = resolve_remote("https://github.com/owner/repo", Some(ForgeKind::GitLab)).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_remote("https://github.com/owner/repo", Some(ForgeKind::GitLab))
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got.kind, ForgeKind::GitLab);
     }
 
     #[test]
     fn test_remote_malformed_inputs_are_rejected() {
-        for bad in ["", "https://", "https://gitlab.com/", "https://gitlab.com", "not a url"] {
+        for bad in [
+            "",
+            "https://",
+            "https://gitlab.com/",
+            "https://gitlab.com",
+            "not a url",
+        ] {
             let Err(err) = resolve_remote(bad, Some(ForgeKind::GitLab)) else {
-            panic!("expected error");
-        };
+                panic!("expected error");
+            };
             assert!(matches!(err, CruiseError::Other(_)), "{bad}: {err:?}");
         }
     }
@@ -334,7 +370,8 @@ mod tests {
 
     #[test]
     fn test_locator_namespace_path_requires_gitlab_override() {
-        let got = resolve_repo_locator("group/sub/project", Some(ForgeKind::GitLab)).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_repo_locator("group/sub/project", Some(ForgeKind::GitLab))
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got.kind, ForgeKind::GitLab);
         assert_eq!(got.repository, "group/sub/project");
         assert!(resolve_repo_locator("group/sub/project", None).is_err());
@@ -342,7 +379,8 @@ mod tests {
 
     #[test]
     fn test_locator_full_gitlab_url_keeps_host_and_path() {
-        let got = resolve_repo_locator("https://gitlab.com/group/sub/project", None).unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_repo_locator("https://gitlab.com/group/sub/project", None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             got,
             ctx(ForgeKind::GitLab, "gitlab.com", "group/sub/project")
@@ -351,11 +389,8 @@ mod tests {
 
     #[test]
     fn test_locator_self_managed_url_with_override() {
-        let got = resolve_repo_locator(
-            "https://git.example.com/team/app",
-            Some(ForgeKind::GitLab),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
+        let got = resolve_repo_locator("https://git.example.com/team/app", Some(ForgeKind::GitLab))
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(got, ctx(ForgeKind::GitLab, "git.example.com", "team/app"));
     }
 
@@ -374,17 +409,30 @@ mod tests {
     #[test]
     fn test_parse_forge_override() {
         assert_eq!(parse_forge_override(None).ok(), Some(None));
-        assert_eq!(parse_forge_override(Some("GitLab")).ok(), Some(Some(ForgeKind::GitLab)));
-        assert_eq!(parse_forge_override(Some("github")).ok(), Some(Some(ForgeKind::GitHub)));
+        assert_eq!(
+            parse_forge_override(Some("GitLab")).ok(),
+            Some(Some(ForgeKind::GitLab))
+        );
+        assert_eq!(
+            parse_forge_override(Some("github")).ok(),
+            Some(Some(ForgeKind::GitHub))
+        );
         assert!(parse_forge_override(Some("bitbucket")).is_err());
     }
 
     #[test]
     fn test_locator_invalid_specs_are_rejected() {
-        for bad in ["", "-owner/repo", "owner/-repo", "owner", "owner//repo", "../x"] {
+        for bad in [
+            "",
+            "-owner/repo",
+            "owner/-repo",
+            "owner",
+            "owner//repo",
+            "../x",
+        ] {
             let Err(err) = resolve_repo_locator(bad, None) else {
-            panic!("expected error");
-        };
+                panic!("expected error");
+            };
             assert!(matches!(err, CruiseError::Other(_)), "{bad}: {err:?}");
         }
     }

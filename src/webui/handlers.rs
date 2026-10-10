@@ -211,8 +211,9 @@ pub(crate) async fn editor(
             let supports_trigger = state
                 .application
                 .reconcile_session(&id)
-                .map(|session| crate::issue_publish::supports_trigger_cruise(&session))
-                .unwrap_or(true);
+                .map_or(true, |session| {
+                    crate::issue_publish::supports_trigger_cruise(&session)
+                });
             let vm = PublishDialogVm {
                 id: id.clone(),
                 submit_url: format!("/webui/sessions/{id}/publish"),

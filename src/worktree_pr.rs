@@ -156,16 +156,15 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let pr_attempt =
-        attempt_pr_creation(
-            ctx,
-            crate::forge::session_forge(session),
-            &session.input,
-            &pr_title,
-            &pr_body,
-            cancel_token,
-        )
-        .await?;
+    let pr_attempt = attempt_pr_creation(
+        ctx,
+        crate::forge::session_forge(session),
+        &session.input,
+        &pr_title,
+        &pr_body,
+        cancel_token,
+    )
+    .await?;
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {
@@ -443,7 +442,16 @@ pub(crate) async fn attempt_pr_creation(
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
     push_branch(&ctx.path, &ctx.branch, cancel_token).await?;
-    match create_pr(forge, &ctx.path, &ctx.branch, trimmed_title, body, cancel_token).await {
+    match create_pr(
+        forge,
+        &ctx.path,
+        &ctx.branch,
+        trimmed_title,
+        body,
+        cancel_token,
+    )
+    .await
+    {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
