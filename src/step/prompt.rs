@@ -292,7 +292,10 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(result, Err(CruiseError::Interrupted)), "{result:?}");
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "{result:?}"
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(15));
     }
 

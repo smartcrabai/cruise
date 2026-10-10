@@ -525,7 +525,10 @@ mod tests {
             Some(&token),
         )
         .await;
-        assert!(matches!(result, Err(CruiseError::Interrupted)), "{result:?}");
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "{result:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(15));
     }
 

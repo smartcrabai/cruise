@@ -2762,7 +2762,10 @@ steps:
             !command.contains("$base"),
             "sync-base must not rely on Bash variable expansion: {command}"
         );
-        assert!(doc["after-pr"]["fix-ci-error"]["if"]["file-changed"] == "sync-base");
+        assert_eq!(
+            doc["after-pr"]["fix-ci-error"]["if"]["file-changed"],
+            "sync-base"
+        );
     }
 
     #[test]

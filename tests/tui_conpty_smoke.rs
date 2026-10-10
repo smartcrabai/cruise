@@ -90,7 +90,10 @@ fn windows_tui_quit_restores_raw_mode_after_input_close() {
         .write_all(b"q")
         .unwrap_or_else(|error| panic!("{error}"));
     tui.writer.flush().unwrap_or_else(|error| panic!("{error}"));
-    drop(std::mem::replace(&mut tui.writer, Box::new(std::io::sink())));
+    drop(std::mem::replace(
+        &mut tui.writer,
+        Box::new(std::io::sink()),
+    ));
     if !wait_for_exit(&mut tui) {
         let _ = tui.child.kill();
         panic!("TUI did not exit after quit/input close");

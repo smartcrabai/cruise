@@ -51,7 +51,11 @@ fn xdg_or_home(xdg_var: &str, home_base: &[&str]) -> Result<PathBuf> {
         let native = if xdg_var == "XDG_CONFIG_HOME" {
             std::env::var_os("APPDATA").map(|v| PathBuf::from(v).join("cruise"))
         } else {
-            let sub = if xdg_var == "XDG_DATA_HOME" { "data" } else { "state" };
+            let sub = if xdg_var == "XDG_DATA_HOME" {
+                "data"
+            } else {
+                "state"
+            };
             std::env::var_os("LOCALAPPDATA").map(|v| PathBuf::from(v).join("cruise").join(sub))
         };
         if let Some(path) = native {
@@ -87,9 +91,18 @@ mod tests {
         let _c = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("xc").as_os_str());
         let _d = EnvGuard::set("XDG_DATA_HOME", tmp.path().join("xd").as_os_str());
         let _s = EnvGuard::set("XDG_STATE_HOME", tmp.path().join("xs").as_os_str());
-        assert_eq!(config_dir().unwrap_or_default(), tmp.path().join("xc").join("cruise"));
-        assert_eq!(data_dir().unwrap_or_default(), tmp.path().join("xd").join("cruise"));
-        assert_eq!(state_dir().unwrap_or_default(), tmp.path().join("xs").join("cruise"));
+        assert_eq!(
+            config_dir().unwrap_or_default(),
+            tmp.path().join("xc").join("cruise")
+        );
+        assert_eq!(
+            data_dir().unwrap_or_default(),
+            tmp.path().join("xd").join("cruise")
+        );
+        assert_eq!(
+            state_dir().unwrap_or_default(),
+            tmp.path().join("xs").join("cruise")
+        );
     }
 
     #[cfg(windows)]

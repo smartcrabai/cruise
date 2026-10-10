@@ -1232,7 +1232,13 @@ fn stop_private_daemon(home: &Path) -> std::io::Result<()> {
             let is_jcode = process
                 .exe()
                 .and_then(Path::file_stem)
-                .or_else(|| process.cmd().first().map(Path::new).and_then(Path::file_stem))
+                .or_else(|| {
+                    process
+                        .cmd()
+                        .first()
+                        .map(Path::new)
+                        .and_then(Path::file_stem)
+                })
                 .is_some_and(|stem| stem.eq_ignore_ascii_case("jcode"));
             let serves = process.cmd().iter().any(|arg| arg == "serve");
             let private = process
@@ -1643,26 +1649,33 @@ mod windows_tests {
         let Ok(spec) = std::env::var(LOCK_PROBE_ENV) else {
             return;
         };
-        let (mode, dir) = spec.split_once('|').unwrap_or_else(|| panic!("bad probe spec"));
-        let file = File::open(Path::new(dir).join(ROOT_LOCK_FILE)).unwrap_or_else(|e| panic!("{e}"));
+        let (mode, dir) = spec
+            .split_once('|')
+            .unwrap_or_else(|| panic!("bad probe spec"));
+        let file =
+            File::open(Path::new(dir).join(ROOT_LOCK_FILE)).unwrap_or_else(|e| panic!("{e}"));
         let locked = fs2::FileExt::try_lock_exclusive(&file).is_ok();
         println!("PROBE_RAN:{mode}:{locked}");
         std::process::exit(i32::from(locked != (mode == "free")));
     }
 
     fn run_lock_probe(mode: &str, dir: &Path) -> bool {
-        let output = std::process::Command::new(std::env::current_exe().unwrap_or_else(|e| panic!("{e}")))
-            .args([
-                "--exact",
-                "backend::jcode::windows_tests::windows_root_lock_child_probe",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(LOCK_PROBE_ENV, format!("{mode}|{}", dir.display()))
-            .output()
-            .unwrap_or_else(|e| panic!("{e}"));
+        let output =
+            std::process::Command::new(std::env::current_exe().unwrap_or_else(|e| panic!("{e}")))
+                .args([
+                    "--exact",
+                    "backend::jcode::windows_tests::windows_root_lock_child_probe",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(LOCK_PROBE_ENV, format!("{mode}|{}", dir.display()))
+                .output()
+                .unwrap_or_else(|e| panic!("{e}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains(&format!("PROBE_RAN:{mode}:")), "probe did not run: {stdout}");
+        assert!(
+            stdout.contains(&format!("PROBE_RAN:{mode}:")),
+            "probe did not run: {stdout}"
+        );
         output.status.success()
     }
 
@@ -1672,9 +1685,15 @@ mod windows_tests {
         let first = lock_session_root(dir.path())
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("expected lock"));
-        assert!(run_lock_probe("blocked", dir.path()), "child must not acquire a held lock");
+        assert!(
+            run_lock_probe("blocked", dir.path()),
+            "child must not acquire a held lock"
+        );
         drop(first);
-        assert!(run_lock_probe("free", dir.path()), "child must acquire a released lock");
+        assert!(
+            run_lock_probe("free", dir.path()),
+            "child must acquire a released lock"
+        );
     }
 
     #[test]
@@ -1746,7 +1765,10 @@ mod windows_tests {
         let pid = std::process::id();
         fs::write(
             home.path().join("servers.json"),
-            format!("{{\"x\":{{\"pid\":{pid},\"socket\":\"{}\"}}}}", "C:/nope/jcode.sock"),
+            format!(
+                "{{\"x\":{{\"pid\":{pid},\"socket\":\"{}\"}}}}",
+                "C:/nope/jcode.sock"
+            ),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         clear_private_daemon(home.path()).unwrap_or_else(|e| panic!("{e}"));

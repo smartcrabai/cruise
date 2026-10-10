@@ -887,7 +887,12 @@ pub(crate) fn parse_pr_metadata(output: &str) -> (String, String) {
 ///
 /// A `pr_url` containing `/-/merge_requests/` is a GitLab merge request and is
 /// queried with `glab`; otherwise `gh` is used.
-pub(crate) fn sync_base(pr_number: &str, pr_url: Option<&str>) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error when the base ref cannot be resolved or is invalid, or
+/// when `git fetch` / `git merge` fails (including merge conflicts).
+pub fn sync_base(pr_number: &str, pr_url: Option<&str>) -> Result<()> {
     sync_base_with(pr_number, pr_url, |program, args| {
         std::process::Command::new(program).args(args).output()
     })
@@ -1033,7 +1038,15 @@ mod tests {
             vec![
                 call(
                     "gh",
-                    &["pr", "view", "42", "--json", "baseRefName", "-q", ".baseRefName"]
+                    &[
+                        "pr",
+                        "view",
+                        "42",
+                        "--json",
+                        "baseRefName",
+                        "-q",
+                        ".baseRefName"
+                    ]
                 ),
                 call("git", &["check-ref-format", "--branch", "main"]),
                 call("git", &["fetch", "origin", "main"]),
@@ -1104,15 +1117,16 @@ mod tests {
         ]);
         assert_other(&result);
         assert!(
-            calls.iter().all(|(_, args)| !args.contains(&"fetch".to_string())),
+            calls
+                .iter()
+                .all(|(_, args)| !args.contains(&"fetch".to_string())),
             "must not fetch an option-like ref: {calls:?}"
         );
     }
 
     #[test]
     fn sync_base_rejects_ref_failing_check_ref_format() {
-        let (result, calls) =
-            run_scripted(vec![Ok(output(0, b"bad..ref\n")), Ok(output(1, b""))]);
+        let (result, calls) = run_scripted(vec![Ok(output(0, b"bad..ref\n")), Ok(output(1, b""))]);
         assert_other(&result);
         assert_eq!(calls.len(), 2);
     }

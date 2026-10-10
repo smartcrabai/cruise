@@ -212,10 +212,10 @@ struct PrivateEmptyHooksDir(PathBuf);
 
 impl PrivateEmptyHooksDir {
     fn create() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("cruise-empty-hooks-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&path).map_err(|error| {
-            guard_error(format!("cannot create {}: {error}", path.display()))
-        })?;
+        let path =
+            std::env::temp_dir().join(format!("cruise-empty-hooks-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path)
+            .map_err(|error| guard_error(format!("cannot create {}: {error}", path.display())))?;
         let dir = Self(path);
         set_mode(&dir.0, 0o700)?;
         Ok(dir)
@@ -1157,7 +1157,13 @@ mod tests {
         let linked = repo.path().join("linked-worktree");
         crate::test_support::run_git_ok(
             repo.path(),
-            &["worktree", "add", "-b", "linked", linked.to_str().unwrap_or_default()],
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                linked.to_str().unwrap_or_default(),
+            ],
         );
         fs::write(repo.path().join("README.md"), "changed")
             .unwrap_or_else(|error| panic!("write failed: {error}"));

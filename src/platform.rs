@@ -127,8 +127,12 @@ pub(crate) fn set_owner_only_acl(path: &std::path::Path) -> std::io::Result<()> 
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl: *mut ACL = std::ptr::null_mut();
-        let result = if GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
-            == 0
+        let result = if GetSecurityDescriptorDacl(
+            descriptor,
+            &mut present,
+            &mut dacl,
+            &mut defaulted,
+        ) == 0
         {
             Err(std::io::Error::last_os_error())
         } else if present != TRUE {
@@ -185,10 +189,18 @@ pub(crate) fn assert_owner_only_dacl(path: &std::path::Path) {
             std::ptr::null_mut(),
             &mut descriptor,
         );
-        assert_eq!(status, 0, "GetNamedSecurityInfoW failed for {}", path.display());
+        assert_eq!(
+            status,
+            0,
+            "GetNamedSecurityInfoW failed for {}",
+            path.display()
+        );
         let mut control = 0u16;
         let mut revision = 0u32;
-        assert_ne!(GetSecurityDescriptorControl(descriptor, &mut control, &mut revision), 0);
+        assert_ne!(
+            GetSecurityDescriptorControl(descriptor, &mut control, &mut revision),
+            0
+        );
         assert!(control & SE_DACL_PROTECTED != 0, "DACL must be protected");
         assert!(!dacl.is_null(), "DACL must be present");
         let mut info = ACL_SIZE_INFORMATION {
@@ -210,7 +222,11 @@ pub(crate) fn assert_owner_only_dacl(path: &std::path::Path) {
             let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
             assert_ne!(GetAce(dacl, index, &mut ace), 0);
             let header = ace.cast::<ACE_HEADER>();
-            assert_eq!((*header).AceType, 0, "only access-allowed ACEs are expected");
+            assert_eq!(
+                (*header).AceType,
+                0,
+                "only access-allowed ACEs are expected"
+            );
             let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
             let sid = std::ptr::addr_of_mut!((*allowed).SidStart).cast();
             let mut raw: *mut u16 = std::ptr::null_mut();
