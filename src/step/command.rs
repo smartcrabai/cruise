@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use command_group::{AsyncCommandGroup as _, AsyncGroupChild};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -95,14 +96,9 @@ fn spawn_command<S: std::hash::BuildHasher>(
     env: &HashMap<String, String, S>,
     cwd: Option<&std::path::Path>,
     quiet: bool,
-) -> Result<tokio::process::Child> {
+) -> Result<AsyncGroupChild> {
     let (shell, flag) = crate::platform::shell_command();
     let mut builder = Command::new(shell);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        builder.as_std_mut().process_group(0);
-    }
     builder
         .arg(flag)
         .arg(cmd)
@@ -122,7 +118,7 @@ fn spawn_command<S: std::hash::BuildHasher>(
         builder.current_dir(dir);
     }
     builder
-        .spawn()
+        .group_spawn()
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))
 }
 
@@ -139,10 +135,8 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
     let quiet = crate::console_mode::is_quiet() || on_step_log.is_some();
     let mut child = spawn_command(cmd, env, cwd, quiet)?;
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    // Keep the process group id even if the shell exits before its descendants.
-    let process_group = child.id();
+    let stdout_pipe = child.inner().stdout.take();
+    let stderr_pipe = child.inner().stderr.take();
     let command_started = Instant::now();
 
     let stdout_task = quiet.then(|| {
@@ -163,14 +157,14 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
     let result = tokio::select! {
         result = async {
             if let Some(duration) = timeout {
-                tokio::time::timeout(duration, child.wait())
+                tokio::time::timeout(duration, child.inner().wait())
                     .await
                     .map_err(|_| CruiseError::StepTimeout {
                         step: cmd.to_string(),
                         after_secs: duration.as_secs(),
                     })?
             } else {
-                child.wait().await
+                child.inner().wait().await
             }
             .map_err(|error| CruiseError::CommandError(error.to_string()))
         } => match result {
@@ -183,25 +177,21 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
                     stdout_task,
                     stderr_task,
                     deadline,
-                    process_group,
+                    &mut child,
                     cancel_token,
                 )
                 .await?;
                 Ok((status, stdout, stderr))
             }
             Err(error) => {
-                terminate_process_group(process_group);
                 let _ = child.kill().await;
-                let _ = child.wait().await;
                 abort_output_task(stdout_task);
                 abort_output_task(Some(stderr_task));
                 Err(error)
             }
         },
         () = cancel_wait(cancel_token) => {
-            terminate_process_group(process_group);
             let _ = child.kill().await;
-            let _ = child.wait().await;
             abort_output_task(stdout_task);
             abort_output_task(Some(stderr_task));
             Err(CruiseError::Interrupted)
@@ -260,19 +250,6 @@ fn abort_output_task(task: Option<tokio::task::JoinHandle<String>>) {
     task.abort();
 }
 
-fn terminate_process_group(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    #[cfg(unix)]
-    {
-        // Commands are started in their own process group, so descendants
-        // holding inherited pipes are terminated with the shell.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-}
 async fn collect_output(
     task: &mut tokio::task::JoinHandle<String>,
     deadline: Instant,
@@ -291,7 +268,7 @@ async fn collect_command_output(
     mut stdout_task: Option<tokio::task::JoinHandle<String>>,
     mut stderr_task: tokio::task::JoinHandle<String>,
     deadline: Instant,
-    process_group: Option<u32>,
+    child: &mut AsyncGroupChild,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<(String, String)> {
     let output = tokio::select! {
@@ -307,7 +284,7 @@ async fn collect_command_output(
             )
         } => output,
         () = cancel_wait(cancel_token) => {
-            terminate_process_group(process_group);
+            let _ = child.start_kill();
             abort_output_task(stdout_task);
             abort_output_task(Some(stderr_task));
             return Err(CruiseError::Interrupted);
@@ -315,7 +292,7 @@ async fn collect_command_output(
     };
     let ((stdout, stdout_timed_out), (stderr, stderr_timed_out)) = output;
     if stdout_timed_out || stderr_timed_out {
-        terminate_process_group(process_group);
+        let _ = child.start_kill();
     }
     Ok((stdout, stderr))
 }
@@ -338,29 +315,23 @@ pub(crate) async fn run_process_output_cancelled(
     if let Some(cwd) = cwd {
         builder.current_dir(cwd);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        builder.as_std_mut().process_group(0);
-    }
     let mut child = builder
-        .spawn()
+        .group_spawn()
         .map_err(|e| CruiseError::ProcessSpawnError(e.to_string()))?;
-    let process_group = child.id();
     let stdout = child
+        .inner()
         .stdout
         .take()
         .map(|mut pipe| tokio::spawn(async move { read_output_bounded(&mut pipe).await }));
     let stderr = child
+        .inner()
         .stderr
         .take()
         .map(|mut pipe| tokio::spawn(async move { read_output_bounded(&mut pipe).await }));
     let status = tokio::select! {
-        result = child.wait() => result,
+        result = child.inner().wait() => result,
         () = cancel_wait(cancel_token) => {
-            terminate_process_group(process_group);
             let _ = child.kill().await;
-            let _ = child.wait().await;
             abort_output_task(stdout);
             abort_output_task(stderr);
             return Err(CruiseError::Interrupted);
@@ -377,7 +348,7 @@ pub(crate) async fn run_process_output_cancelled(
         None => (String::new(), false),
     };
     if stdout.1 || stderr.1 {
-        terminate_process_group(process_group);
+        let _ = child.start_kill();
     }
     Ok(std::process::Output {
         status,
@@ -497,6 +468,69 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn successful_windows_child_preserves_stdout_stderr_and_status() {
+        let _lock = crate::test_support::lock_process();
+        crate::console_mode::set_quiet(true);
+        let _quiet = QuietModeGuard;
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let logs_for_callback = std::sync::Arc::clone(&logs);
+        let on_step_log = move |stream: &str, line: &str| {
+            logs_for_callback
+                .lock()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .push((stream.to_string(), line.to_string()));
+        };
+        let result = run_commands(
+            // cmd's echo keeps the space before a redirection, so write stderr without one.
+            &["echo stdout&echo stderr>&2".to_string()],
+            0,
+            &HashMap::new(),
+            None,
+            None,
+            Some(&on_step_log),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(result.success);
+        let logs = logs.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert!(logs.contains(&("stdout".to_string(), "stdout".to_string())));
+        assert!(logs.contains(&("stderr".to_string(), "stderr".to_string())));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancelled_windows_command_kills_descendants_and_closes_pipes() {
+        let _lock = crate::test_support::lock_process();
+        crate::console_mode::set_quiet(true);
+        let _quiet = QuietModeGuard;
+        let token = crate::cancellation::CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            canceller.cancel();
+        });
+        let started = Instant::now();
+        // The descendant `cmd` inherits the pipes and outlives the parent.
+        let result = run_command(
+            "start /b cmd /c ping -n 30 127.0.0.1 >nul & ping -n 30 127.0.0.1 >nul",
+            0,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            Some(&token),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 
     #[cfg(unix)]

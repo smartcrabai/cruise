@@ -158,6 +158,7 @@ pub async fn handle_worktree_pr_with_persistence(
     }
     let pr_attempt = attempt_pr_creation(
         ctx,
+        crate::forge::session_forge(session),
         session.input_or_title(),
         &pr_title,
         &pr_body,
@@ -270,6 +271,7 @@ async fn generate_pr_description(
                 on_session_id: None,
                 resume: None,
                 computer_use: false,
+                permission: crate::config::PermissionMode::Full,
             })
             .await
         {
@@ -342,6 +344,7 @@ async fn generate_pr_via_sdk_tool(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await
     {
@@ -363,7 +366,8 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation;
+/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation and
+/// `Err(GitHubReviewFailed)` for the opt-in github-review step; other failures only warn.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
@@ -404,11 +408,36 @@ async fn run_after_pr_steps(
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+        Err(e @ CruiseError::GitHubReviewFailed { .. }) => Err(e),
         Err(e) => {
             crate::status_eprintln!("warning: after-pr steps failed: {e}");
             Ok(())
         }
     }
+}
+
+/// Test entry point mirroring the after-pr phase of `run_pr_flow`.
+#[cfg(test)]
+pub(crate) async fn run_after_pr_steps_for_test(
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    working_dir: &Path,
+    option_handler: &dyn OptionHandler,
+) -> Result<()> {
+    run_after_pr_steps(
+        compiled,
+        vars,
+        tracker,
+        10,
+        0,
+        working_dir,
+        &[],
+        None,
+        option_handler,
+        None,
+    )
+    .await
 }
 
 pub(crate) fn build_pr_prompt(
@@ -421,6 +450,7 @@ pub(crate) fn build_pr_prompt(
 
 pub(crate) async fn attempt_pr_creation(
     ctx: &worktree::WorktreeContext,
+    forge: crate::forge::ForgeKind,
     message: &str,
     title: &str,
     body: &str,
@@ -438,7 +468,16 @@ pub(crate) async fn attempt_pr_creation(
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
     push_branch(&ctx.path, &ctx.branch, cancel_token).await?;
-    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body, cancel_token).await {
+    match create_pr(
+        forge,
+        &ctx.path,
+        &ctx.branch,
+        trimmed_title,
+        body,
+        cancel_token,
+    )
+    .await
+    {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
@@ -629,12 +668,16 @@ async fn push_branch(
 /// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise
 /// `--fill`. Falls back to `gh pr view` if a PR already exists.
 async fn create_pr(
+    forge: crate::forge::ForgeKind,
     worktree_path: &Path,
     branch: &str,
     title: &str,
     body: &str,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<String> {
+    if forge == crate::forge::ForgeKind::GitLab {
+        return create_mr(worktree_path, branch, title, body, cancel_token).await;
+    }
     let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
@@ -670,6 +713,69 @@ async fn create_pr(
     Err(CruiseError::Other(format!(
         "gh pr create failed: {create_stderr}; gh pr view also failed: {view_stderr}"
     )))
+}
+
+/// Create a draft GitLab MR using `glab mr create --draft`. Falls back to `glab mr view`
+/// if a merge request already exists for the branch.
+async fn create_mr(
+    worktree_path: &Path,
+    branch: &str,
+    title: &str,
+    body: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<String> {
+    let mut args = vec![
+        "mr",
+        "create",
+        "--source-branch",
+        branch,
+        "--draft",
+        "--yes",
+    ];
+    if title.is_empty() {
+        args.push("--fill");
+    } else {
+        args.extend(["--title", title, "--description", body]);
+    }
+    let output = crate::step::command::run_process_output_cancelled(
+        "glab",
+        &args,
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
+    if output.status.success()
+        && let Some(url) = extract_mr_url(&output.stdout)
+    {
+        return Ok(url);
+    }
+    let fallback = crate::step::command::run_process_output_cancelled(
+        "glab",
+        &["mr", "view", branch, "--output", "json", "--jq", ".web_url"],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
+    if fallback.status.success()
+        && let Some(url) = gh_output_line(&fallback.stdout)
+    {
+        return Ok(url);
+    }
+    let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
+    Err(CruiseError::Other(format!(
+        "glab mr create failed: {create_stderr}; glab mr view also failed: {view_stderr}"
+    )))
+}
+
+/// Find the merge request URL in `glab mr create` stdout (falls back to the last line).
+fn extract_mr_url(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("http") && l.contains("/merge_requests/"))
+        .map(ToString::to_string)
+        .or_else(|| gh_output_line(bytes).and_then(|l| l.lines().last().map(str::to_string)))
 }
 
 /// Trim and return a non-empty line from `gh` stdout bytes, or `None`.
@@ -777,10 +883,321 @@ pub(crate) fn parse_pr_metadata(output: &str) -> (String, String) {
     (String::new(), String::new())
 }
 
+/// Merge the base branch of PR `pr_number` into the current branch.
+///
+/// A `pr_url` containing `/-/merge_requests/` is a GitLab merge request and is
+/// queried with `glab`; otherwise `gh` is used.
+///
+/// # Errors
+///
+/// Returns an error when the base ref cannot be resolved or is invalid, or
+/// when `git fetch` / `git merge` fails (including merge conflicts).
+pub fn sync_base(pr_number: &str, pr_url: Option<&str>) -> Result<()> {
+    sync_base_with(pr_number, pr_url, |program, args| {
+        std::process::Command::new(program).args(args).output()
+    })
+}
+
+/// Same as [`sync_base`] with an injectable command runner `(program, args)`.
+pub(crate) fn sync_base_with<F>(pr_number: &str, pr_url: Option<&str>, mut runner: F) -> Result<()>
+where
+    F: FnMut(&str, &[&str]) -> std::io::Result<std::process::Output>,
+{
+    let mut run = |program: &str, args: &[&str]| -> Result<std::process::Output> {
+        let output = runner(program, args).map_err(|e| {
+            CruiseError::Other(format!("failed to run `{program} {}`: {e}", args.join(" ")))
+        })?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(CruiseError::Other(format!(
+                "`{program} {}` failed: {detail}",
+                args.join(" ")
+            )))
+        }
+    };
+
+    let is_gitlab_mr = pr_url.is_some_and(|url| url.contains("/-/merge_requests/"));
+    let base = if is_gitlab_mr {
+        let view = run("glab", &["mr", "view", pr_number, "--output", "json"])?;
+        let json: serde_json::Value = serde_json::from_slice(&view.stdout)
+            .map_err(|e| CruiseError::Other(format!("invalid `glab mr view` JSON: {e}")))?;
+        json.get("target_branch")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    } else {
+        let view = run(
+            "gh",
+            &[
+                "pr",
+                "view",
+                pr_number,
+                "--json",
+                "baseRefName",
+                "-q",
+                ".baseRefName",
+            ],
+        )?;
+        String::from_utf8(view.stdout)
+            .map_err(|e| CruiseError::Other(format!("base ref is not valid UTF-8: {e}")))?
+            .trim()
+            .to_string()
+    };
+    if base.is_empty() || base.starts_with('-') {
+        return Err(CruiseError::Other(format!("invalid base ref: `{base}`")));
+    }
+    run("git", &["check-ref-format", "--branch", &base])
+        .map_err(|e| CruiseError::Other(format!("invalid base ref `{base}`: {e}")))?;
+    run("git", &["fetch", "origin", &base])?;
+    run("git", &["merge", &format!("origin/{base}"), "--no-edit"])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // --- sync_base_with -----------------------------------------------------
+
+    fn output(code: i32, stdout: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(code << 8);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(code.unsigned_abs());
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    type Call = (String, Vec<String>);
+
+    /// Runs `sync_base_with` with scripted responses (consumed in order),
+    /// returning the result and the recorded calls.
+    fn run_scripted(
+        responses: Vec<std::io::Result<std::process::Output>>,
+    ) -> (Result<()>, Vec<Call>) {
+        run_scripted_url(None, responses)
+    }
+
+    /// [`run_scripted`] with an explicit PR URL.
+    fn run_scripted_url(
+        pr_url: Option<&str>,
+        responses: Vec<std::io::Result<std::process::Output>>,
+    ) -> (Result<()>, Vec<Call>) {
+        let mut calls: Vec<Call> = Vec::new();
+        let mut queue = responses.into_iter();
+        let result = sync_base_with("42", pr_url, |program, args| {
+            calls.push((
+                program.to_string(),
+                args.iter().map(|a| (*a).to_string()).collect(),
+            ));
+            queue
+                .next()
+                .unwrap_or_else(|| panic!("unexpected extra command: {program} {args:?}"))
+        });
+        (result, calls)
+    }
+
+    fn call(program: &str, args: &[&str]) -> Call {
+        (
+            program.to_string(),
+            args.iter().map(|a| (*a).to_string()).collect(),
+        )
+    }
+
+    fn assert_other(result: &Result<()>) {
+        assert!(
+            matches!(result, Err(CruiseError::Other(_))),
+            "expected CruiseError::Other, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn sync_base_runs_gh_check_ref_format_fetch_merge_in_order() {
+        let (result, calls) = run_scripted(vec![
+            Ok(output(0, b"main\n")),
+            Ok(output(0, b"")),
+            Ok(output(0, b"")),
+            Ok(output(0, b"")),
+        ]);
+        result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            calls,
+            vec![
+                call(
+                    "gh",
+                    &[
+                        "pr",
+                        "view",
+                        "42",
+                        "--json",
+                        "baseRefName",
+                        "-q",
+                        ".baseRefName"
+                    ]
+                ),
+                call("git", &["check-ref-format", "--branch", "main"]),
+                call("git", &["fetch", "origin", "main"]),
+                call("git", &["merge", "origin/main", "--no-edit"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn sync_base_uses_glab_target_branch_for_gitlab_merge_request_url() {
+        let (result, calls) = run_scripted_url(
+            Some("https://gitlab.com/g/p/-/merge_requests/42"),
+            vec![
+                Ok(output(0, br#"{"iid":42,"target_branch":"develop"}"#)),
+                Ok(output(0, b"")),
+                Ok(output(0, b"")),
+                Ok(output(0, b"")),
+            ],
+        );
+        result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            calls,
+            vec![
+                call("glab", &["mr", "view", "42", "--output", "json"]),
+                call("git", &["check-ref-format", "--branch", "develop"]),
+                call("git", &["fetch", "origin", "develop"]),
+                call("git", &["merge", "origin/develop", "--no-edit"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn sync_base_rejects_glab_json_without_target_branch() {
+        let (result, calls) = run_scripted_url(
+            Some("https://gitlab.com/g/p/-/merge_requests/42"),
+            vec![Ok(output(0, br#"{"iid":42}"#))],
+        );
+        assert_other(&result);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn sync_base_merge_failure_includes_stdout_conflict_output() {
+        let (result, _calls) = run_scripted(vec![
+            Ok(output(0, b"main\n")),
+            Ok(output(0, b"")),
+            Ok(output(0, b"")),
+            Ok(output(1, b"CONFLICT (content): Merge conflict in a.txt\n")),
+        ]);
+        match result {
+            Err(CruiseError::Other(message)) => assert!(message.contains("CONFLICT"), "{message}"),
+            other => panic!("expected CruiseError::Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_base_rejects_empty_base_ref_without_running_git() {
+        let (result, calls) = run_scripted(vec![Ok(output(0, b"\n"))]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn sync_base_rejects_option_like_base_ref_without_fetch() {
+        let (result, calls) = run_scripted(vec![
+            Ok(output(0, b"--upload-pack=evil\n")),
+            Ok(output(1, b"")),
+        ]);
+        assert_other(&result);
+        assert!(
+            calls
+                .iter()
+                .all(|(_, args)| !args.contains(&"fetch".to_string())),
+            "must not fetch an option-like ref: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn sync_base_rejects_ref_failing_check_ref_format() {
+        let (result, calls) = run_scripted(vec![Ok(output(0, b"bad..ref\n")), Ok(output(1, b""))]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn sync_base_gh_spawn_failure_is_other_and_stops() {
+        let (result, calls) = run_scripted(vec![Err(std::io::Error::other("no gh"))]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn sync_base_gh_nonzero_is_other_and_stops() {
+        let (result, calls) = run_scripted(vec![Ok(output(1, b""))]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn sync_base_gh_invalid_utf8_is_other_and_stops() {
+        let (result, calls) = run_scripted(vec![Ok(output(0, &[0xff, 0xfe, b'\n']))]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn sync_base_fetch_failure_skips_merge() {
+        let (result, calls) = run_scripted(vec![
+            Ok(output(0, b"main\n")),
+            Ok(output(0, b"")),
+            Ok(output(1, b"")),
+        ]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 3);
+    }
+
+    #[test]
+    fn sync_base_merge_failure_is_other() {
+        let (result, calls) = run_scripted(vec![
+            Ok(output(0, b"main\n")),
+            Ok(output(0, b"")),
+            Ok(output(0, b"")),
+            Ok(output(1, b"")),
+        ]);
+        assert_other(&result);
+        assert_eq!(calls.len(), 4);
+    }
+
+    #[test]
+    fn test_extract_last_path_segment_gitlab_mr_url_variants() {
+        assert_eq!(
+            extract_last_path_segment("https://host/group/subgroup/project/-/merge_requests/42"),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            extract_last_path_segment(
+                "https://host/group/subgroup/project/-/merge_requests/42?x=1#note_3"
+            ),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_mr_url_finds_url_among_output_lines() {
+        let out = b"Creating draft merge request\n\nhttps://gitlab.com/g/p/-/merge_requests/5\n";
+        assert_eq!(
+            extract_mr_url(out),
+            Some("https://gitlab.com/g/p/-/merge_requests/5".to_string())
+        );
+        assert_eq!(extract_mr_url(b"  \n"), None);
+    }
 
     // --- ensure_gh_available ------------------------------------------------
 
@@ -892,6 +1309,7 @@ mod tests {
             mcp_servers: IndexMap::new(),
             cleanup_after_pr: false,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

@@ -46,13 +46,30 @@ EOF
 if command -v cruise >/dev/null 2>&1; then
   echo "cruise: already installed at $(command -v cruise)"
 else
-  if [ -z "$CRUISE_VERSION" ] || [ "$CRUISE_VERSION" = "latest" ]; then
-    installer_url="https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh"
+  if [ "${RUNNER_OS:-}" = "Windows" ]; then
+    installer_name="cruise-installer.ps1"
   else
-    installer_url="https://github.com/smartcrabai/cruise/releases/download/${CRUISE_VERSION}/cruise-installer.sh"
+    installer_name="cruise-installer.sh"
+  fi
+  if [ -z "$CRUISE_VERSION" ] || [ "$CRUISE_VERSION" = "latest" ]; then
+    installer_url="https://github.com/smartcrabai/cruise/releases/latest/download/$installer_name"
+  else
+    installer_url="https://github.com/smartcrabai/cruise/releases/download/${CRUISE_VERSION}/$installer_name"
   fi
   echo "cruise: installing ($CRUISE_VERSION) from $installer_url"
-  if ! curl -fsSL "$installer_url" | \
+  if [ "${RUNNER_OS:-}" = "Windows" ]; then
+    # The cargo-dist PowerShell installer honours the same unmanaged-install
+    # variables and drops cruise.exe (x64) straight into $INSTALL_DIR.
+    if ! CRUISE_UNMANAGED_INSTALL="$INSTALL_DIR" \
+      CRUISE_NO_MODIFY_PATH=1 \
+      CRUISE_DISABLE_UPDATE=1 \
+      CRUISE_PRINT_QUIET=1 \
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '$installer_url' | iex"
+    then
+      echo "::error::cruise installer failed for version '$CRUISE_VERSION' from $installer_url" >&2
+      exit 1
+    fi
+  elif ! curl -fsSL "$installer_url" | \
     CRUISE_UNMANAGED_INSTALL="$INSTALL_DIR" \
     CRUISE_NO_MODIFY_PATH=1 \
     CRUISE_DISABLE_UPDATE=1 \

@@ -484,7 +484,7 @@ async fn run_single(
         session.worktree_branch = None;
     }
     if effective_workspace_mode == WorkspaceMode::Worktree {
-        crate::worktree_pr::ensure_gh_available()?;
+        crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
     }
     if cancel_token.is_cancelled() {
         return Err(CruiseError::Interrupted);
@@ -1285,7 +1285,7 @@ mod tests {
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1415,7 +1415,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo,
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1467,7 +1467,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Completed;
@@ -1493,7 +1493,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             PathBuf::from("/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -1722,9 +1722,16 @@ steps:
         );
         let _path_guard = PathEnvGuard::prepend(&bin_dir);
 
-        let result = attempt_pr_creation(&ctx, "test task", "", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &ctx,
+            crate::forge::ForgeKind::GitHub,
+            "test task",
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(result, PrAttemptOutcome::SkippedNoCommits);
         assert!(
@@ -1748,9 +1755,16 @@ steps:
         );
         let base_head = git_stdout_ok(&f.repo, &["rev-parse", "HEAD"]);
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "add feature",
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1800,9 +1814,16 @@ steps:
             "12345+octocat@users.noreply.github.com",
         );
 
-        let result = attempt_pr_creation(&f.ctx, "add feature", "", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "add feature",
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1835,9 +1856,16 @@ steps:
         let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
         assert_ne!(existing_head, base_head);
 
-        let result = attempt_pr_creation(&f.ctx, "rerun without changes", "", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "rerun without changes",
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1899,9 +1927,16 @@ steps:
         );
 
         let pr_title = "feat: add user icon registration";
-        let result = attempt_pr_creation(&f.ctx, "implement user icon feature", pr_title, "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "implement user icon feature",
+            pr_title,
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1933,9 +1968,16 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            fallback,
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -1967,9 +2009,16 @@ steps:
         );
 
         let fallback = "implement user icon feature";
-        let result = attempt_pr_creation(&f.ctx, fallback, "   ", "", None)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            fallback,
+            "   ",
+            "",
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(
             result,
@@ -3310,7 +3359,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "run all conflict".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3874,7 +3923,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "run in place".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -3929,7 +3978,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "save mode test".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4079,7 +4128,7 @@ steps:
         let mut session = SessionState::new(
             session_id.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "default to worktree".to_string(),
         );
         session.phase = SessionPhase::Planned;
@@ -4140,7 +4189,7 @@ steps:
         let mut session_1 = SessionState::new(
             session_id_1.to_string(),
             repo.clone(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "first task".to_string(),
         );
         session_1.phase = SessionPhase::Planned;
@@ -4174,7 +4223,7 @@ steps:
             let mut session_2 = SessionState::new(
                 session_id_2.to_string(),
                 repo.clone(),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "second task added mid-run".to_string(),
             );
             session_2.phase = SessionPhase::Planned;
@@ -4236,7 +4285,7 @@ steps:
         let session = SessionState::new(
             "20260826000000".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "unreadable state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4275,7 +4324,7 @@ steps:
         let session = SessionState::new(
             "20260826000001".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "deleted state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4305,7 +4354,7 @@ steps:
         let session = SessionState::new(
             "20260826000002".to_string(),
             tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "invalid state".to_string(),
         );
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -4335,7 +4384,7 @@ steps:
         let mut session = SessionState::new(
             id.to_string(),
             repo.to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         session.phase = SessionPhase::Planned;

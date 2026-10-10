@@ -303,7 +303,7 @@ impl Fixture {
         let mut state = SessionState::new(
             id.clone(),
             self.root.path().to_path_buf(),
-            cruise::session_config::SessionConfigRef::BuiltinSnapshot,
+            cruise::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         state.phase = phase;
@@ -546,10 +546,10 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
-    // Local config -> user workflow -> Built-in -> Auto-detect.
-    tui.send(b"\x1b[B");
-    tui.send(b"\x1b[B");
-    tui.send(b"\x1b[B");
+    // Local config -> user workflow -> three built-ins -> Auto-detect.
+    for _ in 0..5 {
+        tui.send(b"\x1b[B");
+    }
     tui.wait_for_output("▸ Auto-detect", START_TIMEOUT);
 
     tui.send(b"custom/workflow.yaml");

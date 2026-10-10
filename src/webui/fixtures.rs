@@ -10,11 +10,11 @@ use super::actions::SessionActionsVm;
 use super::templates::RawHtml;
 use super::view::{
     AskPanelVm, AttachmentListVm, AttachmentVm, ChoiceVm, ConfigGroupVm, ConfigOptionVm,
-    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, NewSessionVm,
-    OptionDialogVm, PhaseBadgeVm, PublishDialogVm, RepoOptionsVm, RunAllResultVm, RunAllRunningVm,
-    RunAllVm, SessionDetailVm, SessionHeaderVm, SessionRowVm, SessionSettingsVm, SettingsVm,
-    ShellVm, SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm,
-    ToastKind, ToastVm,
+    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, MergeCheckVm,
+    MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm, RepoOptionsVm,
+    RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm, SessionHeaderVm, SessionRowVm,
+    SessionSettingsVm, SettingsVm, ShellVm, SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs,
+    TabInfoVm, TabLogVm, TabPlanVm, ToastKind, ToastVm,
 };
 use crate::application::DirectoryEntry;
 
@@ -59,6 +59,7 @@ fn actions() -> SessionActionsVm {
         show_delete: true,
         show_cancel: true,
         show_generate_plan: true,
+        show_merge_pr: true,
         status: "idle".to_string(),
     }
 }
@@ -383,10 +384,27 @@ fn form_fixtures() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "merge-pr-dialog",
+            value(&MergePrDialogVm {
+                id: "s1".to_string(),
+                submit_url: "/webui/sessions/s1/merge-pr".to_string(),
+                state: "OPEN".to_string(),
+                mergeable: "MERGEABLE".to_string(),
+                review_decision: "APPROVED".to_string(),
+                checks: vec![MergeCheckVm {
+                    name: "unit-tests".to_string(),
+                    status: "SUCCESS".to_string(),
+                }],
+                no_checks: false,
+                can_merge: true,
+            }),
+        ),
+        (
             "publish-dialog",
             value(&PublishDialogVm {
                 id: "s1".to_string(),
                 submit_url: "/webui/sessions/s1/publish".to_string(),
+                supports_trigger: true,
             }),
         ),
     ]

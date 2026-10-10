@@ -192,6 +192,10 @@ pub(crate) fn router(state: WebState) -> Router {
         )
         .route("/webui/sessions/{id}/option", post(handlers::option_answer))
         .route("/webui/sessions/{id}/publish", post(handlers::publish))
+        .route(
+            "/webui/sessions/{id}/merge-pr",
+            get(handlers::merge_pr_preview).post(handlers::merge_pr),
+        )
         .route("/webui/sessions/{id}/discard", post(handlers::discard))
         .route("/webui/sessions/{id}/delete", post(handlers::delete))
         .route("/webui/run-all", post(handlers::start_run_all))

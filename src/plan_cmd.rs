@@ -674,6 +674,7 @@ async fn generate_title_via_sdk(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await?;
 
@@ -798,7 +799,8 @@ fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Res
     match repo.map(str::trim) {
         Some(spec) if !spec.is_empty() => {
             crate::repo_clone::validate_repo_spec(spec)?;
-            crate::worktree_pr::ensure_gh_available()?;
+            let ctx = crate::forge::resolve_repo_locator_env(spec)?;
+            crate::forge::ensure_forge_available(ctx.kind)?;
             Ok(PlanTarget::Repo(spec.to_string()))
         }
         _ => {
@@ -1341,8 +1343,13 @@ async fn run_approve_loop(
             }
 
             "Publish as Issue" => {
-                let Some(trigger_cruise) = prompt_trigger_cruise()? else {
-                    continue;
+                let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(session) {
+                    let Some(answer) = prompt_trigger_cruise()? else {
+                        continue;
+                    };
+                    answer
+                } else {
+                    false
                 };
                 match crate::issue_publish::publish_plan_issue_and_delete(
                     manager,

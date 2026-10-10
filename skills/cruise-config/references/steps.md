@@ -9,10 +9,18 @@ A pure `workflow_call:` call site (optionally with `skip`,
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
-`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, and
+`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, and
 `output_file`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
+`permission: read-only | edit | full` can be set on a `prompt` or `prompt_file`
+step (or a parallel prompt child) to override the workflow default. It is
+rejected on group calls, `workflow_call`, and parallel wrappers, and
+`read-only`/`edit` are rejected with `command:` backends. `read-only` cannot be
+combined with `allow_commit: true`, and a parallel block containing a
+read-only child may only contain read-only prompt children. Read-only is
+enforced by tool restrictions plus a workspace snapshot diff, not a sandbox.
+
 `computer_use` can be set on a `prompt` or `prompt_file` step to override the
 workflow-level setting. Parallel prompt children can also set it. It is rejected
 on command and option steps, parallel parents, and workflow-call call sites;
@@ -112,7 +120,7 @@ workflow, relative non-URL values are resolved as paths in the remote directory;
 
 ## Command step (shell execution)
 
-`command:` may be a single string or an array. Arrays are run sequentially and stop on the first failure.
+`command:` may be a single string or an array. Arrays are run sequentially and stop on the first failure. On Windows the string runs through `cmd.exe /C`, so write cmd.exe syntax (or call `powershell -Command` / `bash -c` explicitly).
 
 ```yaml
 steps:
@@ -154,7 +162,7 @@ still run sequentially. Command children have no interactive stdin.
 Each child gets a private copy of the incoming variables. Environment precedence:
 workflow < parent block < child. Children support `prompt`/`prompt_file` or
 `command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
-may also set `output_file`, but names must be distinct within the block. Child names must
+may also set `permission` and `output_file`, but names must be distinct within the block. Child names must
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
 `plan`, `group`, `workflow_call`, nested `parallel`, and `allow_commit: true`
 are rejected. Parent fields: `parallel`, `env`, `skip`, `when`, `next`, `if`,
@@ -222,6 +230,7 @@ steps:
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |
+| `github-review` | object \| null | Opt-in review bot loop, valid only directly in `after-pr`: `bots` (required, unique logins) and `max-iterations` (default `3`). Requires `timeout` and exactly one of `prompt` / `prompt_file`; cannot be combined with `command`, `option`, `parallel`, `group`, or `workflow_call`. `output_file` receives the iteration report (see [after-pr.md](after-pr.md#github-review)) |
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
