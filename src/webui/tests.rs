@@ -607,7 +607,7 @@ async fn sidebar_refreshes_run_all_control() {
     let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("hx-target=\"#run-all-control\""), "{body}");
-    assert!(body.contains("hx-target=\"#session-list\""), "{body}");
+    assert!(body.contains("<hx-partial id=\"session-list\""), "{body}");
 }
 
 #[tokio::test]
