@@ -177,7 +177,7 @@ pub struct WebuiArgs {
     #[arg(long, default_value_t = 8484)]
     pub port: u16,
 
-    /// Open the WebUI in the default browser after the server starts.
+    /// Open the `WebUI` in the default browser after the server starts.
     #[arg(short = 'o', long)]
     pub open: bool,
 
@@ -755,11 +755,11 @@ mod tests {
         use clap::CommandFactory;
         let matches = Cli::command()
             .try_get_matches_from(argv)
-            .expect("webui args should parse");
-        let (name, sub) = matches.subcommand().expect("subcommand");
+            .unwrap_or_else(|e| panic!("webui args should parse: {e}"));
+        let (name, sub) = matches.subcommand().unwrap_or_else(|| panic!("subcommand"));
         assert_eq!(name, "webui");
         sub.try_get_one::<bool>("open")
-            .expect("webui should define an `open` flag")
+            .unwrap_or_else(|e| panic!("webui should define an `open` flag: {e}"))
             .copied()
             .unwrap_or(false)
     }
