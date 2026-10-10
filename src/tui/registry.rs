@@ -474,7 +474,7 @@ impl OperationRegistry {
             "__repositories".to_string(),
             tokio::spawn(async move {
                 let result = app
-                    .list_github_repositories()
+                    .list_repositories()
                     .await
                     .map_err(|error| error.to_string());
                 let _ = tx.send(UiEvent::Repositories { result });

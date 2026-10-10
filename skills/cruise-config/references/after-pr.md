@@ -1,6 +1,6 @@
 # `after-pr`: steps that run after PR creation
 
-Steps that run automatically after `cruise run` creates a pull request via `gh pr create`. The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
+Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does). The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
 
 ## Basics
 
@@ -40,9 +40,38 @@ after-pr:
 This opt-out is limited to that prompt step and bypasses all commit-guard behavior for it. Guarded prompt attempts to move `HEAD` fail with a commit-guard violation; cruise may restore the original branch reference without resetting the index or worktree, but the step still fails. Command and option steps are not guarded. `allow_commit: true` cannot be placed on a group or workflow-call invocation; put it on the expanded prompt step.
 
 
+## `github-review`
+
+A prompt step in `after-pr` with `github-review:` waits for a review bot to review the PR head commit, runs the prompt to address unresolved bot threads, applies the prompt's reply/resolve decisions, and repeats up to `max-iterations` (default `3`). `timeout` bounds the whole loop. Unlike other after-pr steps, a failure here fails the run.
+
+```yaml
+after-pr:
+  address-review:
+    github-review:
+      bots: ["copilot-pull-request-reviewer"]
+      max-iterations: 3
+    timeout: 30m
+    output_file: review-report.json # Optional iteration report
+    prompt: "Address the review threads on PR #{pr.number}"
+```
+
+Rules: only directly in `after-pr` (not in `steps`, groups, or `parallel` children), exactly one of `prompt` / `prompt_file`, `timeout` required, `bots` unique, and no `command` / `option` / `parallel` / `group` / `workflow_call`.
+
+## Opt-in auto-merge
+
+Cruise never merges automatically and the built-in `after-pr` has no merge step. To have GitHub auto-merge the PR once its requirements are met, write the command yourself:
+
+```yaml
+after-pr:
+  auto-merge:
+    command: "gh pr merge {pr.number} --auto --squash"
+```
+
+This runs only because you wrote it in your workflow. Because `after-pr` errors are downgraded to warnings (see below), a failing `gh pr merge --auto` (for example when auto-merge is disabled for the repository) will not fail the run. For a manual merge, use **Merge PR** in `cruise list`, the TUI, or the WebUI.
+
 ## Constraints
 
-- **Errors are downgraded to warnings, except cancellation**: non-`Interrupted` errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast). `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase. The model fits side effects like pushing labels, posting notifications, etc.
+- **Errors are downgraded to warnings, except cancellation and `github-review`**: non-`Interrupted` errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast). `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase, and a `github-review` failure (`CruiseError::GitHubReviewFailed`) propagates and marks the run `Failed`. The model fits side effects like pushing labels, posting notifications, etc.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 

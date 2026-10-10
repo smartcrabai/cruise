@@ -53,6 +53,8 @@ async fn run_with_application(application: CruiseApplication) -> Result<()> {
     external_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     #[cfg(unix)]
     let mut signals = Signals::new().map_err(|error| CruiseError::Other(error.to_string()))?;
+    #[cfg(windows)]
+    let mut signals = Signals::new().map_err(|error| CruiseError::Other(error.to_string()))?;
     let mut input_closed = false;
     let mut input_error: Option<String> = None;
     let mut redraw = true;
@@ -125,6 +127,35 @@ impl Signals {
             interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
             term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
             hup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
+        })
+    }
+}
+
+#[cfg(windows)]
+struct Signals {
+    interrupt: tokio::signal::windows::CtrlC,
+    term: NeverSignal,
+    hup: NeverSignal,
+}
+
+/// Windows has no SIGTERM/SIGHUP; these branches never fire.
+#[cfg(windows)]
+struct NeverSignal;
+
+#[cfg(windows)]
+impl NeverSignal {
+    async fn recv(&mut self) -> Option<()> {
+        std::future::pending().await
+    }
+}
+
+#[cfg(windows)]
+impl Signals {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::windows::ctrl_c()?,
+            term: NeverSignal,
+            hup: NeverSignal,
         })
     }
 }

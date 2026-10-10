@@ -51,7 +51,7 @@ pub fn prepare_execution_workspace(
             let (ctx, reused) = worktree::setup_session_worktree(
                 &session.base_dir,
                 &session.id,
-                &session.input,
+                session.input_or_title(),
                 &worktrees_dir,
                 session.worktree_branch.as_deref(),
             )?;

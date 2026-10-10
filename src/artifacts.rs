@@ -178,7 +178,7 @@ fn resolve_existing_path(root: &Path, relative: &Path, name: &str) -> Result<Pat
     for component in relative.components() {
         current.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&current).map_err(|error| read_error(name, &error))?;
-        if metadata.file_type().is_symlink() {
+        if is_link_or_reparse(&metadata) {
             return Err(read_error_message(
                 name,
                 "artifact path contains a symbolic link",
@@ -203,7 +203,7 @@ fn prepare_write_path(root: &Path, relative: &Path, name: &str) -> Result<PathBu
         let is_final = components.peek().is_none();
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
+                if is_link_or_reparse(&metadata) {
                     return Err(write_error_message(
                         name,
                         "artifact path contains a symbolic link",
@@ -258,7 +258,7 @@ fn ensure_directory_ancestors(
     for current_path in path.ancestors().skip(1).take(3) {
         match fs::symlink_metadata(current_path) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
+                if is_link_or_reparse(&metadata) {
                     return Err(error(
                         name,
                         &std::io::Error::other(
@@ -298,7 +298,7 @@ fn ensure_directory(
 ) -> Result<()> {
     ensure_directory_ancestors(path, name, error)?;
     let metadata = fs::symlink_metadata(path).map_err(|io_error| error(name, &io_error))?;
-    if metadata.file_type().is_symlink() {
+    if is_link_or_reparse(&metadata) {
         return Err(error(
             name,
             &std::io::Error::other("artifact root or path component is a symbolic link"),
@@ -339,6 +339,21 @@ fn ensure_directory_tree(root: &Path, name: &str) -> Result<()> {
         create_write_directory(&path, name)?;
     }
     Ok(())
+}
+
+/// True for symlinks and, on Windows, any reparse point (junctions included).
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || metadata.file_type().is_symlink()
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 fn size_error(name: &str) -> CruiseError {
@@ -417,6 +432,67 @@ mod tests {
                 .unwrap_or_else(|_| panic!("concurrent artifact writer panicked"))
                 .unwrap_or_else(|error| panic!("concurrent artifact write failed: {error}"));
         }
+    }
+
+    #[cfg(windows)]
+    fn make_junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|error| panic!("mklink failed to start: {error}"));
+        assert!(status.success(), "mklink /J failed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_root_is_rejected_for_read_and_write() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap_or_else(|error| panic!("{error}"));
+        let link = temp.path().join("link");
+        make_junction(&link, &real);
+        assert!(write(&link, "a.md", "x").is_err());
+        assert!(read(&link, "a.md").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_component_is_rejected_for_write() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap_or_else(|error| panic!("{error}"));
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap_or_else(|error| panic!("{error}"));
+        make_junction(&root.join("dir"), &outside);
+        assert!(write(&root, "dir/a.md", "x").is_err());
+        assert!(!outside.join("a.md").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_component_is_rejected_for_read() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap_or_else(|error| panic!("{error}"));
+        fs::write(outside.join("a.md"), "secret").unwrap_or_else(|error| panic!("{error}"));
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap_or_else(|error| panic!("{error}"));
+        make_junction(&root.join("dir"), &outside);
+        assert!(read(&root, "dir/a.md").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_ancestor_of_root_is_rejected() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let real = temp.path().join("real");
+        fs::create_dir_all(real.join("root")).unwrap_or_else(|error| panic!("{error}"));
+        let link = temp.path().join("link");
+        make_junction(&link, &real);
+        assert!(write(&link.join("root"), "a.md", "x").is_err());
     }
 
     #[cfg(unix)]
