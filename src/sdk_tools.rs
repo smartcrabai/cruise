@@ -561,9 +561,12 @@ mod tests {
 
     #[test]
     fn submit_plan_error_does_not_set_persist_flag() {
-        // Given: a plan path whose parent directory does not exist (write fails)
+        // Given: a plan path whose parent is a regular file (write fails)
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap_or_else(|e| panic!("{e:?}"));
         let flag: PlanPersistFlag = Arc::new(AtomicBool::new(false));
-        let tool = submit_plan_tool(PathBuf::from("/nonexistent/dir/plan.md"), Arc::clone(&flag));
+        let tool = submit_plan_tool(blocker.join("plan.md"), Arc::clone(&flag));
         // When / Then: handler errors and the flag stays unset
         assert!(invoke(&tool, json!({"content": "x"})).is_err());
         assert!(!flag.load(Ordering::SeqCst));

@@ -93,15 +93,15 @@ fn legacy_warning_message(config_dir: &std::path::Path) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let workflows_dir = config_dir.join(crate::paths::WORKFLOWS_DIR_NAME);
-    let yaml_pattern = workflows_dir.join("*.yaml");
-    let alternate_pattern = workflows_dir.join("*.yml");
+    // Always `/`-separated so the message reads the same on every platform.
+    let yaml_pattern = format!("{}/*.yaml", crate::paths::WORKFLOWS_DIR_NAME);
+    let alternate_pattern = format!("{}/*.yml", crate::paths::WORKFLOWS_DIR_NAME);
     Some(format!(
         "warning: found workflow config(s) directly in {}: {}. cruise now reads {} / {} — move them there.",
         escape_warning_text(&config_dir.to_string_lossy()),
         names,
-        escape_warning_text(&yaml_pattern.to_string_lossy()),
-        escape_warning_text(&alternate_pattern.to_string_lossy())
+        escape_warning_text(&yaml_pattern),
+        escape_warning_text(&alternate_pattern)
     ))
 }
 
@@ -377,6 +377,8 @@ mod tests {
         assert!(message.contains("workflows/*.yml"));
     }
 
+    // Windows filenames cannot contain a line feed, so this is unix-only.
+    #[cfg(unix)]
     #[test]
     fn test_legacy_warning_escapes_control_characters_in_paths() {
         // Given: a legacy workflow whose filename contains a line break

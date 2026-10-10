@@ -8,7 +8,7 @@ A CLI tool that orchestrates coding agent workflows defined in a YAML config fil
 
 Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan -> approve -> write tests -> implement -> test -> review -> open PR -> post-PR automation. It handles variable passing between steps, conditional branching, and loop control.
 
-> **Note:** This project supports macOS and Linux only. **Windows is not supported** and Windows binaries are not built or tested. Development and testing happen primarily on macOS; Linux has not been fully verified.
+> **Note:** Cruise runs on macOS, Linux, and Windows (x86-64, `x86_64-pc-windows-msvc`). Development and testing happen primarily on macOS; Linux and Windows have been verified less extensively.
 
 ## Prerequisites
 
@@ -17,9 +17,16 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 - [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
 - [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
+- On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications are not sent on Windows, `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
 ## Installation
+
+### Windows (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.ps1 | iex"
+```
 
 ### Homebrew
 
@@ -130,7 +137,7 @@ cruise
 
 Typical flow: run `cruise`, press `n`, type the task, then either press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**. On Run All, press `p` to edit the shared parallelism setting, type a positive integer, and press `Enter` to save or `Esc` to cancel.
 
-The TUI requires an interactive TTY on macOS or Linux. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh` (`glab` for GitLab repositories).
+The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh` (`glab` for GitLab repositories).
 
 #### Screens and workflows
 
@@ -140,7 +147,7 @@ The TUI has three views:
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
-PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
+PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
 The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
@@ -436,6 +443,8 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+
+On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are missing, the `~/` defaults above apply, and `~\` is expanded like `~/`.
 
 > **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`*.yml` into `~/.config/cruise/workflows/`, `config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
 >
@@ -737,7 +746,7 @@ MCP entry values are passed through without Cruise `{variable}` template resolut
 
 With jcode, Cruise merges the workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Workflow entries replace same-named entries from that source file, and the source is never modified. jcode then applies its normal config merge order, so same-named servers from `~/.claude.json`, `~/.claude/mcp.json`, or project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json` take precedence over the workflow copy. jcode expands `${VAR}` and `${VAR:-default}` using the runtime environment, including workflow-level `env:` values.
 
-With `sdk: claude`, workflow MCP entries are written to a per-run private JSON file with mode `0600` on Unix, and the file path is passed via `--mcp-config`; the SDK passes Cruise's in-process tools separately as its own inline `--mcp-config` value. The user's own Claude MCP configuration remains enabled. `${VAR}` expansion for these Claude entries is not guaranteed.
+With `sdk: claude`, workflow MCP entries are written to a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows), and the file path is passed via `--mcp-config`; the SDK passes Cruise's in-process tools separately as its own inline `--mcp-config` value. The user's own Claude MCP configuration remains enabled. `${VAR}` expansion for these Claude entries is not guaranteed.
 
 ### Prompt Languages
 

@@ -264,6 +264,7 @@ mod tests {
         assert_eq!(parse_github_repo_from_origin("not a url"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_uses_session_repo_and_deletes_session() {
         let _lock = crate::test_support::lock_process();
@@ -296,6 +297,7 @@ mod tests {
         assert!(!manager.sessions_dir().join(&session.id).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_body_is_plan_content_verbatim_regardless_of_trigger_cruise() {
         // trigger_cruise only controls whether a follow-up comment is posted
@@ -328,6 +330,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_trigger_cruise_true_posts_run_comment() {
         // Given: a session ready to publish
@@ -364,6 +367,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_trigger_cruise_false_does_not_post_comment() {
         // Given: a session ready to publish
@@ -395,6 +399,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_comment_failure_keeps_session_and_reports_issue_url() {
         // Given: `gh issue create` succeeds but the follow-up `gh issue comment` fails
@@ -437,6 +442,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_retry_after_comment_failure_does_not_duplicate_issue() {
         // Given: a first attempt that created the issue but failed to post the comment
@@ -482,6 +488,7 @@ mod tests {
         assert!(!manager.sessions_dir().join(&session.id).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_from_planned_session_succeeds_and_deletes_session() {
         // Given: a session already approved into "Planned" phase
@@ -512,6 +519,7 @@ mod tests {
         assert!(!manager.sessions_dir().join(&session.id).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_does_not_delete_session_when_gh_fails() {
         let _lock = crate::test_support::lock_process();
@@ -566,6 +574,7 @@ mod tests {
         assert!(manager.sessions_dir().join(&session.id).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_plan_issue_infers_repo_from_local_origin() {
         let _lock = crate::test_support::lock_process();

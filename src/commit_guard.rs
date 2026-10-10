@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -207,6 +207,31 @@ impl CommitGuard {
     }
 }
 
+/// Owner-only, empty hooks directory used to skip all hooks portably.
+struct PrivateEmptyHooksDir(PathBuf);
+
+impl PrivateEmptyHooksDir {
+    fn create() -> Result<Self> {
+        let path =
+            std::env::temp_dir().join(format!("cruise-empty-hooks-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path)
+            .map_err(|error| guard_error(format!("cannot create {}: {error}", path.display())))?;
+        let dir = Self(path);
+        set_mode(&dir.0, 0o700)?;
+        Ok(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateEmptyHooksDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn describe_movement(before: &HeadState, after: &HeadState) -> String {
     format!(
         "HEAD moved from {}@{} to {}@{}",
@@ -226,13 +251,17 @@ fn rollback(
 ) -> Result<()> {
     ensure_direct_rollback_target(cwd, env, target)?;
     // The guard hook intentionally rejects all branch updates. The explicit
-    // command-line override is limited to this parent-owned CAS rollback.
+    // command-line override is limited to this parent-owned CAS rollback and
+    // points at a private empty directory (portable, unlike `/dev/null`).
+    let empty_hooks = PrivateEmptyHooksDir::create()?;
+    let mut hooks_override = OsString::from("core.hooksPath=");
+    hooks_override.push(empty_hooks.path());
     let output = run_git(
         cwd,
         env,
         [
             OsStr::new("-c"),
-            OsStr::new("core.hooksPath=/dev/null"),
+            hooks_override.as_os_str(),
             OsStr::new("update-ref"),
             OsStr::new("--no-deref"),
             OsStr::new(target),
@@ -336,7 +365,7 @@ fn guarded_common_dir(cwd: &Path, env: &HashMap<String, String>) -> Result<Strin
             "git common dir probe returned a malformed path",
         ));
     }
-    let common_dir = fs::canonicalize(cwd.join(probed)).map_err(|error| {
+    let common_dir = canonical_git_path(&cwd.join(probed)).map_err(|error| {
         guard_error(format!(
             "cannot resolve the guarded git common dir {probed}: {error}"
         ))
@@ -494,7 +523,7 @@ fn install_hook() -> Result<PathBuf> {
     })?;
     set_mode(&root, 0o700)?;
     set_mode(&hooks, 0o700)?;
-    let hooks = fs::canonicalize(&hooks).map_err(|error| {
+    let hooks = canonical_git_path(&hooks).map_err(|error| {
         guard_error(format!(
             "cannot resolve persistent hook directory {}: {error}",
             hooks.display()
@@ -553,11 +582,39 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
             ))
         })?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        crate::platform::set_owner_only_acl(path).map_err(|error| {
+            guard_error(format!(
+                "cannot set permissions on {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, mode);
     }
     Ok(())
+}
+
+/// Canonical absolute path spelled the way Git and the sh hook expect. On
+/// Windows `fs::canonicalize` yields the `\\?\C:\...` verbatim form, which Git
+/// cannot spawn hooks from, so strip that prefix and use forward slashes.
+fn canonical_git_path(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        if let Some(text) = canonical.to_str() {
+            let plain = match text.strip_prefix(r"\\?\UNC\") {
+                Some(rest) => format!("//{rest}"),
+                None => text.strip_prefix(r"\\?\").unwrap_or(text).to_string(),
+            };
+            return Ok(PathBuf::from(plain.replace('\\', "/")));
+        }
+    }
+    Ok(canonical)
 }
 
 fn run_git<I, S>(cwd: &Path, env: &HashMap<String, String>, args: I) -> Result<Output>
@@ -1093,5 +1150,119 @@ mod tests {
             "unexpected commit error: {}",
             String::from_utf8_lossy(&commit.stderr)
         );
+    }
+
+    #[cfg(windows)]
+    fn windows_guarded_repo() -> (tempfile::TempDir, tempfile::TempDir, CommitGuard) {
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let repo = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        crate::test_support::init_git_repo(repo.path());
+        let guard = {
+            let _home_guards = crate::test_support::set_fake_home(home.path());
+            CommitGuard::prepare(Some(repo.path()), &HashMap::new())
+                .unwrap_or_else(|error| panic!("guard setup failed: {error}"))
+                .unwrap_or_else(|| panic!("expected a Git worktree guard"))
+        };
+        (home, repo, guard)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reference_transaction_hook_blocks_head_and_branch_updates() {
+        let _lock = crate::test_support::lock_process();
+        let (_home, repo, guard) = windows_guarded_repo();
+        let before = guard.before.oid.clone();
+        let linked = repo.path().join("linked-worktree");
+        crate::test_support::run_git_ok(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                linked.to_str().unwrap_or_default(),
+            ],
+        );
+        fs::write(repo.path().join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let commit = Command::new("git")
+            .args(["commit", "--no-verify", "-am", "blocked"])
+            .current_dir(repo.path())
+            .envs(guard.env())
+            .output()
+            .unwrap_or_else(|error| panic!("commit failed to start: {error}"));
+        assert!(!commit.status.success());
+        let branch = run_git(repo.path(), guard.env(), ["branch", "guard-blocked"])
+            .unwrap_or_else(|error| panic!("branch failed to start: {error}"));
+        assert!(!branch.status.success(), "branch creation must be blocked");
+        let head = run_git(repo.path(), guard.env(), ["rev-parse", "HEAD"])
+            .unwrap_or_else(|error| panic!("HEAD probe failed: {error}"));
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reference_transaction_hook_allows_non_branch_refs_and_terminal_phases() {
+        let _lock = crate::test_support::lock_process();
+        let (_home, repo, guard) = windows_guarded_repo();
+        let tag = run_git(repo.path(), guard.env(), ["tag", "guard-allows-tags"])
+            .unwrap_or_else(|error| panic!("tag failed to start: {error}"));
+        assert!(
+            tag.status.success(),
+            "tag should be allowed: {}",
+            String::from_utf8_lossy(&tag.stderr)
+        );
+        let remote = run_git(
+            repo.path(),
+            guard.env(),
+            ["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )
+        .unwrap_or_else(|error| panic!("update-ref failed to start: {error}"));
+        assert!(
+            remote.status.success(),
+            "remote-tracking ref should be allowed: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_tree_acl_is_restricted() {
+        let empty = PrivateEmptyHooksDir::create().unwrap_or_else(|error| panic!("{error}"));
+        crate::platform::assert_owner_only_dacl(empty.path());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_commit_guard_cas_rollback_bypasses_only_its_own_hook() {
+        let _lock = crate::test_support::lock_process();
+        let (_home, repo, guard) = windows_guarded_repo();
+        let before = guard.before.oid.clone();
+        fs::write(repo.path().join("README.md"), "changed")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let empty = PrivateEmptyHooksDir::create().unwrap_or_else(|error| panic!("{error}"));
+        let mut hooks = OsString::from("core.hooksPath=");
+        hooks.push(empty.path());
+        let commit = Command::new("git")
+            .arg("-c")
+            .arg(&hooks)
+            .args(["commit", "-am", "bypassed"])
+            .current_dir(repo.path())
+            .envs(guard.env())
+            .output()
+            .unwrap_or_else(|error| panic!("commit failed to start: {error}"));
+        assert!(
+            commit.status.success(),
+            "bypassed commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let result = guard.finish(Ok::<(), CruiseError>(()));
+        assert!(matches!(result, Err(CruiseError::CommitGuardViolation(_))));
+        let restored = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap_or_else(|error| panic!("restored HEAD probe failed: {error}"));
+        assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), before);
     }
 }

@@ -178,6 +178,12 @@ impl PrivateMcpConfigFile {
             match options.open(&path) {
                 Ok(mut file) => {
                     let guard = Self { path };
+                    #[cfg(windows)]
+                    if let Err(error) = crate::platform::set_owner_only_acl(&guard.path) {
+                        drop(file);
+                        drop(guard);
+                        return Err(error);
+                    }
                     let result = file.write_all(&contents);
                     drop(file);
                     if let Err(error) = result {
@@ -572,6 +578,25 @@ mod tests {
         assert_eq!(toolbox.name, "cruise");
         let names: Vec<&str> = toolbox.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["ask_user", "submit_plan"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_claude_mcp_file_is_acl_restricted_before_write() {
+        let mut servers = crate::config::McpServers::new();
+        servers.insert(
+            "remote_tool".to_string(),
+            crate::config::McpServerConfig {
+                transport: Some(crate::config::McpTransport::Http),
+                url: Some("https://example.test/mcp".to_string()),
+                ..Default::default()
+            },
+        );
+        let file = PrivateMcpConfigFile::create(&servers)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("expected a config file"));
+        crate::platform::assert_owner_only_dacl(&file.path);
+        assert!(std::fs::metadata(&file.path).is_ok_and(|m| m.len() > 0));
     }
 
     #[test]

@@ -92,7 +92,7 @@ Entries use the Claude Code `mcpServers` shape and accept only `type`, `command`
 
 For jcode, Cruise merges workflow entries into the private session copy of `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json`) without changing the source. Workflow entries replace same-named source entries. jcode subsequently loads `~/.claude.json`, `~/.claude/mcp.json`, and project-local `.jcode/mcp.json`, `.mcp.json`, and `.claude/mcp.json`, so those later layers can replace a workflow server with the same name. jcode expands `${VAR}` and `${VAR:-default}` from the daemon's runtime environment, including workflow-level `env:` values.
 
-For Claude, Cruise writes workflow entries to a per-run private JSON file with mode `0600` on Unix and passes the file path via `--mcp-config`; the SDK passes its in-process `cruise` tools separately as its own inline `--mcp-config` value. The user's own Claude MCP config remains enabled. `${VAR}` expansion for this backend is not guaranteed.
+For Claude, Cruise writes workflow entries to a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows) and passes the file path via `--mcp-config`; the SDK passes its in-process `cruise` tools separately as its own inline `--mcp-config` value. The user's own Claude MCP config remains enabled. `${VAR}` expansion for this backend is not guaranteed.
 
 
 ## Rate limits and fallback

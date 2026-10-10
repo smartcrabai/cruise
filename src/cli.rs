@@ -68,6 +68,8 @@ pub enum Commands {
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    #[command(hide = true)]
+    Internal(InternalArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,6 +141,24 @@ pub struct WorkflowUpdateArgs {
     /// Skip the confirmation prompt (the preview is still printed).
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct InternalArgs {
+    #[command(subcommand)]
+    pub command: InternalCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InternalCommand {
+    /// Merge the PR base branch into the current branch.
+    SyncBase {
+        /// Pull request number.
+        pr_number: String,
+        /// Pull request URL; a GitLab merge request URL (`/-/merge_requests/`) selects `glab`.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +445,39 @@ mod tests {
     #[test]
     fn test_cli_verify() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn internal_sync_base_parses_pr_number_and_is_hidden() {
+        let cli = Cli::try_parse_from(["cruise", "internal", "sync-base", "42"])
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        match cli.command {
+            Some(Commands::Internal(InternalArgs {
+                command: InternalCommand::SyncBase { pr_number, url },
+            })) => {
+                assert_eq!(pr_number, "42");
+                assert_eq!(url, None);
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+        let mr = "https://gitlab.com/g/p/-/merge_requests/42";
+        let cli = Cli::try_parse_from(["cruise", "internal", "sync-base", "42", "--url", mr])
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        match cli.command {
+            Some(Commands::Internal(InternalArgs {
+                command: InternalCommand::SyncBase { url, .. },
+            })) => assert_eq!(url.as_deref(), Some(mr)),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+        let internal = Cli::command()
+            .find_subcommand("internal")
+            .map(clap::Command::is_hide_set);
+        assert_eq!(internal, Some(true), "internal must be a hidden subcommand");
+    }
+
+    #[test]
+    fn internal_sync_base_requires_pr_number() {
+        assert!(Cli::try_parse_from(["cruise", "internal", "sync-base"]).is_err());
     }
 
     #[test]

@@ -360,6 +360,7 @@ The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named 
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
 - **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer, that its API bridge supports the session capabilities Cruise needs, and that a configured provider/model is available. This action's generated default does not set `model`/`plan_model`; set the inputs or your workflow config if a specific model reference is required.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
+- **Windows runners** are supported: the install step runs the cargo-dist PowerShell installer (`cruise-installer.ps1`), places the x64 `cruise.exe` under `$RUNNER_TEMP`, and appends that directory to `GITHUB_PATH`. `command:` steps run through `cmd.exe /C`.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).
 
 ### FAQ

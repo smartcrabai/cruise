@@ -132,6 +132,9 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Remove(args))) => {
             workflow_cmd::remove(&args.name)
         }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::SyncBase { pr_number, url },
+        })) => worktree_pr::sync_base(&pr_number, url.as_deref()),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),
