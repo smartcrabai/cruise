@@ -515,7 +515,7 @@ async fn run_single(
         save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
 
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.input_with_attachments());
+    let mut vars = VariableStore::new(session.template_input(&manager.sessions_dir()));
     vars.set_named_file(PLAN_VAR, plan_path);
     vars.set_artifacts_root(session.artifacts_path(&manager.sessions_dir()));
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
@@ -918,7 +918,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
             "{} Selected session: {} -- {}",
             style("->").cyan(),
             s.id,
-            crate::display::truncate(&s.input, 60)
+            crate::display::truncate(s.input_or_title(), 60)
         );
         return Ok(s.id.clone());
     }
@@ -931,7 +931,7 @@ fn select_pending_session(manager: &SessionManager) -> Result<String> {
                 "{} | {} | {}",
                 s.id,
                 s.phase.label(),
-                crate::display::truncate(&s.input, 60)
+                crate::display::truncate(s.input_or_title(), 60)
             )
         })
         .collect();
@@ -971,7 +971,7 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
     ));
 
     for (i, result) in results.iter().enumerate() {
-        let truncated = crate::display::truncate(&result.input, MAX_INPUT_CHARS);
+        let truncated = crate::display::truncate(result.input_or_title(), MAX_INPUT_CHARS);
 
         let line = match &result.phase {
             SessionPhase::Completed => {
@@ -2565,6 +2565,36 @@ Previously, emojis were used as user icons."#;
         assert!(
             !gh_log.exists(),
             "current-branch mode should not invoke gh at all"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_binds_input_to_plan_md_for_input_as_plan_session() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let session_id = "20260309120077";
+        let mut session = make_current_branch_session(session_id, &repo, "", "main");
+        session.input_as_plan = true;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(session.plan_path(&manager.sessions_dir()), "do the thing")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            session_id,
+            &single_command_config("edit", "printf '%s' \"{input}\" > input.txt"),
+        );
+
+        let result = run(run_args(session_id)).await;
+
+        assert!(result.is_ok(), "run failed: {result:?}");
+        assert_eq!(
+            fs::read_to_string(repo.join("input.txt")).unwrap_or_else(|e| panic!("{e:?}")),
+            "do the thing"
         );
     }
 

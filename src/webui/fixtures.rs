@@ -188,7 +188,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
             value(&SessionHeaderVm {
                 id: "s1".to_string(),
                 title: "Add a WebUI".to_string(),
-                input: "add a webui".to_string(),
+                input: Some("add a webui".to_string()),
                 badge: badge(),
                 current_step: Some("implement".to_string()),
                 phase_error: Some("failed to run".to_string()),

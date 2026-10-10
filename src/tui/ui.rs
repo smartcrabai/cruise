@@ -346,8 +346,14 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             "Issue    ",
             Span::raw(session.published_issue_url.as_deref().unwrap_or("—")),
         ),
-        labeled_line(app, "Input    ", Span::raw(session.input.as_str())),
     ];
+    if !session.input.trim().is_empty() {
+        lines.push(labeled_line(
+            app,
+            "Input    ",
+            Span::raw(session.input.as_str()),
+        ));
+    }
     if let SessionPhase::Failed(error) = &session.phase {
         lines.push(Line::from(vec![
             Span::styled("Run error", error_style(app)),
@@ -2076,6 +2082,35 @@ mod tests {
 
         assert!(view.contains("Plan Failed"));
         assert!(view.contains("Phase    Awaiting Approval"));
+    }
+
+    #[test]
+    fn info_tab_omits_input_row_for_input_as_plan_session() {
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("skipped", SessionPhase::Planned);
+            state.input = String::new();
+            state.input_as_plan = true;
+            state.title = Some("skipped title".to_string());
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+
+        assert!(view.contains("Phase    Planned"));
+        assert!(!view.contains("Input    "));
+    }
+
+    #[test]
+    fn info_tab_shows_input_row_for_normal_session() {
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("normal", SessionPhase::Planned);
+            state.input = "normal task text".to_string();
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+
+        assert!(view.contains("Input    normal task text"));
     }
 
     #[test]

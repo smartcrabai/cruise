@@ -427,6 +427,7 @@ Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.lo
 The other supported kinds are `builtin_snapshot` (with an optional `name` of the built-in catalog entry, e.g. `{"kind":"builtin_snapshot","name":"simple"}`; older sessions without `name` still load), `repo_snapshot` (with a
 clone-relative `relative_path`), and `inline_snapshot`. A `file` reference is
 live: edits to the file are picked up on the next load or execution reload.
+Sessions created with `--skip-planning` (input-as-plan) store `"input": ""` and `"input_as_plan": true`; `plan.md` holds the task text.
 Snapshot references read only the session-owned `sessions/<session-id>/config.yaml`
 and never rediscover or silently fall back to another config. Built-in, inline,
 and temporary-clone workflows are serialized there as resolved YAML so they
@@ -1291,7 +1292,7 @@ steps:
 
 | Variable | Description |
 |----------|-------------|
-| `{input}` | Initial input from CLI argument or stdin |
+| `{input}` | Initial input from CLI argument or stdin; for `--skip-planning` / input-as-plan sessions (`input_as_plan: true`) it resolves to the current `plan.md` content |
 | `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
