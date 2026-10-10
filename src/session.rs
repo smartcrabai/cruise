@@ -906,6 +906,10 @@ impl SessionManager {
         initial_phase: &SessionPhase,
         initial_fingerprint: SessionStateFingerprint,
     ) {
+        eprintln!(
+            "DIAG dispose id={id} initial={initial_phase:?} dir={}",
+            self.sessions_dir().display()
+        );
         if validate_session_id(id).is_err() {
             return;
         }

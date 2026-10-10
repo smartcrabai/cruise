@@ -485,6 +485,7 @@ steps:
             fs::read_to_string(repo.join("recovered.txt")).unwrap_or_else(|e| panic!("{e:?}")),
             "recovered"
         );
+        eprintln!("DIAG test data_dir={:?}", crate::paths::data_dir());
         let manager =
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
         assert_eq!(

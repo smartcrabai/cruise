@@ -371,6 +371,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         &NoopObserver,
     )
     .await;
+    eprintln!("DIAG explicit_exec={}", explicit_exec.is_some());
     if let Some((manager, id, phase, fingerprint)) = explicit_exec {
         manager.dispose_exec_session_if_owned(&id, &phase, fingerprint);
     }

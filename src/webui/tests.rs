@@ -158,7 +158,13 @@ fn templates_render_all_fixtures() {
             && entry.path().extension().is_some_and(|ext| ext == "tsx")
             && let Ok(relative) = entry.path().strip_prefix(&root)
         {
-            on_disk.push(relative.with_extension("").to_string_lossy().into_owned());
+            let name = relative
+                .with_extension("")
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            on_disk.push(name);
         }
     }
     on_disk.sort();
