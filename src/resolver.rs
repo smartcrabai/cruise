@@ -15,6 +15,8 @@ pub enum ConfigSource {
     UserDir(PathBuf),
     /// Using the built-in default, either as the fallback or by explicit selection.
     Builtin,
+    /// A named built-in workflow other than the default.
+    NamedBuiltin(&'static str),
 }
 
 impl ConfigSource {
@@ -22,6 +24,7 @@ impl ConfigSource {
     pub fn display_string(&self) -> String {
         match self {
             Self::Builtin => "config: (builtin default)".to_string(),
+            Self::NamedBuiltin(name) => format!("config: (builtin {name})"),
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => {
                 format!("config: {}", p.display())
             }
@@ -33,7 +36,7 @@ impl ConfigSource {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => Some(p),
-            Self::Builtin => None,
+            Self::Builtin | Self::NamedBuiltin(_) => None,
         }
     }
 }
@@ -158,6 +161,7 @@ impl ConfigCandidate {
             | CandidateKind::Local(path)
             | CandidateKind::UserDir(path) => path.to_string_lossy().into_owned(),
             CandidateKind::Builtin => crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
+            CandidateKind::NamedBuiltin(name) => format!("{BUILTIN_SELECTOR_PREFIX}{name}"),
         }
     }
 
@@ -174,6 +178,33 @@ pub(crate) enum CandidateKind {
     Local(PathBuf),
     UserDir(PathBuf),
     Builtin,
+    NamedBuiltin(&'static str),
+}
+
+/// Prefix of the selector value for a named built-in workflow.
+pub(crate) const BUILTIN_SELECTOR_PREFIX: &str = "builtin:";
+
+/// Resolve an explicit built-in selector (`__builtin__` or `builtin:<name>`).
+///
+/// Returns `None` when `value` is not a built-in selector.
+fn resolve_builtin_selector(value: &str) -> Option<Result<(String, ConfigSource)>> {
+    let name = if value == crate::new_session_history::BUILTIN_CONFIG_KEY {
+        crate::builtin_workflows::DEFAULT_BUILTIN_NAME
+    } else {
+        value.strip_prefix(BUILTIN_SELECTOR_PREFIX)?
+    };
+    Some(builtin_by_name(name))
+}
+
+fn builtin_by_name(name: &str) -> Result<(String, ConfigSource)> {
+    let workflow = crate::builtin_workflows::find_builtin(name)
+        .ok_or_else(|| CruiseError::Other(format!("unknown built-in workflow: {name}")))?;
+    let source = if workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
+        ConfigSource::Builtin
+    } else {
+        ConfigSource::NamedBuiltin(workflow.name)
+    };
+    Ok((workflow.yaml.to_string(), source))
 }
 
 /// Appends candidates from a YAML directory to `candidates`, resolving each
@@ -284,11 +315,18 @@ fn collect_candidates(
         );
     }
 
-    // 4. Built-in default — always last.
-    candidates.push(ConfigCandidate {
-        label: "Built-in default".to_string(),
-        source: CandidateKind::Builtin,
-    });
+    // 4. Built-in workflows — always last, default first.
+    for workflow in crate::builtin_workflows::BUILTIN_WORKFLOWS {
+        let source = if workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
+            CandidateKind::Builtin
+        } else {
+            CandidateKind::NamedBuiltin(workflow.name)
+        };
+        candidates.push(ConfigCandidate {
+            label: format!("Built-in {}: {}", workflow.name, workflow.description),
+            source,
+        });
+    }
 
     Ok(candidates)
 }
@@ -314,14 +352,11 @@ fn resolve_config_in_dir_with_interactive(
 ) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
-        // Built-in sentinel (`__builtin__`): select the built-in default without any
-        // filesystem access. Resolved here once so every caller (CLI `-c`, `WebUI`
-        // create_session / repo mode / session edit) gets the same behaviour.
-        if path == crate::new_session_history::BUILTIN_CONFIG_KEY {
-            return Ok((
-                crate::config::BUILTIN_CONFIG_YAML.to_string(),
-                ConfigSource::Builtin,
-            ));
+        // Built-in selectors (`__builtin__`, `builtin:<name>`) select an embedded workflow
+        // without any filesystem access. Resolved here once so every caller (CLI `-c`,
+        // `WebUI` create_session / repo mode / session edit) gets the same behaviour.
+        if let Some(resolved) = resolve_builtin_selector(path) {
+            return resolved;
         }
         let buf = PathBuf::from(path);
         let yaml = read_config_file(&buf)?;
@@ -336,19 +371,16 @@ fn resolve_config_in_dir_with_interactive(
         || matches!(
             candidates.first().map(|c| &c.source),
             Some(CandidateKind::EnvVar(_))
-        )
-        || candidates.len() == 1
-    {
-        // Non-interactive, CRUISE_CONFIG is set, or only the built-in entry remains:
-        // take the highest-priority candidate without prompting.
+        ) {
+        // Non-interactive or CRUISE_CONFIG is set: take the highest-priority
+        // candidate without prompting.
         candidates.into_iter().next().ok_or_else(|| {
             CruiseError::Other("internal error: candidate list was empty".to_string())
         })?
     } else {
-        // Interactive: offer all candidates — "Built-in default" is always last, so
-        // cursor position 0 still lands on the highest-priority file and Enter-spam
-        // keeps selecting it, while the built-in default remains explicitly selectable
-        // even when config files exist.
+        // Interactive: offer all candidates. Built-ins come last with the default
+        // first, so cursor position 0 lands on the highest-priority file (or the
+        // built-in default when no file exists) and every built-in stays selectable.
         prompt_select_among_candidates(candidates)?
     };
 
@@ -368,6 +400,7 @@ fn materialize_candidate(candidate: ConfigCandidate) -> Result<(String, ConfigSo
                 ConfigSource::Builtin,
             ));
         }
+        CandidateKind::NamedBuiltin(name) => return builtin_by_name(name),
     };
     read_config_file(&path).map(|yaml| (yaml, source(path)))
 }
@@ -859,11 +892,11 @@ mod tests {
         let candidates =
             collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: exactly one candidate (Builtin) at the end
+        // Then: only the built-in catalog, with the default first
         assert_eq!(
             candidates.len(),
-            1,
-            "expected only Builtin, got {candidates:?}"
+            crate::builtin_workflows::BUILTIN_WORKFLOWS.len(),
+            "expected only builtins, got {candidates:?}"
         );
         assert!(
             matches!(candidates[0].source, CandidateKind::Builtin),
@@ -889,17 +922,17 @@ mod tests {
         let candidates =
             collect_candidates(tmp_dir.path(), None).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: last candidate is always Builtin
-        assert!(!candidates.is_empty(), "candidates should not be empty");
+        // Then: the built-in catalog is last, default first
+        let tail = candidates.len() - crate::builtin_workflows::BUILTIN_WORKFLOWS.len();
         assert!(
-            matches!(
-                candidates
-                    .last()
-                    .unwrap_or_else(|| panic!("unexpected empty"))
-                    .source,
-                CandidateKind::Builtin
-            ),
-            "last candidate must be Builtin, got: {candidates:?}"
+            matches!(candidates[tail].source, CandidateKind::Builtin),
+            "default builtin must start the builtin group, got: {candidates:?}"
+        );
+        assert!(
+            candidates[tail + 1..]
+                .iter()
+                .all(|c| matches!(c.source, CandidateKind::NamedBuiltin(_))),
+            "got: {candidates:?}"
         );
     }
 
@@ -1217,13 +1250,10 @@ mod tests {
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let _env_guard = EnvGuard::remove("CRUISE_CONFIG");
 
-        for interactive in [false, true] {
-            let (yaml, source) =
-                resolve_config_in_dir_with_interactive(None, repo_dir.path(), interactive)
-                    .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(matches!(source, ConfigSource::Builtin));
-            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
-        }
+        let (yaml, source) = resolve_config_in_dir_with_interactive(None, repo_dir.path(), false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(source, ConfigSource::Builtin));
+        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
     }
 
     #[test]
@@ -1460,7 +1490,9 @@ mod tests {
                 "./.cruise/team.yml",
                 "~/.config/cruise/workflows/alpha.yaml",
                 "~/.config/cruise/workflows/zeta.yaml",
-                "Built-in default",
+                "Built-in default: Plan, implement, verify, and open a pull request",
+                "Built-in simple: Implement, test, auto-fix failures, then commit",
+                "Built-in review: Review the changes and report findings without editing files",
             ]
         );
         assert!(matches!(
@@ -1476,7 +1508,7 @@ mod tests {
                 .last()
                 .unwrap_or_else(|| panic!("unexpected empty"))
                 .source,
-            CandidateKind::Builtin
+            CandidateKind::NamedBuiltin(_)
         ));
     }
 
@@ -1820,5 +1852,121 @@ mod tests {
             .find(|c| matches!(c.source, CandidateKind::EnvVar(_)))
             .unwrap_or_else(|| panic!("expected EnvVar candidate"));
         assert_eq!(env_candidate.label, "CRUISE_CONFIG → ./env.yaml");
+    }
+
+    // ---- named builtin workflows ----
+
+    fn isolated_env() -> (
+        crate::test_support::ProcessLock,
+        tempfile::TempDir,
+        EnvGuard,
+        EnvGuard,
+        EnvGuard,
+    ) {
+        let lock = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let h = EnvGuard::set("HOME", home.path().as_os_str());
+        let x = EnvGuard::remove("XDG_CONFIG_HOME");
+        let c = EnvGuard::remove("CRUISE_CONFIG");
+        (lock, home, h, x, c)
+    }
+
+    #[test]
+    fn explicit_builtin_name_selects_expected_yaml() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        for name in ["simple", "review"] {
+            let (yaml, source) =
+                resolve_config_in_dir(Some(&format!("builtin:{name}")), repo.path())
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            let expected = crate::builtin_workflows::find_builtin(name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .yaml;
+            assert_eq!(yaml, expected);
+            assert!(source.path().is_none());
+        }
+    }
+
+    #[test]
+    fn builtin_default_aliases_return_default_yaml() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        for value in ["__builtin__", "builtin:default"] {
+            let (yaml, source) =
+                resolve_config_in_dir(Some(value), repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+            assert!(source.path().is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_builtin_name_is_other_error() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        for value in ["builtin:nope", "builtin:../simple", "builtin:"] {
+            assert!(
+                matches!(
+                    resolve_config_in_dir(Some(value), repo.path()),
+                    Err(CruiseError::Other(_))
+                ),
+                "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_candidates_show_descriptions_and_keep_default_fallback() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let values: Vec<String> = candidates
+            .iter()
+            .map(ConfigCandidate::selection_value)
+            .collect();
+        assert_eq!(
+            values,
+            vec!["__builtin__", "builtin:simple", "builtin:review"]
+        );
+        for (candidate, name) in candidates.iter().zip(["default", "simple", "review"]) {
+            let entry = crate::builtin_workflows::find_builtin(name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert!(candidate.label().contains(name), "{}", candidate.label());
+            assert!(
+                candidate.label().contains(entry.description),
+                "{}",
+                candidate.label()
+            );
+        }
+        let (yaml, source) =
+            resolve_config_in_dir(None, repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        assert!(source.path().is_none());
+    }
+
+    #[test]
+    fn file_candidates_stay_ahead_of_builtins() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            repo.path().join("cruise.yaml"),
+            "command: [local]\nsteps:\n  s:\n    command: local",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let values: Vec<String> = candidates
+            .iter()
+            .map(ConfigCandidate::selection_value)
+            .collect();
+        assert_eq!(values.len(), 4);
+        assert!(values[0].ends_with("cruise.yaml"));
+        assert_eq!(
+            &values[1..],
+            ["__builtin__", "builtin:simple", "builtin:review"]
+        );
     }
 }

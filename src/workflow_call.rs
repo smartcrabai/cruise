@@ -53,6 +53,20 @@ pub fn resolve_workflow_calls(
     finish_resolved_config(config)
 }
 
+/// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
+/// `prompt_file` fields, without environment overrides or retry-policy side
+/// effects. Intended for installing a workflow as a self-contained config.
+///
+/// # Errors
+///
+/// Returns an error when the workflow or any dependency cannot be fetched or
+/// parsed, or when the call graph is invalid or cyclic.
+pub fn resolve_github_workflow_for_install(
+    reference: &GitHubWorkflowRef,
+) -> Result<WorkflowConfig> {
+    load_github_workflow(reference, &mut CallStack::default())
+}
+
 fn finish_resolved_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     for warning in config.deprecated_language_warnings() {
         crate::status_eprintln!("warning: {warning}");

@@ -662,9 +662,9 @@ impl WorkflowConfig {
 
 /// Built-in default workflow config YAML, embedded at compile time.
 ///
-/// Single source: `builtin/cruise.yaml`. Editing that file changes the
+/// Single source: `builtin/default.yaml`. Editing that file changes the
 /// built-in default shipped to users with no config file.
-pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/cruise.yaml");
+pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/default.yaml");
 
 impl WorkflowConfig {
     /// Apply environment variable overrides and locale-derived language defaults.
@@ -2532,20 +2532,14 @@ steps:
         let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
             .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
-        // Then: it has the expected built-in defaults (source: builtin/cruise.yaml)
+        // Then: it has the expected built-in defaults (source: builtin/default.yaml)
         // The built-in workflow names no backend, so the default (`jcode`) runs
         // it, and both model fields are left to that backend's own default.
         assert_eq!(config.sdk, None);
         assert_eq!(config.model, None);
         assert_eq!(config.plan_model, None);
-        assert_eq!(
-            config.languages.as_ref().and_then(|l| l.plan.as_deref()),
-            None
-        );
-        assert_eq!(
-            config.languages.as_ref().and_then(|l| l.pr.as_deref()),
-            Some("English")
-        );
+        // Languages are left to the locale-derived defaults.
+        assert!(config.languages.is_none());
         assert!(config.cleanup_after_pr);
         // max_retries is unset so DEFAULT_MAX_RETRIES governs
         assert_eq!(config.max_retries, None);
@@ -2555,8 +2549,8 @@ steps:
         // after-pr automation must not auto-merge: merging stays a human action
         assert!(!config.after_pr.contains_key("merge"));
 
-        // And: the review group ends with a fixing review pass after the
-        // verification and simplification steps.
+        // And: the review group runs read-only analyzers in parallel, then
+        // consolidates their findings, then applies the worklist.
         let review = config
             .groups
             .get("verify-review")
@@ -2566,25 +2560,32 @@ steps:
             .keys()
             .map(std::string::String::as_str)
             .collect();
+        assert_eq!(order, vec!["analyze", "consolidate", "apply"]);
+        let analyzers: Vec<&str> = review.steps["analyze"]
+            .parallel
+            .as_ref()
+            .unwrap_or_else(|| panic!("'analyze' must be a parallel step"))
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         assert_eq!(
-            order,
+            analyzers,
             vec![
-                "verify-plan-implementation",
-                "verify-wiring",
-                "verify-docs",
-                "simplify-pass",
-                "review-pass"
+                "plan-implementation",
+                "wiring",
+                "simplify",
+                "review",
+                "docs"
             ]
         );
 
-        // And: review fixes re-enter the flow at plan verification, so a
-        // review-driven change is re-checked against {plan} before wiring.
+        // And: any applied fix re-enters the loop at the analyzers.
         assert_eq!(
             review
                 .if_condition
                 .as_ref()
                 .and_then(|c| c.file_changed.as_deref()),
-            Some("verify-review-pass/verify-plan-implementation")
+            Some("verify-review-pass/analyze")
         );
 
         // And: it passes full config validation
@@ -4969,12 +4970,12 @@ steps:
     }
 
     #[test]
-    fn test_builtin_config_infers_plan_language_but_keeps_pr_language_english() {
+    fn test_builtin_config_infers_plan_and_pr_language_from_locale() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
 
-        // Given: the built-in config leaves planning language unspecified
+        // Given: the built-in config leaves both languages unspecified
         let mut config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
             .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
 
@@ -4983,9 +4984,9 @@ steps:
             .apply_env_overrides()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: planning follows the locale while PR generation remains English
+        // Then: both planning and PR generation follow the locale
         assert_eq!(config.effective_plan_language(), "Japanese");
-        assert_eq!(config.effective_pr_language(), "English");
+        assert_eq!(config.effective_pr_language(), "Japanese");
     }
 
     #[test]
