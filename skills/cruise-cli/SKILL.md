@@ -212,7 +212,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` (or `builtin:default`) selects the built-in default workflow; `builtin:simple` / `builtin:review` select the other built-ins (`cruise workflow list`). `cruise workflow eject <name> [--to user|project]` copies a built-in to `$XDG_CONFIG_HOME/cruise/workflows/` (default) or `./.cruise/` and never overwrites an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time), adopted without prompting.
+4. None found → a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time), adopted without prompting.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 

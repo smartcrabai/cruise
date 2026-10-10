@@ -16,7 +16,7 @@ pub static BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
     BuiltinWorkflow {
         name: DEFAULT_BUILTIN_NAME,
         description: "Plan, implement, verify, and open a pull request",
-        yaml: include_str!("../builtin/cruise.yaml"),
+        yaml: include_str!("../builtin/default.yaml"),
     },
     BuiltinWorkflow {
         name: "simple",
