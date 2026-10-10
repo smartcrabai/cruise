@@ -329,7 +329,13 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         // Write the augmented input so the saved plan references the attached
         // images; the LLM running steps will pick those up via plan.md.
         let plan_content = session.input_with_attachments();
-        if let Err(e) = crate::planning::write_input_as_plan(&plan_path, &plan_content) {
+        let write_result = crate::planning::write_input_as_plan(&plan_path, &plan_content)
+            .and_then(|content| {
+                crate::metadata::refresh_session_title_from_plan(&mut session, &content);
+                session.mark_input_as_plan();
+                manager.save(&session)
+            });
+        if let Err(e) = write_result {
             notify_plan_result(&session, &Err(CruiseError::Other(e.to_string())));
             eprintln!(
                 "\n{} Failed to write input as plan. Session {} discarded.",
@@ -450,6 +456,7 @@ pub async fn launch_background_plan(
         let skip_result =
             crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
+                session.mark_input_as_plan();
                 finalize_skip_planning_session(&manager, &mut session)
             });
         if let Err(error) = skip_result {
@@ -667,6 +674,7 @@ async fn generate_title_via_sdk(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await?;
 
@@ -698,7 +706,7 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
     match crate::worktree::setup_session_worktree(
         &session.base_dir,
         &session.id,
-        &session.input,
+        session.input_or_title(),
         &worktrees_dir,
         session.worktree_branch.as_deref(),
     ) {
@@ -791,7 +799,8 @@ fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Res
     match repo.map(str::trim) {
         Some(spec) if !spec.is_empty() => {
             crate::repo_clone::validate_repo_spec(spec)?;
-            crate::worktree_pr::ensure_gh_available()?;
+            let ctx = crate::forge::resolve_repo_locator_env(spec)?;
+            crate::forge::ensure_forge_available(ctx.kind)?;
             Ok(PlanTarget::Repo(spec.to_string()))
         }
         _ => {
@@ -951,7 +960,11 @@ async fn generate_plan_for_session(
 ) -> Result<String> {
     let config = manager.load_config(session)?;
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+    let mut vars = setup_plan_vars(
+        session.template_input(&manager.sessions_dir()),
+        plan_path.clone(),
+        &config,
+    );
     // Background worker: no interactive user, so the SDK agent proceeds on
     // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
     let mut resume: Option<String> = None;
@@ -1330,8 +1343,13 @@ async fn run_approve_loop(
             }
 
             "Publish as Issue" => {
-                let Some(trigger_cruise) = prompt_trigger_cruise()? else {
-                    continue;
+                let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(session) {
+                    let Some(answer) = prompt_trigger_cruise()? else {
+                        continue;
+                    };
+                    answer
+                } else {
+                    false
                 };
                 match crate::issue_publish::publish_plan_issue_and_delete(
                     manager,
@@ -1390,8 +1408,11 @@ pub async fn replan_session(
         }
         let config = manager.load_config(session)?;
         let plan_path = session.plan_path(&manager.sessions_dir());
-        let mut vars =
-            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+        let mut vars = setup_plan_vars(
+            session.template_input(&manager.sessions_dir()),
+            plan_path.clone(),
+            &config,
+        );
         vars.set_prev_input(Some(feedback));
         let working_dir = session
             .worktree_path
@@ -1558,8 +1579,11 @@ pub async fn regenerate_plan_for_session(
         let saved_worktree_branch = session.worktree_branch.clone();
         setup_planning_worktree(manager, session)?;
         let plan_path = session.plan_path(&manager.sessions_dir());
-        let mut vars =
-            setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+        let mut vars = setup_plan_vars(
+            session.template_input(&manager.sessions_dir()),
+            plan_path.clone(),
+            &config,
+        );
 
         let work_dir = plan_working_dir(session).to_path_buf();
         let mut resume: Option<String> = None;

@@ -9,7 +9,7 @@ variable is an error.
 
 | Variable | Description |
 |----------|-------------|
-| `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here |
+| `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here; for `--skip-planning` / input-as-plan sessions (`input_as_plan: true`) it resolves to the current `plan.md` content |
 | `{prev.output}` | Previous prompt output, or a parallel block's JSON results keyed by child name |
 | `{prev.input}` | User text input from the previous option step |
 | `{prev.stderr}` | Previous command/prompt stderr, or a parallel block's combined stderr and execution errors prefixed by child name |
@@ -20,6 +20,8 @@ variable is an error.
 | `{pr.number}` | PR number, available after a PR has been created |
 | `{pr.url}` | PR URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
+
+In a `github-review` step, `{pr.number}` is available in the prompt, and cruise appends the PR head commit OID and the unresolved review threads (JSON) to the prompt automatically.
 
 ## Parser behavior
 
@@ -39,7 +41,7 @@ The substitution is done by a hand-written parser, with Rust-`format!`-style bra
 - `{plan}` is set automatically for every session-backed execution. `cruise run` points it at the session's `plan.md` absolute path; `cruise exec` points it at the same path, but the file is an empty `plan.md` placeholder written when the transient exec session is created, so `{plan}` resolves without a "No such file" error while carrying no plan content.
 - `{file:name}` is available only while resolving a workflow prompt, including a prompt loaded from `prompt_file`. It is read from the same session's `artifacts/` directory at execution time, so a file may be absent when the YAML is loaded but present when a later prompt runs. The artifact is deleted with its session; terminal `cruise exec` sessions are removed after completion, while interrupted exec sessions and suspended `cruise run` sessions keep artifacts for resume.
 - `{plan.language}` is registered for planning-phase prompts, but normal workflow execution (`cruise run` / `cruise exec`) initializes only `{plan}` (plus runtime `{prev.*}` values), so references to `{plan.language}` in execution-step fields fail with `UndefinedVariable`.
-- `{pr.number}` / `{pr.url}` are defined only after `gh pr create` succeeds — effectively only inside `after-pr`.
+- `{pr.number}` / `{pr.url}` are defined only after `gh pr create` (or `glab mr create` on GitLab) succeeds — effectively only inside `after-pr`.
 - After a successful prompt step, `{prev.output}` and `{prev.stderr}` are set, `{prev.input}` is cleared, and `{prev.success}` is retained.
 - After a completed command step, `{prev.stderr}` and `{prev.success}` are set, while `{prev.output}` and `{prev.input}` are cleared.
 - After a parallel block joins, `{prev.output}` is a JSON object in child declaration order, `{prev.stderr}` combines named child errors, `{prev.success}` is the aggregate success flag, and `{prev.input}` is cleared. Each child receives a private copy of the variables from before the block; siblings cannot read each other's results. See [steps.md](steps.md#parallel-step) for the result fields and failure semantics.

@@ -51,6 +51,9 @@ trap 'rc=$?; rm -rf "$TMP"; exit "$rc"' EXIT
 export GITHUB_ENV="$TMP/github_env"
 export GITHUB_OUTPUT="$TMP/github_output"
 export RUNNER_TEMP="$TMP/runner"
+# GitHub's Windows runners export RUNNER_OS=Windows to every step. Suites that
+# model a Windows runner set it per case; everything else models a POSIX one.
+unset RUNNER_OS
 STUB_DIR="$TMP/bin"
 STUB_LOG="$TMP/stub.log"
 mkdir -p "$RUNNER_TEMP" "$STUB_DIR"

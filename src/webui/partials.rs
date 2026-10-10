@@ -86,7 +86,7 @@ pub(crate) fn header_vm(
     Ok(SessionHeaderVm {
         id: session.id.clone(),
         title,
-        input: session.input.clone(),
+        input: (!session.input.trim().is_empty()).then(|| session.input.clone()),
         badge,
         current_step: session.current_step.clone(),
         phase_error: session.phase_error.clone(),
@@ -316,7 +316,7 @@ pub(crate) fn option_dialog_html(
 ) -> Result<String> {
     let session_title = state.application.read_session(session_id).ok().map_or_else(
         || session_id.to_string(),
-        |state| truncate(&state.input, 80),
+        |state| truncate(state.input_or_title(), 80),
     );
     let text_choice = choices
         .iter()
@@ -369,10 +369,10 @@ fn notify(kind: ToastKind, detail: &str) -> SseMessage {
 }
 
 fn session_input(state: &WebState, session_id: &str) -> String {
-    state
-        .application
-        .read_session(session_id)
-        .map_or_else(|_| session_id.to_string(), |session| session.input)
+    state.application.read_session(session_id).map_or_else(
+        |_| session_id.to_string(),
+        |session| session.input_or_title().to_string(),
+    )
 }
 
 fn run_all_partials(state: &WebState) -> Result<String> {

@@ -303,7 +303,7 @@ impl Fixture {
         let mut state = SessionState::new(
             id.clone(),
             self.root.path().to_path_buf(),
-            cruise::session_config::SessionConfigRef::BuiltinSnapshot,
+            cruise::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         );
         state.phase = phase;
@@ -546,10 +546,10 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
-    // Local config -> user workflow -> Built-in -> Auto-detect.
-    tui.send(b"\x1b[B");
-    tui.send(b"\x1b[B");
-    tui.send(b"\x1b[B");
+    // Local config -> user workflow -> three built-ins -> Auto-detect.
+    for _ in 0..5 {
+        tui.send(b"\x1b[B");
+    }
     tui.wait_for_output("▸ Auto-detect", START_TIMEOUT);
 
     tui.send(b"custom/workflow.yaml");
@@ -830,11 +830,11 @@ fn assert_two_sessions(
     assert_eq!(sessions.len(), 2, "unexpected saved sessions: {sessions:?}");
     let first = sessions
         .iter()
-        .find(|session| session.input == first_input)
+        .find(|session| session.title_or_input() == first_input)
         .unwrap_or_else(|| panic!("first session missing: {sessions:?}"));
     let second = sessions
         .iter()
-        .find(|session| session.input == second_input)
+        .find(|session| session.title_or_input() == second_input)
         .unwrap_or_else(|| panic!("second session missing: {sessions:?}"));
     assert_eq!(&first.phase, expected_phase);
     assert_eq!(&second.phase, expected_phase);
@@ -938,7 +938,7 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
         .unwrap_or_else(|error| panic!("{error}"));
     let planned = sessions
         .iter()
-        .find(|session| session.input == "planned through terminal e2e")
+        .find(|session| session.title_or_input() == "planned through terminal e2e")
         .unwrap_or_else(|| panic!("planned session missing: {sessions:?}"));
     assert_eq!(planned.phase, SessionPhase::Planned);
     assert_eq!(planned.workspace_mode, WorkspaceMode::CurrentBranch);

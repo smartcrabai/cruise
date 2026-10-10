@@ -323,6 +323,8 @@ pub fn set_fake_home(path: &Path) -> Vec<EnvGuard> {
     vec![
         EnvGuard::remove("HOME"),
         EnvGuard::set("USERPROFILE", path.as_os_str()),
+        EnvGuard::remove("APPDATA"),
+        EnvGuard::remove("LOCALAPPDATA"),
         EnvGuard::remove("XDG_CONFIG_HOME"),
         EnvGuard::remove("XDG_DATA_HOME"),
         EnvGuard::remove("XDG_STATE_HOME"),
