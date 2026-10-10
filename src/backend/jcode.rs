@@ -68,6 +68,7 @@ const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// provider credentials.
 #[derive(Default)]
 pub(crate) struct JcodeRunnerConfig {
+    pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
     pub(crate) effort: Option<EffortLevel>,
@@ -188,12 +189,14 @@ fn launch_client(
         inherit_logins: false,
         ..Default::default()
     };
-    let process_disabled_tools = if config.computer_use {
+    let skip_user_lists =
+        config.computer_use && config.permission == crate::config::PermissionMode::Full;
+    let process_disabled_tools = if skip_user_lists {
         None
     } else {
         std::env::var(JCODE_DISABLED_TOOLS_ENV).ok()
     };
-    let config_toml = if config.computer_use
+    let config_toml = if skip_user_lists
         || config.env.contains_key(JCODE_DISABLED_TOOLS_ENV)
         || process_disabled_tools.is_some()
     {
@@ -208,6 +211,7 @@ fn launch_client(
         config.computer_use,
         process_disabled_tools.as_deref(),
         config_toml.as_deref(),
+        config.permission,
     );
     JcodeClient::launch(options).map_err(|error| {
         let hint = if matches!(
@@ -231,6 +235,7 @@ fn launch_environment(
     computer_use: bool,
     process_disabled_tools: Option<&str>,
     config_toml: Option<&str>,
+    permission: crate::config::PermissionMode,
 ) -> HashMap<OsString, OsString> {
     let mut env: HashMap<OsString, OsString> = workflow_env
         .iter()
@@ -256,20 +261,36 @@ fn launch_environment(
             OsString::from(routed_model_arg(provider, model).as_ref()),
         );
     }
-    if !computer_use {
-        let disabled_tools = computer_use_disabled_tools(
+    let restricted = permission != crate::config::PermissionMode::Full;
+    if restricted || !computer_use {
+        let mut disabled_tools = computer_use_disabled_tools(
             workflow_env
                 .get(JCODE_DISABLED_TOOLS_ENV)
                 .map(String::as_str),
             process_disabled_tools,
             config_toml,
         );
+        for tool in permission_disabled_tools(permission) {
+            if !disabled_tools.split(',').any(|existing| existing == *tool) {
+                disabled_tools.push(',');
+                disabled_tools.push_str(tool);
+            }
+        }
         env.insert(
             OsString::from(JCODE_DISABLED_TOOLS_ENV),
             OsString::from(disabled_tools),
         );
     }
     env
+}
+
+/// Tools a permission mode removes on top of the user's disabled list.
+fn permission_disabled_tools(permission: crate::config::PermissionMode) -> &'static [&'static str] {
+    match permission {
+        crate::config::PermissionMode::ReadOnly => &["bash", "edit", "write", "apply_patch"],
+        crate::config::PermissionMode::Edit => &["bash"],
+        crate::config::PermissionMode::Full => &[],
+    }
 }
 
 fn computer_use_disabled_tools(

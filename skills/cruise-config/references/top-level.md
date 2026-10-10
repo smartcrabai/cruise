@@ -22,6 +22,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
+permission: full           # Optional: prompt permission read-only | edit | full (default: full)
 computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body

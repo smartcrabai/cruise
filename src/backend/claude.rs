@@ -66,6 +66,7 @@ static PRIVATE_MCP_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// caller needs to format the config.
 #[derive(Default)]
 pub(crate) struct ClaudeRunnerConfig {
+    pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<EffortLevel>,
     pub(crate) cwd: Option<PathBuf>,
@@ -464,7 +465,30 @@ fn build_options(config: &ClaudeRunnerConfig) -> ClaudeAgentOptions {
     // Cruise runs prompts unattended: the workflow decides what a step may
     // touch, and there is no console to answer a permission prompt on, so a
     // prompt would deadlock the step until its `timeout:` fires.
-    opts.permission_mode = Some(PermissionMode::BypassPermissions);
+    match config.permission {
+        crate::config::PermissionMode::Full => {
+            opts.permission_mode = Some(PermissionMode::BypassPermissions);
+        }
+        restricted => {
+            // `DontAsk` denies anything not explicitly allowed instead of
+            // prompting, so restricted steps never wait on a console.
+            opts.permission_mode = Some(PermissionMode::DontAsk);
+            opts.disallowed_tools.push("Bash".to_string());
+            if restricted == crate::config::PermissionMode::ReadOnly {
+                opts.disallowed_tools
+                    .extend(["Edit", "Write", "NotebookEdit"].map(str::to_string));
+            } else {
+                opts.allowed_tools
+                    .extend(["Edit", "Write", "NotebookEdit"].map(str::to_string));
+            }
+            opts.allowed_tools.extend(
+                config
+                    .tools
+                    .iter()
+                    .map(|tool| format!("mcp__{CRUISE_TOOLBOX_NAME}__{}", tool.name)),
+            );
+        }
+    }
     // Workflow MCP servers are passed to the CLI by `run_async` through a
     // private config file, never through the SDK's inline `--mcp-config` JSON.
     if !config.tools.is_empty() {
@@ -1275,5 +1299,152 @@ mod tests {
             }
             false
         }
+    }
+
+    // -- permission mapping ---------------------------------------------------
+
+    fn claude_args(config: &ClaudeRunnerConfig) -> Vec<String> {
+        SubprocessCliTransport::one_shot(build_options(config), "hi".to_string()).build_args()
+    }
+
+    fn arg_after(args: &[String], flag: &str) -> Option<String> {
+        args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+    }
+
+    fn csv(args: &[String], flag: &str) -> Vec<String> {
+        arg_after(args, flag)
+            .map(|v| v.split(',').map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn build_options_full_keeps_bypass_permissions() {
+        let opts = build_options(&ClaudeRunnerConfig {
+            permission: crate::config::PermissionMode::Full,
+            ..Default::default()
+        });
+        assert!(matches!(
+            opts.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        ));
+        assert_eq!(opts.disallowed_tools, Vec::<String>::new());
+    }
+
+    #[test]
+    fn build_options_restricted_modes_use_dont_ask() {
+        for mode in [
+            crate::config::PermissionMode::ReadOnly,
+            crate::config::PermissionMode::Edit,
+        ] {
+            let opts = build_options(&ClaudeRunnerConfig {
+                permission: mode,
+                ..Default::default()
+            });
+            assert!(
+                matches!(opts.permission_mode, Some(PermissionMode::DontAsk)),
+                "{mode:?} must not prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn build_options_read_only_disallows_shell_and_file_mutation_tools() {
+        let opts = build_options(&ClaudeRunnerConfig {
+            permission: crate::config::PermissionMode::ReadOnly,
+            ..Default::default()
+        });
+        for tool in ["Bash", "Edit", "Write", "NotebookEdit"] {
+            assert!(
+                opts.disallowed_tools.iter().any(|t| t == tool),
+                "{tool} should be disallowed: {:?}",
+                opts.disallowed_tools
+            );
+        }
+    }
+
+    #[test]
+    fn build_options_edit_disallows_bash_but_allows_direct_edit_tools() {
+        let opts = build_options(&ClaudeRunnerConfig {
+            permission: crate::config::PermissionMode::Edit,
+            ..Default::default()
+        });
+        assert!(opts.disallowed_tools.iter().any(|t| t == "Bash"));
+        for tool in ["Edit", "Write"] {
+            assert!(
+                opts.allowed_tools.iter().any(|t| t == tool),
+                "{tool} should be allowed: {:?}",
+                opts.allowed_tools
+            );
+            assert!(!opts.disallowed_tools.iter().any(|t| t == tool));
+        }
+    }
+
+    #[test]
+    fn build_options_restricted_modes_allow_cruise_tools_only() {
+        for mode in [
+            crate::config::PermissionMode::ReadOnly,
+            crate::config::PermissionMode::Edit,
+        ] {
+            let opts = build_options(&ClaudeRunnerConfig {
+                permission: mode,
+                tools: vec![tool("ask_user"), tool("submit_plan")],
+                ..Default::default()
+            });
+            assert!(
+                opts.allowed_tools
+                    .iter()
+                    .any(|t| t == "mcp__cruise__ask_user")
+            );
+            assert!(
+                opts.allowed_tools
+                    .iter()
+                    .any(|t| t == "mcp__cruise__submit_plan")
+            );
+            assert!(
+                !opts
+                    .allowed_tools
+                    .iter()
+                    .any(|t| t.starts_with("mcp__") && !t.starts_with("mcp__cruise__")),
+                "external MCP must not be allowed: {:?}",
+                opts.allowed_tools
+            );
+        }
+    }
+
+    #[test]
+    fn restricted_modes_pass_dont_ask_and_tool_lists_to_the_cli() {
+        let args = claude_args(&ClaudeRunnerConfig {
+            permission: crate::config::PermissionMode::ReadOnly,
+            ..Default::default()
+        });
+        assert_eq!(
+            arg_after(&args, "--permission-mode").as_deref(),
+            Some("dontAsk")
+        );
+        let disallowed = csv(&args, "--disallowedTools");
+        for tool in ["Bash", "Edit", "Write", "NotebookEdit"] {
+            assert!(disallowed.iter().any(|t| t == tool), "{disallowed:?}");
+        }
+
+        let args = claude_args(&ClaudeRunnerConfig {
+            permission: crate::config::PermissionMode::Edit,
+            ..Default::default()
+        });
+        assert_eq!(
+            arg_after(&args, "--permission-mode").as_deref(),
+            Some("dontAsk")
+        );
+        assert!(csv(&args, "--disallowedTools").iter().any(|t| t == "Bash"));
+        assert!(!args.iter().any(|a| a == "default" || a == "acceptEdits"));
+    }
+
+    #[test]
+    fn full_mode_cli_args_keep_bypass_permissions_without_tool_lists() {
+        let args = claude_args(&ClaudeRunnerConfig::default());
+        assert_eq!(
+            arg_after(&args, "--permission-mode").as_deref(),
+            Some("bypassPermissions")
+        );
+        assert!(!args.iter().any(|a| a == "--disallowedTools"));
     }
 }

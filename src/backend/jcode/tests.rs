@@ -702,7 +702,15 @@ fn sdk_child_environment_keeps_workflow_env_and_forces_required_overrides() {
         (OPENAI_SERVICE_TIER_ENV.to_string(), String::new()),
         (JCODE_CHECK_UPDATES_ENV.to_string(), "1".to_string()),
     ]);
-    let env = launch_environment(&workflow, None, None, true, None, None);
+    let env = launch_environment(
+        &workflow,
+        None,
+        None,
+        true,
+        None,
+        None,
+        crate::config::PermissionMode::Full,
+    );
     assert_eq!(
         env.get(OsStr::new("CRUISE_GUARD_COMMON_DIR"))
             .and_then(|value| value.to_str()),
@@ -736,6 +744,7 @@ fn launch_environment_preserves_the_workflow_disabled_tools_policy() {
         true,
         None,
         None,
+        crate::config::PermissionMode::Full,
     );
 
     assert_eq!(
@@ -747,7 +756,15 @@ fn launch_environment_preserves_the_workflow_disabled_tools_policy() {
 
 #[test]
 fn launch_environment_disables_computer_use_by_default() {
-    let env = launch_environment(&HashMap::new(), None, None, false, None, None);
+    let env = launch_environment(
+        &HashMap::new(),
+        None,
+        None,
+        false,
+        None,
+        None,
+        crate::config::PermissionMode::Full,
+    );
 
     assert_eq!(
         env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
@@ -765,6 +782,7 @@ fn launch_environment_merges_jcode_config_disabled_tools() {
         false,
         None,
         Some("[tools]\ndisabled = [\"bash\"]"),
+        crate::config::PermissionMode::Full,
     );
 
     assert_eq!(
@@ -814,14 +832,30 @@ fn launch_environment_leaves_disabled_tool_policy_unchanged_when_enabled() {
         JCODE_DISABLED_TOOLS_ENV.to_string(),
         "bash, macos_computer_use".to_string(),
     )]);
-    let env = launch_environment(&workflow, None, None, true, Some("process-tool"), None);
+    let env = launch_environment(
+        &workflow,
+        None,
+        None,
+        true,
+        Some("process-tool"),
+        None,
+        crate::config::PermissionMode::Full,
+    );
 
     assert_eq!(
         env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
             .and_then(|value| value.to_str()),
         Some("bash, macos_computer_use")
     );
-    let env = launch_environment(&HashMap::new(), None, None, true, None, None);
+    let env = launch_environment(
+        &HashMap::new(),
+        None,
+        None,
+        true,
+        None,
+        None,
+        crate::config::PermissionMode::Full,
+    );
     assert!(!env.contains_key(OsStr::new(JCODE_DISABLED_TOOLS_ENV)));
 }
 
@@ -834,6 +868,7 @@ fn private_runtime_disables_auto_update_with_environment_override() {
         true,
         None,
         None,
+        crate::config::PermissionMode::Full,
     );
     assert_eq!(
         env.get(OsStr::new(JCODE_CHECK_UPDATES_ENV))
@@ -1257,6 +1292,7 @@ fn explicit_provider_and_model_override_environment_defaults_at_launch() {
         true,
         None,
         None,
+        crate::config::PermissionMode::Full,
     );
     assert_eq!(
         env.get(OsStr::new(JCODE_PROVIDER_ENV))
@@ -1537,4 +1573,173 @@ fn workflow_mcp_merge_rejects_non_object_server_maps() {
             .to_string()
             .contains("`mcpServers` must be a JSON object")
     );
+}
+
+fn disabled_list(env: &HashMap<OsString, OsString>) -> Vec<String> {
+    env.get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
+        .and_then(|value| value.to_str())
+        .map(|value| value.split(',').map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn env_with_permission(
+    workflow: &HashMap<String, String>,
+    computer_use: bool,
+    process: Option<&str>,
+    config_toml: Option<&str>,
+    permission: crate::config::PermissionMode,
+) -> HashMap<OsString, OsString> {
+    launch_environment(
+        workflow,
+        None,
+        None,
+        computer_use,
+        process,
+        config_toml,
+        permission,
+    )
+}
+
+#[test]
+fn launch_environment_read_only_disables_mutation_shell_and_computer_use() {
+    let env = env_with_permission(
+        &HashMap::new(),
+        false,
+        None,
+        None,
+        crate::config::PermissionMode::ReadOnly,
+    );
+    let mut tools = disabled_list(&env);
+    tools.sort();
+    assert_eq!(
+        tools,
+        ["apply_patch", "bash", "edit", "macos_computer_use", "write"]
+    );
+}
+
+#[test]
+fn launch_environment_edit_disables_only_shell_and_computer_use() {
+    let env = env_with_permission(
+        &HashMap::new(),
+        false,
+        None,
+        None,
+        crate::config::PermissionMode::Edit,
+    );
+    let mut tools = disabled_list(&env);
+    tools.sort();
+    assert_eq!(tools, ["bash", "macos_computer_use"]);
+}
+
+#[test]
+fn launch_environment_full_keeps_existing_computer_use_behavior() {
+    let env = env_with_permission(
+        &HashMap::new(),
+        false,
+        None,
+        None,
+        crate::config::PermissionMode::Full,
+    );
+    assert_eq!(disabled_list(&env), ["macos_computer_use"]);
+    let env = env_with_permission(
+        &HashMap::new(),
+        true,
+        None,
+        None,
+        crate::config::PermissionMode::Full,
+    );
+    assert!(!env.contains_key(OsStr::new(JCODE_DISABLED_TOOLS_ENV)));
+}
+
+#[test]
+fn launch_environment_restricted_modes_override_computer_use_true() {
+    for (mode, must_have) in [
+        (crate::config::PermissionMode::ReadOnly, "write"),
+        (crate::config::PermissionMode::Edit, "bash"),
+    ] {
+        let env = env_with_permission(&HashMap::new(), true, None, None, mode);
+        let tools = disabled_list(&env);
+        assert!(tools.iter().any(|t| t == must_have), "{mode:?}: {tools:?}");
+        assert!(
+            tools.iter().any(|t| t == "macos_computer_use"),
+            "{mode:?}: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn launch_environment_merges_permission_disabled_tools_without_dropping_user_policy() {
+    let workflow = HashMap::from([(
+        JCODE_DISABLED_TOOLS_ENV.to_string(),
+        "webfetch, bash".to_string(),
+    )]);
+    let env = env_with_permission(
+        &workflow,
+        false,
+        Some("process-tool"),
+        Some("[tools]\ndisabled = [\"config-tool\"]"),
+        crate::config::PermissionMode::ReadOnly,
+    );
+    let tools = disabled_list(&env);
+    assert!(tools.iter().any(|t| t == "webfetch"));
+    assert!(
+        !tools
+            .iter()
+            .any(|t| t == "process-tool" || t == "config-tool")
+    );
+    for tool in ["bash", "edit", "write", "apply_patch", "macos_computer_use"] {
+        assert_eq!(
+            tools.iter().filter(|t| *t == tool).count(),
+            1,
+            "{tool} exactly once: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn launch_environment_permission_tools_follow_process_then_config_precedence() {
+    let config = Some("[tools]\ndisabled = [\"config-tool\"]");
+    let env = env_with_permission(
+        &HashMap::new(),
+        false,
+        Some("process-tool"),
+        config,
+        crate::config::PermissionMode::Edit,
+    );
+    let tools = disabled_list(&env);
+    assert!(tools.iter().any(|t| t == "process-tool"));
+    assert!(!tools.iter().any(|t| t == "config-tool"));
+
+    let env = env_with_permission(
+        &HashMap::new(),
+        false,
+        None,
+        config,
+        crate::config::PermissionMode::Edit,
+    );
+    let tools = disabled_list(&env);
+    assert!(tools.iter().any(|t| t == "config-tool"));
+    assert!(tools.iter().any(|t| t == "bash"));
+}
+
+#[test]
+fn restricted_computer_use_merges_user_disabled_tools_with_mode_tools() {
+    let env = launch_environment(
+        &HashMap::new(),
+        None,
+        None,
+        true,
+        Some("grep"),
+        None,
+        crate::config::PermissionMode::Edit,
+    );
+    let value = env
+        .get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
+        .and_then(|value| value.to_str())
+        .unwrap_or_else(|| panic!("{JCODE_DISABLED_TOOLS_ENV} missing"))
+        .to_string();
+    let tools: Vec<&str> = value.split(',').collect();
+    assert!(tools.contains(&"grep"));
+    assert!(tools.contains(&"bash"));
+    assert!(tools.contains(&COMPUTER_USE_TOOL));
 }

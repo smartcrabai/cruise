@@ -4,6 +4,8 @@ Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan, implemen
 
 This action has **no pull-request mode**: it only reacts to `issues` (opened) and `issue_comment` (created) events. A comment made on a pull request is always ignored (PRs are "issues" at the GitHub API level, but this action explicitly excludes them).
 
+> Note: restricted prompt steps (`permission: read-only | edit`) run unattended with denied tools rather than prompts, and a read-only step fails if it changes the workspace.
+
 ## Quickstart
 
 1. Install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository (optional -- skip it to fall back to the workflow's `GITHUB_TOKEN`; see [How authentication works](#how-authentication-works)).

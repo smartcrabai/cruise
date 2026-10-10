@@ -208,21 +208,27 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     }
                     crate::platform::reclaim_terminal_foreground();
                     let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
-                    let trigger_cruise = match inquire::Confirm::new(
-                        "Post an @cruise run comment after creating the issue?",
-                    )
-                    .with_default(default_trigger_cruise)
-                    .prompt()
+                    let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session)
                     {
-                        Ok(answer) => answer,
-                        Err(
-                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
-                        ) => {
-                            continue;
+                        match inquire::Confirm::new(
+                            "Post an @cruise run comment after creating the issue?",
+                        )
+                        .with_default(default_trigger_cruise)
+                        .prompt()
+                        {
+                            Ok(answer) => answer,
+                            Err(
+                                InquireError::OperationCanceled
+                                | InquireError::OperationInterrupted,
+                            ) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(CruiseError::Other(format!("selection error: {e}")));
+                            }
                         }
-                        Err(e) => {
-                            return Err(CruiseError::Other(format!("selection error: {e}")));
-                        }
+                    } else {
+                        false
                     };
                     match crate::issue_publish::publish_plan_issue_and_delete(
                         &manager,
@@ -284,6 +290,14 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         Err(e) => {
                             eprintln!("{} {e}", style("x").red());
                         }
+                    }
+                }
+                "Merge PR" => {
+                    if merge_pr_interactive(&manager, &session.id)? {
+                        break;
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
                     }
                 }
                 "Edit Settings" => {
@@ -429,6 +443,7 @@ fn session_actions_with_plan_availability(
         SessionPhase::Completed => {
             if session.pr_url.is_some() {
                 actions.push("Open PR");
+                actions.push("Merge PR");
             }
             actions.push("Reset to Planned");
         }
@@ -581,17 +596,81 @@ async fn edit_session_settings_interactive(
     Ok(())
 }
 
-fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
-    let status = std::process::Command::new("gh")
-        .args(["pr", "view", pr_url, "--web"])
-        .status()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh: {e}")))?;
-    if !status.success() {
-        return Err(CruiseError::Other(format!(
-            "gh pr view --web exited with {status}"
-        )));
+/// Preview, choose a method, confirm and merge. Returns true when the session was cleaned up.
+fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Result<bool> {
+    use crate::application::{CruiseApplication, MergePrOutcome, PrMergeMethod};
+
+    let app = CruiseApplication::new(manager.clone());
+    let status = match app.inspect_pr_for_merge(id) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            return Ok(false);
+        }
+    };
+    eprintln!("PR state: {}", status.state);
+    eprintln!("Mergeable: {}", status.mergeable);
+    eprintln!("Review decision: {}", status.review_decision);
+    if status.checks.is_empty() {
+        eprintln!("Checks: none");
     }
-    Ok(())
+    for check in &status.checks {
+        eprintln!("Check: {} ({})", check.name, check.status);
+    }
+    if status.state != "OPEN" {
+        eprintln!(
+            "{} PR is {}. Run `cruise clean` to remove the session.",
+            style("!").yellow(),
+            status.state
+        );
+        return Ok(false);
+    }
+    let methods = vec!["Squash", "Merge", "Rebase"];
+    let method_label = match inquire::Select::new("Merge method:", methods).prompt() {
+        Ok(m) => m,
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    };
+    let method = match method_label {
+        "Merge" => PrMergeMethod::Merge,
+        "Rebase" => PrMergeMethod::Rebase,
+        _ => PrMergeMethod::Squash,
+    };
+    let prompt = format!(
+        "Merge PR with {method_label} (mergeable: {}, review: {})?",
+        status.mergeable, status.review_decision
+    );
+    match inquire::Confirm::new(&prompt).with_default(false).prompt() {
+        Ok(true) => {}
+        Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+    match app.merge_pr(id, method) {
+        Ok(MergePrOutcome::Cleaned) => {
+            eprintln!("{} PR merged; session cleaned up.", style("v").green());
+            Ok(true)
+        }
+        Ok(MergePrOutcome::Pending) => {
+            eprintln!(
+                "{} PR is still open (for example in a merge queue). The session was kept.",
+                style("!").yellow()
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            Ok(false)
+        }
+    }
+}
+
+fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
+    crate::platform::open_url(pr_url)
+        .map_err(|e| CruiseError::Other(format!("failed to open {pr_url}: {e}")))
 }
 
 #[cfg(test)]
@@ -1324,6 +1403,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_actions_completed_with_pr_offers_merge_pr() {
+        let mut with_pr = make_session("20261009100000", "task", SessionPhase::Completed);
+        with_pr.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+        let without_pr = make_session("20261009100001", "task", SessionPhase::Completed);
+        assert!(session_actions(&with_pr).contains(&"Merge PR"));
+        assert!(!session_actions(&without_pr).contains(&"Merge PR"));
+
+        for phase in [
+            SessionPhase::Planned,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Suspended,
+            SessionPhase::Failed("e".to_string()),
+        ] {
+            let mut session = make_session("20261009100002", "task", phase);
+            session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
+            assert!(!session_actions(&session).contains(&"Merge PR"));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // session_actions -- Open PR coverage
     // -----------------------------------------------------------------------
@@ -1337,96 +1436,16 @@ mod tests {
         // When
         let actions = session_actions(&session);
 
-        // Then: order is ["Open PR", "Reset to Planned", "Delete", "Back"]
+        // Then: order is ["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
         assert_eq!(
             actions,
-            vec!["Open PR", "Reset to Planned", "Delete", "Back"]
+            vec!["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
         );
     }
 
     // -----------------------------------------------------------------------
     // open_pr_in_browser
     // -----------------------------------------------------------------------
-
-    #[cfg(unix)]
-    #[test]
-    fn test_open_pr_in_browser_calls_gh_view_web() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::{fs, io::Read};
-
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let log_path = tmp.path().join("gh.log");
-
-        // fake gh: records args to log file then exits 0
-        let script_path = bin_dir.join("gh");
-        fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
-                log_path.display()
-            ),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut perms = fs::metadata(&script_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
-
-        let url = "https://github.com/owner/repo/pull/42";
-        let result = open_pr_in_browser(url);
-
-        assert!(result.is_ok(), "should succeed: {result:?}");
-
-        // Verify log: "pr view <url> --web" was passed
-        let mut log_content = String::new();
-        fs::File::open(&log_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .read_to_string(&mut log_content)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            log_content.contains("pr view"),
-            "gh should receive 'pr view': {log_content}"
-        );
-        assert!(
-            log_content.contains(url),
-            "gh should receive the PR url: {log_content}"
-        );
-        assert!(
-            log_content.contains("--web"),
-            "gh should receive '--web': {log_content}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_open_pr_in_browser_gh_failure_returns_error() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // fake gh: always exits 1
-        let script_path = bin_dir.join("gh");
-        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
-        let mut perms = fs::metadata(&script_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
-
-        let result = open_pr_in_browser("https://github.com/owner/repo/pull/1");
-
-        assert!(result.is_err(), "should fail when gh exits non-zero");
-    }
 
     // -----------------------------------------------------------------------
     // AwaitingApproval phase -- actions and labels

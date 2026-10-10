@@ -20,26 +20,20 @@ use crate::session::{SessionManager, SessionState};
 /// Leading dashes are rejected so the spec can never be parsed as a flag by
 /// `gh`, and dot-only parts (`.`, `..`) are rejected as never-valid names.
 pub fn validate_repo_spec(spec: &str) -> Result<()> {
-    fn valid_part(part: &str) -> bool {
-        !part.is_empty()
-            && !part.starts_with('-')
-            && part.chars().any(|c| c != '.')
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    }
+    crate::forge::resolve_repo_locator_env(spec)
+        .map(|_| ())
+        .map_err(|e| CruiseError::Other(format!("invalid repository '{spec}': {e}")))
+}
 
-    let valid = spec
-        .split_once('/')
-        .is_some_and(|(owner, name)| valid_part(owner) && valid_part(name));
-
-    if valid {
-        Ok(())
-    } else {
-        Err(CruiseError::Other(format!(
-            "invalid repository '{spec}': expected <owner>/<repository>"
-        )))
-    }
+fn clone_program_and_target(
+    repo: &str,
+) -> Result<(crate::forge::ForgeContext, &'static str, String)> {
+    let ctx = crate::forge::resolve_repo_locator_env(repo)?;
+    let (program, target) = match ctx.kind {
+        crate::forge::ForgeKind::GitHub => ("gh", repo.to_string()),
+        crate::forge::ForgeKind::GitLab => ("glab", ctx.repository.clone()),
+    };
+    Ok((ctx, program, target))
 }
 
 /// Clone `repo` into `clone_path` using `gh repo clone` (so `gh`'s
@@ -53,18 +47,24 @@ pub fn clone_repo(repo: &str, clone_path: &Path) -> Result<()> {
     if let Some(parent) = clone_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let output = Command::new("gh")
-        .args(["repo", "clone", repo])
+    let (ctx, program, target) = clone_program_and_target(repo)?;
+    let mut command = Command::new(program);
+    if ctx.kind == crate::forge::ForgeKind::GitLab {
+        command.env("GITLAB_HOST", &ctx.host);
+    }
+    let output = command
+        .args(["repo", "clone", &target])
         .arg(clone_path)
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh repo clone: {e}")))?;
+        .map_err(|e| CruiseError::Other(format!("failed to run {program} repo clone: {e}")))?;
 
     if !output.status.success() {
         let _ = std::fs::remove_dir_all(clone_path);
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CruiseError::Other(format!(
-            "gh repo clone {} failed: {}",
+            "{} repo clone {} failed: {}",
+            program,
             repo,
             stderr.trim()
         )));
@@ -152,9 +152,10 @@ pub async fn ensure_repo_session_workspace_cancelled(
         std::fs::create_dir_all(parent)?;
     }
     let clone_path_string = clone_path.to_string_lossy().into_owned();
+    let (_ctx, program, target) = clone_program_and_target(&repo)?;
     let output = crate::step::command::run_process_output_cancelled(
-        "gh",
-        &["repo", "clone", &repo, &clone_path_string],
+        program,
+        &["repo", "clone", &target, &clone_path_string],
         None,
         Some(cancel_token),
     )
@@ -169,7 +170,8 @@ pub async fn ensure_repo_session_workspace_cancelled(
     if !output.status.success() {
         let _ = std::fs::remove_dir_all(&clone_path);
         return Err(CruiseError::Other(format!(
-            "gh repo clone {} failed: {}",
+            "{} repo clone {} failed: {}",
+            program,
             repo,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -262,7 +264,6 @@ mod tests {
             "owner/repo/extra",
             "owner repo/x",
             "owner/repo name",
-            "https://github.com/owner/repo",
             "-u/repo",
             "owner/-repo",
             "./repo",

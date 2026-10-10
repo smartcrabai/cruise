@@ -371,6 +371,7 @@ pub async fn run_plan_prompt_template(
             on_session_id: ctx.on_session_id,
             resume: resume.clone(),
             computer_use: ctx.config.computer_use,
+            permission: crate::config::PermissionMode::Full,
         })
         .await;
     drop(spinner);

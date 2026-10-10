@@ -53,6 +53,20 @@ pub fn resolve_workflow_calls(
     finish_resolved_config(config)
 }
 
+/// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
+/// `prompt_file` fields, without environment overrides or retry-policy side
+/// effects. Intended for installing a workflow as a self-contained config.
+///
+/// # Errors
+///
+/// Returns an error when the workflow or any dependency cannot be fetched or
+/// parsed, or when the call graph is invalid or cyclic.
+pub fn resolve_github_workflow_for_install(
+    reference: &GitHubWorkflowRef,
+) -> Result<WorkflowConfig> {
+    load_github_workflow(reference, &mut CallStack::default())
+}
+
 fn finish_resolved_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     for warning in config.deprecated_language_warnings() {
         crate::status_eprintln!("warning: {warning}");
@@ -219,6 +233,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("allow_commit", step.allow_commit),
         ("computer_use", step.computer_use.is_some()),
         ("output_file", step.output_file.is_some()),
+        ("permission", step.permission.is_some()),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
@@ -2106,5 +2121,48 @@ after-pr:
             assert!(children["review"].prompt_file.is_none());
         }
         crate::config::validate_config(&config).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[test]
+    fn test_workflow_call_uses_caller_default_and_preserves_inner_permission() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "permission: read-only\nsteps:\n  plain:\n    prompt: plain\n  inner:\n    prompt: inner\n    permission: edit\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "permission: full\nsteps:\n  shared:\n    workflow_call: ./callee.yaml\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let resolved =
+            resolve_workflow_calls(config, dir.path()).unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(resolved.permission, crate::config::PermissionMode::Full);
+        assert_eq!(resolved.steps["shared/plain"].permission, None);
+        assert_eq!(
+            resolved.steps["shared/inner"].permission,
+            Some(crate::config::PermissionMode::Edit)
+        );
+    }
+
+    #[test]
+    fn test_workflow_call_rejects_permission_on_call_site() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "steps:\n  inspect:\n    prompt: inspect\n",
+        );
+        let config = WorkflowConfig::from_yaml(
+            "steps:\n  shared:\n    workflow_call: ./callee.yaml\n    permission: full\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let Err(error) = resolve_workflow_calls(config, dir.path()) else {
+            panic!("permission is not supported on a workflow_call site");
+        };
+        assert!(error.to_string().contains("permission"));
     }
 }

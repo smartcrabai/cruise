@@ -7,6 +7,7 @@ mod backend;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
+mod builtin_workflows;
 mod cancellation;
 mod clean_cmd;
 mod cli;
@@ -36,6 +37,8 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
+mod forge;
+mod github_review;
 mod graph;
 mod herdr;
 mod issue_publish;
@@ -49,6 +52,7 @@ mod paths;
 mod plan_cmd;
 mod planning;
 mod platform;
+mod pr_merge;
 mod repo_clone;
 mod resolver;
 mod retry;
@@ -72,6 +76,9 @@ mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
+mod workflow_cmd;
+mod workflow_generate;
+mod workflow_packages;
 mod workspace;
 mod worktree;
 mod worktree_pr;
@@ -109,9 +116,25 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
+            workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
+            workflow_generate::run(args).await
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
+            workflow_cmd::add(&args.spec, args.name, args.yes)
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Update(args))) => {
+            workflow_cmd::update(&args.name, args.yes)
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Remove(args))) => {
+            workflow_cmd::remove(&args.name)
+        }
         Some(cli::Commands::Internal(cli::InternalArgs {
-            command: cli::InternalCommand::SyncBase { pr_number },
-        })) => worktree_pr::sync_base(&pr_number),
+            command: cli::InternalCommand::SyncBase { pr_number, url },
+        })) => worktree_pr::sync_base(&pr_number, url.as_deref()),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),
