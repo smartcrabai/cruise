@@ -46,7 +46,7 @@ The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
 - `--host <ADDR>` -- interface to bind (default `127.0.0.1`; the WebUI has no authentication, so do not bind it to an untrusted network). The Merge PR route is served by the same unauthenticated server, and its on-screen confirmation is not access control: never expose the WebUI to a network you do not trust.
 - `--port <PORT>` -- TCP port to listen on (default `8484`).
-- `--no-open` -- do not open the browser automatically.
+- `-o`, `--open` -- open the WebUI in the default browser after the server starts (by default the browser is not opened; visit the printed URL yourself).
 - `--webui-dir <DIR>` -- serve `templates/` and `static/` from disk for development. For example, `cruise webui --webui-dir webui`; templates are re-read on every request, so edit and reload without restarting.
 - `Ctrl-C` -- stops the server. Active operations are cancelled (sessions become Suspended), the server exits within about 10 seconds, and a second `Ctrl-C` quits immediately.
 
@@ -220,7 +220,7 @@ Commands:
   config       Show or update application-level configuration (`~/.config/cruise/config.json`)
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve the browser UI from this machine and open it in the default browser
+  webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:

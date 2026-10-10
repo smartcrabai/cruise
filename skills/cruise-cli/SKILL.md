@@ -53,7 +53,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
-| Serve the local browser UI | `cruise webui` |
+| Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |

@@ -23,7 +23,7 @@ impl Drop for ChildGuard {
 
 fn start(home: &std::path::Path) -> (ChildGuard, u16) {
     let child = Command::new(env!("CARGO_BIN_EXE_cruise"))
-        .args(["webui", "--no-open", "--port", "0"])
+        .args(["webui", "--port", "0"])
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
