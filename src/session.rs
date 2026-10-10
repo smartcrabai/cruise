@@ -2109,7 +2109,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2134,7 +2134,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
@@ -2901,7 +2901,7 @@ mod tests {
         let state = SessionState::new(
             id.clone(),
             PathBuf::from("/repo"),
-            SessionConfigRef::BuiltinSnapshot,
+            SessionConfigRef::BuiltinSnapshot { name: None },
             "task".to_string(),
         );
         let config = crate::config::WorkflowConfig::from_yaml(
@@ -4102,7 +4102,7 @@ mod tests {
         let mut state = SessionState::new_draft(
             "20260830000001".to_string(),
             PathBuf::from("/tmp/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             String::new(),
         );
         state.attachments.push(PathBuf::from("image.png"));

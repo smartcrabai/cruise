@@ -211,7 +211,7 @@ Commands:
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine and open it in the default browser
-  workflow     Install and manage GitHub workflow packages (`add`, `remove`, `update`, `list`)
+  workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -223,6 +223,19 @@ Options:
       --repo <OWNER/REPO>      GitHub repository (owner/repository) to clone into a temporary directory for planning and execution
       --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
 ```
+
+#### `cruise workflow generate`
+
+```
+cruise workflow generate <DESCRIPTION> --name <NAME> [--user] [--config <PATH>]
+```
+
+Drafts a new workflow YAML from a description. The backend is chosen by the normal config resolution (`--config`, `CRUISE_CONFIG`, local files, user workflows, built-in default). The file is saved to `./.cruise/<NAME>.yaml`, or to the user workflow directory (`~/.config/cruise/workflows/`) with `--user`. `NAME` may contain only letters, digits, `-` and `_`.
+
+- The reply must be raw YAML (no Markdown fence). Each candidate is parsed and run through the same preflight as `cruise exec` (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
+- The validated YAML is saved exactly as returned. An existing file with the same name is never overwritten, and the backend is not called in that case.
+- The generated workflow is not run and no session is created.
+- Validation does not prove that the commands are safe or that the workflow succeeds. The selected agent backend keeps its normal permissions, so it may modify the repository during generation. Review the YAML before running it.
 
 #### `cruise ssh`
 
@@ -261,7 +274,7 @@ Arguments:
   [INPUT]  Task description
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default (see Config File Resolution)
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
       --no-force-exec              Ignore force_exec: true and plan as usual
       --skip-planning              Use the input directly as the plan, skipping LLM-based plan generation
@@ -296,7 +309,7 @@ Arguments:
   [INPUT]  Task description (omit to prompt interactively; reads from stdin when piped)
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
 ```
 
 Saves the input as a `Draft` session without invoking the LLM. The plan can be generated later by choosing **Generate Plan** from `cruise list`. Useful when you have an idea you want to capture immediately but don't want to start (or pay for) planning yet.
@@ -336,7 +349,7 @@ Arguments:
   [INPUT]  Task description bound to {input} (optional if your config doesn't reference {input})
 
 Options:
-  -c, --config <PATH>              Path to the workflow config file; use __builtin__ for the built-in default
+  -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -402,7 +415,7 @@ Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.lo
 {"config":{"kind":"file","path":"/absolute/path/cruise.yaml"}}
 ```
 
-The other supported kinds are `builtin_snapshot`, `repo_snapshot` (with a
+The other supported kinds are `builtin_snapshot` (with an optional `name` of the built-in catalog entry, e.g. `{"kind":"builtin_snapshot","name":"simple"}`; older sessions without `name` still load), `repo_snapshot` (with a
 clone-relative `relative_path`), and `inline_snapshot`. A `file` reference is
 live: edits to the file are picked up on the next load or execution reload.
 Snapshot references read only the session-owned `sessions/<session-id>/config.yaml`
@@ -515,17 +528,27 @@ The interactive session list shows a menu of actions depending on the session's 
 
 cruise resolves the workflow config as follows:
 
-1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown. The special value `-c __builtin__` explicitly selects the built-in default workflow (see 4. below) even when config files exist.
+1. **`-c/--config` flag** -- highest priority. The specified file must exist or cruise exits with an error. No prompt is shown. The special value `-c __builtin__` (alias `builtin:default`) explicitly selects the built-in default workflow even when config files exist. `-c builtin:<name>` selects another built-in workflow by name. The catalog is fixed:
+
+   | Name | Description |
+   |------|-------------|
+   | `default` | Plan, implement, verify, and open a pull request (`builtin/default.yaml`) |
+   | `simple` | Implement, test, auto-fix failures, then commit |
+   | `review` | Review the changes and report findings without editing files |
+
+   Interactive selectors (CLI, TUI, WebUI) list every built-in with its description after the config files, default first. Non-interactive resolution with no config file still uses `default`. `cruise workflow list` prints the catalog.
+
+   To customize one, copy it with `cruise workflow eject <name> [--to user|project]`. `--to user` (the default) writes `$XDG_CONFIG_HOME/cruise/workflows/<name>.yaml`, and `--to project` writes `./.cruise/<name>.yaml`. Eject never overwrites an existing file and fails instead.
 2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
-   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. A **Built-in default** entry is always offered at the end of the list, so the built-in default remains selectable even when config files are found; with only that entry present, it is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
+   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with the default first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at the default. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
+The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers every built-in workflow with its description alongside *Auto* so a session can be pinned to an embedded workflow regardless of discovered files.
 
 ## Config File Reference
 

@@ -1,0 +1,10 @@
+description: Review the changes and report findings without editing files
+command:
+  - claude
+  - -p
+
+steps:
+  review:
+    prompt: |
+      Review the changes for: {input}
+      Report findings without editing any files.
