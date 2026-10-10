@@ -205,6 +205,7 @@ Commands:
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine and open it in the default browser
+  workflow     Author workflow YAML files
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -216,6 +217,19 @@ Options:
       --repo <OWNER/REPO>      GitHub repository (owner/repository) to clone into a temporary directory for planning and execution
       --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
 ```
+
+#### `cruise workflow generate`
+
+```
+cruise workflow generate <DESCRIPTION> --name <NAME> [--user] [--config <PATH>]
+```
+
+Drafts a new workflow YAML from a description. The backend is chosen by the normal config resolution (`--config`, `CRUISE_CONFIG`, local files, user workflows, built-in default). The file is saved to `./.cruise/<NAME>.yaml`, or to the user workflow directory (`~/.config/cruise/workflows/`) with `--user`. `NAME` may contain only letters, digits, `-` and `_`.
+
+- The reply must be raw YAML (no Markdown fence). Each candidate is parsed and run through the same preflight as `cruise exec` (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
+- The validated YAML is saved exactly as returned. An existing file with the same name is never overwritten, and the backend is not called in that case.
+- The generated workflow is not run and no session is created.
+- Validation does not prove that the commands are safe or that the workflow succeeds. The selected agent backend keeps its normal permissions, so it may modify the repository during generation. Review the YAML before running it.
 
 #### `cruise ssh`
 

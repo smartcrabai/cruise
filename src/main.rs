@@ -74,6 +74,7 @@ mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
 mod workflow_cmd;
+mod workflow_generate;
 mod workspace;
 mod worktree;
 mod worktree_pr;
@@ -117,6 +118,9 @@ async fn run() -> error::Result<()> {
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
             workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
+            workflow_generate::run(args).await
         }
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(

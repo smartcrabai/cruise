@@ -5,6 +5,10 @@ description: Use when running, operating, or troubleshooting the `cruise` CLI or
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
 
+## Generating workflow YAML
+
+`cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
@@ -44,6 +48,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI | `cruise webui` |
+| Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
