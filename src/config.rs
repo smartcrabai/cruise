@@ -2469,7 +2469,13 @@ steps:
             .collect();
         assert_eq!(
             analyzers,
-            vec!["plan-implementation", "wiring", "simplify", "review", "docs"]
+            vec![
+                "plan-implementation",
+                "wiring",
+                "simplify",
+                "review",
+                "docs"
+            ]
         );
 
         // And: any applied fix re-enters the loop at the analyzers.
