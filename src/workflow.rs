@@ -176,6 +176,8 @@ pub struct CompiledWorkflow {
     pub cleanup_after_pr: bool,
     /// Whether prompt turns may use jcode's macOS desktop-control tool by default.
     pub computer_use: bool,
+    /// Default permission mode for prompt steps.
+    pub permission: crate::config::PermissionMode,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -205,6 +207,7 @@ impl CompiledWorkflow {
             mcp_servers: self.mcp_servers.clone(),
             cleanup_after_pr: self.cleanup_after_pr,
             computer_use: self.computer_use,
+            permission: self.permission,
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -255,6 +258,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         mcp_servers: config.mcp_servers,
         cleanup_after_pr: config.cleanup_after_pr,
         computer_use: config.computer_use,
+        permission: config.permission,
         steps,
         after_pr,
         invocations,
@@ -289,6 +293,11 @@ fn expand_steps(
             if step.computer_use.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.permission.is_some() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses permission on a group call; set it on the inner prompt step"
                 )));
             }
 
@@ -1304,5 +1313,41 @@ after-pr:
             msg.contains("old membership style") || msg.contains("groups.<name>.steps"),
             "expected migration hint in: {msg}"
         );
+    }
+
+    #[test]
+    fn test_permission_inherits_through_groups_and_after_pr() {
+        let compiled = compiled(
+            "sdk: jcode\npermission: read-only\ngroups:\n  g:\n    steps:\n      inner:\n        prompt: inner\n      keep:\n        prompt: keep\n        permission: edit\nsteps:\n  run:\n    group: g\n  plain:\n    prompt: plain\nafter-pr:\n  pub:\n    prompt: pub\n  pub2:\n    prompt: pub2\n    permission: full\n",
+        );
+        assert_eq!(compiled.permission, crate::config::PermissionMode::ReadOnly);
+        assert_eq!(compiled.steps["run/inner"].permission, None);
+        assert_eq!(
+            compiled.steps["run/keep"].permission,
+            Some(crate::config::PermissionMode::Edit)
+        );
+        let after = compiled.to_after_pr_compiled();
+        assert_eq!(after.permission, crate::config::PermissionMode::ReadOnly);
+        assert_eq!(
+            after.steps["pub2"].permission,
+            Some(crate::config::PermissionMode::Full)
+        );
+    }
+
+    #[test]
+    fn test_compile_defaults_permission_to_full() {
+        let compiled = compiled("steps:\n  a:\n    prompt: hi\n");
+        assert_eq!(compiled.permission, crate::config::PermissionMode::Full);
+    }
+
+    #[test]
+    fn test_compile_rejects_permission_on_group_call_site() {
+        let result = compile(parsed(
+            "groups:\n  g:\n    steps:\n      i:\n        prompt: hi\nsteps:\n  run:\n    group: g\n    permission: read-only\n",
+        ));
+        let Err(error) = result else {
+            panic!("group call sites cannot set permission");
+        };
+        assert!(error.to_string().contains("permission"));
     }
 }

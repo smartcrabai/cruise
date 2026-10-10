@@ -1,6 +1,6 @@
 # `after-pr`: steps that run after PR creation
 
-Steps that run automatically after `cruise run` creates a pull request via `gh pr create`. The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
+Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does). The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
 
 ## Basics
 
@@ -56,6 +56,18 @@ after-pr:
 ```
 
 Rules: only directly in `after-pr` (not in `steps`, groups, or `parallel` children), exactly one of `prompt` / `prompt_file`, `timeout` required, `bots` unique, and no `command` / `option` / `parallel` / `group` / `workflow_call`.
+
+## Opt-in auto-merge
+
+Cruise never merges automatically and the built-in `after-pr` has no merge step. To have GitHub auto-merge the PR once its requirements are met, write the command yourself:
+
+```yaml
+after-pr:
+  auto-merge:
+    command: "gh pr merge {pr.number} --auto --squash"
+```
+
+This runs only because you wrote it in your workflow. Because `after-pr` errors are downgraded to warnings (see below), a failing `gh pr merge --auto` (for example when auto-merge is disabled for the repository) will not fail the run. For a manual merge, use **Merge PR** in `cruise list`, the TUI, or the WebUI.
 
 ## Constraints
 

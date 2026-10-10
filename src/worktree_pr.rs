@@ -156,8 +156,15 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let pr_attempt =
-        attempt_pr_creation(ctx, &session.input, &pr_title, &pr_body, cancel_token).await?;
+    let pr_attempt = attempt_pr_creation(
+        ctx,
+        crate::forge::session_forge(session),
+        &session.input,
+        &pr_title,
+        &pr_body,
+        cancel_token,
+    )
+    .await?;
     pr_attempt.report();
     match pr_attempt {
         PrAttemptOutcome::Created { url, .. } => {
@@ -264,6 +271,7 @@ async fn generate_pr_description(
                 on_session_id: None,
                 resume: None,
                 computer_use: false,
+                permission: crate::config::PermissionMode::Full,
             })
             .await
         {
@@ -336,6 +344,7 @@ async fn generate_pr_via_sdk_tool(
             on_session_id: None,
             resume: None,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
         })
         .await
     {
@@ -441,6 +450,7 @@ pub(crate) fn build_pr_prompt(
 
 pub(crate) async fn attempt_pr_creation(
     ctx: &worktree::WorktreeContext,
+    forge: crate::forge::ForgeKind,
     message: &str,
     title: &str,
     body: &str,
@@ -458,7 +468,16 @@ pub(crate) async fn attempt_pr_creation(
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
     push_branch(&ctx.path, &ctx.branch, cancel_token).await?;
-    match create_pr(&ctx.path, &ctx.branch, trimmed_title, body, cancel_token).await {
+    match create_pr(
+        forge,
+        &ctx.path,
+        &ctx.branch,
+        trimmed_title,
+        body,
+        cancel_token,
+    )
+    .await
+    {
         Ok(url) => Ok(PrAttemptOutcome::Created {
             url,
             commit_outcome,
@@ -649,12 +668,16 @@ async fn push_branch(
 /// Create a draft PR using `gh pr create --draft`. Uses `--title`/`--body` if provided, otherwise
 /// `--fill`. Falls back to `gh pr view` if a PR already exists.
 async fn create_pr(
+    forge: crate::forge::ForgeKind,
     worktree_path: &Path,
     branch: &str,
     title: &str,
     body: &str,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<String> {
+    if forge == crate::forge::ForgeKind::GitLab {
+        return create_mr(worktree_path, branch, title, body, cancel_token).await;
+    }
     let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
@@ -690,6 +713,69 @@ async fn create_pr(
     Err(CruiseError::Other(format!(
         "gh pr create failed: {create_stderr}; gh pr view also failed: {view_stderr}"
     )))
+}
+
+/// Create a draft GitLab MR using `glab mr create --draft`. Falls back to `glab mr view`
+/// if a merge request already exists for the branch.
+async fn create_mr(
+    worktree_path: &Path,
+    branch: &str,
+    title: &str,
+    body: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<String> {
+    let mut args = vec![
+        "mr",
+        "create",
+        "--source-branch",
+        branch,
+        "--draft",
+        "--yes",
+    ];
+    if title.is_empty() {
+        args.push("--fill");
+    } else {
+        args.extend(["--title", title, "--description", body]);
+    }
+    let output = crate::step::command::run_process_output_cancelled(
+        "glab",
+        &args,
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
+    if output.status.success()
+        && let Some(url) = extract_mr_url(&output.stdout)
+    {
+        return Ok(url);
+    }
+    let fallback = crate::step::command::run_process_output_cancelled(
+        "glab",
+        &["mr", "view", branch, "--output", "json", "--jq", ".web_url"],
+        Some(worktree_path),
+        cancel_token,
+    )
+    .await?;
+    if fallback.status.success()
+        && let Some(url) = gh_output_line(&fallback.stdout)
+    {
+        return Ok(url);
+    }
+    let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
+    Err(CruiseError::Other(format!(
+        "glab mr create failed: {create_stderr}; glab mr view also failed: {view_stderr}"
+    )))
+}
+
+/// Find the merge request URL in `glab mr create` stdout (falls back to the last line).
+fn extract_mr_url(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("http") && l.contains("/merge_requests/"))
+        .map(ToString::to_string)
+        .or_else(|| gh_output_line(bytes).and_then(|l| l.lines().last().map(str::to_string)))
 }
 
 /// Trim and return a non-empty line from `gh` stdout bytes, or `None`.
@@ -802,6 +888,30 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn test_extract_last_path_segment_gitlab_mr_url_variants() {
+        assert_eq!(
+            extract_last_path_segment("https://host/group/subgroup/project/-/merge_requests/42"),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            extract_last_path_segment(
+                "https://host/group/subgroup/project/-/merge_requests/42?x=1#note_3"
+            ),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_mr_url_finds_url_among_output_lines() {
+        let out = b"Creating draft merge request\n\nhttps://gitlab.com/g/p/-/merge_requests/5\n";
+        assert_eq!(
+            extract_mr_url(out),
+            Some("https://gitlab.com/g/p/-/merge_requests/5".to_string())
+        );
+        assert_eq!(extract_mr_url(b"  \n"), None);
+    }
+
     // --- ensure_gh_available ------------------------------------------------
 
     /// Given: fake `gh` that responds to --version with exit 0
@@ -912,6 +1022,7 @@ mod tests {
             mcp_servers: IndexMap::new(),
             cleanup_after_pr: false,
             computer_use: false,
+            permission: crate::config::PermissionMode::Full,
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

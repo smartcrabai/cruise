@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -289,7 +291,15 @@ fn render_info(
         ),
         labeled_line(
             app,
-            "PR       ",
+            if session
+                .pr_url
+                .as_deref()
+                .is_some_and(|u| u.contains("/-/merge_requests/"))
+            {
+                "MR       "
+            } else {
+                "PR/MR    "
+            },
             Span::raw(session.pr_url.as_deref().unwrap_or("—")),
         ),
         labeled_line(
@@ -699,7 +709,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Attachments => "Any images to attach? (optional; one path per line)",
         Step::Source => "Where is the code?",
         Step::WorkingDirectory => "Which directory? (blank = current directory)",
-        Step::Repository => "Which GitHub repository? (owner/name)",
+        Step::Repository => "Which repository? (owner/name, group/project, or URL)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
         Step::Workspace => "Where should cruise execute?",
@@ -764,7 +774,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Source => two_way(
             "Directory",
-            "GitHub repository (cloned with gh)",
+            "Repository (cloned with gh or glab)",
             form.source == SourceKind::GitHub,
         ),
         Step::Workspace => two_way(
@@ -1010,6 +1020,9 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
         Modal::Publish { trigger_cruise } => {
             render_publish_modal(frame, app, area, *trigger_cruise);
         }
+        Modal::MergePr { status, method } => {
+            render_merge_pr_modal(frame, app, area, status, *method);
+        }
         Modal::Palette { actions, selected } => {
             render_palette_modal(frame, app, area, actions, *selected);
         }
@@ -1053,6 +1066,40 @@ fn render_publish_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, trigger
         if trigger_cruise { "yes" } else { "no" }
     );
     render_text_modal(frame, app, area, 72, 8, "Publish", text);
+}
+
+fn render_merge_pr_modal(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    status: &crate::application::PrMergeStatus,
+    method: crate::application::PrMergeMethod,
+) {
+    use crate::application::PrMergeMethod;
+    let mut text = format!(
+        "State: {}\nMergeable: {}\nReview: {}\nChecks:",
+        status.state, status.mergeable, status.review_decision
+    );
+    if status.checks.is_empty() {
+        text.push_str(" none");
+    }
+    for check in &status.checks {
+        let _ = write!(text, "\n  {}: {}", check.name, check.status);
+    }
+    text.push_str("\n\nMethod:");
+    for (candidate, label) in [
+        (PrMergeMethod::Squash, "Squash"),
+        (PrMergeMethod::Merge, "Merge"),
+        (PrMergeMethod::Rebase, "Rebase"),
+    ] {
+        let mark = if candidate == method { ">" } else { " " };
+        let _ = write!(text, "\n {mark} {label}");
+    }
+    text.push_str("\n\n↑↓ method   Enter merge   Esc cancel");
+    let height = u16::try_from(status.checks.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(14);
+    render_text_modal(frame, app, area, 72, height, "Merge PR", text);
 }
 
 fn render_palette_modal(
@@ -1526,7 +1573,7 @@ mod tests {
         let mut state = crate::session::SessionState::new(
             "2026092100000000_00000000000000000000000000000001".to_string(),
             temp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "rendered TUI session".to_string(),
         );
         state.phase = phase;
@@ -2169,7 +2216,7 @@ mod tests {
             );
         }
         assert!(
-            !view.contains("GitHub repository"),
+            !view.contains("Repository (GitHub or GitLab)"),
             "directory sessions do not ask for a repository"
         );
         assert!(view.contains("Tab or Ctrl+Enter next"));
@@ -2239,7 +2286,7 @@ mod tests {
                     app.sessions.push(crate::session::SessionState::new(
                         "session-1".to_string(),
                         std::path::PathBuf::from("."),
-                        crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                        crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                         "task".to_string(),
                     ));
                 });
@@ -2261,7 +2308,7 @@ mod tests {
             app.sessions.push(crate::session::SessionState::new(
                 "session-1".to_string(),
                 std::path::PathBuf::from("."),
-                crate::session_config::SessionConfigRef::BuiltinSnapshot,
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "task".to_string(),
             ));
         });

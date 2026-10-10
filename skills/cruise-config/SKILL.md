@@ -16,14 +16,16 @@ cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p`
 
 Config files are resolved in this priority order:
 
-1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` selects the built-in default workflow even when config files exist
+1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` (or `builtin:default`) selects the built-in default workflow even when config files exist; `-c builtin:simple` / `builtin:review` select the other catalog workflows (`cruise workflow list`; copy one to edit with `cruise workflow eject <name> [--to user|project]`)
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/cruise.yaml` in the source tree, embedded at build time: test-first steps + verify-review group + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
+6. Built-in default (`builtin/default.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
+
+> `cruise workflow add owner/repo[/path][@ref]` installs a pinned, self-contained copy of a GitHub workflow into `~/.config/cruise/workflows/<name>.yaml` plus a `<name>.cruise-package.json` manifest. Hand-written YAMLs there are never touched by `update`/`remove`.
 
 > User workflow YAMLs left directly in `~/.config/cruise/` are no longer discovered. Cruise emits a one-time warning and tells you to move them into `~/.config/cruise/workflows/`.
 
@@ -91,3 +93,7 @@ After writing or editing a config, verify each of the following:
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
 12. **Retry loops**: Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
+
+## Generated configs
+
+`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
