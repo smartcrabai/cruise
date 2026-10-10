@@ -221,20 +221,21 @@ impl_start=$((impl_marker + 1))
 impl_end=$((impl_start + impl_len - 1))
 sed -n "${wt_start},${wt_end}p" "$default_cfg" | sed 's/^      //' > "$TMP/extracted-write-test-first.md"
 sed -n "${impl_start},${impl_end}p" "$default_cfg" | sed 's/^      //' > "$TMP/extracted-implement-after-tests.md"
-if diff -q "$TMP/extracted-write-test-first.md" prompts/write-test-first.md >/dev/null; then
+# Windows checkouts may carry CRLF endings (core.autocrlf); the embedded prompt
+# is LF-only, so the source is compared with carriage returns removed.
+tr -d '\r' < prompts/write-test-first.md > "$TMP/source-write-test-first.md"
+tr -d '\r' < prompts/implement-after-tests.md > "$TMP/source-implement-after-tests.md"
+if diff -q "$TMP/extracted-write-test-first.md" "$TMP/source-write-test-first.md" >/dev/null; then
   pass "resolve-config: write-test-first.md's prompt round-trips verbatim into the generated config"
 else
   fail "resolve-config: write-test-first.md's prompt round-trips verbatim into the generated config" \
-    "$(diff "$TMP/extracted-write-test-first.md" prompts/write-test-first.md)
-$(wc -c < "$TMP/extracted-write-test-first.md") vs $(wc -c < prompts/write-test-first.md) bytes
-$(head -c 120 "$TMP/extracted-write-test-first.md" | od -c | head -4)
-$(head -c 120 prompts/write-test-first.md | od -c | head -4)"
+    "$(diff "$TMP/extracted-write-test-first.md" "$TMP/source-write-test-first.md")"
 fi
-if diff -q "$TMP/extracted-implement-after-tests.md" prompts/implement-after-tests.md >/dev/null; then
+if diff -q "$TMP/extracted-implement-after-tests.md" "$TMP/source-implement-after-tests.md" >/dev/null; then
   pass "resolve-config: implement-after-tests.md's prompt round-trips verbatim into the generated config"
 else
   fail "resolve-config: implement-after-tests.md's prompt round-trips verbatim into the generated config" \
-    "$(diff "$TMP/extracted-implement-after-tests.md" prompts/implement-after-tests.md)"
+    "$(diff "$TMP/extracted-implement-after-tests.md" "$TMP/source-implement-after-tests.md")"
 fi
 
 # --- GITHUB_ACTION_PATH wins over the script-relative fallback ------------
@@ -607,6 +608,13 @@ SH
 # stub's "#!/usr/bin/env bash" shebang resolves bash via PATH), plus
 # mkdir/chmod/cat for the installer body itself -- and never gh, regardless
 # of what the host has installed.
+# Git for Windows cannot symlink POSIX binaries, and its copies do not start
+# without their DLLs, so this PATH isolation only exists on POSIX hosts.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "SKIP: install: a missing gh CLI (PATH isolation needs POSIX symlinks)"
+    ;;
+  *)
 new_case
 : > "$GITHUB_PATH"
 write_ok_installer
@@ -624,6 +632,8 @@ assert_nonzero_status "install: a missing gh CLI makes the step fail after a suc
   "$status" "status=$status output=$status_out"
 assert_contains "install: a missing gh CLI reports a clear ::error:: naming the cause" \
   "$status_out" "::error::gh CLI not found on PATH"
+    ;;
+esac
 
 # Lines/branches not independently exercised here (documented, not testable
 # hermetically): the case where BOTH the installer succeeds AND the freshly-
