@@ -16,6 +16,7 @@ struct Tui {
     _master: Box<dyn portable_pty::MasterPty + Send>,
     _root: TempDir,
     output: Arc<Mutex<Vec<u8>>>,
+    cursor_queries_answered: usize,
 }
 
 fn start_tui() -> Tui {
@@ -68,13 +69,33 @@ fn start_tui() -> Tui {
             }
         }
     });
-    std::thread::sleep(Duration::from_secs(3));
-    Tui {
+    let mut tui = Tui {
         child,
         writer,
         _master: pair.master,
         _root: root,
         output,
+        cursor_queries_answered: 0,
+    };
+    // crossterm blocks on the `ESC[6n` cursor-position query during startup, and
+    // ConPTY has no emulator to answer it, so answer as a terminal would.
+    let settle = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < settle {
+        answer_cursor_queries(&mut tui);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    tui
+}
+
+fn answer_cursor_queries(tui: &mut Tui) {
+    let queries = {
+        let bytes = tui.output.lock().unwrap_or_else(|error| error.into_inner());
+        String::from_utf8_lossy(&bytes).matches("\x1b[6n").count()
+    };
+    while tui.cursor_queries_answered < queries {
+        let _ = tui.writer.write_all(b"\x1b[1;1R");
+        let _ = tui.writer.flush();
+        tui.cursor_queries_answered += 1;
     }
 }
 
@@ -91,6 +112,7 @@ fn transcript(tui: &Tui) -> String {
 fn wait_for_exit(tui: &mut Tui) -> bool {
     let deadline = Instant::now() + EXIT_TIMEOUT;
     while Instant::now() < deadline {
+        answer_cursor_queries(tui);
         if matches!(tui.child.try_wait(), Ok(Some(_))) {
             return true;
         }
