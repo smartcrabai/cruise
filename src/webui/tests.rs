@@ -112,6 +112,27 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
 }
 
 #[test]
+fn publish_dialog_hides_trigger_checkbox_when_unsupported() {
+    let harness = harness();
+    let render = |supports: bool| {
+        harness
+            .state
+            .templates
+            .render(
+                "publish-dialog",
+                &serde_json::json!({
+                    "id": "s1",
+                    "submitUrl": "/webui/sessions/s1/publish",
+                    "supportsTrigger": supports,
+                }),
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+    };
+    assert!(render(true).contains("triggerCruise"));
+    assert!(!render(false).contains("triggerCruise"));
+}
+
+#[test]
 fn templates_render_all_fixtures() {
     let harness = harness();
     let root = webui_root().join("templates");

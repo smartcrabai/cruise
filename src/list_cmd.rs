@@ -208,21 +208,27 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     }
                     crate::platform::reclaim_terminal_foreground();
                     let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
-                    let trigger_cruise = match inquire::Confirm::new(
-                        "Post an @cruise run comment after creating the issue?",
-                    )
-                    .with_default(default_trigger_cruise)
-                    .prompt()
+                    let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session)
                     {
-                        Ok(answer) => answer,
-                        Err(
-                            InquireError::OperationCanceled | InquireError::OperationInterrupted,
-                        ) => {
-                            continue;
+                        match inquire::Confirm::new(
+                            "Post an @cruise run comment after creating the issue?",
+                        )
+                        .with_default(default_trigger_cruise)
+                        .prompt()
+                        {
+                            Ok(answer) => answer,
+                            Err(
+                                InquireError::OperationCanceled
+                                | InquireError::OperationInterrupted,
+                            ) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(CruiseError::Other(format!("selection error: {e}")));
+                            }
                         }
-                        Err(e) => {
-                            return Err(CruiseError::Other(format!("selection error: {e}")));
-                        }
+                    } else {
+                        false
                     };
                     match crate::issue_publish::publish_plan_issue_and_delete(
                         &manager,
@@ -663,16 +669,8 @@ fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Res
 }
 
 fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
-    let status = std::process::Command::new("gh")
-        .args(["pr", "view", pr_url, "--web"])
-        .status()
-        .map_err(|e| CruiseError::Other(format!("failed to run gh: {e}")))?;
-    if !status.success() {
-        return Err(CruiseError::Other(format!(
-            "gh pr view --web exited with {status}"
-        )));
-    }
-    Ok(())
+    crate::platform::open_url(pr_url)
+        .map_err(|e| CruiseError::Other(format!("failed to open {pr_url}: {e}")))
 }
 
 #[cfg(test)]
@@ -1448,86 +1446,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // open_pr_in_browser
     // -----------------------------------------------------------------------
-
-    #[cfg(unix)]
-    #[test]
-    fn test_open_pr_in_browser_calls_gh_view_web() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::{fs, io::Read};
-
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let log_path = tmp.path().join("gh.log");
-
-        // fake gh: records args to log file then exits 0
-        let script_path = bin_dir.join("gh");
-        fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
-                log_path.display()
-            ),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut perms = fs::metadata(&script_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
-
-        let url = "https://github.com/owner/repo/pull/42";
-        let result = open_pr_in_browser(url);
-
-        assert!(result.is_ok(), "should succeed: {result:?}");
-
-        // Verify log: "pr view <url> --web" was passed
-        let mut log_content = String::new();
-        fs::File::open(&log_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .read_to_string(&mut log_content)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            log_content.contains("pr view"),
-            "gh should receive 'pr view': {log_content}"
-        );
-        assert!(
-            log_content.contains(url),
-            "gh should receive the PR url: {log_content}"
-        );
-        assert!(
-            log_content.contains("--web"),
-            "gh should receive '--web': {log_content}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_open_pr_in_browser_gh_failure_returns_error() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // fake gh: always exits 1
-        let script_path = bin_dir.join("gh");
-        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
-        let mut perms = fs::metadata(&script_path)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
-
-        let _guard = crate::test_binary_support::PathEnvGuard::prepend(&bin_dir);
-
-        let result = open_pr_in_browser("https://github.com/owner/repo/pull/1");
-
-        assert!(result.is_err(), "should fail when gh exits non-zero");
-    }
 
     // -----------------------------------------------------------------------
     // AwaitingApproval phase -- actions and labels

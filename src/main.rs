@@ -37,6 +37,7 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
+mod forge;
 mod graph;
 mod herdr;
 mod issue_publish;

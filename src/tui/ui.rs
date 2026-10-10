@@ -291,7 +291,15 @@ fn render_info(
         ),
         labeled_line(
             app,
-            "PR       ",
+            if session
+                .pr_url
+                .as_deref()
+                .is_some_and(|u| u.contains("/-/merge_requests/"))
+            {
+                "MR       "
+            } else {
+                "PR/MR    "
+            },
             Span::raw(session.pr_url.as_deref().unwrap_or("—")),
         ),
         labeled_line(
@@ -701,7 +709,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Attachments => "Any images to attach? (optional; one path per line)",
         Step::Source => "Where is the code?",
         Step::WorkingDirectory => "Which directory? (blank = current directory)",
-        Step::Repository => "Which GitHub repository? (owner/name)",
+        Step::Repository => "Which repository? (owner/name, group/project, or URL)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
         Step::Workspace => "Where should cruise execute?",
@@ -766,7 +774,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Source => two_way(
             "Directory",
-            "GitHub repository (cloned with gh)",
+            "Repository (cloned with gh or glab)",
             form.source == SourceKind::GitHub,
         ),
         Step::Workspace => two_way(
@@ -2208,7 +2216,7 @@ mod tests {
             );
         }
         assert!(
-            !view.contains("GitHub repository"),
+            !view.contains("Repository (GitHub or GitLab)"),
             "directory sessions do not ask for a repository"
         );
         assert!(view.contains("Tab or Ctrl+Enter next"));

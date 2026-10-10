@@ -14,6 +14,7 @@ pub struct PublishedIssue {
 /// (`ssh://git@github.com/owner/repo[.git]`), and the scp-like syntax
 /// (`git@github.com:owner/repo[.git]`). Returns `None` for non-GitHub hosts
 /// or input that doesn't match any of these forms.
+#[cfg(test)]
 #[must_use]
 pub fn parse_github_repo_from_origin(origin_url: &str) -> Option<String> {
     let trimmed = origin_url.trim();
@@ -47,32 +48,34 @@ pub fn parse_github_repo_from_origin(origin_url: &str) -> Option<String> {
 
 /// Resolve the `owner/repo` slug for `session`: its recorded `repo` field if
 /// set, otherwise the `origin` remote of its `base_dir` git checkout.
-fn resolve_repo(session: &SessionState) -> Result<String> {
+fn resolve_repo(session: &SessionState) -> Result<(crate::forge::ForgeKind, String)> {
     if let Some(repo) = &session.repo {
-        return Ok(repo.clone());
+        let ctx = crate::forge::resolve_repo_locator_env(repo)?;
+        return Ok((ctx.kind, repo.clone()));
     }
 
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&session.base_dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| CruiseError::Other(format!("failed to run git remote get-url origin: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::Other(format!(
-            "failed to determine GitHub repository: git remote get-url origin failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    let origin_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    parse_github_repo_from_origin(&origin_url).ok_or_else(|| {
+    let origin_url = crate::forge::origin_url(&session.base_dir).map_err(CruiseError::Other)?;
+    let forced = crate::forge::forge_override_from_env()?;
+    let ctx = crate::forge::resolve_remote(&origin_url, forced).map_err(|e| {
         CruiseError::Other(format!(
-            "could not determine GitHub repository from origin URL: {origin_url}"
+            "could not determine repository from origin URL: {origin_url}: {e}"
         ))
-    })
+    })?;
+    let repo = match ctx.kind {
+        crate::forge::ForgeKind::GitHub => ctx.repository,
+        crate::forge::ForgeKind::GitLab if ctx.host == "gitlab.com" => ctx.repository,
+        crate::forge::ForgeKind::GitLab => format!("{}/{}", ctx.host, ctx.repository),
+    };
+    Ok((ctx.kind, repo))
+}
+
+/// Whether the `@cruise run` trigger comment is available for `session`'s forge (GitHub only).
+#[must_use]
+pub fn supports_trigger_cruise(session: &SessionState) -> bool {
+    !matches!(
+        resolve_repo(session),
+        Ok((crate::forge::ForgeKind::GitLab, _))
+    )
 }
 
 /// Publish a session's generated plan as a GitHub issue, then delete the
@@ -103,7 +106,12 @@ pub fn publish_plan_issue_and_delete(
     mut session: SessionState,
     trigger_cruise: bool,
 ) -> Result<PublishedIssue> {
-    let repo = resolve_repo(&session)?;
+    let (forge, repo) = resolve_repo(&session)?;
+    if forge == crate::forge::ForgeKind::GitLab && trigger_cruise {
+        return Err(CruiseError::Other(
+            "triggering `@cruise run` is not supported for GitLab repositories".to_string(),
+        ));
+    }
 
     let url = if let Some(existing_url) = session.published_issue_url.clone() {
         existing_url
@@ -128,30 +136,46 @@ pub fn publish_plan_issue_and_delete(
             .join("issue-body.md");
         std::fs::write(&body_path, &plan_content)?;
 
-        let output = std::process::Command::new("gh")
+        let (program, body_flag) = match forge {
+            crate::forge::ForgeKind::GitHub => ("gh", "--body-file"),
+            crate::forge::ForgeKind::GitLab => ("glab", "--description-file"),
+        };
+        let output = std::process::Command::new(program)
             .arg("issue")
             .arg("create")
             .arg("--repo")
             .arg(&repo)
             .arg("--title")
             .arg(session.title_or_input())
-            .arg("--body-file")
+            .arg(body_flag)
             .arg(&body_path)
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|e| CruiseError::Other(format!("failed to run gh issue create: {e}")))?;
+            .map_err(|e| {
+                CruiseError::Other(format!("failed to run {program} issue create: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(CruiseError::Other(format!(
-                "gh issue create failed: {}",
+                "{program} issue create failed: {}",
                 stderr.trim()
             )));
         }
 
-        let url = gh_output_line(&output.stdout).ok_or_else(|| {
-            CruiseError::Other("gh issue create succeeded but printed no URL".to_string())
-        })?;
+        let url = gh_output_line(&output.stdout)
+            .and_then(|out| {
+                out.lines()
+                    .rev()
+                    .find(|l| l.trim().starts_with("http"))
+                    .map(|l| l.trim().to_string())
+                    .or(Some(out))
+            })
+            .ok_or_else(|| {
+                CruiseError::Other(format!(
+                    "{program} issue create succeeded but printed no URL"
+                ))
+            })?;
 
         session.published_issue_url = Some(url.clone());
         manager.save(&session)?;

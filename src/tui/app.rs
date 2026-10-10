@@ -2598,6 +2598,7 @@ impl TuiApp {
             SessionAction::Publish => {
                 let trigger_cruise = self.active_session().is_some_and(|session| {
                     matches!(&session.phase, crate::session::SessionPhase::Planned)
+                        && crate::issue_publish::supports_trigger_cruise(session)
                 });
                 self.modal = Some(Modal::Publish { trigger_cruise });
             }

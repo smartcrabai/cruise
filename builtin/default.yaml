@@ -731,10 +731,16 @@ steps:
 after-pr:
   pr-ready:
     command: |-
-      gh pr ready {pr.number}
+      case "{pr.url}" in
+        */-/merge_requests/*) glab mr update {pr.number} --ready ;;
+        *) gh pr ready {pr.number} ;;
+      esac
   sync-base:
     command: |
-      base=$(gh pr view {pr.number} --json baseRefName -q '.baseRefName')
+      case "{pr.url}" in
+        */-/merge_requests/*) base=$(glab mr view {pr.number} --output json | jq -r '.target_branch') ;;
+        *) base=$(gh pr view {pr.number} --json baseRefName -q '.baseRefName') ;;
+      esac
       git fetch origin "$base"
       git merge "origin/$base" --no-edit
   resolve-conflict:
@@ -750,13 +756,36 @@ after-pr:
       git push
   wait-ci:
     command: |-
-      gh pr checks {pr.number} --watch
+      case "{pr.url}" in
+        */-/merge_requests/*)
+          while :; do
+            status=$(glab ci get --merge-request {pr.number} --output json | jq -r '.status')
+            case "$status" in
+              success) exit 0 ;;
+              running|pending|created|waiting_for_resource|preparing|scheduled) ;;
+              *)
+                log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
+                : > "$log"
+                glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json \
+                  | jq -r '.id as $p | (.jobs // [])[] | select(.status == "failed") | "\($p) \(.id)"' \
+                  | while read -r pid jid; do
+                      echo "=== job $jid (pipeline $pid) ===" >> "$log"
+                      glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
+                    done
+                exit 1 ;;
+            esac
+            sleep 15
+          done ;;
+        *) gh pr checks {pr.number} --watch ;;
+      esac
   fix-ci-error:
     skip: prev.success
     allow_commit: true
     prompt: |
-      The GitHub Actions CI for PR #{pr.number} is failing.
-      Identify the failing check with `gh pr checks {pr.number}`,
+      The CI for PR/MR #{pr.number} ({pr.url}) is failing.
+      If the URL is a GitLab merge request (contains `/-/merge_requests/`), the failed job
+      traces were collected in the file `$(git rev-parse --git-dir)/cruise-ci-traces.log`. Read it and fix the cause.
+      Otherwise (GitHub), identify the failing check with `gh pr checks {pr.number}`,
       check the detailed logs with `gh run view <run-id> --log-failed` or similar, and fix the cause.
       After fixing it, update the PR branch with git add / commit / push.
     if:

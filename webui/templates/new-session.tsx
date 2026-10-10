@@ -22,7 +22,7 @@ export default function NewSession(props) {
           <label class="flex items-center gap-2 cursor-pointer">
             {!props.directorySelected && <input type="radio" name="sourceMode" value="repo" checked hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
             {props.directorySelected && <input type="radio" name="sourceMode" value="repo" hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
-            <span class="text-sm text-gray-700 dark:text-gray-300">GitHub Repository</span>
+            <span class="text-sm text-gray-700 dark:text-gray-300">Repository (GitHub or GitLab)</span>
           </label>
         </div>
       </div>

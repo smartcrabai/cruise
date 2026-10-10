@@ -111,7 +111,7 @@ impl Step {
             Self::Attachments => "Images",
             Self::Source => "Source",
             Self::WorkingDirectory => "Working directory",
-            Self::Repository => "GitHub repository",
+            Self::Repository => "Repository (GitHub or GitLab)",
             Self::Config => "Workflow config",
             Self::SkippedSteps => "Skipped steps",
             Self::Workspace => "Workspace",
@@ -466,7 +466,7 @@ impl NewSessionForm {
             },
             Step::Source => match self.source {
                 SourceKind::Directory => "Directory",
-                SourceKind::GitHub => "GitHub repository",
+                SourceKind::GitHub => "Repository (GitHub or GitLab)",
             }
             .to_string(),
             Step::WorkingDirectory => nonempty(&self.working_dir.text())

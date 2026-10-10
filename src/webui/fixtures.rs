@@ -404,6 +404,7 @@ fn form_fixtures() -> Vec<(&'static str, Value)> {
             value(&PublishDialogVm {
                 id: "s1".to_string(),
                 submit_url: "/webui/sessions/s1/publish".to_string(),
+                supports_trigger: true,
             }),
         ),
     ]
