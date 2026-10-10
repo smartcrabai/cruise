@@ -48,6 +48,7 @@ The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 - `--port <PORT>` -- TCP port to listen on (default `8484`).
 - `--no-open` -- do not open the browser automatically.
 - `--webui-dir <DIR>` -- serve `templates/` and `static/` from disk for development. For example, `cruise webui --webui-dir webui`; templates are re-read on every request, so edit and reload without restarting.
+- `Ctrl-C` -- stops the server. Active operations are cancelled (sessions become Suspended), the server exits within about 10 seconds, and a second `Ctrl-C` quits immediately.
 
 The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline.
 
