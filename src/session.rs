@@ -4350,7 +4350,7 @@ mod tests {
         SessionState::new_draft(
             "20260830000002".to_string(),
             PathBuf::from("/tmp/repo"),
-            crate::session_config::SessionConfigRef::BuiltinSnapshot,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             input.to_string(),
         )
     }
