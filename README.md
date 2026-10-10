@@ -516,7 +516,7 @@ cruise resolves the workflow config as follows:
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. A **Built-in default** entry is always offered at the end of the list, so the built-in default remains selectable even when config files are found; with only that entry present, it is auto-picked. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/cruise.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
+4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
 The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers **Built-in default** alongside *Auto* so a session can be pinned to the embedded default regardless of discovered files.
 
