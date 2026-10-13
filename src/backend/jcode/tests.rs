@@ -189,6 +189,7 @@ fn send_text_after_accept<W: Write>(writer: &mut W, session_id: &str) {
     send_event(
         jcode_sdk::ApiEvent::TurnDone {
             session_id: session_id.to_string(),
+            pending_soft_interrupts: None,
         },
         writer,
     );
@@ -595,6 +596,7 @@ fn cancellation_requests_session_cancel_before_returning() {
             send_event(
                 jcode_sdk::ApiEvent::TurnDone {
                     session_id: session_id.clone(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );
