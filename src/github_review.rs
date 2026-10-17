@@ -753,9 +753,9 @@ mod tests {
 
     struct Fixture {
         tmp: TempDir,
-        _lock: crate::test_support::ProcessLock,
         _path: crate::test_support::EnvGuard,
         _dir: crate::test_support::EnvGuard,
+        _lock: crate::test_support::ProcessLock,
     }
 
     impl Fixture {
@@ -794,9 +794,9 @@ esac
             let dir = crate::test_support::EnvGuard::set("GH_FIXTURE_DIR", tmp.path());
             let f = Self {
                 tmp,
-                _lock: lock,
                 _path: path,
                 _dir: dir,
+                _lock: lock,
             };
             f.write("head.txt", OID);
             f.reviews(&[]);

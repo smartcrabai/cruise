@@ -1030,6 +1030,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn command_backend_reports_selected_or_default_model_without_mixing_into_output() {
+        let _process_lock = crate::test_support::lock_process();
+
         for (model, expected_notice) in [
             (
                 Some("command/provider/model:free:xhigh"),

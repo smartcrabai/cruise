@@ -5294,8 +5294,8 @@ mod merge_pr_tests {
         gh: FakeGh,
         app: CruiseApplication,
         manager: SessionManager,
-        _lock: crate::test_support::ProcessLock,
         _path: crate::test_support::EnvGuard,
+        _lock: crate::test_support::ProcessLock,
     }
 
     fn fixture() -> Fixture {
@@ -5311,8 +5311,8 @@ mod merge_pr_tests {
             gh,
             app,
             manager,
-            _lock: lock,
             _path: path,
+            _lock: lock,
         }
     }
 

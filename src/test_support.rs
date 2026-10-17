@@ -8,6 +8,7 @@ pub static GLOBAL_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 
 /// RAII guard that restores a single environment variable on drop.
 /// Caller must hold `GLOBAL_PROCESS_LOCK` to ensure no concurrent env access.
+/// For struct or tuple fields, store this guard before the lock: fields drop in declaration order.
 pub struct EnvGuard {
     key: &'static str,
     prev: Option<String>,
