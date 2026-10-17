@@ -1227,7 +1227,10 @@ pub(crate) async fn run_prompt_step(
             crate::status_eprintln!("  {}", style(resolved).dim());
         }
     }
-    let prompt = vars.resolve_prompt(&step.prompt)?;
+    let mut prompt = vars.resolve_prompt(&step.prompt)?;
+    if !allow_commit {
+        prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
+    }
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode =
