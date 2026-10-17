@@ -3092,10 +3092,10 @@ steps:
         // NOTE: Both variables are checked in the same step2 via env vars, before any subsequent
         // command step could overwrite prev.stderr.
         let yaml = r#"
-command: [sh, -c, "cat; printf noise >&2"]
+command: [sh, -c, "cat >/dev/null; printf chain_value; printf noise >&2"]
 steps:
   step1:
-    prompt: "chain_value"
+    prompt: "produce separate stdout and stderr"
   step2:
     command: 'sh -c "test \"$PREV_OUT\" = chain_value && test \"$PREV_ERR\" = noise"'
     env:
