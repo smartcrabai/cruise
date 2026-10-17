@@ -220,7 +220,7 @@ impl Fixture {
             ],
         );
         let config = self.root.path().join(format!("{id}.yaml"));
-        let yaml = "command: [sh, -c, 'cat']\nmodel: 'provider/tui-model:free:xhigh'\nsteps:\n  verify:\n    prompt: tui model response\n";
+        let yaml = "command: [sh, -c, 'cat >/dev/null; echo tui-model-output']\nmodel: 'provider/tui-model:free:xhigh'\nsteps:\n  verify:\n    prompt: tui model response\n";
         std::fs::write(&config, yaml).unwrap_or_else(|error| panic!("{error}"));
         let mut state = SessionState::new(
             id.to_string(),
@@ -1140,7 +1140,7 @@ fn run_all_displays_model_notice_in_the_tui_log_view() {
     tui.send(b"\r");
     tui.wait_for_output("Run All finished", Duration::from_secs(15));
     thread::sleep(Duration::from_millis(250));
-    tui.wait_for_output("tui model response", START_TIMEOUT);
+    tui.wait_for_output("tui-model-output", START_TIMEOUT);
     tui.wait_for_output("Model: provider/tui-model:free:xhigh", START_TIMEOUT);
     tui.send(b"q");
 

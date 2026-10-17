@@ -81,7 +81,7 @@ impl Fixture {
 fn parallel_cli_prints_each_child_stream_once_with_its_name() {
     let fixture = Fixture::new(
         r"
-command: [sh, -c, 'cat; echo prompt-stderr >&2']
+command: [sh, -c, 'cat >/dev/null; echo prompt-response; echo prompt-stderr >&2']
 steps:
   before:
     command: 'echo sequential-stdout; echo sequential-stderr >&2'
@@ -105,7 +105,7 @@ steps:
         "sequential-stderr",
         "command-stdout",
         "command-stderr",
-        "prompt-stdout",
+        "prompt-response",
         "prompt-stderr",
     ] {
         assert_eq!(
@@ -117,7 +117,7 @@ steps:
     for line in [
         "[checks/command_child] command-stdout",
         "[checks/command_child] command-stderr",
-        "[checks/prompt_child] prompt-stdout",
+        "[checks/prompt_child] prompt-response",
         "[checks/prompt_child] prompt-stderr",
     ] {
         assert!(

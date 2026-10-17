@@ -478,53 +478,53 @@ command:
   - -c
   - |
       prompt="$(cat)"
-      case "$prompt" in
-        initial-state)
+      case "$FIXTURE_STEP" in
+        baseline)
           printf '%s\n' 'BASELINE: café 🙂' 'line-2' '{{"key":"value"}}' '{{input}} {{file:other.md}} {{{{literal}}}}'
           printf '%s' 'PROMPT_STDERR' >&2
           ;;
-        final-check*)
+        verify)
           expected=$(cat <<'EOF'
-      final-check
-      BASELINE: café 🙂
+      BEGIN_ARTIFACT:BASELINE: café 🙂
       line-2
       {{"key":"value"}}
       {{input}} {{file:other.md}} {{{{literal}}}}
+      :END_ARTIFACT
       EOF
           )
           case "$prompt" in
-            *PROMPT_STDERR*) printf '%s' 'ARTIFACT_MIXED' ;;
-            *)
-              if [ "$prompt" = "$expected" ]; then
-                printf '%s' 'ARTIFACT_EXACT'
-              else
-                printf '%s' 'ARTIFACT_MISMATCH'
-              fi
+            *"$expected"*)
+              case "$prompt" in
+                *PROMPT_STDERR*) printf '%s' 'ARTIFACT_STDERR_MIXED' ;;
+                *) printf '%s' 'ARTIFACT_PRESERVED' ;;
+              esac
               ;;
+            *) printf '%s' 'ARTIFACT_MISMATCH' ;;
           esac
-          ;;
-        *)
-          printf '%s' "$prompt"
           ;;
       esac
 steps:
   baseline:
     prompt: initial-state
     output_file: initial-state.md
+    env:
+      FIXTURE_STEP: baseline
   interpose:
     command: printf command-result
   verify:
     prompt: |-
       final-check
-      {file:initial-state.md}
+      BEGIN_ARTIFACT:{file:initial-state.md}:END_ARTIFACT
+    env:
+      FIXTURE_STEP: verify
 "#,
     );
     let output = fixture.exec("task input");
     let text = terminal(&output);
     assert!(output.status.success(), "{text}");
     assert!(
-        text.contains("ARTIFACT_EXACT"),
-        "the saved artifact must preserve the exact response without stderr or recursive expansion: {text}"
+        text.contains("ARTIFACT_PRESERVED"),
+        "the inserted artifact data must remain intact, exclude stderr, and avoid recursive expansion: {text}"
     );
     assert!(
         !fixture.repo.join("initial-state.md").exists(),
@@ -613,10 +613,21 @@ command:
   - -c
   - |
       prompt="$(cat)"
-      case "$prompt" in
+      case "$FIXTURE_STEP" in
         first) printf 'FIRST_OUTPUT' ;;
         second) printf 'SECOND_OUTPUT' ;;
-        join*) printf '%s' "$prompt" ;;
+        join)
+          expected=$(cat <<'EOF'
+      join
+      BEGIN_FIRST:FIRST_OUTPUT:END_FIRST
+      BEGIN_SECOND:SECOND_OUTPUT:END_SECOND
+      EOF
+          )
+          case "$prompt" in
+            *"$expected"*) printf 'JOIN_ORDERED' ;;
+            *) printf 'JOIN_MISMATCH' ;;
+          esac
+          ;;
       esac
 steps:
   parallel:
@@ -624,20 +635,30 @@ steps:
       first:
         prompt: first
         output_file: first.md
+        env:
+          FIXTURE_STEP: first
       second:
         prompt: second
         output_file: second.md
+        env:
+          FIXTURE_STEP: second
   join:
     prompt: |-
       join
-      {file:first.md}
-      {file:second.md}
+      BEGIN_FIRST:{file:first.md}:END_FIRST
+      BEGIN_SECOND:{file:second.md}:END_SECOND
+    env:
+      FIXTURE_STEP: join
 "#,
     );
     let output = fixture.exec("input");
     let text = terminal(&output);
     assert!(output.status.success(), "{text}");
     assert!(text.contains("FIRST_OUTPUT"), "{text}");
+    assert!(
+        text.contains("JOIN_ORDERED"),
+        "the join prompt must contain both saved artifacts in child order: {text}"
+    );
     assert!(text.contains("SECOND_OUTPUT"), "{text}");
 }
 
@@ -810,8 +831,8 @@ command:
   - -c
   - |
       prompt="$(cat)"
-      case "$prompt" in
-        initial)
+      case "$FIXTURE_STEP" in
+        baseline)
           printf 'RESUME_BASELINE\n'
           touch .baseline-ready
           ;;
@@ -819,9 +840,14 @@ command:
           touch .hold-ready
           if [ -e .hold-seen ]; then printf 'HOLD_RESUMED' ; else touch .hold-seen; sleep 30; fi
           ;;
-        final*)
+        verify)
+          expected=$(cat <<'EOF'
+      BEGIN_RESUME:RESUME_BASELINE
+      :END_RESUME
+      EOF
+          )
           case "$prompt" in
-            *RESUME_BASELINE*) printf 'RESUME_OK' ;;
+            *"$expected"*) printf 'RESUME_OK' ;;
             *) printf 'RESUME_BAD' ;;
           esac
           ;;
@@ -830,12 +856,18 @@ steps:
   baseline:
     prompt: initial
     output_file: baseline.md
+    env:
+      FIXTURE_STEP: baseline
   hold:
     prompt: hold
+    env:
+      FIXTURE_STEP: hold
   verify:
     prompt: |-
       final
-      {file:baseline.md}
+      BEGIN_RESUME:{file:baseline.md}:END_RESUME
+    env:
+      FIXTURE_STEP: verify
 "#,
     );
     let mut child = fixture
