@@ -751,8 +751,8 @@ mod merge_pr {
         harness: Harness,
         session: SessionState,
         gh: FakeGh,
-        _lock: crate::test_support::ProcessLock,
         _path: crate::test_support::EnvGuard,
+        _lock: crate::test_support::ProcessLock,
     }
 
     fn merge_harness(phase: crate::session::SessionPhase, pr_url: Option<&str>) -> Merge {
@@ -775,8 +775,8 @@ mod merge_pr {
             harness,
             session,
             gh,
-            _lock: lock,
             _path: path,
+            _lock: lock,
         }
     }
 
