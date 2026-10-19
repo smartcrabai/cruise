@@ -264,7 +264,11 @@ fn list_shows_installed_provenance_sorted_and_ignores_manual_and_broken_manifest
     assert!(a < z, "not name-sorted: {shown}");
     assert!(shown.contains("org/repo"));
     assert!(shown.contains("main"));
-    assert!(shown.contains(SHA_1));
+    assert!(shown.contains(&SHA_1[..7]));
+    assert!(
+        !shown.contains(SHA_1),
+        "full SHA must be shortened: {shown}"
+    );
     assert!(shown.contains("alpha.yaml"));
     assert!(!shown.contains("manual"));
     assert!(!shown.contains("broken"));
