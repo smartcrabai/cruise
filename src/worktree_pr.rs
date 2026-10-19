@@ -132,6 +132,7 @@ pub async fn handle_worktree_pr_with_persistence(
     rate_limit_retries: usize,
     max_retries: usize,
     skipped_steps: &[String],
+    flags: &crate::flags::FlagValues,
     cancel_token: Option<&CancellationToken>,
     option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
@@ -188,6 +189,7 @@ pub async fn handle_worktree_pr_with_persistence(
                 rate_limit_retries,
                 ctx.path.as_path(),
                 skipped_steps,
+                flags,
                 cancel_token,
                 option_handler,
                 on_step_log,
@@ -377,6 +379,7 @@ async fn run_after_pr_steps(
     rate_limit_retries: usize,
     working_dir: &std::path::Path,
     skipped_steps: &[String],
+    flags: &crate::flags::FlagValues,
     cancel_token: Option<&CancellationToken>,
     option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
@@ -390,7 +393,7 @@ async fn run_after_pr_steps(
         &dag,
         &after_compiled,
         &dag.start,
-        skipped_steps,
+        &crate::flags::preflight_skips(compiled, flags, skipped_steps),
         "after-pr",
     )?;
     let ctx = ExecutionContext {
@@ -403,6 +406,7 @@ async fn run_after_pr_steps(
         config_reloader: None,
         working_dir: Some(working_dir),
         skipped_steps,
+        flags,
         on_step_log,
     };
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
@@ -433,6 +437,7 @@ pub(crate) async fn run_after_pr_steps_for_test(
         0,
         working_dir,
         &[],
+        &crate::flags::NO_FLAGS,
         None,
         option_handler,
         None,
@@ -1506,6 +1511,7 @@ mod tests {
             0,
             0,
             &[],
+            &crate::flags::NO_FLAGS,
             None,
             &crate::option_handler::NoOpOptionHandler,
             Some(&on_step_log),

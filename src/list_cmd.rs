@@ -261,6 +261,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         dry_run: false,
                         cleanup_after_pr: false,
                         no_cleanup_after_pr: false,
+                        flags: vec![],
                     };
                     return crate::run_cmd::run(run_args).await;
                 }
@@ -565,6 +566,44 @@ async fn edit_session_settings_interactive(
         CurrentStepUpdate::Unchanged
     };
 
+    // One Select per declared flag: keep the current value or set on/off.
+    let declared_flags = manager
+        .load_config(session)
+        .map(|config| crate::flags::choices(&config))
+        .unwrap_or_default();
+    let flags = if declared_flags.is_empty() {
+        None
+    } else {
+        let mut values = session.flags.clone();
+        for flag in &declared_flags {
+            let current = match session.flags.get(&flag.name) {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "unset",
+            };
+            let keep = format!("Keep (current: {current})");
+            let options = vec![keep.clone(), "on".to_string(), "off".to_string()];
+            let message = format!("Flag '{}':", flag.name);
+            let mut prompt = inquire::Select::new(&message, options);
+            if let Some(description) = flag.description.as_deref() {
+                prompt = prompt.with_help_message(description);
+            }
+            match prompt.prompt() {
+                Ok(choice) if choice == keep => {}
+                Ok(choice) => {
+                    values.insert(flag.name.clone(), choice == "on");
+                }
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(CruiseError::Other(format!("selection error: {e}")));
+                }
+            }
+        }
+        Some(values)
+    };
+
     let (updated, config_changed) = update_session_settings(
         manager,
         &session.id,
@@ -572,6 +611,7 @@ async fn edit_session_settings_interactive(
             config_path: None,
             skipped_steps,
             current_step_update,
+            flags,
         },
     )?;
     *session = updated;

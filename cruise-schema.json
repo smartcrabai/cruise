@@ -127,12 +127,28 @@
       "type": "boolean",
       "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false. Only available with the jcode backend on macOS (no effect on Linux); true is rejected for sdk: claude and command: backends."
     },
+    "flags": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_-]+$" },
+      "additionalProperties": { "$ref": "#/$defs/FlagConfig" },
+      "description": "Declared workflow flags. Steps reference them with `flag:`; values are supplied with --flag NAME=on|off."
+    },
     "retry": {
       "$ref": "#/$defs/RetryConfig",
       "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried on the same model, unless a workflow-level model array with fallback entries supplies an implicit policy."
     }
   },
   "$defs": {
+    "FlagConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the flag"
+        }
+      }
+    },
     "StepConfig": {
       "type": "object",
       "additionalProperties": false,
@@ -207,6 +223,10 @@
             }
           ],
           "description": "Whether to skip this step (boolean or variable reference)"
+        },
+        "flag": {
+          "type": "string",
+          "description": "Name of a workflow-level flag. The step runs only when the flag is on; when it is off the step is skipped."
         },
         "when": {
           "$ref": "#/$defs/WhenCondition",
@@ -337,7 +357,8 @@
               "output_file": { "type": "null" },
               "computer_use": { "type": "null" },
               "permission": { "type": "null" },
-              "allow_commit": { "const": false }
+              "allow_commit": { "const": false },
+              "flag": { "type": "null" }
             }
           }
         },

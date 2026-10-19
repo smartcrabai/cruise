@@ -17,12 +17,16 @@ pub struct SessionSettingsUpdate {
     pub config_path: Option<String>,
     pub skipped_steps: Vec<String>,
     pub current_step_update: CurrentStepUpdate,
+    /// Replacement flag values. `None` keeps the stored values (pruned to the
+    /// flags the resulting config still declares).
+    pub flags: Option<crate::flags::FlagValues>,
 }
 
 struct PreparedSettings {
     requested_config_path: Option<String>,
     skipped_steps: Vec<String>,
     current_step_update: CurrentStepUpdate,
+    flags: crate::flags::FlagValues,
     is_failed_or_suspended: bool,
     config_ref: SessionConfigRef,
     config: crate::config::WorkflowConfig,
@@ -56,6 +60,7 @@ fn prepare_settings(
         config_path: requested_config_path,
         skipped_steps,
         current_step_update,
+        flags: requested_flags,
     } = update;
 
     let (requested_config_path, config_ref, config) = match requested_config_path {
@@ -89,6 +94,18 @@ fn prepare_settings(
     }
 
     crate::config::validate_config(&config)?;
+    let flags = match requested_flags {
+        Some(values) => {
+            crate::flags::validate_names(&config, &values)?;
+            values
+        }
+        None => session
+            .flags
+            .iter()
+            .filter(|(name, _)| config.flags.contains_key(name.as_str()))
+            .map(|(name, on)| (name.clone(), *on))
+            .collect(),
+    };
     if let CurrentStepUpdate::Set(step_name) = &current_step_update {
         validate_current_step_name(&config, step_name, &skipped_steps)?;
     }
@@ -96,6 +113,7 @@ fn prepare_settings(
         requested_config_path,
         skipped_steps,
         current_step_update,
+        flags,
         is_failed_or_suspended,
         config_ref,
         config,
@@ -122,6 +140,7 @@ pub fn update_session_settings(
         requested_config_path,
         skipped_steps,
         current_step_update,
+        flags,
         is_failed_or_suspended,
         config_ref,
         config,
@@ -143,6 +162,7 @@ pub fn update_session_settings(
     }
     session.config = config_ref;
     session.skipped_steps = skipped_steps;
+    session.flags = flags;
     session.plan_error = None;
     session.updated_at = Some(current_iso8601());
 
@@ -255,6 +275,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -289,6 +310,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["build".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -322,6 +344,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["test".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -354,6 +377,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -390,6 +414,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -422,6 +447,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["build".to_string(), "test".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -461,6 +487,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["lint".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -502,6 +529,7 @@ mod tests {
                 config_path: Some(alt_config.to_string_lossy().into_owned()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -547,6 +575,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["lint".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -599,6 +628,7 @@ mod tests {
                 config_path: Some(crate::new_session_history::BUILTIN_CONFIG_KEY.to_string()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -639,6 +669,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -681,6 +712,7 @@ mod tests {
                 config_path: Some(String::new()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -746,6 +778,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -787,6 +820,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["s".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -828,6 +862,7 @@ mod tests {
                 config_path: Some("__builtin__".to_string()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -858,6 +893,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec!["s".to_string()],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -893,6 +929,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Set("s".to_string()),
+                flags: None,
             },
         );
 
@@ -936,6 +973,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Clear,
+                flags: None,
             },
         );
 
@@ -984,6 +1022,7 @@ mod tests {
                 config_path: Some(alt_config.to_string_lossy().into_owned()),
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Unchanged,
+                flags: None,
             },
         );
 
@@ -1017,6 +1056,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Set("nonexistent_step".to_string()),
+                flags: None,
             },
         );
 
@@ -1049,6 +1089,7 @@ mod tests {
                 config_path: None,
                 skipped_steps: vec![],
                 current_step_update: CurrentStepUpdate::Set("s".to_string()),
+                flags: None,
             },
         );
 
@@ -1057,5 +1098,109 @@ mod tests {
             result.is_err(),
             "Planned phase should reject current_step update"
         );
+    }
+    fn write_flag_config(dir: &std::path::Path, declare_other: bool) {
+        let other = if declare_other {
+            "  extra:\n    description: other\n"
+        } else {
+            ""
+        };
+        let other_step = if declare_other {
+            "  t:\n    command: echo t\n    flag: extra\n"
+        } else {
+            ""
+        };
+        fs::write(
+            dir.join("cruise.yaml"),
+            format!(
+                "command: [local]\nflags:\n  deploy:\n    description: d\n{other}steps:\n  s:\n    command: echo ok\n    flag: deploy\n{other_step}"
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    fn flag_update(flags: Option<crate::flags::FlagValues>) -> SessionSettingsUpdate {
+        SessionSettingsUpdate {
+            config_path: None,
+            skipped_steps: vec![],
+            current_step_update: CurrentStepUpdate::Unchanged,
+            flags,
+        }
+    }
+
+    #[test]
+    fn test_update_session_settings_stores_flags_and_keeps_them_when_omitted() {
+        // Given: a Planned session whose config declares two flags
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        write_flag_config(&repo, true);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        manager
+            .create(&make_session("20260619000030", &repo))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: flags are replaced, then an update omits them
+        let values: crate::flags::FlagValues = [("deploy".to_string(), true)].into();
+        let (stored, _) = update_session_settings(
+            &manager,
+            "20260619000030",
+            flag_update(Some(values.clone())),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let (kept, _) = update_session_settings(&manager, "20260619000030", flag_update(None))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: the values were stored and survive an update that omits flags
+        assert_eq!(stored.flags, values);
+        assert_eq!(kept.flags, values);
+    }
+
+    #[test]
+    fn test_update_session_settings_rejects_unknown_flag_name() {
+        // Given: a session whose config declares only `deploy`
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        write_flag_config(&repo, false);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        manager
+            .create(&make_session("20260619000031", &repo))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: an undeclared flag is submitted
+        let values: crate::flags::FlagValues = [("nope".to_string(), true)].into();
+        let result = update_session_settings(&manager, "20260619000031", flag_update(Some(values)));
+
+        // Then: it is rejected naming the flag
+        let message = result.map_or_else(|e| e.to_string(), |_| String::new());
+        assert!(message.contains("unknown flag 'nope'"), "got: {message}");
+    }
+
+    #[test]
+    fn test_update_session_settings_prunes_flags_no_longer_declared() {
+        // Given: a session holding values for two flags
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        write_flag_config(&repo, false);
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let mut session = make_session("20260619000032", &repo);
+        session.flags = [("deploy".to_string(), true), ("gone".to_string(), false)].into();
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: settings are updated without new flag values
+        let (updated, _) = update_session_settings(&manager, "20260619000032", flag_update(None))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // Then: values for flags the config no longer declares are dropped
+        assert_eq!(updated.flags.len(), 1);
+        assert_eq!(updated.flags.get("deploy"), Some(&true));
     }
 }

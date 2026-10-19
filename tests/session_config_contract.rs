@@ -621,6 +621,7 @@ fn editing_without_a_config_selection_preserves_snapshot_and_reports_no_config_c
             config_path: None,
             skipped_steps: vec!["shared".to_string()],
             current_step_update: CurrentStepUpdate::Unchanged,
+            flags: None,
         },
     )
     .unwrap_or_else(|error| panic!("preserving snapshot during edit: {error}"));
@@ -669,6 +670,7 @@ fn explicit_empty_config_selection_reselects_auto_file_instead_of_creating_a_bui
             config_path: Some(String::new()),
             skipped_steps: vec![],
             current_step_update: CurrentStepUpdate::Unchanged,
+            flags: None,
         },
     )
     .unwrap_or_else(|error| panic!("explicit Auto selection: {error}"));
@@ -709,6 +711,7 @@ fn failed_session_rejects_a_config_reference_switch() {
             config_path: Some(replacement.to_string_lossy().into_owned()),
             skipped_steps: vec![],
             current_step_update: CurrentStepUpdate::Unchanged,
+            flags: None,
         },
     )
     .map_or_else(

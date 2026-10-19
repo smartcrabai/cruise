@@ -482,6 +482,7 @@ impl TuiApp {
         // and populate skip choices that do not exist in the clone.
         if self.form.source == SourceKind::GitHub && config.is_empty() {
             self.form.apply_default_skips(&[]);
+            self.form.set_flag_choices(Vec::new());
             self.config_defaults = None;
             return true;
         }
@@ -497,11 +498,13 @@ impl TuiApp {
             Ok(defaults) => {
                 self.form
                     .apply_default_skips(&defaults.default_skipped_steps);
+                self.form.set_flag_choices(defaults.flags.clone());
                 self.config_defaults = Some(defaults);
                 true
             }
             Err(error) => {
                 self.config_defaults = None;
+                self.form.set_flag_choices(Vec::new());
                 self.set_error(error.to_string());
                 false
             }
@@ -1940,6 +1943,8 @@ impl TuiApp {
         }
         if self.form.step == Step::SkippedSteps {
             self.toggle_skip_choice();
+        } else if self.form.step == Step::Flags {
+            self.form.toggle_flag();
         } else if self.form.step.is_choice() {
             self.choose(1);
         }
@@ -2156,6 +2161,14 @@ impl TuiApp {
                     let count = self.skip_choices().len();
                     if count > 0 {
                         self.skip_cursor = (self.skip_cursor.cast_signed() + delta)
+                            .rem_euclid(count.cast_signed())
+                            .cast_unsigned();
+                    }
+                }
+                Step::Flags => {
+                    let count = self.form.flag_choices.len();
+                    if count > 0 {
+                        self.form.flag_cursor = (self.form.flag_cursor.cast_signed() + delta)
                             .rem_euclid(count.cast_signed())
                             .cast_unsigned();
                     }
@@ -2693,7 +2706,7 @@ impl TuiApp {
                 PendingCommand::Session(SessionAction::Ask),
             ),
             SessionAction::EditSettings => self.open_input(
-                "Config path (blank keeps current); skipped steps (one per line)",
+                "Config path (blank keeps current); skipped steps (one per line); flag:NAME=on|off",
                 PendingCommand::Session(SessionAction::EditSettings),
             ),
             SessionAction::EditCurrentStep => self.open_input(
@@ -2724,7 +2737,11 @@ impl TuiApp {
         );
         let mut editor = Editor::default();
         if multiline && let Some(session) = self.active_session() {
-            editor.set_text(&format!("\n{}", session.skipped_steps.join("\n")));
+            let mut text = format!("\n{}", session.skipped_steps.join("\n"));
+            for (name, on) in &session.flags {
+                text.push_str(&format!("\nflag:{name}={}", if *on { "on" } else { "off" }));
+            }
+            editor.set_text(&text);
         }
         self.modal = Some(Modal::Input {
             title: title.to_string(),
@@ -2789,11 +2806,28 @@ impl TuiApp {
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
                     .map(ToString::to_string);
-                let skipped_steps = lines
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToString::to_string)
-                    .collect();
+                let mut skipped_steps = Vec::new();
+                let mut flag_assignments = Vec::new();
+                for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
+                    if let Some(assignment) = line.strip_prefix("flag:") {
+                        match crate::flags::parse_assignment(assignment) {
+                            Ok(parsed) => flag_assignments.push(parsed),
+                            Err(message) => {
+                                self.set_error(message);
+                                return;
+                            }
+                        }
+                    } else {
+                        skipped_steps.push(line.to_string());
+                    }
+                }
+                let flags = match crate::flags::from_cli(&flag_assignments) {
+                    Ok(values) => Some(values),
+                    Err(error) => {
+                        self.set_error(error.to_string());
+                        return;
+                    }
+                };
                 if !self.registry.edit_settings(
                     self.application.clone(),
                     id,
@@ -2801,6 +2835,7 @@ impl TuiApp {
                         config_path,
                         skipped_steps,
                         current_step_update: CurrentStepUpdateDto::Unchanged,
+                        flags,
                     },
                     regenerate,
                     self.events.clone(),
@@ -5894,6 +5929,7 @@ mod tests {
             after_pr_steps: Vec::new(),
             default_skipped_steps: Vec::new(),
             resolved_config_key: "test".to_string(),
+            flags: Vec::new(),
         });
         app.form.step = Step::SkippedSteps;
         assert!(!app.handle_key(key(KeyCode::Char('j'))));

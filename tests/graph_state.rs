@@ -42,6 +42,7 @@ fn context<'a>(
         config_reloader: None,
         working_dir: Some(dir),
         skipped_steps: &[],
+        flags: &cruise::flags::NO_FLAGS,
         on_step_log: None,
     }
 }

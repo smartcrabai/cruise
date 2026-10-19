@@ -487,6 +487,12 @@ fn expand_called_workflow(
         )));
     }
 
+    if let Some((name, _)) = callee.steps.iter().find(|(_, s)| s.flag.is_some()) {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "workflow_call step '{call_site}' references a workflow whose step '{name}' uses a flag; flags are not supported inside called workflows"
+        )));
+    }
+
     let compiled = crate::workflow::compile(callee)?;
     let original_ids: HashSet<String> = compiled.steps.keys().cloned().collect();
     let first_id = compiled.steps.keys().next().cloned();
@@ -497,6 +503,7 @@ fn expand_called_workflow(
         step.workflow_call = None;
         debug_assert!(step.prompt_file.is_none());
         rewrite_internal_references(&mut step, call_site, &original_ids);
+        step.flag.clone_from(&call_step.flag);
 
         if first_id.as_deref() == Some(original_id.as_str()) {
             step.skip.clone_from(&call_step.skip);

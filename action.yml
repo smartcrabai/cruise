@@ -93,6 +93,15 @@ inputs:
       effort.
     required: false
     default: ""
+  flags:
+    description: >-
+      Workflow flag values for the `run` command, one `NAME=on|off` per line
+      (blank lines and lines starting with "#" are ignored). Each line is
+      passed to `cruise run` as `--flag NAME=on|off`. Required when the
+      workflow config declares flags, because a non-interactive run cannot
+      prompt for them. Has no effect on `exec`, `plan` or `fix`.
+    required: false
+    default: ""
   plan_model:
     description: >-
       Overrides CRUISE_PLAN_MODEL (the model used by the `plan`/`fix`
@@ -306,6 +315,7 @@ runs:
         EXEC_CONFIG_PATH: ${{ steps.config.outputs.exec_config_path }}
         GIT_USER_NAME_INPUT: ${{ inputs.git_user_name }}
         GIT_USER_EMAIL_INPUT: ${{ inputs.git_user_email }}
+        FLAGS_INPUT: ${{ inputs.flags }}
         USED_APP: ${{ steps.token.outputs.used_app }}
       run: ${{ github.action_path }}/action/scripts/run.sh
 

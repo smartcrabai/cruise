@@ -170,6 +170,7 @@ async fn run_force_exec(
     rate_limit_retries: usize,
     dry_run: bool,
     background: bool,
+    flags: Vec<(String, bool)>,
 ) -> Result<()> {
     let PlanTarget::Local {
         yaml,
@@ -196,6 +197,7 @@ async fn run_force_exec(
             max_retries: None,
             rate_limit_retries,
             dry_run,
+            flags,
         },
     )
     .await
@@ -257,6 +259,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
                     args.rate_limit_retries,
                     args.dry_run,
                     false,
+                    args.flags.clone(),
                 ))
                 .await;
             }
@@ -283,6 +286,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let (mut config, mut session) =
         create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
+    apply_cli_flags_or_discard(&manager, &config, &mut session, &args.flags)?;
 
     if let Err(e) = attach_images_or_discard(&manager, &mut session, &images) {
         eprintln!(
@@ -413,6 +417,7 @@ pub async fn launch_background_plan(
     repo: Option<&str>,
     images: &[String],
     no_force_exec: bool,
+    flags: &[(String, bool)],
 ) -> Result<()> {
     let target = resolve_plan_target(repo, None)?;
 
@@ -439,6 +444,7 @@ pub async fn launch_background_plan(
                     DEFAULT_RATE_LIMIT_RETRIES,
                     false,
                     true,
+                    flags.to_vec(),
                 ))
                 .await;
             }
@@ -446,7 +452,8 @@ pub async fn launch_background_plan(
     }
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let (_config, mut session) = create_session_for_target(&manager, target, None, &input)?;
+    let (config, mut session) = create_session_for_target(&manager, target, None, &input)?;
+    apply_cli_flags_or_discard(&manager, &config, &mut session, flags)?;
     attach_images_or_discard(&manager, &mut session, &detected_images)?;
     setup_planning_worktree_or_discard(&manager, &mut session)?;
 
@@ -814,6 +821,32 @@ fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Res
             })
         }
     }
+}
+
+/// Validate `--flag` assignments against the config and store them on the
+/// session. An invalid assignment discards the freshly created session.
+fn apply_cli_flags_or_discard(
+    manager: &SessionManager,
+    config: &WorkflowConfig,
+    session: &mut SessionState,
+    assignments: &[(String, bool)],
+) -> Result<()> {
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    let result = crate::flags::from_cli(assignments).and_then(|values| {
+        crate::flags::validate_names(config, &values)?;
+        session.flags = values;
+        manager.save(session)
+    });
+    if let Err(error) = result {
+        cleanup_discarded_session_workspace(manager, session);
+        if let Err(del_err) = manager.delete(&session.id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Create the planning session (and, for repo targets, the temporary clone)
@@ -1249,6 +1282,13 @@ async fn run_approve_loop(
                     continue;
                 };
                 session.skipped_steps = skipped_steps;
+                if !crate::flags::prompt_missing(
+                    config,
+                    &mut session.flags,
+                    crate::flags::prompt_flag_cli,
+                )? {
+                    continue;
+                }
                 drop(review);
                 tokio::select! {
                     result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
@@ -1288,6 +1328,7 @@ async fn run_approve_loop(
                     dry_run: false,
                     cleanup_after_pr: false,
                     no_cleanup_after_pr: false,
+                    flags: vec![],
                 };
                 return crate::run_cmd::run(run_args).await;
             }
@@ -1752,6 +1793,7 @@ mod tests {
             repo: None,
             rate_limit_retries: 0,
             images: vec![],
+            flags: vec![],
         }
     }
 
@@ -2705,6 +2747,7 @@ steps:
             None,
             &[],
             false,
+            &[],
         ))
         .await;
 

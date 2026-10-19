@@ -10,11 +10,12 @@ use super::actions::SessionActionsVm;
 use super::templates::RawHtml;
 use super::view::{
     AskPanelVm, AttachmentListVm, AttachmentVm, ChoiceVm, ConfigGroupVm, ConfigOptionVm,
-    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, MergeCheckVm,
-    MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm, RepoOptionsVm,
-    RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm, SessionHeaderVm,
-    SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm, ShellVm, SidebarVm, StepRowVm,
-    StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm, ToastKind, ToastVm,
+    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, FlagRowVm,
+    MergeCheckVm, MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm,
+    RepoOptionsVm, RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm,
+    SessionHeaderVm, SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm, ShellVm,
+    SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm,
+    ToastKind, ToastVm,
 };
 use crate::application::DirectoryEntry;
 
@@ -121,6 +122,13 @@ fn step_tree() -> StepTreeVm {
             },
         ],
         empty: false,
+        flags: vec![FlagRowVm {
+            name: "deploy".to_string(),
+            description: "Deploy after merge".to_string(),
+            on: false,
+            off: true,
+            require: true,
+        }],
     }
 }
 

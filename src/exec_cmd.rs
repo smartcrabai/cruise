@@ -12,6 +12,7 @@ pub(crate) struct ExecRequest {
     pub max_retries: Option<usize>,
     pub rate_limit_retries: usize,
     pub dry_run: bool,
+    pub flags: Vec<(String, bool)>,
 }
 
 pub async fn run(args: ExecArgs) -> Result<()> {
@@ -26,6 +27,7 @@ pub async fn run(args: ExecArgs) -> Result<()> {
             max_retries: args.max_retries,
             rate_limit_retries: args.rate_limit_retries,
             dry_run: args.dry_run,
+            flags: args.flags,
         },
     )
     .await
@@ -43,7 +45,14 @@ pub(crate) async fn run_resolved(
 
     let compiled = crate::workflow::compile(config.clone())?;
     let graph = crate::graph::build_graph(&compiled, effective_max_retries)?;
-    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])?;
+    let flag_values = crate::flags::from_cli(&req.flags)?;
+    crate::flags::validate_names(config, &flag_values)?;
+    crate::graph::validation::validate_workflow(
+        &compiled,
+        &graph,
+        &graph.start,
+        &crate::flags::preflight_skips(&compiled, &flag_values, &[]),
+    )?;
     if req.dry_run {
         engine::print_dry_run(config, None);
         return Ok(());
@@ -51,6 +60,7 @@ pub(crate) async fn run_resolved(
 
     let manager = SessionManager::new(paths::data_dir()?);
     let session = setup_exec_session(&manager, source, yaml, req.input)?;
+    let session = persist_exec_flags(&manager, session, flag_values)?;
 
     let run_args = RunArgs {
         session: Some(session.id.clone()),
@@ -61,9 +71,27 @@ pub(crate) async fn run_resolved(
         dry_run: false,
         cleanup_after_pr: false,
         no_cleanup_after_pr: false,
+        flags: vec![],
     };
 
     crate::run_cmd::run(run_args).await
+}
+
+/// Store explicit flag values on a freshly created exec session.
+fn persist_exec_flags(
+    manager: &SessionManager,
+    mut session: SessionState,
+    flags: crate::flags::FlagValues,
+) -> Result<SessionState> {
+    if flags.is_empty() {
+        return Ok(session);
+    }
+    session.flags = flags;
+    if let Err(error) = manager.save(&session) {
+        let _ = std::fs::remove_dir_all(manager.sessions_dir().join(&session.id));
+        return Err(error);
+    }
+    Ok(session)
 }
 
 /// Create and persist a transient session for exec mode.
@@ -274,6 +302,7 @@ mod tests {
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
+            flags: vec![],
         }
     }
 
@@ -731,6 +760,7 @@ steps:
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: true,
+            flags: vec![],
         };
 
         // When: exec is called with --dry-run

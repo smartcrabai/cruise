@@ -10,5 +10,25 @@ export default function StepTree(props) {
         {step.afterPr && <span class="text-xs text-gray-500 dark:text-gray-400">after PR</span>}
       </label>
     </li>)}
+    {props.flags.map(flag => <li class="flex items-center gap-2">
+      <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300">
+        <span>{flag.name}</span>
+        {flag.require && <select name={"flag." + flag.name} required class="rounded border border-gray-300 bg-white px-1 text-sm dark:border-gray-600 dark:bg-gray-800">
+          {!flag.on && !flag.off && <option value="" selected>Choose…</option>}
+          {flag.on && <option value="on" selected>on</option>}
+          {!flag.on && <option value="on">on</option>}
+          {flag.off && <option value="off" selected>off</option>}
+          {!flag.off && <option value="off">off</option>}
+        </select>}
+        {!flag.require && <select name={"flag." + flag.name} class="rounded border border-gray-300 bg-white px-1 text-sm dark:border-gray-600 dark:bg-gray-800">
+          {!flag.on && !flag.off && <option value="" selected>Choose…</option>}
+          {flag.on && <option value="on" selected>on</option>}
+          {!flag.on && <option value="on">on</option>}
+          {flag.off && <option value="off" selected>off</option>}
+          {!flag.off && <option value="off">off</option>}
+        </select>
+        {flag.description && <span class="text-xs text-gray-500 dark:text-gray-400">{flag.description}</span>}
+      </label>
+    </li>)}
   </ul>;
 }
