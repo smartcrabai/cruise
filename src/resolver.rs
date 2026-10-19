@@ -53,13 +53,15 @@ pub fn resolve_workflow_config(
     yaml: &str,
     source: &ConfigSource,
     base_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
 ) -> Result<crate::config::WorkflowConfig> {
+    let defaults = crate::workflow_defaults::WorkflowDefaults::load(project_dir)?;
     match source.path() {
-        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path(path),
-        None => crate::workflow_call::resolve_workflow_calls(
-            crate::config::WorkflowConfig::from_yaml(yaml)
-                .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?,
+        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path, &defaults),
+        None => crate::workflow_call::resolve_workflow_calls_from_yaml_with_defaults(
+            yaml,
             base_dir,
+            &defaults,
         ),
     }
 }
@@ -74,9 +76,10 @@ pub fn load_config_from_source(
     yaml: &str,
     source: &ConfigSource,
 ) -> Result<crate::config::WorkflowConfig> {
+    let cwd = std::env::current_dir()?;
     let config = match source.path() {
-        Some(_) => resolve_workflow_config(yaml, source, std::path::Path::new("."))?,
-        None => resolve_workflow_config(yaml, source, &std::env::current_dir()?)?,
+        Some(_) => resolve_workflow_config(yaml, source, std::path::Path::new("."), Some(&cwd))?,
+        None => resolve_workflow_config(yaml, source, &cwd, Some(&cwd))?,
     };
     crate::config::validate_config(&config)?;
     Ok(config)
@@ -228,6 +231,29 @@ fn push_yaml_dir_candidates(
     }
 }
 
+/// Reject a path that points at a user or project workflow defaults file.
+fn reject_defaults_file(path: &std::path::Path, cwd: &std::path::Path) -> Result<()> {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return Ok(());
+    };
+    let reserved = [
+        crate::workflow_defaults::user_defaults_path(),
+        Some(crate::workflow_defaults::project_defaults_path(cwd)),
+    ];
+    if reserved
+        .into_iter()
+        .flatten()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .any(|p| p == target)
+    {
+        return Err(CruiseError::Other(format!(
+            "{} is a workflow defaults file and cannot be selected as a workflow",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Collect all candidate config files in priority order.
 ///
 /// `env_val` is the value of `CRUISE_CONFIG` already read from the environment
@@ -251,6 +277,7 @@ fn collect_candidates(
         let buf = PathBuf::from(&env_path);
         match std::fs::metadata(&buf) {
             Ok(_) => {
+                reject_defaults_file(&buf, &cwd)?;
                 let abs = to_absolute(buf);
                 let label = format!(
                     "CRUISE_CONFIG → {}",
@@ -292,6 +319,14 @@ fn collect_candidates(
     // misidentified as a config candidate; avoid placing YAML data files there.
     let local_dir = cwd.join(".cruise");
     if local_dir.is_dir() {
+        let canonical_defaults = [
+            crate::workflow_defaults::user_defaults_path(),
+            Some(crate::workflow_defaults::project_defaults_path(&cwd)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect::<Vec<_>>();
         push_yaml_dir_candidates(
             &mut candidates,
             &local_dir,
@@ -299,6 +334,18 @@ fn collect_candidates(
             home.as_deref(),
             CandidateKind::Local,
         );
+        candidates.retain(|c| match &c.source {
+            CandidateKind::Local(path) => {
+                let reserved_name = path.parent() == Some(local_dir.as_path())
+                    && path.file_name()
+                        == Some(crate::workflow_defaults::DEFAULTS_FILE_NAME.as_ref());
+                let aliases_defaults = std::fs::canonicalize(path)
+                    .ok()
+                    .is_some_and(|path| canonical_defaults.contains(&path));
+                !reserved_name && !aliases_defaults
+            }
+            _ => true,
+        });
     }
 
     // 3. User workflow config files (~/.config/cruise/workflows/*.yaml / *.yml), ASCII-sorted.
@@ -359,6 +406,7 @@ fn resolve_config_in_dir_with_interactive(
             return resolved;
         }
         let buf = PathBuf::from(path);
+        reject_defaults_file(&buf, cwd)?;
         let yaml = read_config_file(&buf)?;
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
     }
@@ -1961,5 +2009,119 @@ mod tests {
             &values[1..],
             ["__builtin__", "builtin:simple", "builtin:review"]
         );
+    }
+
+    // ---- workflow defaults files are reserved ----
+
+    fn write_yaml(path: &std::path::Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        std::fs::write(path, body).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    const WORKFLOW_BODY: &str = "command: [echo]\nsteps:\n  s:\n    command: echo";
+
+    #[test]
+    fn project_default_yaml_is_not_a_workflow_candidate() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        write_yaml(&repo.path().join(".cruise/default.yaml"), "model: x\n");
+        write_yaml(&repo.path().join(".cruise/foo.yaml"), WORKFLOW_BODY);
+        let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let files: Vec<String> = candidates
+            .iter()
+            .map(ConfigCandidate::selection_value)
+            .filter(|v| {
+                std::path::Path::new(v)
+                    .extension()
+                    .is_some_and(|e| e == "yaml")
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].ends_with("foo.yaml"), "{files:?}");
+    }
+
+    #[test]
+    fn user_workflows_default_yaml_remains_a_candidate() {
+        let (_lock, home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        write_yaml(
+            &user_workflows_dir(home.path()).join("default.yaml"),
+            WORKFLOW_BODY,
+        );
+        let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.selection_value().ends_with("default.yaml")),
+            "workflows/default.yaml must stay selectable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_symlink_aliases_to_defaults_are_excluded_but_workflow_default_is_selectable() {
+        use std::os::unix::fs::symlink;
+
+        let (_lock, home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let project_default = repo.path().join(".cruise/default.yaml");
+        let user_default = home.path().join(".config/cruise/default.yaml");
+        write_yaml(&project_default, "model: project\n");
+        write_yaml(&user_default, "model: user\n");
+        let project_alias = repo.path().join(".cruise/project-alias.yaml");
+        let user_alias = repo.path().join(".cruise/user-alias.yaml");
+        symlink(&project_default, &project_alias).unwrap_or_else(|e| panic!("{e:?}"));
+        symlink(&user_default, &user_alias).unwrap_or_else(|e| panic!("{e:?}"));
+        let workflow_default = user_workflows_dir(home.path()).join("default.yaml");
+        write_yaml(&workflow_default, WORKFLOW_BODY);
+
+        let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let values: Vec<String> = candidates
+            .iter()
+            .map(ConfigCandidate::selection_value)
+            .collect();
+        assert!(!values.contains(&project_alias.to_string_lossy().into_owned()));
+        assert!(!values.contains(&user_alias.to_string_lossy().into_owned()));
+        assert!(
+            values.contains(&workflow_default.to_string_lossy().into_owned()),
+            "workflows/default.yaml must remain selectable: {values:?}"
+        );
+        for alias in [&project_alias, &user_alias] {
+            let error = resolve_config_in_dir(alias.to_str(), repo.path())
+                .err()
+                .unwrap_or_else(|| panic!("default alias {} must be rejected", alias.display()));
+            assert!(error.to_string().contains("workflow defaults file"), "{error}");
+        }
+    }
+
+    #[test]
+    fn explicit_path_to_defaults_files_is_rejected() {
+        let (_lock, home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let project = repo.path().join(".cruise/default.yaml");
+        let user = home.path().join(".config/cruise/default.yaml");
+        write_yaml(&project, "model: x\n");
+        write_yaml(&user, "model: x\n");
+        for path in [project, user] {
+            let err = resolve_config_in_dir(path.to_str(), repo.path())
+                .err()
+                .unwrap_or_else(|| panic!("{} must be rejected", path.display()));
+            assert!(err.to_string().contains("workflow defaults file"), "{err}");
+        }
+    }
+
+    #[test]
+    fn cruise_config_env_pointing_at_defaults_file_is_rejected() {
+        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let project = repo.path().join(".cruise/default.yaml");
+        write_yaml(&project, "model: x\n");
+        let _env = EnvGuard::set("CRUISE_CONFIG", project.as_os_str());
+        let err = collect_config_candidates(repo.path())
+            .err()
+            .unwrap_or_else(|| panic!("CRUISE_CONFIG defaults file must be rejected"));
+        assert!(err.to_string().contains("workflow defaults file"), "{err}");
     }
 }

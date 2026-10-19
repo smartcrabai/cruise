@@ -27,17 +27,19 @@ fn repo_assets() -> assets::Assets {
 struct Harness {
     state: WebState,
     dir: tempfile::TempDir,
+    manager: SessionManager,
 }
 
 fn harness() -> Harness {
     let Ok(dir) = tempfile::tempdir() else {
         panic!("tempdir");
     };
-    let application = CruiseApplication::new(SessionManager::new(dir.path().to_path_buf()));
+    let manager = SessionManager::new(dir.path().to_path_buf());
+    let application = CruiseApplication::new(manager.clone());
     let Ok(state) = WebState::new(application, &repo_assets()) else {
         panic!("web state");
     };
-    Harness { state, dir }
+    Harness { state, dir, manager }
 }
 
 fn create_session(harness: &Harness) -> SessionState {
@@ -192,6 +194,123 @@ async fn root_page_has_shell_contract() {
     ] {
         assert!(body.contains(needle), "missing {needle}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
+    use crate::test_support::{EnvGuard, init_git_repo, prepend_to_path, write_executable_script};
+
+    let _lock = crate::test_support::lock_process();
+    let _forge = EnvGuard::remove("CRUISE_FORGE");
+    let harness = harness();
+    let home = harness.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap_or_else(|error| panic!("create fake home: {error}"));
+    let _home = crate::test_support::set_fake_home(&home);
+
+    let caller = harness.dir.path().join("caller");
+    std::fs::create_dir_all(caller.join(".cruise"))
+        .unwrap_or_else(|error| panic!("create caller defaults: {error}"));
+    std::fs::write(
+        caller.join(".cruise/default.yaml"),
+        "pre_steps:\n  caller-only:\n    command: echo caller\n",
+    )
+    .unwrap_or_else(|error| panic!("write caller defaults: {error}"));
+
+    let target = harness.dir.path().join("target-repo");
+    std::fs::create_dir_all(target.join(".cruise"))
+        .unwrap_or_else(|error| panic!("create target defaults: {error}"));
+    std::fs::write(
+        target.join(".cruise/default.yaml"),
+        "pre_steps:\n  target-only:\n    command: echo target\n",
+    )
+    .unwrap_or_else(|error| panic!("write target defaults: {error}"));
+    init_git_repo(&target);
+
+    let bin = harness.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create bin: {error}"));
+    write_executable_script(
+        &bin.join("gh"),
+        "#!/bin/sh\nif [ \"${1:-}\" = \"repo\" ] && [ \"${2:-}\" = \"clone\" ]; then\n  exec git clone \"$CRUISE_TEST_REPO_PATH\" \"$4\"\nfi\nexit 1\n",
+    );
+    let _repo_source = EnvGuard::set("CRUISE_TEST_REPO_PATH", target.as_os_str());
+    let _path = prepend_to_path(&bin);
+
+    let repo = "owner/repo";
+    let preview = harness
+        .state
+        .application
+        .new_session_config_defaults(&caller, Some("__builtin__"), Some(repo))
+        .unwrap_or_else(|error| panic!("preview defaults: {error}"));
+    let preview_ids = preview
+        .steps
+        .iter()
+        .map(|step| step.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(!preview_ids.contains("pre/caller-only"));
+    assert!(preview_ids.contains("write-test-first"));
+
+    let preview_html = super::pages::step_tree_html(
+        &harness.state,
+        &caller.to_string_lossy(),
+        Some("__builtin__"),
+        Some(repo),
+        &[],
+    )
+    .unwrap_or_else(|error| panic!("render repo preview: {error}"));
+    assert!(preview_html.contains("value=\"write-test-first\""));
+    assert!(!preview_html.contains("pre/caller-only"));
+
+    let session = harness
+        .state
+        .application
+        .create_session(NewSessionRequest {
+            input: "repo defaults preview".to_string(),
+            base_dir: std::path::PathBuf::new(),
+            config_path: Some(std::path::PathBuf::from("__builtin__")),
+            config_yaml: None,
+            repo: Some(repo.to_string()),
+            workspace_mode: crate::session::WorkspaceMode::Worktree,
+            allow_dirty_working_tree: false,
+            attachments: Vec::new(),
+            skipped_steps: vec!["write-test-first".to_string()],
+        })
+        .unwrap_or_else(|error| panic!("create repo session: {error}"));
+    let persisted = harness
+        .manager
+        .load_config(&session)
+        .unwrap_or_else(|error| panic!("load persisted config: {error}"));
+    let persisted_ids = crate::workflow::list_skippable_steps(&persisted)
+        .unwrap_or_else(|error| panic!("list persisted steps: {error}"))
+        .into_iter()
+        .map(|step| step.id)
+        .collect::<std::collections::HashSet<_>>();
+    let cloned_preview = harness
+        .state
+        .application
+        .new_session_config_defaults(
+            &session.base_dir,
+            Some("__builtin__"),
+            Some(repo),
+        )
+        .unwrap_or_else(|error| panic!("clone-resolved preview: {error}"));
+    let cloned_preview_ids = cloned_preview
+        .steps
+        .iter()
+        .map(|step| step.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(persisted_ids.contains("pre/target-only"));
+    assert!(!persisted_ids.contains("pre/caller-only"));
+    assert!(preview_ids.is_subset(&persisted_ids));
+    assert_eq!(cloned_preview_ids, persisted_ids);
+    assert_eq!(session.skipped_steps, ["write-test-first"]);
+    assert!(
+        session
+            .skipped_steps
+            .iter()
+            .all(|step| persisted_ids.contains(step)),
+        "submitted skipped IDs must exist in the clone-resolved config"
+    );
 }
 
 #[tokio::test]

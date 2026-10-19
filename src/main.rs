@@ -77,6 +77,7 @@ mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
 mod workflow_cmd;
+mod workflow_defaults;
 mod workflow_generate;
 mod workflow_packages;
 mod workspace;

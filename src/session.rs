@@ -275,6 +275,15 @@ impl SessionState {
         self.input_with_attachments()
     }
 
+    /// Directory whose `.cruise/default.yaml` applies to this session, if any.
+    ///
+    /// Repository sessions have no project layer: their clone is recreated at
+    /// run time, so a project file could differ between plan and run.
+    #[must_use]
+    pub fn workflow_defaults_dir(&self) -> Option<&Path> {
+        self.repo.is_none().then_some(self.base_dir.as_path())
+    }
+
     /// Input, else title, for labels and fallbacks.
     #[must_use]
     pub fn input_or_title(&self) -> &str {
@@ -838,8 +847,11 @@ impl SessionManager {
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
         match &state.config {
             crate::session_config::SessionConfigRef::File { path } => {
-                crate::workflow_call::resolve_workflow_calls_from_path(path.clone()).map_err(
-                    |error| match error {
+                let defaults = crate::workflow_defaults::WorkflowDefaults::load(
+                    state.workflow_defaults_dir(),
+                )?;
+                crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path.clone(), &defaults)
+                    .map_err(|error| match error {
                         CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
                             format!("failed to parse file config {}: {message}", path.display()),
                         ),
@@ -847,8 +859,7 @@ impl SessionManager {
                             "failed to load file config {}: {error}",
                             path.display()
                         )),
-                    },
-                )
+                    })
             }
             reference => {
                 let path = snapshot_path(&self.sessions_dir(), &state.id);
@@ -4469,5 +4480,80 @@ mod tests {
         state.title = Some("  ".to_string());
 
         assert_eq!(state.input_or_title(), "");
+    }
+
+    #[test]
+    fn test_file_session_load_config_applies_live_project_defaults() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _env = crate::test_support::set_fake_home(home.path());
+        let project = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let workflow = project.path().join("flow.yaml");
+        std::fs::write(
+            &workflow,
+            "command: [echo]\nsteps:\n  main:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(home.path().join("cruise-data"));
+        let state = SessionState::new(
+            "20261019000001".to_string(),
+            project.path().to_path_buf(),
+            SessionConfigRef::File { path: workflow },
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+
+        let before = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!before.steps.contains_key("pre/setup"));
+
+        std::fs::create_dir_all(project.path().join(".cruise")).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            project.path().join(".cruise/default.yaml"),
+            "pre_steps:\n  setup:\n    command: echo setup\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let after = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            after.steps.keys().next().map(String::as_str),
+            Some("pre/setup")
+        );
+    }
+
+    #[test]
+    fn test_snapshot_session_load_config_ignores_later_defaults_changes() {
+        let _lock = crate::test_support::lock_process();
+        let home = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _env = crate::test_support::set_fake_home(home.path());
+        let project = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(home.path().join("cruise-data"));
+        let state = SessionState::new(
+            "20261019000002".to_string(),
+            project.path().to_path_buf(),
+            SessionConfigRef::BuiltinSnapshot { name: None },
+            "task".to_string(),
+        );
+        manager.create(&state).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            manager.sessions_dir().join(&state.id).join("config.yaml"),
+            "command: [echo]\nsteps:\n  main:\n    command: echo\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir_all(project.path().join(".cruise")).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(
+            project.path().join(".cruise/default.yaml"),
+            "pre_steps:\n  setup:\n    command: echo setup\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let config = manager
+            .load_config(&state)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let keys: Vec<&str> = config.steps.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["main"]);
     }
 }

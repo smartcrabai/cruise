@@ -5,7 +5,8 @@ use cruise::workflow_call::resolve_workflow_calls;
 
 fn resolve(yaml: &str) -> WorkflowConfig {
     let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-    resolve_workflow_calls(config, ".").unwrap_or_else(|e| panic!("{e:?}"))
+    resolve_workflow_calls(config, ".")
+        .unwrap_or_else(|e| panic!("{e:?}"))
 }
 
 #[test]

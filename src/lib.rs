@@ -41,6 +41,7 @@ pub mod variable;
 pub mod workflow;
 pub mod workflow_call;
 pub mod workflow_cmd;
+pub mod workflow_defaults;
 pub(crate) mod workflow_packages;
 pub mod workspace;
 pub mod worktree;

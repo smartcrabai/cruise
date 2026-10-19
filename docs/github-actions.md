@@ -1,6 +1,6 @@
 # cruise GitHub Action
 
-Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan, implement, and open a draft PR inside GitHub Actions -- similar in spirit to [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action), but driving cruise's own plan -> implement -> PR workflow through cruise's default `sdk: jcode` backend -- the action installs the `jcode` CLI and provisions its credentials for you.
+Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan, implement, and open a draft PR inside GitHub Actions -- similar in spirit to [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action), but driving cruise's own plan -> implement -> PR workflow through `sdk: jcode` unless the resolved workflow selects another backend -- the action installs the `jcode` CLI and provisions its credentials for you.
 
 This action has **no pull-request mode**: it only reacts to `issues` (opened) and `issue_comment` (created) events. A comment made on a pull request is always ignored (PRs are "issues" at the GitHub API level, but this action explicitly excludes them).
 
@@ -181,13 +181,13 @@ The identifiers in this table are for CLI credential provisioning; `jcode login 
 
 ## sdk: jcode -- how execution works
 
-The action does not set `CRUISE_SDK`, so Cruise resolves the backend from the repository config. The generated default config omits `sdk`, selecting Cruise's default `sdk: jcode` backend. A repository config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
+The action does not set `CRUISE_SDK`, so Cruise resolves the backend from the repository workflow config and applicable checkout project defaults. The generated default config omits `sdk`; after `.cruise/default.yaml` is applied, Cruise falls back to `sdk: jcode` only when neither `command` nor `sdk` remains set. A repository workflow config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
 
 This action installs the `cruise` binary (`cruise_version`) and the `jcode` CLI (`jcode_version`). It uses the CLI for setup and credential provisioning: `anthropic_api_key` and `openai_api_key` are stored with `jcode login`, and each `providers` entry is written with `jcode provider add`. The action pins the source `JCODE_HOME` under `$RUNNER_TEMP/cruise/jcode-home`.
 
 For SDK execution, Cruise creates a private session home from that source home and inherits its credentials and config. Plan homes persist until the Cruise session is deleted or cleaned; ordinary non-resumable prompt homes are removed after the turn. Pre-session homes left by a crash are pruned after 24 hours, stopping the owned daemon first. The action's temporary source home keeps provisioned credentials away from a persistent runner home. The separate jcode installer home is also isolated under `$RUNNER_TEMP`, including the installer process's `HOME` and shell configuration.
 
-- **Backend** is Cruise's default `sdk: jcode` unless a repository config overrides it.
+- **Backend** is `sdk: jcode` only when neither `command` nor `sdk` remains set after applicable checkout project defaults are applied.
 - **Authentication** can come from the dedicated key inputs, `providers` / `provider_api_keys`, or provider keys supplied through `env`. The action gate fails if all supported credential inputs are empty; a `no_auth` profile does not require a key.
 - **OpenAI service tier** defaults to `off` when neither the workflow nor process environment defines `JCODE_OPENAI_SERVICE_TIER`; an explicit value is respected.
 - **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. The jcode SDK accepts `provider/model[:effort]`, a bare model, or no model. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](../README.md#sdk-mode).
@@ -195,15 +195,18 @@ For SDK execution, Cruise creates a private session home from that source home a
 
 ### Zero-config default
 
-When `config` is empty and the repository has no config, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Cruise selects its default `sdk: jcode` backend; no model is specified by the generated config.
+When `config` is empty, there is no root workflow config, and there are no YAML files directly under `.cruise/`, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Applicable checkout project defaults are applied first; Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set.
 
 ## config resolution
 
 - **`config` input set** -- resolved to an absolute path and exported as `CRUISE_CONFIG`. Used by the `run`/`plan`/`fix` commands.
-- **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or any YAML file under `.cruise/`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up, including whichever backend it names (see [above](#sdk-jcode----how-execution-works)). See [`examples/repo-cruise.yaml`](../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
-- **`config` input empty, and the repository has no config of its own** -- this action generates a default config (`write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `sdk`/`model`/`plan_model`) and exports it as `CRUISE_CONFIG`; omitting `sdk` selects Cruise's default `jcode` backend. See [Zero-config default](#zero-config-default).
+- **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or a workflow YAML under `.cruise/` other than the top-level `.cruise/default.yaml`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up, including whichever backend it names (see [above](#sdk-jcode----how-execution-works)). See [`examples/repo-cruise.yaml`](../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
+- **`config` input empty, with no root workflow config and no YAML directly under `.cruise/`** -- this action generates a default config (`write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `sdk`/`model`/`plan_model`) and exports it as `CRUISE_CONFIG`; after applicable checkout project defaults are applied, Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set. See [Zero-config default](#zero-config-default).
+- **`.cruise/default.yaml` is the only YAML directly under `.cruise/`, with no root workflow config** -- this action leaves `CRUISE_CONFIG` unset. Cruise uses its built-in default workflow and applies `.cruise/default.yaml` as project defaults.
 - **`exec` always uses its own generated config**, regardless of `config` or the two cases above: a minimal config with a single `implement` step whose prompt is `"{input}"` (also without `sdk`/`model`/`plan_model`). `cruise exec` binds the whole plan text to `{input}` and never runs a planning step (`plan.md` stays empty), so a `{plan}`-based config would silently receive an empty prompt.
 - The action always exports `CRUISE_FORCE_EXEC=false`, so a repository's `force_exec: true` never changes the action's explicit `run`/`plan`/`fix` command flow.
+
+The action uses project defaults from the checkout's `.cruise/default.yaml` only. Its isolated XDG configuration does not load the user's `~/.config/cruise/default.yaml`.
 
 In every case, the `model`/`plan_model` inputs (`CRUISE_MODEL`/`CRUISE_PLAN_MODEL` env overrides, applied by cruise itself) take priority over whatever a config file does or doesn't set.
 

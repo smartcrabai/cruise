@@ -44,10 +44,6 @@ pub enum PermissionMode {
 /// `computer_use` defaults to `false` and controls access to jcode's macOS
 /// desktop-control tool for prompt turns. Per-step prompt settings can override
 /// this default.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "workflow configuration flags represent independent settings"
-)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowConfig {
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
@@ -568,6 +564,38 @@ fn normalize_language(value: Option<&str>, default: &str) -> String {
         default.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+impl WorkflowConfig {
+    /// Effective `interactive_planning`.
+    #[must_use]
+    pub fn interactive_planning(&self) -> bool {
+        self.interactive_planning
+    }
+
+    /// Effective `cleanup_after_pr`.
+    #[must_use]
+    pub fn cleanup_after_pr(&self) -> bool {
+        self.cleanup_after_pr
+    }
+
+    /// Effective `force_exec`.
+    #[must_use]
+    pub fn force_exec(&self) -> bool {
+        self.force_exec
+    }
+
+    /// Effective `computer_use`.
+    #[must_use]
+    pub fn computer_use(&self) -> bool {
+        self.computer_use
+    }
+
+    /// Effective `permission`.
+    #[must_use]
+    pub fn permission(&self) -> PermissionMode {
+        self.permission
     }
 }
 
@@ -1352,15 +1380,13 @@ const SUPPORTED_SDKS: &[&str] = &["jcode", "claude"];
 const REMOVED_SDKS: &[(&str, &str)] = &[
     (
         "seher",
-        "drop `sdk:` to use the default `jcode` backend (or set `sdk: claude`), \
-         and replace any `model:` / `plan_model:` mode key (`build` / `plan`) \
-         with a `provider/model[:effort]` reference",
+        "remove `sdk:` to use the workflow's `command` or the backend from applicable `default.yaml` layers (falling back to `jcode` only when none is selected), or set `sdk: claude`; \
+         replace `model:` / `plan_model:` mode keys (`build` / `plan`) with model values accepted by the selected backend",
     ),
     (
         "pi",
-        "drop `sdk:` to use the default `jcode` backend (or set `sdk: claude`), \
-         and express `model:` / `plan_model:` in that backend's \
-         `provider/model[:effort]` namespace",
+        "remove `sdk:` to use the workflow's `command` or the backend from applicable `default.yaml` layers (falling back to `jcode` only when none is selected), or set `sdk: claude`; \
+         express `model:` / `plan_model:` in the selected backend's model syntax",
     ),
 ];
 
@@ -1414,7 +1440,7 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
     let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
     let is_jcode = matches!(executor, crate::executor::Executor::Jcode);
 
-    if !is_jcode && config.computer_use {
+    if !is_jcode && config.computer_use() {
         return Err(computer_use_backend_error(config, None));
     }
 
@@ -1452,7 +1478,7 @@ fn validate_permission(config: &WorkflowConfig) -> crate::error::Result<()> {
         crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
         crate::executor::Executor::Command { .. }
     );
-    let effective = |step: &StepConfig| step.permission.unwrap_or(config.permission);
+    let effective = |step: &StepConfig| step.permission.unwrap_or_else(|| config.permission());
     let is_prompt = |step: &StepConfig| step.prompt.is_some() || step.prompt_file.is_some();
     let check_prompt = |name: &str, step: &StepConfig| -> crate::error::Result<()> {
         let mode = effective(step);
@@ -1524,7 +1550,7 @@ fn computer_use_backend_error(
     );
     if config.sdk.as_deref() == Some("claude") {
         crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key or use the default jcode backend"
+            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key, or select `sdk: jcode` in the workflow with no `command:` setting"
         ))
     } else {
         crate::error::CruiseError::InvalidStepConfig(format!(
@@ -2692,7 +2718,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the field is true
-        assert!(config.cleanup_after_pr);
+        assert!(config.cleanup_after_pr());
     }
 
     #[test]
@@ -2709,7 +2735,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the field defaults to false (non-destructive)
-        assert!(!config.cleanup_after_pr);
+        assert!(!config.cleanup_after_pr());
     }
 
     #[test]
@@ -2727,7 +2753,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: force_exec is enabled
-        assert!(config.force_exec);
+        assert!(config.force_exec());
     }
 
     #[test]
@@ -2744,7 +2770,7 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: force_exec defaults to false
-        assert!(!config.force_exec);
+        assert!(!config.force_exec());
     }
 
     #[test]
@@ -2782,7 +2808,7 @@ steps:
         assert_eq!(config.plan_model, None);
         // Languages are left to the locale-derived defaults.
         assert!(config.languages.is_none());
-        assert!(config.cleanup_after_pr);
+        assert!(config.cleanup_after_pr());
         // max_retries is unset so DEFAULT_MAX_RETRIES governs
         assert_eq!(config.max_retries, None);
         assert!(config.steps.contains_key("write-test-first"));
@@ -3217,8 +3243,12 @@ steps:
         assert_eq!(config.plan_model, None);
         assert_ne!(config.steps.len(), 0, "steps is empty");
         assert!(
-            config.steps.contains_key("mise-trust"),
-            "expected mise-trust step"
+            !config.steps.contains_key("mise-trust"),
+            "mise-trust is no longer a built-in step"
+        );
+        assert_eq!(
+            config.steps.keys().next().map(String::as_str),
+            Some("write-test-first")
         );
     }
 
@@ -5338,7 +5368,8 @@ steps:
 
             // Then: cleanup_after_pr reflects the parsed bool value
             assert_eq!(
-                config.cleanup_after_pr, expected,
+                config.cleanup_after_pr(),
+                expected,
                 "CRUISE_CLEANUP_AFTER_PR={value:?} should parse to {expected}"
             );
         }
@@ -5362,7 +5393,8 @@ steps:
 
             // Then: force_exec reflects the parsed bool value
             assert_eq!(
-                config.force_exec, expected,
+                config.force_exec(),
+                expected,
                 "CRUISE_FORCE_EXEC={value:?} should parse to {expected}"
             );
         }
@@ -6872,7 +6904,7 @@ steps:
     fn test_permission_defaults_to_full_and_step_override_round_trips() {
         let config = WorkflowConfig::from_yaml("steps:\n  a:\n    prompt: hi\n")
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.permission, PermissionMode::Full);
+        assert_eq!(config.permission(), PermissionMode::Full);
         assert_eq!(config.steps["a"].permission, None);
         let serialized = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
         assert!(serialized["steps"]["a"].get("permission").is_none());
@@ -6881,12 +6913,12 @@ steps:
             "permission: edit\nsteps:\n  a:\n    prompt: hi\n    permission: read-only\n  b:\n    prompt: hi\n    permission: full\n",
         )
         .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.permission, PermissionMode::Edit);
+        assert_eq!(config.permission(), PermissionMode::Edit);
         assert_eq!(config.steps["a"].permission, Some(PermissionMode::ReadOnly));
         assert_eq!(config.steps["b"].permission, Some(PermissionMode::Full));
         let yaml = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error}"));
         let again = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(again.permission, PermissionMode::Edit);
+        assert_eq!(again.permission(), PermissionMode::Edit);
         assert_eq!(again.steps["a"].permission, Some(PermissionMode::ReadOnly));
         assert_eq!(again.steps["b"].permission, Some(PermissionMode::Full));
     }

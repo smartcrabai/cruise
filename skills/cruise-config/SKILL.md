@@ -19,9 +19,9 @@ Config files are resolved in this priority order:
 1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` (or `builtin:default`) selects the built-in default workflow even when config files exist; `-c builtin:simple` / `builtin:review` select the other catalog workflows (`cruise workflow list`; copy one to edit with `cruise workflow eject <name> [--to user|project]`)
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
-4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted)
+4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted), excluding the top-level `.cruise/default.yaml`
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/default.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation, run on the default `jcode` SDK backend) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
+6. Built-in default (`builtin/default.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
 
 In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
 
@@ -29,9 +29,11 @@ In a non-interactive context (stdin/stdout is not a TTY), the highest-priority c
 
 > User workflow YAMLs left directly in `~/.config/cruise/` are no longer discovered. Cruise emits a one-time warning and tells you to move them into `~/.config/cruise/workflows/`.
 
+`$XDG_CONFIG_HOME/cruise/default.yaml` (when `XDG_CONFIG_HOME` is unset, macOS/Linux use `~/.config/cruise/default.yaml`; Windows uses `%APPDATA%\cruise\default.yaml` when `APPDATA` is set, otherwise it falls back to `~/.config/cruise/default.yaml`) and `./.cruise/default.yaml` provide workflow defaults, with project defaults taking precedence over user defaults; explicit `-c` or `CRUISE_CONFIG` selection of either defaults file is rejected. Environment overrides are applied after workflow and defaults layers. `pre_steps` from defaults are command-only steps inserted at the start of `steps` as `pre/<name>`; user defaults are applied before project defaults, and a project `pre_steps` entry with the same name replaces the user entry. A `default.yaml` inside `workflows/` is an ordinary selectable workflow.
+
 ## Minimal config
 
-`steps` is required. `command` and `sdk` are mutually exclusive; omitting both runs prompts on the default `jcode` SDK backend.
+`steps` is required. `command` and `sdk` are mutually exclusive; the default `jcode` SDK backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied.
 
 ```yaml
 command: [claude, -p]
@@ -81,7 +83,7 @@ The full spec is split into the files below. Load only the sections you need.
 
 After writing or editing a config, verify each of the following:
 
-1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither is set, the default `jcode` backend runs. When `sdk` is set, is it `jcode` or `claude`? (Any other value is a validation error.)
+1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied, the default `jcode` backend runs. When `sdk` is set, is it `jcode` or `claude`? (Any other value is a validation error.)
 2. **Step type uniqueness**: each executable step holds one of `prompt` / `prompt_file` / `command` / `option` / `parallel` (pure `group` and `workflow_call` call sites hold none of these). Parallel children must be prompt/command steps; apply the parent and child restrictions in [references/steps.md](references/steps.md#parallel-step). Use `prompt_file` for long prompts; relative paths are resolved relative to the configuration file (or the called workflow's directory).
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is set by both `cruise run` and `cruise exec` (exec points it at an empty `plan.md` placeholder); `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?

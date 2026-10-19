@@ -238,6 +238,9 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
 
     let pr_language = config.effective_pr_language();
     let plan_language = config.effective_plan_language();
+    let cleanup_after_pr = config.cleanup_after_pr();
+    let computer_use = config.computer_use();
+    let permission = config.permission();
 
     Ok(CompiledWorkflow {
         command: config.command,
@@ -256,9 +259,9 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         pr_language,
         plan_language,
         mcp_servers: config.mcp_servers,
-        cleanup_after_pr: config.cleanup_after_pr,
-        computer_use: config.computer_use,
-        permission: config.permission,
+        cleanup_after_pr,
+        computer_use,
+        permission,
         steps,
         after_pr,
         invocations,
