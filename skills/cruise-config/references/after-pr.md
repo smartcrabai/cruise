@@ -71,7 +71,7 @@ This runs only because you wrote it in your workflow. Because `after-pr` errors 
 
 ## Constraints
 
-- **Errors are downgraded to warnings, except cancellation and `github-review`**: non-`Interrupted` errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast). `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase, and a `github-review` failure (`CruiseError::GitHubReviewFailed`) propagates and marks the run `Failed`. The model fits side effects like pushing labels, posting notifications, etc.
+- **Other errors are downgraded to warnings**: errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast), except cancellation, missing jcode models, and `github-review` failures. `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase. A missing-model error from a jcode after-PR prompt propagates and fails the run/session. A `github-review` failure (`CruiseError::GitHubReviewFailed`) propagates and marks the run `Failed`. The model fits side effects like pushing labels, posting notifications, etc.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 

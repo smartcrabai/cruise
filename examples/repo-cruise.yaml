@@ -19,9 +19,10 @@
 # `cruise plan`/`cruise run` on a workstation, against your own jcode
 # credentials (`jcode login <provider>`).
 
-# `model`/`plan_model` are left unset so the backend can use its configured defaults.
-# To pin a model, replace these placeholders with references supported by your
-# jcode SDK setup (`provider/model[:effort]` or a bare model):
+# Set `model` to an available Cruise model reference before running jcode
+# prompts. A jcode home's configured default does not fill in a missing model.
+# Planning calls may use `plan_model`; otherwise they fall back to `model`.
+# Use `provider/model[:effort]` or a bare model supported by your setup:
 # model: provider/model[:effort]
 # plan_model: provider/model[:effort]
 

@@ -87,7 +87,9 @@ pub(super) async fn run_parallel_step(
                 // A block timeout cancels unfinished children, but the block
                 // itself follows the same failure path as an ordinary timeout.
                 let fatal = match &error {
-                    CruiseError::CommitGuardViolation(_) => true,
+                    CruiseError::CommitGuardViolation(_) | CruiseError::MissingJcodeModel(_) => {
+                        true
+                    }
                     CruiseError::Interrupted => !timed_out,
                     CruiseError::StepTimeout { .. } => false,
                     _ => !has_if_fail,

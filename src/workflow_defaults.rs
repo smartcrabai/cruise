@@ -1,6 +1,7 @@
 //! Workflow defaults (`default.yaml`) layered under every resolved workflow.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -14,6 +15,73 @@ use crate::error::{CruiseError, Result};
 
 /// File name of the reserved workflow-defaults file.
 pub(crate) const DEFAULTS_FILE_NAME: &str = "default.yaml";
+
+const MISSING_JCODE_MODEL_TEMPLATE: &str = "# Replace null with a jcode model reference: provider/model[:effort] or a bare model.\nmodel: null\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserDefaultsTemplateStatus {
+    Created,
+    PreservedExisting,
+}
+
+fn ensure_user_defaults_template_at(path: &Path) -> std::io::Result<UserDefaultsTemplateStatus> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(UserDefaultsTemplateStatus::PreservedExisting);
+        }
+        Err(error) => return Err(error),
+    };
+
+    if let Err(error) = file.write_all(MISSING_JCODE_MODEL_TEMPLATE.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+
+    Ok(UserDefaultsTemplateStatus::Created)
+}
+
+/// Build an actionable error for a jcode prompt whose effective Cruise model
+/// is missing, creating a user defaults template only when no file exists.
+pub(crate) fn missing_jcode_model_error() -> CruiseError {
+    let setup = match crate::paths::config_dir() {
+        Ok(config_dir) => {
+            let path = config_dir.join(DEFAULTS_FILE_NAME);
+            match ensure_user_defaults_template_at(&path) {
+                Ok(UserDefaultsTemplateStatus::Created) => {
+                    format!("Created the user defaults template at {}.", path.display())
+                }
+                Ok(UserDefaultsTemplateStatus::PreservedExisting) => format!(
+                    "The existing user defaults file at {} was kept unchanged.",
+                    path.display()
+                ),
+                Err(error) => format!(
+                    "Could not create the user defaults file at {}: {error}.",
+                    path.display()
+                ),
+            }
+        }
+        Err(error) => format!(
+            "Could not resolve the user defaults path from XDG_CONFIG_HOME or the home directory, so no template was created: {error}."
+        ),
+    };
+
+    CruiseError::MissingJcodeModel(format!(
+        "jcode requires a Cruise model for this prompt. {setup} Set `model` to an available `provider/model[:effort]` reference or a bare model in defaults or the workflow, or set `CRUISE_MODEL` when starting a new session. Planning calls may instead use `plan_model` or `CRUISE_PLAN_MODEL`. The generated `model: null` is only a placeholder and must be replaced. Retry with the command that initiated the request after updating settings: use `cruise run <SESSION>` for a failed run session, or rerun `cruise plan`/`cruise exec` for those requests. File-backed sessions reload defaults, but snapshot sessions do not, so start a fresh snapshot session if needed."
+    ))
+}
 
 /// Top-level keys that only make sense in a workflow.
 const WORKFLOW_ONLY_KEYS: [&str; 4] = ["description", "steps", "groups", "after-pr"];
@@ -728,6 +796,63 @@ mod tests {
         let mut set = workflow("command: [echo]\nmodel: wf/y");
         applied(&env, &mut set);
         assert_eq!(set.model, Some(ModelSpec::Single("wf/y".into())));
+    }
+
+    #[test]
+    fn null_user_model_does_not_mask_project_or_workflow_model() {
+        let env = env();
+        write(&env.user_file, "model: null\nplan_model: null\n");
+        write(
+            &env.project_file,
+            "model: project/model\nplan_model: project/plan\n",
+        );
+
+        let project_values = applied_with_presence(&env, &workflow_yaml(""));
+        assert_eq!(
+            project_values.model,
+            Some(ModelSpec::Single("project/model".into()))
+        );
+        assert_eq!(
+            project_values.plan_model,
+            Some(ModelSpec::Single("project/plan".into()))
+        );
+
+        let workflow_values = applied_with_presence(
+            &env,
+            &workflow_yaml("model: workflow/model\nplan_model: workflow/plan"),
+        );
+        assert_eq!(
+            workflow_values.model,
+            Some(ModelSpec::Single("workflow/model".into()))
+        );
+        assert_eq!(
+            workflow_values.plan_model,
+            Some(ModelSpec::Single("workflow/plan".into()))
+        );
+    }
+
+    #[test]
+    fn model_environment_overrides_apply_to_workflow_and_plan_models() {
+        let env = env();
+        let _model = EnvGuard::set("CRUISE_MODEL", "env/provider-model");
+        let _plan_model = EnvGuard::set("CRUISE_PLAN_MODEL", "env/plan-model");
+        let mut config = applied_with_presence(
+            &env,
+            &workflow_yaml("model: workflow/model\nplan_model: workflow/plan"),
+        );
+
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert_eq!(
+            config.model,
+            Some(ModelSpec::Single("env/provider-model".into()))
+        );
+        assert_eq!(
+            config.plan_model,
+            Some(ModelSpec::Single("env/plan-model".into()))
+        );
     }
 
     #[test]

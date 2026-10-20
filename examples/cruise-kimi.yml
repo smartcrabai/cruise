@@ -44,8 +44,9 @@ jobs:
 
       - uses: smartcrabai/cruise@v1
         with:
-          # This supplies Kimi credentials to the action's jcode SDK runtime
-          # and leaves model selection to the SDK default. Add model inputs
-          # only for routes advertised by the installed jcode SDK.
+          # This supplies Kimi credentials to the action's jcode SDK runtime.
+          # Define CRUISE_MODEL as a route available for this credential, or
+          # configure model in the repository workflow / .cruise/default.yaml.
+          model: ${{ vars.CRUISE_MODEL }}
           env: |
             KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}

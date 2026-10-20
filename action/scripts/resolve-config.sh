@@ -12,9 +12,9 @@
 #   3. `config` unset and no repo config exists -- this script generates a
 #      default config and exports it as CRUISE_CONFIG. It deliberately sets
 #      neither `sdk` nor `model`/`plan_model`: omitting `sdk` selects
-#      cruise's default backend (`sdk: jcode`); omitting model fields leaves
-#      model selection to that SDK. Explicit action inputs still override
-#      the generated config.
+#      cruise's default backend (`sdk: jcode`). Any jcode prompt still needs a
+#      Cruise model from the action inputs or checkout workflow/defaults;
+#      explicit action inputs override the generated config.
 #      `model`/`plan_model` inputs (CRUISE_MODEL/CRUISE_PLAN_MODEL env
 #      overrides, applied by cruise itself) still take priority over this
 #      generated config when set.
@@ -24,7 +24,8 @@
 # config intentionally has a single step referencing {input} rather than
 # {plan}. Generated unconditionally, regardless of the `config` input --
 # `exec` always uses this file via an explicit `-c`. Like the generated
-# default above, it sets neither `sdk` nor `model`/`plan_model`.
+# default above, it sets neither `sdk` nor `model`/`plan_model`. The action's
+# model input or checkout defaults must supply a model for jcode execution.
 set -euo pipefail
 
 CONFIG_INPUT="${CONFIG_INPUT:-}"

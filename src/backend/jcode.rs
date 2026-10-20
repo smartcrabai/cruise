@@ -84,7 +84,8 @@ pub(crate) struct JcodeRunnerConfig {
 
 /// Cruise's `provider/model[:effort]` syntax, parsed once for each fallback
 /// attempt. `provider` is kept separate so known aliases retain their previous
-/// route-selection semantics.
+/// route-selection semantics. An omitted model parses to an empty model field;
+/// the executor rejects that result before starting a jcode request.
 pub(crate) type ModelRef = (Option<String>, Option<String>, Option<EffortLevel>);
 
 pub(crate) fn parse_model_ref(model_ref: Option<&str>) -> Result<ModelRef> {
@@ -103,7 +104,7 @@ pub(crate) fn parse_model_ref(model_ref: Option<&str>) -> Result<ModelRef> {
             Ok((Some(provider.to_string()), Some(model.to_string()), effort))
         }
         Some(_) => Err(CruiseError::InvalidStepConfig(format!(
-            "invalid model reference '{raw}' for `sdk: jcode`: expected 'provider/model[:effort]', 'model[:effort]', or no value"
+            "invalid model reference '{raw}' for `sdk: jcode`: expected 'provider/model[:effort]' or 'model[:effort]'"
         ))),
     }
 }

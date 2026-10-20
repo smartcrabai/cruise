@@ -46,10 +46,10 @@ export_env JCODE_HOME "$CRUISE_DIR/jcode-home"
 export_env CRUISE_FORCE_EXEC false
 
 # --- model references: cruise's jcode format ("provider/model[:effort]" or a
-# bare model id); empty means "use the default provider/model configured in
-# the jcode home this action pins". cruise's own env-override reader already
-# ignores an empty CRUISE_MODEL/CRUISE_PLAN_MODEL, but we still skip the
-# export entirely for clarity. ---
+# bare model id). Empty action inputs are skipped so workflow or checkout
+# project defaults can supply them; actual jcode prompts still require an
+# effective Cruise model and do not fall back to JCODE_MODEL or the jcode-home
+# default. ---
 [ -n "$MODEL_INPUT" ] && export_env CRUISE_MODEL "$MODEL_INPUT"
 [ -n "$PLAN_MODEL_INPUT" ] && export_env CRUISE_PLAN_MODEL "$PLAN_MODEL_INPUT"
 

@@ -222,6 +222,20 @@ pub fn install_version_only_gh(bin_dir: &Path) {
     write_executable_script(&bin_dir.join("gh"), script);
 }
 
+/// Install and prepend a Jcode executable that exits without contacting a provider.
+/// The returned guard restores PATH on drop. Caller must hold `GLOBAL_PROCESS_LOCK`.
+///
+/// # Panics
+///
+/// Panics if the executable directory or stub script cannot be created.
+#[cfg(unix)]
+#[must_use]
+pub fn install_exiting_jcode_stub(bin_dir: &Path) -> EnvGuard {
+    std::fs::create_dir_all(bin_dir).unwrap_or_else(|error| panic!("{error}"));
+    write_executable_script(&bin_dir.join("jcode"), "#!/bin/sh\nexit 1\n");
+    prepend_to_path(bin_dir)
+}
+
 /// Extract the error message from a `Result`, panicking if it was `Ok`.
 ///
 /// # Panics

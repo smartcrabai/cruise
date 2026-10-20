@@ -168,12 +168,13 @@ The identifiers in this table are for CLI credential provisioning; `jcode login 
 
 ### Kimi for Coding example
 
-[Kimi for Coding](https://api.kimi.com/coding/) uses the jcode CLI credential provider `kimi`, authenticated with `KIMI_API_KEY`. The example provisions that credential through the action and leaves model selection to the SDK default; it does not specify a model route.
+[Kimi for Coding](https://api.kimi.com/coding/) uses the jcode CLI credential provider `kimi`, authenticated with `KIMI_API_KEY`. The example provisions that credential through the action. Supply a compatible Cruise model through the action's `model` input or the repository's workflow / `.cruise/default.yaml`; the jcode home default alone does not select Cruise's model.
 
 ```yaml
 - uses: smartcrabai/cruise@v1
   with:
-    # This example provisions credentials only; model inputs are omitted.
+    # Set model to a route available for this credential, or configure it in
+    # the repository workflow / .cruise/default.yaml.
     env: |
       KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
 ```
@@ -190,12 +191,12 @@ For SDK execution, Cruise creates a private session home from that source home a
 - **Backend** is `sdk: jcode` only when neither `command` nor `sdk` remains set after applicable checkout project defaults are applied.
 - **Authentication** can come from the dedicated key inputs, `providers` / `provider_api_keys`, or provider keys supplied through `env`. The action gate fails if all supported credential inputs are empty; a `no_auth` profile does not require a key.
 - **OpenAI service tier** defaults to `off` when neither the workflow nor process environment defines `JCODE_OPENAI_SERVICE_TIER`; an explicit value is respected.
-- **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. The jcode SDK accepts `provider/model[:effort]`, a bare model, or no model. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](../README.md#sdk-mode).
+- **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. Every actual jcode prompt requires an effective Cruise model in `provider/model[:effort]` or bare-model form. `model` may come from the action input, repository workflow, or checkout `.cruise/default.yaml`; the jcode home default and `JCODE_MODEL` do not substitute. `plan_model` is used for planning calls and otherwise falls back to `model`. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](../README.md#sdk-mode).
 - **Custom providers** are provisioned as jcode profiles through the CLI; see [Providers](#providers) for their input schema and credentials.
 
 ### Zero-config default
 
-When `config` is empty, there is no root workflow config, and there are no YAML files directly under `.cruise/`, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Applicable checkout project defaults are applied first; Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set.
+When `config` is empty, there is no root workflow config, and there are no YAML files directly under `.cruise/`, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Applicable checkout project defaults and action model inputs must supply a model for jcode prompts; Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set.
 
 ## config resolution
 
@@ -286,7 +287,7 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `cruise_version` | `latest` | cruise release to install (`latest` or a tag like `v0.2.0`). Requires v0.2.0+; the install step rejects an older binary with a clear error. |
 | `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.88.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.88.0 or newer regardless. |
 | `config` | *(empty)* | Path to a cruise workflow config YAML in your repo, used by `run`/`plan`/`fix` (sets `CRUISE_CONFIG`). Empty lets cruise's own resolver pick a config from the checkout, or its built-in default. No effect on `exec`. |
-| `model` | *(empty)* | Overrides `CRUISE_MODEL`; for `sdk: jcode`, use `provider/model[:effort]`, a bare model, or leave empty. The jcode SDK resolves the provider route. |
+| `model` | *(empty)* | Overrides `CRUISE_MODEL`; for `sdk: jcode`, use `provider/model[:effort]`, a bare model, or leave the override unset. Every actual jcode prompt must resolve an effective Cruise model from this input, the workflow config, checkout `.cruise/default.yaml`, or (for planning prompts) `plan_model`/`CRUISE_PLAN_MODEL`. jcode's configured default and `JCODE_MODEL` do not substitute. |
 | `flags` | *(empty)* | Workflow flag values for `run`, one `NAME=on\|off` per line (blank lines and lines starting with `#` ignored). Each line is passed to `cruise run` as `--flag NAME=on\|off`. Required when the workflow config declares flags, since a non-interactive run cannot prompt. No effect on `exec`, `plan` or `fix`. |
 | `plan_model` | *(empty)* | Overrides `CRUISE_PLAN_MODEL` (the `plan`/`fix` commands' planning step), same format as `model`. |
 | `providers` | *(empty)* | JSON object keyed by jcode provider-profile name. Each entry requires `base_url` and `model`; optional `context_window`, `auth`, `auth_header`, `provider_routing`, `no_auth`, `default`. Each entry becomes a `[providers.<name>]` profile via `jcode provider add`. See [Providers](#providers) for the full schema. |
@@ -362,7 +363,7 @@ The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named 
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
 - **"cruise completed but no pull request was created" (run).** cruise ran (and may have pushed a branch), but `gh pr create` failed. Check that the workflow grants `permissions: pull-requests: write` and that branch protection / repository rules allow creating PRs from the pushed branch.
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
-- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer, that its API bridge supports the session capabilities Cruise needs, and that a configured provider/model is available. This action's generated default does not set `model`/`plan_model`; set the inputs or your workflow config if a specific model reference is required.
+- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer, that its API bridge supports the session capabilities Cruise needs, and that every actual jcode prompt resolves an effective Cruise model. This requirement is unconditional: jcode's configured default and `JCODE_MODEL` do not substitute. Set the `model`/`plan_model` inputs or configure them in the workflow or checkout `.cruise/default.yaml`, as appropriate for the prompt.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
 - **Windows runners** are supported: the install step runs the cargo-dist PowerShell installer (`cruise-installer.ps1`), places the x64 `cruise.exe` under `$RUNNER_TEMP`, and appends that directory to `GITHUB_PATH`. `command:` steps run through `cmd.exe /C`.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).

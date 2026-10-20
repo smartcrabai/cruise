@@ -5,8 +5,9 @@ Setting the top-level `sdk` field selects an SDK execution path instead of the c
 ```yaml
 sdk: jcode
 
-# Optional model references use `provider/model[:effort]` or a bare model.
-# Replace this placeholder with a route available in your jcode setup.
+# Every actual jcode prompt needs an effective model. Set one here, in
+# applicable default.yaml, or through CRUISE_MODEL / CRUISE_PLAN_MODEL.
+# Use `provider/model[:effort]` or a bare model supported by your jcode setup.
 # model: provider/model[:effort]
 
 steps:
@@ -27,9 +28,9 @@ In both SDK backends, `model` / `plan_model` / per-step `model` carry the same p
 | Form | Example | Behavior |
 |------|---------|----------|
 | `provider/model[:effort]` | `provider/model` | Explicit provider + model syntax for `sdk: jcode`. `sdk: claude` treats everything before `:effort` as the model name. |
-| `:effort` | `:high` | Provider/model left to the backend default; the requested effort is applied. |
+| `:effort` | `:high` | Claude may use its backend model default with this effort. Jcode rejects this because it does not identify a model. |
 | `model` (no `/`) | `model-name` | Provider left to the backend's own resolution. |
-| unset | *(both `model` and `plan_model` omitted)* | The backend's configured default provider/model is used. |
+| unset | *(both `model` and `plan_model` omitted)* | A jcode prompt stops with a missing-model setup error. Claude keeps its existing backend-default behavior. |
 
 The `:effort` suffix is recognized only when it names an effort tier (`low`/`medium`/`high`/`xhigh`/`max`, the aliases `minimal`/`min`/`med`, or the numeric spellings `1`..`4`) or one of `off`/`none`/`0`/`5` — those four are stripped from the model id but leave the effort unset. Any other `:` suffix (e.g. an OpenRouter `:free` variant) stays part of the model id, so watch out for a model id whose own suffix happens to be `:0`..`:5`.
 
@@ -37,7 +38,7 @@ A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode`
 
 ## `sdk: jcode` — the jcode SDK (default)
 
-`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. Cruise checks the SDK handshake for `sessions` and, when custom tools are registered, `session_tools`; it does not run a CLI version probe. A missing capability produces an actionable upgrade error. `model`, `plan_model`, and per-step `model` accept `provider/model[:effort]`, a bare `model`, or no value. The effort suffix is applied through the SDK.
+`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. Cruise checks the SDK handshake for `sessions` and, when custom tools are registered, `session_tools`; it does not run a CLI version probe. A missing capability produces an actionable upgrade error. `model`, `plan_model`, and per-step `model` accept `provider/model[:effort]` or a bare model. Every actual jcode prompt must resolve to a model: ordinary prompts use step `model` then workflow/default `model`; planning calls use `plan_model` then `model`. An omitted model, blank value, or effort-only reference stops the call before jcode starts. Cruise creates or preserves the user-level `default.yaml` template to explain the setting; it never uses `JCODE_MODEL`, the jcode home default, or a resume session to fill in Cruise's missing model. Claude and external `command` backends retain their existing no-model behavior.
 
 The GitHub Action's shell bootstrap uses `jcode version --json`, `jcode login`, `jcode provider add`, and observational `jcode auth status` because that shell setup has no SDK client and the SDK exposes neither CLI version metadata nor account/profile setup operations. The Cruise backend itself uses the SDK capability handshake after launch.
 

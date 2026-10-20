@@ -121,7 +121,7 @@ Parallel children cannot make this declaration for their parent: child output ma
 
 ## `if: fail:` — failure handler
 
-Specifies what to do when the step **fails**: a command exits non-zero, the step times out (see `timeout` below), the prompt errors, or a `no-file-changes: failed` directive triggers. The value is either a step name (jump) or a mapping; only `{ retry: true }` re-executes the same step. `{}`, `{ retry: false }`, and mappings with unknown keys parse (`retry` defaults to `false`, unknown keys are ignored) and fall through to the normal transition without retrying.
+Specifies what to do when the step has a **recoverable failure**: a command exits non-zero, the step times out (see `timeout` below), a recoverable prompt error occurs, or a `no-file-changes: failed` directive triggers. A missing-model error from a jcode prompt bypasses `if.fail` and aborts the workflow. The value is either a step name (jump) or a mapping; only `{ retry: true }` re-executes the same step. `{}`, `{ retry: false }`, and mappings with unknown keys parse (`retry` defaults to `false`, unknown keys are ignored) and fall through to the normal transition without retrying.
 
 ```yaml
 steps:
@@ -142,7 +142,7 @@ steps:
 
 - Cannot be used inside `after-pr` steps.
 - Cannot be used in a group-level `if:`.
-- With `if.fail` set, a prompt-step error is caught and routed to the handler instead of aborting the workflow.
+- With `if.fail` set, recoverable prompt-step errors are caught and routed to the handler instead of aborting the workflow. Missing-model errors from jcode prompts bypass the handler and abort the workflow.
 - Without `if.fail`, a failed command step does **not** abort the workflow — it proceeds normally and the next step can branch on `{prev.success}` / `{prev.stderr}`. A `no-file-changes` failure without `if.fail` aborts the workflow.
 - Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
@@ -164,7 +164,7 @@ steps:
 
 1. If `skip` resolves to true, or `when.exists` matches no file → skip and go to next.
 2. Execute the step (bounded by `timeout` if set).
-3. Step failed (non-zero exit / prompt error / timeout / `no-file-changes: failed`) and `if.fail` is set → jump to its target, or re-execute on `retry: true`.
+3. Step has a recoverable failure (non-zero exit / recoverable prompt error / timeout / `no-file-changes: failed`) and `if.fail` is set → jump to its target, or re-execute on `retry: true`. A missing-model error from a jcode prompt bypasses `if.fail` and aborts the workflow.
 4. `no-file-changes: failed`, no files changed, and no `if.fail` → stop with Failed.
 5. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
 6. `no-file-changes: retry` and no files changed → re-execute the same step.

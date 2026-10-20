@@ -626,6 +626,7 @@ async fn approve_with_title(
         {
             Ok(title) => session.title = Some(title),
             Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
+            Err(e @ CruiseError::MissingJcodeModel(_)) => return Err(e),
             Err(e) => {
                 eprintln!("warning: SDK title generation failed: {e}");
                 crate::metadata::refresh_session_title_from_plan(session, plan_content);
@@ -2774,5 +2775,49 @@ steps:
                     .map_or(true, |path| path != repo_canonical)),
             "terminal force_exec sessions must be removed"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_jcode_model_during_title_generation_does_not_approve_session() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        #[cfg(unix)]
+        {
+            let bin = tmp.path().join("bin");
+            process
+                .env_guards
+                .push(crate::test_support::install_exiting_jcode_stub(&bin));
+        }
+        process.env_guards.push(crate::test_support::EnvGuard::set(
+            "JCODE_HOME",
+            tmp.path().join("jcode-home"),
+        ));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            process
+                .env_guards
+                .push(crate::test_support::EnvGuard::remove(key));
+        }
+        let manager = SessionManager::new(tmp.path().join("sessions"));
+        let mut session = SessionState::new(
+            "title-model-required".to_string(),
+            tmp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::inline_snapshot(),
+            "implement a feature".to_string(),
+        );
+        session.phase = SessionPhase::AwaitingApproval;
+        let config =
+            WorkflowConfig::from_yaml("sdk: jcode\nsteps:\n  work:\n    prompt: implement\n")
+                .unwrap_or_else(|error| panic!("{error}"));
+
+        let result = approve_with_title(&mut session, &manager, &config, "# Plan", None).await;
+
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "title-generation model errors must not become warnings and approval: {result:?}"
+        );
+        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
+        assert_eq!(session.title, None);
+        assert!(!manager.sessions_dir().join(&session.id).exists());
+        assert!(tmp.path().join(".config/cruise/default.yaml").is_file());
     }
 }

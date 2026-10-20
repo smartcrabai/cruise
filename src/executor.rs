@@ -190,9 +190,25 @@ impl Executor {
     ///
     /// Returns an error if the command fails to spawn / exits non-zero, if the
     /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
-    /// cruise does not implement.
+    /// cruise does not implement. A jcode request with no effective Cruise model
+    /// returns [`CruiseError::MissingJcodeModel`] before starting the backend.
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         const GUARD: &str = "read-only";
+
+        if matches!(self, Executor::Jcode) {
+            if req
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(CruiseError::Interrupted);
+            }
+            if let Ok((_, model, _)) = jcode::parse_model_ref(req.model_or_mode)
+                && model.is_none()
+            {
+                return Err(crate::workflow_defaults::missing_jcode_model_error());
+            }
+        }
+
         if req.permission != crate::config::PermissionMode::ReadOnly {
             return self.dispatch(req).await;
         }
@@ -598,6 +614,12 @@ async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
 
 fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<JcodeRunnerConfig> {
     let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
+    if model.is_none() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "model reference '{}' for `sdk: jcode` does not identify a model",
+            model_ref.unwrap_or("<unset>")
+        )));
+    }
     Ok(JcodeRunnerConfig {
         model,
         provider,
@@ -628,6 +650,7 @@ mod tests {
 
     use crate::backend::effort::EffortLevel;
     use crate::backend::stream::LimitError;
+    use crate::test_support::{EnvGuard, lock_process, set_fake_home};
 
     static EMPTY_MCP_SERVERS: LazyLock<crate::config::McpServers> =
         LazyLock::new(crate::config::McpServers::new);
@@ -880,6 +903,7 @@ mod tests {
     fn build_jcode_config_forwards_mcp_servers() {
         let env = HashMap::new();
         let mut req = base_req(&env);
+        req.model_or_mode = Some("test-provider/test-model");
         let mut mcp_servers = crate::config::McpServers::new();
         mcp_servers.insert(
             "local_tool".to_string(),
@@ -890,9 +914,198 @@ mod tests {
         );
         req.mcp_servers = &mcp_servers;
 
-        let config = build_jcode_config(&req, None).unwrap_or_else(|error| panic!("{error}"));
+        let config =
+            build_jcode_config(&req, req.model_or_mode).unwrap_or_else(|error| panic!("{error}"));
 
         assert_eq!(config.mcp_servers, mcp_servers);
+        assert_eq!(config.provider.as_deref(), Some("test-provider"));
+        assert_eq!(config.model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn build_jcode_config_rejects_references_without_a_model() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+
+        for model in [None, Some(""), Some("  \t"), Some(":high"), Some(":none")] {
+            let result = build_jcode_config(&req, model);
+            assert!(
+                matches!(result, Err(CruiseError::InvalidStepConfig(_))),
+                "model reference {model:?} must not produce a runner config"
+            );
+        }
+    }
+
+    #[test]
+    fn build_jcode_config_keeps_real_models_with_effort_and_free_suffixes() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+
+        let effort = build_jcode_config(&req, Some("test-provider/test-model:high"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(effort.provider.as_deref(), Some("test-provider"));
+        assert_eq!(effort.model.as_deref(), Some("test-model"));
+        assert_eq!(effort.effort, Some(EffortLevel::High));
+
+        let free = build_jcode_config(&req, Some("test-provider/free-model:free"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(free.provider.as_deref(), Some("test-provider"));
+        assert_eq!(free.model.as_deref(), Some("free-model:free"));
+        assert_eq!(free.effort, None);
+    }
+
+    #[tokio::test]
+    async fn missing_jcode_model_ignores_backend_default_and_resume_and_creates_user_file() {
+        let _process = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(home.path());
+        #[cfg(unix)]
+        {
+            let bin = home.path().join("bin");
+            guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+        }
+        guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
+        guards.push(EnvGuard::set("JCODE_MODEL", "backend/default-model"));
+        for key in ["CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(EnvGuard::remove(key));
+        }
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.resume = Some("existing-session-id".to_string());
+
+        let result =
+            crate::retry::with_active_policy(Some(fast_policy(&[])), jcode_executor().run(req))
+                .await;
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "backend defaults and a resume id must not replace a missing Cruise model: {result:?}"
+        );
+        let user_file = home.path().join(".config/cruise/default.yaml");
+        assert!(
+            user_file.is_file(),
+            "expected user defaults at {}",
+            user_file.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_jcode_model_reports_user_defaults_creation_failure() {
+        let _process = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(home.path());
+        let bin = home.path().join("bin");
+        guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+        let config_root = home.path().join("config");
+        guards.push(EnvGuard::set("XDG_CONFIG_HOME", &config_root));
+        guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(EnvGuard::remove(key));
+        }
+        std::fs::write(&config_root, "not a directory").unwrap_or_else(|error| panic!("{error}"));
+        let user_file = config_root.join("cruise/default.yaml");
+        let env = HashMap::new();
+
+        let result = jcode_executor().run(base_req(&env)).await;
+        let Err(error @ CruiseError::MissingJcodeModel(_)) = result else {
+            panic!("settings creation failure must preserve the missing-model error: {result:?}");
+        };
+        let diagnostic = error.to_string().to_ascii_lowercase();
+        assert!(
+            diagnostic.contains(&user_file.display().to_string().to_ascii_lowercase()),
+            "missing-model diagnostic must identify the intended settings path: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("not a directory"),
+            "missing-model diagnostic must include the file-system cause: {diagnostic}"
+        );
+        assert!(config_root.is_file());
+        assert!(!user_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_cancelled_missing_jcode_request_has_no_initialization_or_backend_side_effect() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _process = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(home.path());
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
+        let marker = home.path().join("jcode-started");
+        let executable = bin.join("jcode");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf started >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let mut permissions = std::fs::metadata(&executable)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .unwrap_or_else(|error| panic!("{error}"));
+        guards.push(EnvGuard::set("PATH", bin.as_os_str()));
+        for key in [
+            "JCODE_MODEL",
+            "JCODE_HOME",
+            "CRUISE_MODEL",
+            "CRUISE_PLAN_MODEL",
+        ] {
+            guards.push(EnvGuard::remove(key));
+        }
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.cancel_token = Some(&token);
+
+        let result = jcode_executor().run(req).await;
+
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "got {result:?}"
+        );
+        assert!(
+            !home.path().join(".config/cruise/default.yaml").exists(),
+            "a cancelled request must not create user defaults"
+        );
+        assert!(!marker.exists(), "a cancelled request must not start jcode");
+    }
+
+    #[tokio::test]
+    async fn missing_jcode_model_is_not_replaced_by_read_only_file_tracker_error() {
+        let _process = lock_process();
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(root.path());
+        #[cfg(unix)]
+        {
+            let bin = root.path().join("bin");
+            guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+        }
+        guards.push(EnvGuard::set("JCODE_HOME", root.path().join("jcode-home")));
+        let xdg = root.path().join("workspace-config");
+        guards.push(EnvGuard::set("XDG_CONFIG_HOME", xdg.as_os_str()));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(EnvGuard::remove(key));
+        }
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.working_dir = Some(root.path());
+        req.permission = crate::config::PermissionMode::ReadOnly;
+
+        let result = jcode_executor().run(req).await;
+
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "missing model must be reported before read-only tracking sees template creation: {result:?}"
+        );
+        assert!(xdg.join("cruise/default.yaml").is_file());
     }
 
     // -- run_with_fallback wiring ---------------------------------------------
@@ -1606,6 +1819,84 @@ mod tests {
                 .iter()
                 .any(|notice| notice == "Model: test-executor-unusable/spare"),
             "the usable fallback must be reported: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn effort_only_fallback_candidate_is_skipped_before_runner_start() {
+        let attempts = recorder();
+        let attempts_sink = Arc::clone(&attempts);
+        let started = recorder();
+        let started_sink = Arc::clone(&started);
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("test-primary/model");
+        req.max_retries = 1;
+
+        let policy = fast_policy(&[("test-primary/model", &[":high", "test-next/model"])]);
+        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
+            let model = model.unwrap_or_default();
+            record(&attempts_sink, model);
+            let config = build_jcode_config(&req, Some(model))?;
+            record(&started_sink, model);
+            if model == "test-primary/model" {
+                Ok(canned(vec![limit_chunk()]))
+            } else if config.model.is_none() {
+                Ok(canned(vec![StreamChunk::Done(
+                    "effort-only model".to_string(),
+                )]))
+            } else {
+                Ok(canned(vec![StreamChunk::Done("next model".to_string())]))
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the valid model after the empty candidate should run: {error}")
+        });
+
+        assert_eq!(outcome.result.output, "next model");
+        assert_eq!(
+            recorded(&attempts),
+            [
+                "test-primary/model",
+                "test-primary/model",
+                ":high",
+                "test-next/model",
+            ]
+        );
+        assert_eq!(
+            recorded(&started),
+            [
+                "test-primary/model",
+                "test-primary/model",
+                "test-next/model",
+            ],
+            "the effort-only fallback must not start a runner"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_model_reference_keeps_existing_fallback_error_path_without_initializing_defaults()
+     {
+        let _process = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(home.path());
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(EnvGuard::remove(key));
+        }
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("provider/");
+
+        let result = jcode_executor().run(req).await;
+
+        assert!(
+            matches!(result, Err(CruiseError::InvalidStepConfig(_))),
+            "an invalid reference must retain its existing parse/fallback error: {result:?}"
+        );
+        assert!(
+            !home.path().join(".config/cruise/default.yaml").exists(),
+            "an invalid reference is not an omitted model"
         );
     }
 
