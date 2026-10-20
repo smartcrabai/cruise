@@ -104,7 +104,7 @@ pub fn setup_plan_vars(
 /// (`command`-style) templates and register no custom tools.
 #[must_use]
 pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
-    Executor::new(config.sdk.as_deref(), &config.command).is_sdk() && config.interactive_planning
+    Executor::new(config.sdk.as_deref(), &config.command).is_sdk() && config.interactive_planning()
 }
 
 /// Select the plan-generation template for the configured backend.
@@ -370,7 +370,7 @@ pub async fn run_plan_prompt_template(
             tools,
             on_session_id: ctx.on_session_id,
             resume: resume.clone(),
-            computer_use: ctx.config.computer_use,
+            computer_use: ctx.config.computer_use(),
             permission: crate::config::PermissionMode::Full,
         })
         .await;
@@ -669,7 +669,7 @@ mod tests {
     fn interactive_planning_defaults_to_true_for_sdk() {
         // Omitting the field keeps the tool-based interactive flow (SDK templates).
         let config = config_with(Some("jcode"), None);
-        assert!(config.interactive_planning);
+        assert!(config.interactive_planning());
         assert!(sdk_plan_tools_enabled(&config));
     }
 

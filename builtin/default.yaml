@@ -603,9 +603,6 @@ groups:
 
           Never ask the user; this step runs unattended.
 steps:
-  mise-trust:
-    command: |-
-      mise trust || true
   write-test-first:
     prompt: |-
       Using {plan}, write test code only. Production implementation belongs to next step.

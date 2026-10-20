@@ -72,11 +72,17 @@ fn prepare_settings(
                 requested_config_path.as_deref(),
                 &session.base_dir,
             )?;
-            let config =
-                crate::resolver::resolve_workflow_config(&yaml, &source, &session.base_dir)?;
             let config_ref = SessionConfigRef::from_source(
                 &source,
                 session.repo.as_ref().map(|_| session.base_dir.as_path()),
+            )?;
+            let project_dir = (session.repo.is_none() || config_ref.live_path().is_none())
+                .then_some(session.base_dir.as_path());
+            let config = crate::resolver::resolve_workflow_config(
+                &yaml,
+                &source,
+                &session.base_dir,
+                project_dir,
             )?;
             (requested_config_path, config_ref, config)
         }
@@ -561,6 +567,7 @@ mod tests {
             crate::config::BUILTIN_CONFIG_YAML,
             &crate::resolver::ConfigSource::Builtin,
             &repo,
+            None,
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         manager
@@ -600,6 +607,7 @@ mod tests {
             crate::config::BUILTIN_CONFIG_YAML,
             &crate::resolver::ConfigSource::Builtin,
             &repo,
+            None,
         )
         .and_then(|config| crate::session_config::serialize_resolved_config(&config))
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -849,6 +857,7 @@ mod tests {
             crate::config::BUILTIN_CONFIG_YAML,
             &crate::resolver::ConfigSource::Builtin,
             &repo,
+            None,
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         manager

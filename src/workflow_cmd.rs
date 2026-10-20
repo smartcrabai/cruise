@@ -107,6 +107,12 @@ fn render_list(
 ///
 /// Returns an error when the destination cannot be determined or ejecting fails.
 pub fn eject(name: &str, project: bool) -> Result<()> {
+    if project && name == "default" {
+        return Err(crate::error::CruiseError::Other(
+            "./.cruise/default.yaml is reserved for workflow defaults; choose another --name or use --user"
+                .to_string(),
+        ));
+    }
     let dir = if project {
         std::env::current_dir()?.join(".cruise")
     } else {
@@ -391,5 +397,17 @@ mod tests {
         assert!(!tmp.path().join("escape.yaml").exists());
         let entries = std::fs::read_dir(&dest).map_or(0, Iterator::count);
         assert_eq!(entries, 0);
+    }
+
+    #[test]
+    fn eject_default_to_project_is_rejected_without_writing() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let prev = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
+        std::env::set_current_dir(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = eject("default", true);
+        std::env::set_current_dir(prev).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(result.is_err());
+        assert!(!tmp.path().join(".cruise").join("default.yaml").exists());
     }
 }

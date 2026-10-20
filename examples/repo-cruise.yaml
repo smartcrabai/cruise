@@ -12,8 +12,9 @@
 # customize the prompts, add the `test` -> `fix-test-error` retry loop below,
 # or pin a specific model.
 #
-# No `sdk:` field: omitting both `sdk` and `command` selects cruise's
-# default `jcode` backend, which is what the cruise GitHub Action
+# No `sdk:` field: the `jcode` backend is selected only when neither
+# `command` nor `sdk` remains set in the resolved workflow after applicable
+# `default.yaml` layers; this is what the cruise GitHub Action
 # provisions and drives. It is equally usable outside the Action --
 # `cruise plan`/`cruise run` on a workstation, against your own jcode
 # credentials (`jcode login <provider>`).

@@ -7,7 +7,8 @@
 //! resolving a config would overwrite it.
 
 use cruise::config::WorkflowConfig;
-use cruise::workflow_call::resolve_workflow_calls;
+use cruise::workflow_call::resolve_workflow_calls_with_defaults;
+use cruise::workflow_defaults::WorkflowDefaults;
 
 const RETRY_YAML: &str = r#"
 sdk: jcode
@@ -36,7 +37,7 @@ const PLAIN_YAML: &str = "sdk: jcode\nsteps:\n  s1:\n    prompt: hi\n";
 
 fn resolve(yaml: &str) -> Result<WorkflowConfig, cruise::error::CruiseError> {
     let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-    resolve_workflow_calls(config, ".")
+    resolve_workflow_calls_with_defaults(config, ".", &WorkflowDefaults::default())
 }
 
 fn resolve_ok(yaml: &str) {

@@ -17,7 +17,7 @@ steps:
 ## Mutual exclusivity with `command`
 
 - Both `command` and `sdk` set → validation error.
-- Neither set → valid: prompts run on the **default `jcode` backend**. An empty `command` array counts as "not set", so an `sdk`-only config is valid.
+- Neither remains set in the resolved workflow after applicable `default.yaml` layers are applied → valid: prompts run on the **fallback `jcode` backend**. An empty `command` array counts as "not set", so an `sdk`-only config is valid.
 - `sdk` set to anything other than `jcode` / `claude` → validation error.
 
 ## Model fields are plain model references

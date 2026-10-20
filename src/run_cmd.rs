@@ -553,6 +553,7 @@ async fn run_single(
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
     let config_reloader = crate::session_config::config_reloader_for_reference(
         &session.config,
+        session.workflow_defaults_dir().map(Path::to_path_buf),
         effective_max_retries,
     );
     let log_path = manager.run_log_path(&session_id);

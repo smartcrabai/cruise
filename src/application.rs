@@ -439,8 +439,15 @@ fn create_session_inner(
             SessionConfigRef::from_source(&source, repo.as_ref().map(|_| base_dir.as_path()))?;
         (yaml, source, config_ref)
     };
-    let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir)?;
+    let project_dir =
+        (repo.is_none() || config_ref.live_path().is_none()).then_some(base_dir.as_path());
+    let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir, project_dir)?;
     crate::config::validate_config(&config)?;
+    let skipped_steps = if repo.is_some() && config_ref.is_snapshot() {
+        filter_skipped_steps(&config, request.skipped_steps)?
+    } else {
+        request.skipped_steps
+    };
     crate::flags::validate_names(&config, &request.flags)?;
     let mut state = SessionState::new_draft(
         id.to_string(),
@@ -455,7 +462,7 @@ fn create_session_inner(
         None => None,
     };
     state.repo = repo;
-    state.skipped_steps = request.skipped_steps;
+    state.skipped_steps = skipped_steps;
     state.flags = request.flags;
     manager.create_with_config(&state, &config)?;
     let session_dir = manager.sessions_dir().join(id);
@@ -481,6 +488,35 @@ fn create_session_inner(
     });
     history.save_best_effort();
     Ok(state)
+}
+
+fn filter_skipped_steps(
+    config: &crate::config::WorkflowConfig,
+    skipped_steps: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut available = std::collections::HashSet::new();
+    collect_skippable_step_ids(
+        &crate::workflow::list_skippable_steps(config)?,
+        &mut available,
+    );
+    collect_skippable_step_ids(
+        &crate::workflow::list_skippable_after_pr_steps(config)?,
+        &mut available,
+    );
+    Ok(skipped_steps
+        .into_iter()
+        .filter(|step| available.contains(step))
+        .collect())
+}
+
+fn collect_skippable_step_ids(
+    nodes: &[crate::workflow::SkippableStepNode],
+    ids: &mut std::collections::HashSet<String>,
+) {
+    for node in nodes {
+        ids.insert(node.id.clone());
+        collect_skippable_step_ids(&node.children, ids);
+    }
 }
 
 impl ApplicationRuntime {
@@ -2391,10 +2427,14 @@ impl CruiseApplication {
         };
         let config_path = config_path.map(crate::new_session_history::expand_tilde);
         let (yaml, source) = crate::resolver::resolve_config_in_dir(config_path.as_deref(), &base)?;
-        let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base)?;
+        let clone_root = (repo.is_some() && base.starts_with(self.manager.clones_dir()))
+            .then_some(base.as_path());
+        let config_ref = SessionConfigRef::from_source(&source, clone_root)?;
+        let project_dir = (repo.is_none() || (clone_root.is_some() && config_ref.is_snapshot()))
+            .then_some(base.as_path());
+        let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base, project_dir)?;
         crate::config::validate_config(&config)?;
-        let resolved_key =
-            SessionConfigRef::from_source(&source, None)?.stable_identity(None, "defaults");
+        let resolved_key = config_ref.stable_identity(repo, "defaults");
         let steps = crate::workflow::list_skippable_steps(&config)?;
         let after_pr_steps = crate::workflow::list_skippable_after_pr_steps(&config)?;
         let history = NewSessionHistory::load_best_effort();
@@ -2413,6 +2453,13 @@ impl CruiseApplication {
             }
             .map(|entry| entry.skipped_steps.clone())
             .unwrap_or_default();
+        let mut available = std::collections::HashSet::new();
+        collect_skippable_step_ids(&steps, &mut available);
+        collect_skippable_step_ids(&after_pr_steps, &mut available);
+        let default_skipped_steps = default_skipped_steps
+            .into_iter()
+            .filter(|step| available.contains(step))
+            .collect();
         Ok(NewSessionConfigDefaults {
             steps,
             after_pr_steps,
@@ -3559,6 +3606,7 @@ async fn execute_run(
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
     let config_reloader = crate::session_config::config_reloader_for_reference(
         &setup.state.config,
+        setup.state.workflow_defaults_dir().map(Path::to_path_buf),
         setup.max_retries,
     );
     let execution = {
@@ -4137,6 +4185,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("write initial config failed: {e}"));
         let reloader = crate::session_config::config_reloader_for_reference(
             &crate::session_config::SessionConfigRef::File { path: path.clone() },
+            None,
             3,
         )
         .unwrap_or_else(|| panic!("expected a config reloader"));
@@ -4326,18 +4375,20 @@ mod tests {
 
     #[tokio::test]
     async fn planning_policy_scope_isolated_between_concurrent_sessions() {
-        let with_fallback = crate::workflow_call::resolve_workflow_calls(
+        let with_fallback = crate::workflow_call::resolve_workflow_calls_with_defaults(
             crate::config::WorkflowConfig::from_yaml(
                 "model: [primary, fallback]\nsteps:\n  plan:\n    prompt: hi\n",
             )
             .unwrap_or_else(|e| panic!("{e}")),
             ".",
+            &crate::workflow_defaults::WorkflowDefaults::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        let without_fallback = crate::workflow_call::resolve_workflow_calls(
+        let without_fallback = crate::workflow_call::resolve_workflow_calls_with_defaults(
             crate::config::WorkflowConfig::from_yaml("steps:\n  plan:\n    prompt: hi\n")
                 .unwrap_or_else(|e| panic!("{e}")),
             ".",
+            &crate::workflow_defaults::WorkflowDefaults::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let stale_policy = crate::retry::policy_for_config(with_fallback.retry.clone())

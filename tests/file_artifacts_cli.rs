@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use cruise::config::WorkflowConfig;
 use cruise::workflow;
-use cruise::workflow_call::resolve_workflow_calls;
+use cruise::workflow_call::resolve_workflow_calls_with_defaults;
 use tempfile::TempDir;
 
 struct Fixture {
@@ -162,7 +162,12 @@ fn resolve_and_compile_config(
     base_dir: &Path,
 ) -> Result<cruise::workflow::CompiledWorkflow, String> {
     let config = WorkflowConfig::from_yaml(yaml).map_err(|error| error.to_string())?;
-    let config = resolve_workflow_calls(config, base_dir).map_err(|error| error.to_string())?;
+    let config = resolve_workflow_calls_with_defaults(
+        config,
+        base_dir,
+        &cruise::workflow_defaults::WorkflowDefaults::default(),
+    )
+    .map_err(|error| error.to_string())?;
     workflow::compile(config).map_err(|error| error.to_string())
 }
 
@@ -274,8 +279,11 @@ steps:
     );
     fixture.write_file("prompt.md", "prompt loaded from disk");
 
-    let resolved = cruise::workflow_call::resolve_workflow_calls_from_path(&fixture.config)
-        .unwrap_or_else(|error| panic!("workflow resolution failed: {error}"));
+    let resolved = cruise::workflow_call::resolve_workflow_calls_from_path_with_defaults(
+        &fixture.config,
+        &cruise::workflow_defaults::WorkflowDefaults::default(),
+    )
+    .unwrap_or_else(|error| panic!("workflow resolution failed: {error}"));
     let step = resolved
         .steps
         .get("summarize")

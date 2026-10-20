@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -218,35 +219,54 @@ pub fn write_snapshot_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<(
 #[must_use]
 pub fn config_reloader_for_reference(
     reference: &SessionConfigRef,
+    defaults_dir: Option<PathBuf>,
     effective_max_retries: usize,
 ) -> Option<Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>> {
     let path = reference.live_path()?.to_path_buf();
-    let last_mtime = Mutex::new(
-        std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok(),
+    let mut watched_paths = vec![path.clone()];
+    if let Some(user_defaults_path) = crate::workflow_defaults::user_defaults_path() {
+        watched_paths.push(user_defaults_path);
+    }
+    if let Some(defaults_dir) = &defaults_dir {
+        watched_paths.push(crate::workflow_defaults::project_defaults_path(
+            defaults_dir,
+        ));
+    }
+    let last_state = Mutex::new(
+        watched_paths
+            .iter()
+            .map(|path| file_modification_state(path))
+            .collect::<Vec<_>>(),
     );
     Some(Box::new(move || {
-        let current_mtime = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        let mut last = last_mtime
+        let current_state = watched_paths
+            .iter()
+            .map(|path| file_modification_state(path))
+            .collect::<Vec<_>>();
+        let mut last = last_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current_mtime == *last {
+        if current_state == *last {
             return Ok(None);
         }
-        let config = crate::workflow_call::resolve_workflow_calls_from_path(&path)?;
+        let defaults = crate::workflow_defaults::WorkflowDefaults::load(defaults_dir.as_deref())?;
+        let config =
+            crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(&path, &defaults)?;
         crate::config::validate_config(&config)?;
         crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
         let retry_policy = crate::retry::policy_for_config(config.retry.clone());
         let compiled = crate::workflow::compile(config)?;
-        *last = current_mtime;
+        *last = current_state;
         Ok(Some(crate::engine::ReloadedWorkflow {
             compiled,
             retry_policy,
         }))
     }))
+}
+
+fn file_modification_state(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
 }
 
 /// Selector value for a built-in snapshot: the legacy sentinel for the default.

@@ -79,7 +79,11 @@ pub(crate) async fn generate_yaml(
 pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
     let config = WorkflowConfig::from_yaml(yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls(config, base_dir)?;
+    let config = crate::workflow_call::resolve_workflow_calls_with_defaults(
+        config,
+        base_dir,
+        &crate::workflow_defaults::WorkflowDefaults::default(),
+    )?;
     crate::config::validate_config(&config)?;
     let max_retries = crate::config::resolve_effective_max_retries(None, &config);
     crate::config::validate_group_retry_budget(&config, max_retries)?;
@@ -115,6 +119,12 @@ pub(crate) fn validate_name(name: &str) -> std::result::Result<String, String> {
 /// Returns an error for an invalid name or when the user workflow directory is unavailable.
 pub(crate) fn destination_path(name: &str, user: bool, cwd: &Path) -> Result<PathBuf> {
     validate_name(name).map_err(CruiseError::Other)?;
+    if !user && name == "default" {
+        return Err(CruiseError::Other(
+            "./.cruise/default.yaml is reserved for workflow defaults; choose another --name or use --user"
+                .to_string(),
+        ));
+    }
     let dir = if user {
         crate::paths::workflows_dir()?
     } else {
@@ -238,6 +248,19 @@ mod tests {
         assert_eq!(
             destination_path("ci", true, cwd).unwrap(),
             crate::paths::workflows_dir().unwrap().join("ci.yaml")
+        );
+    }
+
+    #[test]
+    fn destination_path_reserves_project_default_but_not_user_default() {
+        let _lock = lock_process();
+        let home = TempDir::new().unwrap();
+        let _env = set_fake_home(home.path());
+        let cwd = Path::new("/work/proj");
+        assert!(destination_path("default", false, cwd).is_err());
+        assert_eq!(
+            destination_path("default", true, cwd).unwrap(),
+            crate::paths::workflows_dir().unwrap().join("default.yaml")
         );
     }
 

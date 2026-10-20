@@ -449,6 +449,8 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Kind | Path |
 |------|------|
 | User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` (default: `~/.config/cruise/workflows/`) |
+| User workflow defaults | `$XDG_CONFIG_HOME/cruise/default.yaml` (default: `~/.config/cruise/default.yaml`) |
+| Project workflow defaults | `./.cruise/default.yaml` |
 | Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
@@ -562,13 +564,40 @@ cruise resolves the workflow config as follows:
 2. **`CRUISE_CONFIG` environment variable** -- if set, used directly (error if the file does not exist). No prompt is shown.
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
-   - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename
+   - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename; the top-level `./.cruise/default.yaml` is excluded
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with the default first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at the default. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
 
 The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers every built-in workflow with its description alongside *Auto* so a session can be pinned to an embedded workflow regardless of discovered files.
+
+### Workflow defaults (`default.yaml`)
+
+`$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error), and `cruise workflow eject default --to project` / `cruise workflow generate --name default` refuse to write `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
+
+Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > built-in defaults.
+
+- `env` and `mcp_servers` merge per key (higher layer wins).
+- `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
+- Other fields (`model`, `plan_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `retry`) are taken from the highest layer that sets them.
+- `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
+- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use` or `permission` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
+
+`pre_steps:` defines command-only steps (`command`, `env`, `timeout`, `skip`, `when`) inserted at the start of the workflow's `steps` as `pre/<name>`. They do not run in planning or `after-pr`. User steps come first, then project steps; a project step with the same name replaces the user one in place.
+
+```yaml
+# ./.cruise/default.yaml
+pre_steps:
+  mise-trust:
+    command: mise trust || true
+  nix:
+    command: nix develop --command true
+```
+
+Upgrade note: the built-in workflow no longer has a `mise-trust` step. Add the `mise-trust` pre step above to keep that behavior.
+
+In GitHub Actions, `XDG_*` is isolated, so only the project `.cruise/default.yaml` takes effect.
 
 ## Config File Reference
 
@@ -581,8 +610,9 @@ command:                   # LLM invocation command (mutually exclusive with `sd
   - "{model}"
   - -p
 
-# sdk: jcode              # Use jcode-sdk (the default when neither
-                          # `command` nor `sdk` is set; see SDK Mode)
+# sdk: jcode              # Use jcode-sdk (the fallback only when neither
+                          # `command` nor `sdk` remains set after applicable
+                          # `default.yaml` layers; see SDK Mode)
 # sdk: claude             # Use claude-agent-sdk to drive the claude CLI
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
@@ -664,10 +694,12 @@ steps:
 
 ### SDK Mode
 
-Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; omitting both selects the default `jcode` backend. Two values are accepted: `jcode` and `claude`.
+Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; the default `jcode` backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied. Two values are accepted: `jcode` and `claude`.
 
 ```yaml
-sdk: jcode        # optional -- this is the default when neither `command` nor `sdk` is set
+sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
+                  # when neither `command` nor `sdk` remains set in the resolved
+                  # workflow after applicable `default.yaml` layers are applied.
 
 # Optional `model`/`plan_model` references use `provider/model[:effort]` or a bare model.
 # Replace these placeholders with routes available in your jcode setup.
@@ -736,7 +768,7 @@ interactive_planning: false   # tool-less, file-based planning
 
 #### MCP servers (`mcp_servers`)
 
-The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, the default jcode backend when neither `sdk` nor `command` is set, and `sdk: claude`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
+The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
 
 Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. HTTP and SSE transports are supported only with `sdk: claude`:
 
@@ -784,7 +816,7 @@ The effective values are available to built-in templates as `{pr.language}` and 
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` set -- the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise makes a separate title-generation request using the plan step's model resolution (`plan_model` -> `model`, then the backend's own default). Approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead. If title generation fails, cruise extracts the title from `plan.md`.
+- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` remains set in the resolved workflow after applicable `default.yaml` layers are applied -- then the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise makes a separate title-generation request using the plan step's model resolution (`plan_model` -> `model`, then the backend's own default). Approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead. If title generation fails, cruise extracts the title from `plan.md`.
 - **Command mode (`command:` set)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
 No additional configuration is required.

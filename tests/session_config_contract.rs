@@ -8,6 +8,7 @@ use cruise::application::{CruiseApplication, NewSessionRequest};
 use cruise::config::WorkflowConfig;
 use cruise::planning::plan_conversation_key;
 use cruise::session::SessionManager;
+use cruise::session_config::{SessionConfigRef, config_reloader_for_reference};
 use cruise::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -806,5 +807,101 @@ fn cli_json_lists_a_new_state_and_derives_config_fields_without_reading_legacy_s
         listed["config_source"]
             .as_str()
             .is_some_and(|label| label.contains(config_path.to_string_lossy().as_ref()))
+    );
+}
+
+#[test]
+fn file_reference_reloader_reloads_when_only_user_defaults_change() {
+    let _env_lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let user_config = temp.path().join("user-config");
+    let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", user_config.as_os_str());
+    let user_defaults_dir = user_config.join("cruise");
+    fs::create_dir_all(&user_defaults_dir)
+        .unwrap_or_else(|error| panic!("create user defaults directory: {error}"));
+    let user_defaults = user_defaults_dir.join("default.yaml");
+    fs::write(&user_defaults, "env:\n  RELOAD_SOURCE: user-before\n")
+        .unwrap_or_else(|error| panic!("write user defaults: {error}"));
+
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap_or_else(|error| panic!("create project: {error}"));
+    let workflow = project.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
+    )
+    .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    let reloader =
+        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
+            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    assert!(
+        reloader()
+            .unwrap_or_else(|error| panic!("check initial config: {error}"))
+            .is_none()
+    );
+
+    fs::write(&user_defaults, "env:\n  RELOAD_SOURCE: user-after-longer\n")
+        .unwrap_or_else(|error| panic!("update user defaults: {error}"));
+    let updated = reloader()
+        .unwrap_or_else(|error| panic!("reload user defaults: {error}"))
+        .unwrap_or_else(|| panic!("user-defaults change did not reload the workflow"));
+    assert_eq!(
+        updated
+            .compiled
+            .env
+            .get("RELOAD_SOURCE")
+            .map(String::as_str),
+        Some("user-after-longer")
+    );
+}
+
+#[test]
+fn file_reference_reloader_reloads_when_only_project_defaults_change() {
+    let _env_lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let user_config = temp.path().join("user-config");
+    let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", user_config.as_os_str());
+
+    let project = temp.path().join("project");
+    let project_defaults_dir = project.join(".cruise");
+    fs::create_dir_all(&project_defaults_dir)
+        .unwrap_or_else(|error| panic!("create project defaults directory: {error}"));
+    let project_defaults = project_defaults_dir.join("default.yaml");
+    fs::write(&project_defaults, "env:\n  RELOAD_SOURCE: project-before\n")
+        .unwrap_or_else(|error| panic!("write project defaults: {error}"));
+    let workflow = project.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
+    )
+    .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    let reloader =
+        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
+            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    assert!(
+        reloader()
+            .unwrap_or_else(|error| panic!("check initial config: {error}"))
+            .is_none()
+    );
+
+    fs::write(
+        &project_defaults,
+        "env:\n  RELOAD_SOURCE: project-after-longer\n",
+    )
+    .unwrap_or_else(|error| panic!("update project defaults: {error}"));
+    let updated = reloader()
+        .unwrap_or_else(|error| panic!("reload project defaults: {error}"))
+        .unwrap_or_else(|| panic!("project-defaults change did not reload the workflow"));
+    assert_eq!(
+        updated
+            .compiled
+            .env
+            .get("RELOAD_SOURCE")
+            .map(String::as_str),
+        Some("project-after-longer")
     );
 }

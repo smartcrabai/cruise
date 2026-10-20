@@ -228,8 +228,10 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 1. `-c/--config <path>` (must exist; no prompt). The special value `__builtin__` (or `builtin:default`) selects the built-in default workflow; `builtin:simple` / `builtin:review` select the other built-ins (`cruise workflow list`). `cruise workflow eject <name> [--to user|project]` copies a built-in to `$XDG_CONFIG_HOME/cruise/workflows/` (default) or `./.cruise/` and never overwrites an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
-3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
+3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with a trailing **Built-in default** entry (TTY) or highest-priority auto-pick (non-interactive).
 4. None found → a built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time), adopted without prompting.
+
+`$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults (when `XDG_CONFIG_HOME` is unset, macOS/Linux use `~/.config/cruise/default.yaml`; Windows uses `%APPDATA%\cruise\default.yaml` when `APPDATA` is set, otherwise it falls back to `~/.config/cruise/default.yaml`); `./.cruise/default.yaml` supplies project defaults and takes precedence over user defaults. Workflow fields override defaults, and environment overrides are applied afterward. Defaults `pre_steps` are command-only and are inserted at the start of the workflow as `pre/<name>`; project entries override same-named user entries. The top-level `.cruise/default.yaml` is not a workflow candidate, and explicitly selecting either defaults file with `-c` or `CRUISE_CONFIG` is rejected. A file such as `workflows/default.yaml` remains an ordinary workflow.
 
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 

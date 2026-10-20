@@ -2,7 +2,8 @@ name: "Cruise"
 description: >-
   Trigger the cruise coding agent from a GitHub Issue (@cruise plan / run /
   exec / fix). Runs cruise's plan -> implement -> PR workflow (or a direct
-  exec push) inside GitHub Actions using cruise's default jcode SDK backend,
+  exec push) inside GitHub Actions using the `sdk: jcode` backend unless the resolved
+  workflow selects another backend,
   and reports progress back as a comment.
 author: "smartcrabai"
 

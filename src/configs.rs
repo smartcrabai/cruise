@@ -80,7 +80,10 @@ fn escape_warning_text(value: &str) -> String {
 /// workflow YAML files exist.
 #[must_use]
 fn legacy_warning_message(config_dir: &std::path::Path) -> Option<String> {
-    let legacy = legacy_user_config_files(config_dir);
+    let mut legacy = legacy_user_config_files(config_dir);
+    legacy.retain(|path| {
+        path.file_name() != Some(crate::workflow_defaults::DEFAULTS_FILE_NAME.as_ref())
+    });
     if legacy.is_empty() {
         return None;
     }
@@ -441,5 +444,26 @@ mod tests {
             entries.is_empty(),
             "missing config dir should return empty list"
         );
+    }
+
+    #[test]
+    fn test_legacy_warning_ignores_defaults_file() {
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("default.yaml"), "model: x\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(legacy_warning_message(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn test_legacy_warning_still_names_other_files_next_to_defaults_file() {
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("default.yaml"), "model: x\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(tmp.path().join("old.yaml"), "command: [local]")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let message =
+            legacy_warning_message(tmp.path()).unwrap_or_else(|| panic!("expected a warning"));
+        assert!(message.contains("old.yaml"));
+        assert!(!message.contains("default.yaml"));
     }
 }

@@ -7,8 +7,9 @@ command:                  # LLM invocation command (array). Mutually exclusive w
   - "{model}"
   - -p
 
-# sdk: jcode              # Alternative backend: use jcode-sdk (the default
-                          # when neither `command` nor `sdk` is set; see sdk.md).
+# sdk: jcode              # Alternative backend: use jcode-sdk (the fallback
+                          # when neither `command` nor `sdk` remains set in the
+                          # resolved workflow after applicable `default.yaml` layers; see sdk.md).
 # sdk: claude             # Alternative backend: drive the claude CLI in-process
                           # via claude-agent-sdk (see sdk.md).
 
@@ -58,7 +59,7 @@ cleanup_after_pr: false   # Optional: delete local worktree and branch after PR 
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
-`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); setting neither runs prompts on the default `jcode` backend. When `sdk` is set it must be `jcode` or `claude` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
+`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); the `jcode` backend is used only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. When `sdk` is set it must be `jcode` or `claude` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
 Unknown top-level keys are silently ignored, so obsolete fields from older
 configs (for example `worktree:` or `state:`) still load without error. Only
@@ -66,12 +67,31 @@ per-step configuration and the `retry:` block reject unknown fields, so a typo
 at the top level is accepted and has no effect, while the same typo inside a
 step fails the load (see [steps.md](steps.md)).
 
+## Workflow defaults (`default.yaml`)
+
+A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`,
+`max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`,
+`force_exec`, `computer_use`, `permission`, `env`, `retry`, `mcp_servers`, and
+`pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
+`groups`, and `after-pr`) are rejected.
+
+`pre_steps` is a map from a name to a command step with `command` and optional
+`env`, `timeout`, `skip`, and `when` fields. Defaults insert these steps before
+workflow steps as `pre/<name>`. Names must be non-empty and must not contain
+`/`; a generated `pre/<name>` that collides with a workflow step is rejected.
+
+User defaults are applied before project defaults, so project values take
+precedence. `command` and `sdk` are replaced together when either is set;
+`env` and `mcp_servers` merge by key, with the higher-precedence value winning.
+Other defaulted fields fill only values the workflow leaves unset, so explicit
+workflow values take precedence. Environment overrides are applied afterward.
+
 ## `command` vs `sdk`
 
 There are three prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: jcode` — use the jcode SDK; the default when neither `command` nor `sdk` is set. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
+- `sdk: jcode` — use the jcode SDK; the fallback only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
 ## `mcp_servers`

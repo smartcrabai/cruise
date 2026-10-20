@@ -243,7 +243,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     }
 
     if let PlanTarget::Local { config, .. } = &target
-        && config.force_exec
+        && config.force_exec()
     {
         match force_exec_opt_out(
             args.no_force_exec,
@@ -431,7 +431,7 @@ pub async fn launch_background_plan(
     }
 
     if let PlanTarget::Local { config, .. } = &target
-        && config.force_exec
+        && config.force_exec()
     {
         match force_exec_opt_out(no_force_exec, false, false, !detected_images.is_empty()) {
             Some(reason) => {
@@ -913,10 +913,11 @@ fn build_repo_planning_session(
 ) -> Result<(WorkflowConfig, SessionState)> {
     let (yaml, source) = crate::resolver::resolve_config_in_dir(explicit_config, clone_path)?;
     eprintln!("{}", style(source.display_string()).dim());
-    let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path)?;
+    let config_ref = SessionConfigRef::from_source(&source, Some(clone_path))?;
+    let project_dir = config_ref.live_path().is_none().then_some(clone_path);
+    let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path, project_dir)?;
     validate_config(&config)?;
 
-    let config_ref = SessionConfigRef::from_source(&source, Some(clone_path))?;
     let mut session = SessionState::new(
         session_id.to_string(),
         clone_path.to_path_buf(),
