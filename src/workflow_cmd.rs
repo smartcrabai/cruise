@@ -3,9 +3,13 @@
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::builtin_workflows::{BUILTIN_WORKFLOWS, find_builtin};
+use console::{measure_text_width, style};
+
+use crate::builtin_workflows::{BUILTIN_WORKFLOWS, BuiltinWorkflow, find_builtin};
 use crate::error::{CruiseError, Result};
-use crate::workflow_packages::{self as packages, PreparedPackage, WorkflowPackageError};
+use crate::workflow_packages::{
+    self as packages, InstalledPackage, PreparedPackage, WorkflowPackageError,
+};
 
 /// Print the built-in workflows, then the installed workflow packages.
 ///
@@ -13,26 +17,88 @@ use crate::workflow_packages::{self as packages, PreparedPackage, WorkflowPackag
 ///
 /// Returns an error when the installed packages cannot be read.
 pub fn list() -> Result<()> {
-    for workflow in BUILTIN_WORKFLOWS {
-        println!("{}\t{}", workflow.name, workflow.description);
-    }
     let installed = packages::list_installed().map_err(to_cruise)?;
-    if installed.is_empty() {
-        println!("No installed workflow packages.");
-    }
-    for p in installed {
-        println!(
-            "{}\t{}/{}/{}\t{}\t{}\t{}",
-            p.name,
-            p.owner,
-            p.repo,
-            p.workflow_path,
-            p.requested_ref,
-            p.resolved_commit,
-            p.config_path.display()
-        );
+    let home = home::home_dir();
+    let cwd = std::env::current_dir().ok();
+    let display_path = |p: &Path| match &cwd {
+        Some(cwd) => crate::resolver::shorten_display_path(p, cwd, home.as_deref()),
+        None => p.display().to_string(),
+    };
+    for line in render_list(BUILTIN_WORKFLOWS, &installed, display_path) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// Render the list output as lines (pure; no I/O).
+fn render_list(
+    builtins: &[BuiltinWorkflow],
+    installed: &[InstalledPackage],
+    display_path: impl Fn(&Path) -> String,
+) -> Vec<String> {
+    use crate::batch_dashboard::sanitize_terminal_text as clean;
+
+    struct Row {
+        name: String,
+        source: String,
+        sha: String,
+        path: String,
+    }
+    let rows: Vec<Row> = installed
+        .iter()
+        .map(|p| Row {
+            name: clean(&p.name),
+            source: clean(&format!(
+                "{}/{}/{}@{}",
+                p.owner, p.repo, p.workflow_path, p.requested_ref
+            )),
+            sha: clean(&p.resolved_commit.chars().take(7).collect::<String>()),
+            path: clean(&display_path(&p.config_path)),
+        })
+        .collect();
+
+    let name_width = builtins
+        .iter()
+        .map(|w| measure_text_width(w.name))
+        .chain(rows.iter().map(|r| measure_text_width(&r.name)))
+        .max()
+        .unwrap_or(0);
+    let source_width = rows
+        .iter()
+        .map(|r| measure_text_width(&r.source))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = vec![style("Built-in workflows").bold().to_string()];
+    for w in builtins {
+        let name = style(format!("{:<name_width$}", w.name)).cyan().bold();
+        if w.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
+            lines.push(format!(
+                "  {name}  {}  {}",
+                w.description,
+                style("(default)").green()
+            ));
+        } else {
+            lines.push(format!("  {name}  {}", w.description));
+        }
+    }
+    lines.push(String::new());
+    lines.push(style("Installed packages").bold().to_string());
+    if rows.is_empty() {
+        lines.push(format!(
+            "  {}  Install one with: {}",
+            style("(none)").dim(),
+            style("cruise workflow add <owner/repo[/path][@ref]>").cyan()
+        ));
+    }
+    let indent = " ".repeat(2 + name_width + 2);
+    for r in &rows {
+        let name = style(format!("{:<name_width$}", r.name)).cyan().bold();
+        let source = format!("{:<source_width$}", r.source);
+        lines.push(format!("  {name}  {source}  {}", style(&r.sha).dim()));
+        lines.push(format!("{indent}{}", style(&r.path).dim()));
+    }
+    lines
 }
 
 /// Eject a built-in workflow to the project (`./.cruise/`) or user workflows directory.
@@ -149,6 +215,138 @@ fn install(prepared: PreparedPackage, yes: bool, verb: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::error::CruiseError;
+
+    const FULL_SHA: &str = "1111111111111111111111111111111111111111";
+
+    fn pkg(name: &str, requested_ref: &str, commit: &str) -> InstalledPackage {
+        InstalledPackage {
+            name: name.to_string(),
+            owner: "org".to_string(),
+            repo: "repo".to_string(),
+            workflow_path: "cruise.yaml".to_string(),
+            requested_ref: requested_ref.to_string(),
+            resolved_commit: commit.to_string(),
+            config_path: PathBuf::from(format!("/cfg/{name}.yaml")),
+        }
+    }
+
+    fn render(installed: &[InstalledPackage]) -> Vec<String> {
+        render_list(BUILTIN_WORKFLOWS, installed, |p| p.display().to_string())
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect()
+    }
+
+    fn line_with<'a>(lines: &'a [String], needle: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle}: {lines:?}"))
+    }
+
+    #[test]
+    fn render_list_without_packages_shows_sections_and_hint() {
+        let lines = render(&[]);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Built-in workflows")
+        );
+        assert!(lines.iter().any(|l| l == "Installed packages"));
+        assert!(lines.iter().any(|l| l.contains("(none)")));
+        assert!(lines.iter().any(|l| l.contains("cruise workflow add")));
+    }
+
+    #[test]
+    fn render_list_aligns_builtin_descriptions() {
+        let lines = render(&[]);
+        let cols: Vec<usize> = BUILTIN_WORKFLOWS
+            .iter()
+            .map(|w| {
+                line_with(&lines, w.description)
+                    .find(w.description)
+                    .unwrap_or_else(|| panic!("missing {}", w.name))
+            })
+            .collect();
+        assert!(cols.windows(2).all(|w| w[0] == w[1]), "{cols:?}");
+    }
+
+    #[test]
+    fn render_list_marks_only_default_builtin() {
+        let lines = render(&[]);
+        let marked: Vec<&String> = lines.iter().filter(|l| l.contains("(default)")).collect();
+        assert_eq!(marked.len(), 1, "{lines:?}");
+        assert!(
+            marked[0]
+                .trim_start()
+                .starts_with(crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+        );
+    }
+
+    #[test]
+    fn render_list_package_shows_source_short_sha_and_indented_path() {
+        let lines = render(&[pkg("alpha", "main", FULL_SHA)]);
+        let joined = lines.join("\n");
+        assert!(joined.contains("org/repo/cruise.yaml@main"), "{joined}");
+        assert!(joined.contains(&FULL_SHA[..7]));
+        assert!(!joined.contains(FULL_SHA), "{joined}");
+        let idx = lines
+            .iter()
+            .position(|l| l.contains("org/repo/cruise.yaml@main"))
+            .unwrap_or_else(|| panic!("{joined}"));
+        let path_line = lines
+            .get(idx + 1)
+            .unwrap_or_else(|| panic!("no path line: {joined}"));
+        assert!(path_line.trim_start().starts_with("/cfg/alpha.yaml"));
+        let name_col = lines[idx].find("alpha").unwrap_or(usize::MAX);
+        let name_width = BUILTIN_WORKFLOWS
+            .iter()
+            .map(|w| w.name.len())
+            .max()
+            .unwrap_or(0)
+            .max("alpha".len());
+        assert_eq!(
+            path_line.len() - path_line.trim_start().len(),
+            name_col + name_width + 2
+        );
+    }
+
+    #[test]
+    fn render_list_shares_name_column_across_sections() {
+        let long = "a-very-long-package-name";
+        let lines = render(&[pkg(long, "main", FULL_SHA)]);
+        let simple = crate::builtin_workflows::find_builtin("simple")
+            .unwrap_or_else(|| panic!("simple missing"));
+        let col = line_with(&lines, simple.description)
+            .find(simple.description)
+            .unwrap_or(0);
+        assert_eq!(col, 2 + long.len() + 2, "{lines:?}");
+    }
+
+    #[test]
+    fn render_list_tolerates_short_commit() {
+        let lines = render(&[pkg("alpha", "main", "abc")]);
+        assert!(line_with(&lines, "org/repo").contains("abc"));
+    }
+
+    #[test]
+    fn render_list_neutralizes_control_characters() {
+        let clean = render(&[pkg("alpha", "main", FULL_SHA)]).len();
+        let dirty = render(&[pkg("alpha", "main\nX", FULL_SHA)]);
+        assert_eq!(dirty.len(), clean, "{dirty:?}");
+        assert!(dirty.iter().all(|l| !l.contains('\n') && !l.contains('\r')));
+    }
+
+    #[test]
+    fn render_list_has_no_trailing_spaces() {
+        for installed in [
+            vec![],
+            vec![pkg("alpha", "main", FULL_SHA), pkg("z", "v1", "abc")],
+        ] {
+            for line in render(&installed) {
+                assert!(!line.ends_with(' '), "trailing space: {line:?}");
+            }
+        }
+    }
 
     #[test]
     fn eject_builtin_copies_yaml_to_new_destination() {
