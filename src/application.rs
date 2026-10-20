@@ -4117,6 +4117,7 @@ impl OptionHandler for RuntimeOptionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn save_failure_hooks_are_resettable() {
@@ -4398,7 +4399,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
-                flags: Default::default(),
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         let request: PlanRequest =
@@ -4442,7 +4443,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
-                flags: Default::default(),
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         let no_op_sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
@@ -4533,7 +4534,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
-                flags: Default::default(),
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         (app, session)
@@ -4983,7 +4984,7 @@ mod tests {
             allow_dirty_working_tree: false,
             attachments: vec![],
             skipped_steps: vec![],
-            flags: Default::default(),
+            flags: BTreeMap::default(),
         })
         .unwrap_or_else(|e| panic!("create model logging session: {e}"))
     }

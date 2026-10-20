@@ -1,5 +1,7 @@
 //! Router and template contract tests.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures::StreamExt as _;
@@ -55,7 +57,7 @@ fn create_session(harness: &Harness) -> SessionState {
         allow_dirty_working_tree: true,
         attachments: Vec::new(),
         skipped_steps: Vec::new(),
-        flags: Default::default(),
+        flags: BTreeMap::default(),
     });
     match result {
         Ok(session) => session,

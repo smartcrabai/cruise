@@ -1464,11 +1464,7 @@ fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
     }
 }
 
-/// Print a dry-run summary of the workflow flow.
-pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
-    println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
-    println!("command: {}", config.command.join(" "));
-
+fn print_dry_run_config(config: &WorkflowConfig) {
     if let Some(model) = config
         .model
         .as_ref()
@@ -1506,14 +1502,22 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             if let Some(max) = g.max_retries {
                 print!(" (max_retries: {max})");
             }
-            if let Some(ref if_cond) = g.if_condition
-                && let Some(ref target) = if_cond.file_changed
+            if let Some(if_cond) = &g.if_condition
+                && let Some(target) = &if_cond.file_changed
             {
                 print!(" -> retry from: {}", style(target).green());
             }
             println!();
         }
     }
+}
+
+/// Print a dry-run summary of the workflow flow.
+pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
+    println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
+    println!("command: {}", config.command.join(" "));
+
+    print_dry_run_config(config);
 
     println!("\nsteps:");
 

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
+use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -2739,7 +2740,7 @@ impl TuiApp {
         if multiline && let Some(session) = self.active_session() {
             let mut text = format!("\n{}", session.skipped_steps.join("\n"));
             for (name, on) in &session.flags {
-                text.push_str(&format!("\nflag:{name}={}", if *on { "on" } else { "off" }));
+                let _ = write!(text, "\nflag:{name}={}", if *on { "on" } else { "off" });
             }
             editor.set_text(&text);
         }
@@ -2800,48 +2801,7 @@ impl TuiApp {
                 self.start_replan(id, request);
             }
             PendingCommand::Session(SessionAction::EditSettings) => {
-                let mut lines = value.lines();
-                let config_path = lines
-                    .next()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToString::to_string);
-                let mut skipped_steps = Vec::new();
-                let mut flag_assignments = Vec::new();
-                for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
-                    if let Some(assignment) = line.strip_prefix("flag:") {
-                        match crate::flags::parse_assignment(assignment) {
-                            Ok(parsed) => flag_assignments.push(parsed),
-                            Err(message) => {
-                                self.set_error(message);
-                                return;
-                            }
-                        }
-                    } else {
-                        skipped_steps.push(line.to_string());
-                    }
-                }
-                let flags = match crate::flags::from_cli(&flag_assignments) {
-                    Ok(values) => Some(values),
-                    Err(error) => {
-                        self.set_error(error.to_string());
-                        return;
-                    }
-                };
-                if !self.registry.edit_settings(
-                    self.application.clone(),
-                    id,
-                    SessionSettingsRequest {
-                        config_path,
-                        skipped_steps,
-                        current_step_update: CurrentStepUpdateDto::Unchanged,
-                        flags,
-                    },
-                    regenerate,
-                    self.events.clone(),
-                ) {
-                    self.set_error("Session already has active work".to_string());
-                }
+                self.apply_edit_settings_input(id, &value, regenerate);
             }
             PendingCommand::Session(SessionAction::EditCurrentStep) => {
                 let update = if value.trim().is_empty() {
@@ -2858,6 +2818,51 @@ impl TuiApp {
                 }
             }
             _ => self.status = Some("Input was not used by this action".to_string()),
+        }
+    }
+
+    fn apply_edit_settings_input(&mut self, id: String, value: &str, regenerate: bool) {
+        let mut lines = value.lines();
+        let config_path = lines
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string);
+        let mut skipped_steps = Vec::new();
+        let mut flag_assignments = Vec::new();
+        for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
+            if let Some(assignment) = line.strip_prefix("flag:") {
+                match crate::flags::parse_assignment(assignment) {
+                    Ok(parsed) => flag_assignments.push(parsed),
+                    Err(message) => {
+                        self.set_error(message);
+                        return;
+                    }
+                }
+            } else {
+                skipped_steps.push(line.to_string());
+            }
+        }
+        let flags = match crate::flags::from_cli(&flag_assignments) {
+            Ok(values) => Some(values),
+            Err(error) => {
+                self.set_error(error.to_string());
+                return;
+            }
+        };
+        if !self.registry.edit_settings(
+            self.application.clone(),
+            id,
+            SessionSettingsRequest {
+                config_path,
+                skipped_steps,
+                current_step_update: CurrentStepUpdateDto::Unchanged,
+                flags,
+            },
+            regenerate,
+            self.events.clone(),
+        ) {
+            self.set_error("Session already has active work".to_string());
         }
     }
 

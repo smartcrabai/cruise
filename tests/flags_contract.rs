@@ -336,7 +336,7 @@ fn missing_reports_unset_flags_in_declaration_order_with_descriptions() {
         flags::missing(&config, &values(&[("e2e", false)])),
         vec![("docs", None)]
     );
-    assert!(flags::missing(&config, &values(&[("e2e", false), ("docs", true)])).is_empty());
+    assert_eq!(flags::missing(&config, &values(&[("e2e", false), ("docs", true)])), []);
 }
 
 #[test]
@@ -405,8 +405,9 @@ fn missing_in_compiled_lists_referenced_flags_without_values() {
     let mut missing = flags::missing_in_compiled(&compiled, &values(&[("e2e", true)]));
     missing.sort();
     assert_eq!(missing, ["docs"]);
-    assert!(
-        flags::missing_in_compiled(&compiled, &values(&[("e2e", true), ("docs", true)])).is_empty()
+    assert_eq!(
+        flags::missing_in_compiled(&compiled, &values(&[("e2e", true), ("docs", true)])),
+        Vec::<String>::new()
     );
 }
 
@@ -617,13 +618,13 @@ async fn hot_reload_to_workflow_with_unresolved_flag_is_ignored() {
         "command: [echo]\nflags:\n  new: {}\nsteps:\n  a:\n    flag: new\n    command: touch reloaded.txt\n",
     ))
     .unwrap();
-    let reloader = move || {
+    let reload_callback = move || {
         Ok(Some(ReloadedWorkflow {
             compiled: reloaded.clone(),
             retry_policy: None,
         }))
     };
-    let r = run(dir.path(), initial, &FlagValues::new(), Some(&reloader)).await;
+    let r = run(dir.path(), initial, &FlagValues::new(), Some(&reload_callback)).await;
     r.result.unwrap();
     assert!(dir.path().join("original.txt").exists());
     assert!(!dir.path().join("reloaded.txt").exists());

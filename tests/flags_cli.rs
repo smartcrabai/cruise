@@ -29,7 +29,7 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("failed to run git command: {error}"));
     assert!(
         out.status.success(),
         "{}",
@@ -39,9 +39,11 @@ fn git(dir: &Path, args: &[&str]) {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().unwrap();
+        let root = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create temporary fixture directory: {error}"));
         let repo = root.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&repo)
+            .unwrap_or_else(|error| panic!("failed to create fixture repository directory: {error}"));
         git(&repo, &["init", "-q", "-b", "main"]);
         git(
             &repo,
@@ -62,7 +64,8 @@ impl Fixture {
             ],
         );
         let config = root.path().join("workflow.yaml");
-        std::fs::write(&config, WORKFLOW).unwrap();
+        std::fs::write(&config, WORKFLOW)
+            .unwrap_or_else(|error| panic!("failed to write fixture workflow config: {error}"));
         Self { root, repo, config }
     }
 
@@ -88,7 +91,9 @@ impl Fixture {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        command.output().unwrap()
+        command
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run cruise exec command: {error}"))
     }
 }
 

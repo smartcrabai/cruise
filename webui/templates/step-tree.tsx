@@ -26,7 +26,7 @@ export default function StepTree(props) {
           {!flag.on && <option value="on">on</option>}
           {flag.off && <option value="off" selected>off</option>}
           {!flag.off && <option value="off">off</option>}
-        </select>
+        </select>}
         {flag.description && <span class="text-xs text-gray-500 dark:text-gray-400">{flag.description}</span>}
       </label>
     </li>)}
