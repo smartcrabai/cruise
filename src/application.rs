@@ -395,10 +395,6 @@ fn cleanup_new_execution_workspace(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "session creation resolves defaults, flags, skips, and persisted state together"
-)]
 fn create_session_inner(
     manager: &SessionManager,
     request: NewSessionRequest,
@@ -448,20 +444,7 @@ fn create_session_inner(
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir, project_dir)?;
     crate::config::validate_config(&config)?;
     let skipped_steps = if repo.is_some() && config_ref.is_snapshot() {
-        let mut available = std::collections::HashSet::new();
-        collect_skippable_step_ids(
-            &crate::workflow::list_skippable_steps(&config)?,
-            &mut available,
-        );
-        collect_skippable_step_ids(
-            &crate::workflow::list_skippable_after_pr_steps(&config)?,
-            &mut available,
-        );
-        request
-            .skipped_steps
-            .into_iter()
-            .filter(|step| available.contains(step))
-            .collect()
+        filter_skipped_steps(&config, request.skipped_steps)?
     } else {
         request.skipped_steps
     };
@@ -505,6 +488,25 @@ fn create_session_inner(
     });
     history.save_best_effort();
     Ok(state)
+}
+
+fn filter_skipped_steps(
+    config: &crate::config::WorkflowConfig,
+    skipped_steps: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut available = std::collections::HashSet::new();
+    collect_skippable_step_ids(
+        &crate::workflow::list_skippable_steps(config)?,
+        &mut available,
+    );
+    collect_skippable_step_ids(
+        &crate::workflow::list_skippable_after_pr_steps(config)?,
+        &mut available,
+    );
+    Ok(skipped_steps
+        .into_iter()
+        .filter(|step| available.contains(step))
+        .collect())
 }
 
 fn collect_skippable_step_ids(

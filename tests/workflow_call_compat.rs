@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use cruise::config::WorkflowConfig;
 use cruise::error::CruiseError;
@@ -46,20 +46,9 @@ fn public_defaults_application_uses_workflow_yaml_field_presence() {
     assert!(!explicit_false.config.interactive_planning);
 }
 
-#[expect(
-    dead_code,
-    reason = "compile-time compatibility check for legacy resolver arities"
-)]
-fn legacy_resolver_call_arities(
-    config: WorkflowConfig,
-    base_dir: &Path,
-    workflow_path: &Path,
-) -> (
-    Result<WorkflowConfig, CruiseError>,
-    Result<WorkflowConfig, CruiseError>,
-) {
-    (
-        resolve_workflow_calls(config, PathBuf::from(base_dir)),
-        resolve_workflow_calls_from_path(workflow_path),
-    )
+#[test]
+fn legacy_resolver_call_arities_remain_public() {
+    let _: fn(WorkflowConfig, PathBuf) -> Result<WorkflowConfig, CruiseError> =
+        resolve_workflow_calls;
+    let _: fn(PathBuf) -> Result<WorkflowConfig, CruiseError> = resolve_workflow_calls_from_path;
 }

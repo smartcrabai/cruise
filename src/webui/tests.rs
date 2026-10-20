@@ -204,11 +204,12 @@ async fn root_page_has_shell_contract() {
 }
 
 #[cfg(unix)]
+fn collect_step_ids(steps: impl IntoIterator<Item = String>) -> std::collections::HashSet<String> {
+    steps.into_iter().collect()
+}
+
+#[cfg(unix)]
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "this end-to-end test covers repo preview, clone defaults, and persisted skip IDs"
-)]
 fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
     use crate::test_support::{EnvGuard, init_git_repo, prepend_to_path, write_executable_script};
 
@@ -253,11 +254,7 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
         .application
         .new_session_config_defaults(&caller, Some("__builtin__"), Some(repo))
         .unwrap_or_else(|error| panic!("preview defaults: {error}"));
-    let preview_ids = preview
-        .steps
-        .iter()
-        .map(|step| step.id.clone())
-        .collect::<std::collections::HashSet<_>>();
+    let preview_ids = collect_step_ids(preview.steps.iter().map(|step| step.id.clone()));
     assert!(!preview_ids.contains("pre/caller-only"));
     assert!(preview_ids.contains("write-test-first"));
 
@@ -292,21 +289,19 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
         .manager
         .load_config(&session)
         .unwrap_or_else(|error| panic!("load persisted config: {error}"));
-    let persisted_ids = crate::workflow::list_skippable_steps(&persisted)
-        .unwrap_or_else(|error| panic!("list persisted steps: {error}"))
-        .into_iter()
-        .map(|step| step.id)
-        .collect::<std::collections::HashSet<_>>();
+    let persisted_ids = collect_step_ids(
+        crate::workflow::list_skippable_steps(&persisted)
+            .unwrap_or_else(|error| panic!("list persisted steps: {error}"))
+            .into_iter()
+            .map(|step| step.id),
+    );
     let cloned_preview = harness
         .state
         .application
         .new_session_config_defaults(&session.base_dir, Some("__builtin__"), Some(repo))
         .unwrap_or_else(|error| panic!("clone-resolved preview: {error}"));
-    let cloned_preview_ids = cloned_preview
-        .steps
-        .iter()
-        .map(|step| step.id.clone())
-        .collect::<std::collections::HashSet<_>>();
+    let cloned_preview_ids =
+        collect_step_ids(cloned_preview.steps.iter().map(|step| step.id.clone()));
     assert!(persisted_ids.contains("pre/target-only"));
     assert!(!persisted_ids.contains("pre/caller-only"));
     assert!(preview_ids.is_subset(&persisted_ids));
