@@ -336,7 +336,10 @@ fn missing_reports_unset_flags_in_declaration_order_with_descriptions() {
         flags::missing(&config, &values(&[("e2e", false)])),
         vec![("docs", None)]
     );
-    assert_eq!(flags::missing(&config, &values(&[("e2e", false), ("docs", true)])), []);
+    assert_eq!(
+        flags::missing(&config, &values(&[("e2e", false), ("docs", true)])),
+        []
+    );
 }
 
 #[test]
@@ -624,7 +627,13 @@ async fn hot_reload_to_workflow_with_unresolved_flag_is_ignored() {
             retry_policy: None,
         }))
     };
-    let r = run(dir.path(), initial, &FlagValues::new(), Some(&reload_callback)).await;
+    let r = run(
+        dir.path(),
+        initial,
+        &FlagValues::new(),
+        Some(&reload_callback),
+    )
+    .await;
     r.result.unwrap();
     assert!(dir.path().join("original.txt").exists());
     assert!(!dir.path().join("reloaded.txt").exists());

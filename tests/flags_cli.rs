@@ -39,11 +39,13 @@ fn git(dir: &Path, args: &[&str]) {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new()
-            .unwrap_or_else(|error| panic!("failed to create temporary fixture directory: {error}"));
+        let root = TempDir::new().unwrap_or_else(|error| {
+            panic!("failed to create temporary fixture directory: {error}")
+        });
         let repo = root.path().join("repo");
-        std::fs::create_dir(&repo)
-            .unwrap_or_else(|error| panic!("failed to create fixture repository directory: {error}"));
+        std::fs::create_dir(&repo).unwrap_or_else(|error| {
+            panic!("failed to create fixture repository directory: {error}")
+        });
         git(&repo, &["init", "-q", "-b", "main"]);
         git(
             &repo,
