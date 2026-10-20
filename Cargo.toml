@@ -3,7 +3,9 @@ description = "YAML-driven coding agent workflow orchestrator"
 edition = "2024"
 license = "MIT"
 name = "cruise"
+default-run = "cruise"
 publish = false
+autobins = false
 repository = "https://github.com/smartcrabai/cruise"
 rust-version = "1.95"
 version.workspace = true
@@ -11,6 +13,14 @@ version.workspace = true
 # `publish = false` would otherwise make dist skip this package.
 [package.metadata.dist]
 dist = true
+
+[[bin]]
+name = "cruise"
+path = "src/launcher.rs"
+
+[[bin]]
+name = "cruise-runtime"
+path = "src/main.rs"
 
 [workspace]
 members = ["."]

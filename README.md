@@ -28,10 +28,32 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.ps1 | iex"
 ```
 
+### macOS and Linux (shell installer)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh | sh
+```
+
+Or download the installer to a file and run it only if the download succeeds:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fLsS --output cruise-installer.sh \
+  https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh \
+  && sh ./cruise-installer.sh
+```
+
+The installer places `cruise` in `$CARGO_HOME/bin` (normally `~/.cargo/bin`); make sure that directory is on your `PATH`. To update an installation made this way, rerun the installer. To pin a release, replace `/releases/latest/` in the URL with `/releases/download/v<version>/`, for example `v0.2.15`. Keep Homebrew installations managed with Homebrew, and use the PowerShell installer above on Windows.
+
 ### Homebrew
 
 ```sh
 brew install smartcrabai/tap/cruise
+```
+
+Upgrade a Homebrew installation with:
+
+```sh
+brew upgrade smartcrabai/tap/cruise
 ```
 
 ### WebUI
@@ -221,6 +243,7 @@ Commands:
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
+  update       Native application update (currently unavailable); `--status` inspects in-progress transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
@@ -453,7 +476,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Project workflow defaults | `./.cruise/default.yaml` |
 | Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
-| State files (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+| State files (`history.json`, `new_session_draft.json`, `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are missing, the `~/` defaults above apply, and `~\` is expanded like `~/`.
 
@@ -1628,6 +1651,14 @@ Then open an issue, or comment on one, starting with `@cruise`:
 | `@cruise fix <feedback>` | **fix** | Revise the existing plan-tracking comment in place. |
 
 See [`docs/github-actions.md`](docs/github-actions.md) for the full command grammar, a typical plan -> fix -> run -> review walkthrough, the provider table (Anthropic/OpenAI/Kimi/Google/Groq/DeepSeek/xAI/...), inputs/outputs, security notes, and how to point it at your own workflow config or a self-hosted endpoint. See [`examples/`](examples/) for drop-in workflow files and a sample repo config.
+
+## Development build
+
+To test the launcher locally, build both binaries. The `cruise` launcher starts the adjacent `cruise-runtime`, so both are needed:
+
+```sh
+cargo build --bin cruise --bin cruise-runtime
+```
 
 ## Support
 

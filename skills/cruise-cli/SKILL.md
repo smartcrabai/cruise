@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui), planning variants (--skip-planning / --grill / --formal-spec / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
+description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui / update / update --status), planning variants (--skip-planning / --grill / --formal-spec / --no-interactive-planning / --image / --repo), bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → open PR → after-pr automation**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -54,6 +54,8 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
+| Update Cruise itself | `cruise update` |
+| Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
@@ -252,7 +254,7 @@ When loading a workflow config, these process environment variables override the
 
 The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`) accept only `true`, `false`, `1`, or `0` after trimming; any other non-empty value is an error. The string overrides above are applied only when their trimmed value is non-empty.
 
-These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop notifications; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
+These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_RUNTIME` overrides the launcher’s runtime executable path; `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop notifications; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
 
 ## Runtime file layout (XDG)
 
