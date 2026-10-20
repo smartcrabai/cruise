@@ -120,6 +120,10 @@ pub struct WorkflowDefaults {
 /// Resolution state for fields whose public `WorkflowConfig` values
 /// are materialized before defaults have been applied.
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these field-presence flags represent independent workflow settings"
+)]
 pub(crate) struct WorkflowConfigPresence {
     interactive_planning: bool,
     cleanup_after_pr: bool,
@@ -167,6 +171,11 @@ pub struct WorkflowConfigResolution {
 }
 
 impl WorkflowConfigResolution {
+    /// Parse a workflow config while retaining which fields were explicitly set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `yaml` is not valid workflow configuration.
     pub fn from_yaml(yaml: &str) -> std::result::Result<Self, serde_yaml::Error> {
         Ok(Self {
             config: WorkflowConfig::from_yaml(yaml)?,
@@ -274,6 +283,7 @@ impl WorkflowDefaults {
         self.apply_to_with_presence(&mut resolution.config, resolution.presence)
     }
 
+    #[cfg(test)]
     fn apply_to_materialized_config(&self, config: &mut WorkflowConfig) -> Result<()> {
         self.apply_to_with_presence(config, WorkflowConfigPresence::materialized())
     }
@@ -541,8 +551,8 @@ mod tests {
     fn applied_with_presence(env: &Env, yaml: &str) -> WorkflowConfig {
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
-        let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut resolution =
+            WorkflowConfigResolution::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         defaults
             .apply_to(&mut resolution)
             .unwrap_or_else(|e| panic!("{e:?}"));
@@ -927,8 +937,8 @@ mod tests {
         let yaml = workflow_yaml("command: [claude, -p]");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
-        let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut resolution =
+            WorkflowConfigResolution::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
         match defaults.apply_to(&mut resolution) {
             Err(CruiseError::InvalidStepConfig(message)) => {
                 assert!(message.contains("computer_use"), "{message}");
@@ -945,8 +955,8 @@ mod tests {
         let yaml = workflow_yaml("command: [claude, -p]");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
-        let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut resolution =
+            WorkflowConfigResolution::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
         match defaults.apply_to(&mut resolution) {
             Err(CruiseError::InvalidStepConfig(message)) => {
                 assert!(message.contains("permission"), "{message}");

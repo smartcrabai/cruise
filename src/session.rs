@@ -850,16 +850,19 @@ impl SessionManager {
                 let defaults = crate::workflow_defaults::WorkflowDefaults::load(
                     state.workflow_defaults_dir(),
                 )?;
-                crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path.clone(), &defaults)
-                    .map_err(|error| match error {
-                        CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
-                            format!("failed to parse file config {}: {message}", path.display()),
-                        ),
-                        error => CruiseError::Other(format!(
-                            "failed to load file config {}: {error}",
-                            path.display()
-                        )),
-                    })
+                crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(
+                    path.clone(),
+                    &defaults,
+                )
+                .map_err(|error| match error {
+                    CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
+                        format!("failed to parse file config {}: {message}", path.display()),
+                    ),
+                    error => CruiseError::Other(format!(
+                        "failed to load file config {}: {error}",
+                        path.display()
+                    )),
+                })
             }
             reference => {
                 let path = snapshot_path(&self.sessions_dir(), &state.id);

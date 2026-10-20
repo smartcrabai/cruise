@@ -830,14 +830,9 @@ fn file_reference_reloader_reloads_when_only_user_defaults_change() {
         "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
     )
     .unwrap_or_else(|error| panic!("write workflow: {error}"));
-    let reloader = config_reloader_for_reference(
-        &SessionConfigRef::File {
-            path: workflow,
-        },
-        Some(project),
-        3,
-    )
-    .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    let reloader =
+        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
+            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
     assert!(
         reloader()
             .unwrap_or_else(|error| panic!("check initial config: {error}"))
@@ -850,7 +845,11 @@ fn file_reference_reloader_reloads_when_only_user_defaults_change() {
         .unwrap_or_else(|error| panic!("reload user defaults: {error}"))
         .unwrap_or_else(|| panic!("user-defaults change did not reload the workflow"));
     assert_eq!(
-        updated.compiled.env.get("RELOAD_SOURCE").map(String::as_str),
+        updated
+            .compiled
+            .env
+            .get("RELOAD_SOURCE")
+            .map(String::as_str),
         Some("user-after-longer")
     );
 }
@@ -877,27 +876,29 @@ fn file_reference_reloader_reloads_when_only_project_defaults_change() {
         "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
     )
     .unwrap_or_else(|error| panic!("write workflow: {error}"));
-    let reloader = config_reloader_for_reference(
-        &SessionConfigRef::File {
-            path: workflow,
-        },
-        Some(project),
-        3,
-    )
-    .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    let reloader =
+        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
+            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
     assert!(
         reloader()
             .unwrap_or_else(|error| panic!("check initial config: {error}"))
             .is_none()
     );
 
-    fs::write(&project_defaults, "env:\n  RELOAD_SOURCE: project-after-longer\n")
-        .unwrap_or_else(|error| panic!("update project defaults: {error}"));
+    fs::write(
+        &project_defaults,
+        "env:\n  RELOAD_SOURCE: project-after-longer\n",
+    )
+    .unwrap_or_else(|error| panic!("update project defaults: {error}"));
     let updated = reloader()
         .unwrap_or_else(|error| panic!("reload project defaults: {error}"))
         .unwrap_or_else(|| panic!("project-defaults change did not reload the workflow"));
     assert_eq!(
-        updated.compiled.env.get("RELOAD_SOURCE").map(String::as_str),
+        updated
+            .compiled
+            .env
+            .get("RELOAD_SOURCE")
+            .map(String::as_str),
         Some("project-after-longer")
     );
 }

@@ -445,7 +445,10 @@ fn create_session_inner(
     crate::config::validate_config(&config)?;
     let skipped_steps = if repo.is_some() && config_ref.is_snapshot() {
         let mut available = std::collections::HashSet::new();
-        collect_skippable_step_ids(&crate::workflow::list_skippable_steps(&config)?, &mut available);
+        collect_skippable_step_ids(
+            &crate::workflow::list_skippable_steps(&config)?,
+            &mut available,
+        );
         collect_skippable_step_ids(
             &crate::workflow::list_skippable_after_pr_steps(&config)?,
             &mut available,

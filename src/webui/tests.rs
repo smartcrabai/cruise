@@ -39,7 +39,11 @@ fn harness() -> Harness {
     let Ok(state) = WebState::new(application, &repo_assets()) else {
         panic!("web state");
     };
-    Harness { state, dir, manager }
+    Harness {
+        state,
+        dir,
+        manager,
+    }
 }
 
 fn create_session(harness: &Harness) -> SessionState {
@@ -198,6 +202,10 @@ async fn root_page_has_shell_contract() {
 
 #[cfg(unix)]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "this end-to-end test covers repo preview, clone defaults, and persisted skip IDs"
+)]
 fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
     use crate::test_support::{EnvGuard, init_git_repo, prepend_to_path, write_executable_script};
 
@@ -288,11 +296,7 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
     let cloned_preview = harness
         .state
         .application
-        .new_session_config_defaults(
-            &session.base_dir,
-            Some("__builtin__"),
-            Some(repo),
-        )
+        .new_session_config_defaults(&session.base_dir, Some("__builtin__"), Some(repo))
         .unwrap_or_else(|error| panic!("clone-resolved preview: {error}"));
     let cloned_preview_ids = cloned_preview
         .steps

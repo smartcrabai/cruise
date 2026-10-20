@@ -20,9 +20,13 @@ fn workflow_config_retains_legacy_direct_field_types() {
 fn public_defaults_application_uses_workflow_yaml_field_presence() {
     let project = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let cruise_dir = project.path().join(".cruise");
-    std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|error| panic!("create defaults dir: {error}"));
-    std::fs::write(cruise_dir.join("default.yaml"), "interactive_planning: true\n")
-        .unwrap_or_else(|error| panic!("write defaults: {error}"));
+    std::fs::create_dir_all(&cruise_dir)
+        .unwrap_or_else(|error| panic!("create defaults dir: {error}"));
+    std::fs::write(
+        cruise_dir.join("default.yaml"),
+        "interactive_planning: true\n",
+    )
+    .unwrap_or_else(|error| panic!("write defaults: {error}"));
     let defaults = WorkflowDefaults::load(Some(project.path()))
         .unwrap_or_else(|error| panic!("load defaults: {error}"));
 
@@ -33,17 +37,19 @@ fn public_defaults_application_uses_workflow_yaml_field_presence() {
         .unwrap_or_else(|error| panic!("apply defaults: {error}"));
     assert!(absent.config.interactive_planning);
 
-    let mut explicit_false = WorkflowConfigResolution::from_yaml(
-        "interactive_planning: false\nsteps: {}\n",
-    )
-    .unwrap_or_else(|error| panic!("parse workflow: {error}"));
+    let mut explicit_false =
+        WorkflowConfigResolution::from_yaml("interactive_planning: false\nsteps: {}\n")
+            .unwrap_or_else(|error| panic!("parse workflow: {error}"));
     defaults
         .apply_to(&mut explicit_false)
         .unwrap_or_else(|error| panic!("apply defaults: {error}"));
     assert!(!explicit_false.config.interactive_planning);
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "compile-time compatibility check for legacy resolver arities"
+)]
 fn legacy_resolver_call_arities(
     config: WorkflowConfig,
     base_dir: &Path,

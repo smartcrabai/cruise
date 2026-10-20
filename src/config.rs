@@ -45,6 +45,10 @@ pub enum PermissionMode {
 /// desktop-control tool for prompt turns. Per-step prompt settings can override
 /// this default.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "workflow configuration flags represent independent settings"
+)]
 pub struct WorkflowConfig {
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
     ///

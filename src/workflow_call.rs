@@ -36,6 +36,11 @@ pub fn resolve_workflow_calls_from_path(path: impl Into<PathBuf>) -> Result<Work
 }
 
 /// Load a workflow file, resolve calls, and apply the supplied defaults.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed, workflow calls cannot
+/// be resolved, defaults conflict with the workflow, or validation fails.
 pub fn resolve_workflow_calls_from_path_with_defaults(
     path: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
@@ -67,6 +72,11 @@ pub fn resolve_workflow_calls(
 }
 
 /// Resolve calls in a parsed config and apply the supplied defaults.
+///
+/// # Errors
+///
+/// Returns an error if workflow calls cannot be resolved, defaults conflict
+/// with the workflow, environment overrides fail, or validation fails.
 pub fn resolve_workflow_calls_with_defaults(
     config: WorkflowConfig,
     base_dir: impl Into<PathBuf>,
@@ -75,7 +85,10 @@ pub fn resolve_workflow_calls_with_defaults(
     let base_dir = base_dir.into();
     let mut stack = CallStack::default();
     let config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
-    finish_resolved_config(WorkflowConfigResolution::from_materialized(config), defaults)
+    finish_resolved_config(
+        WorkflowConfigResolution::from_materialized(config),
+        defaults,
+    )
 }
 
 /// Resolve calls from raw YAML so field presence survives until defaults are
@@ -121,7 +134,7 @@ fn finish_resolved_config(
     // `PromptRun` carries no policy field, so the retry policy reaches the
     // executor ambiently. Validated first, so an unusable policy is rejected
     // here instead of becoming the active one.
-    crate::config::validate_retry(&config)?;
+    crate::config::validate_retry(config)?;
     crate::retry::set_active_policy(config.retry.clone());
     Ok(resolution.config)
 }
@@ -668,6 +681,11 @@ mod tests {
         resolve_workflow_calls_from_path_with_defaults(path, &WorkflowDefaults::default())
             .unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
     }
+    #[test]
+    fn legacy_resolver_functions_remain_callable() {
+        let _: fn(PathBuf) -> Result<WorkflowConfig> = resolve_workflow_calls_from_path;
+        let _: fn(WorkflowConfig, PathBuf) -> Result<WorkflowConfig> = resolve_workflow_calls;
+    }
 
     #[cfg(unix)]
     fn install_gh_stub(dir: &TempDir, script: &str) -> EnvGuard {
@@ -979,7 +997,9 @@ steps:
         );
 
         // When: workflow calls are resolved.
-        let Err(err) = resolve_workflow_calls_from_path_with_defaults(a, &WorkflowDefaults::default()) else {
+        let Err(err) =
+            resolve_workflow_calls_from_path_with_defaults(a, &WorkflowDefaults::default())
+        else {
             panic!("expected workflow_call cycle to be rejected");
         };
 
@@ -1065,8 +1085,9 @@ steps:
         )
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         assert_eq!(
             resolved.steps["implement"].prompt.as_deref(),
             Some("slash ref page\n")
@@ -1129,9 +1150,11 @@ steps:
         )
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
-        let Err(err) =
-            resolve_workflow_calls_with_defaults(config, PathBuf::from("."), &WorkflowDefaults::default())
-        else {
+        let Err(err) = resolve_workflow_calls_with_defaults(
+            config,
+            PathBuf::from("."),
+            &WorkflowDefaults::default(),
+        ) else {
             panic!("expected workflow_call in group to be rejected");
         };
         let msg = err.to_string();
@@ -1168,7 +1191,8 @@ steps:
 ",
         );
 
-        let Err(err) = resolve_workflow_calls_from_path_with_defaults(parent, &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_from_path_with_defaults(parent, &WorkflowDefaults::default())
         else {
             panic!("expected called workflow with groups to be rejected");
         };
@@ -1193,7 +1217,8 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: workflow calls are resolved.
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected mixed workflow_call step to be rejected");
         };
@@ -1237,8 +1262,9 @@ steps:
             WorkflowConfig::from_yaml(parent_yaml).unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: workflow calls are resolved from an already parsed config.
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: the expanded first step inherits call-site skip/when and the expanded last step jumps to parent next.
         let first = &resolved.steps["maybe-review/one"];
@@ -1260,7 +1286,8 @@ steps:
         )
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
-        let Err(error) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(error) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected allow_commit on a workflow call site to be rejected");
         };
@@ -1280,8 +1307,9 @@ steps:
         )
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         assert!(resolved.steps["shared/one"].allow_commit);
     }
 
@@ -1298,7 +1326,8 @@ steps:
         )
         .unwrap_or_else(|error| panic!("{error}"));
 
-        let Err(error) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(error) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("computer_use is not supported on a workflow_call site");
         };
@@ -1318,8 +1347,9 @@ steps:
         )
         .unwrap_or_else(|error| panic!("{error}"));
 
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|error| panic!("{error}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|error| panic!("{error}"));
         let step = serde_json::to_value(&resolved.steps["shared/inspect"])
             .unwrap_or_else(|error| panic!("{error}"));
 
@@ -1470,9 +1500,12 @@ steps:
 
         // Given: YAML sets model=sonnet, CRUISE_MODEL env var overrides to opus
         // When: workflow is loaded via resolve_workflow_calls (YAML-string path)
-        let resolved =
-            resolve_workflow_calls_with_defaults(config, PathBuf::from("."), &WorkflowDefaults::default())
-                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved = resolve_workflow_calls_with_defaults(
+            config,
+            PathBuf::from("."),
+            &WorkflowDefaults::default(),
+        )
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: model reflects the env var override, not the YAML value
         assert_eq!(
@@ -1574,8 +1607,9 @@ steps:
 
         // When: resolved with the config directory as base while the process cwd
         // remains elsewhere (cargo test cwd is the crate root, not this tempdir).
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: the file next to the config file is read, not one relative to cwd.
         assert_eq!(
@@ -1599,8 +1633,9 @@ steps:
 ",
         )
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         assert_eq!(
             resolved.steps["dotted"].prompt.as_deref(),
@@ -1659,9 +1694,12 @@ steps:
         let unrelated_base = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
 
         // When: resolved with the unrelated base directory.
-        let resolved =
-            resolve_workflow_calls_with_defaults(config, unrelated_base.path(), &WorkflowDefaults::default())
-                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved = resolve_workflow_calls_with_defaults(
+            config,
+            unrelated_base.path(),
+            &WorkflowDefaults::default(),
+        )
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: the absolute path wins over the base directory.
         assert_eq!(
@@ -1743,8 +1781,10 @@ steps:
 
         // When: resolved.
         // Then: reading a directory fails with the expanded full path in the message.
-        let Err(err) = resolve_workflow_calls_from_path_with_defaults(config_path, &WorkflowDefaults::default())
-        else {
+        let Err(err) = resolve_workflow_calls_from_path_with_defaults(
+            config_path,
+            &WorkflowDefaults::default(),
+        ) else {
             panic!("expected reading a directory as prompt_file to fail");
         };
         let msg = err.to_string();
@@ -1773,7 +1813,8 @@ steps:
         // When: resolved from the config directory.
         // Then: the error reports the joined full path (unexpanded `~user` treated
         // as a literal directory name under the config directory).
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected unknown-user prompt_file to fail");
         };
@@ -1807,8 +1848,9 @@ steps:
 
         // When: resolved.
         // Then: it is treated as a bare file name in the config directory.
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         assert_eq!(
             resolved.steps["implement"].prompt.as_deref(),
             Some("tilde-named file\n")
@@ -1884,8 +1926,9 @@ after-pr:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: workflow calls are resolved.
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: both locations are inlined.
         assert_eq!(
@@ -1916,8 +1959,9 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: resolved and serialized back to YAML.
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         let serialized = serde_yaml::to_string(&resolved).unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the content is kept verbatim (no trim), the field is cleared, and
@@ -1947,8 +1991,9 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: resolved at load time.
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
         // Then: placeholders survive untouched; variable resolution happens later
         // exactly as for inline `prompt`.
@@ -1975,7 +2020,8 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: resolved.
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected both-specified step to be rejected");
         };
@@ -2011,9 +2057,13 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: each is resolved.
-        let empty_result = resolve_workflow_calls_with_defaults(empty, dir.path(), &WorkflowDefaults::default());
-        let whitespace_result =
-            resolve_workflow_calls_with_defaults(whitespace, dir.path(), &WorkflowDefaults::default());
+        let empty_result =
+            resolve_workflow_calls_with_defaults(empty, dir.path(), &WorkflowDefaults::default());
+        let whitespace_result = resolve_workflow_calls_with_defaults(
+            whitespace,
+            dir.path(),
+            &WorkflowDefaults::default(),
+        );
 
         // Then: both are rejected as empty prompt_file values.
         for result in [empty_result, whitespace_result] {
@@ -2040,7 +2090,8 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: resolved.
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected missing prompt_file to be rejected");
         };
@@ -2075,7 +2126,8 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: workflow calls are resolved.
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected workflow_call + prompt_file to be rejected");
         };
@@ -2106,7 +2158,8 @@ steps:
         .unwrap_or_else(|e| panic!("parse failed: {e}"));
 
         // When: resolved.
-        let Err(err) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("expected non-UTF-8 prompt_file to be rejected");
         };
@@ -2137,7 +2190,8 @@ steps:
         // When: resolved against the remote base directory.
         // Then: rejected up front because `~` has no meaning on a remote tree
         // (and no `gh` fetch is attempted).
-        let Err(err) = resolve_workflow_calls_with_defaults(config, github_base, &WorkflowDefaults::default())
+        let Err(err) =
+            resolve_workflow_calls_with_defaults(config, github_base, &WorkflowDefaults::default())
         else {
             panic!("expected ~/ prompt_file in GitHub-hosted workflow to be rejected");
         };
@@ -2204,8 +2258,9 @@ after-pr:
         )
         .unwrap_or_else(|error| panic!("{error}"));
 
-        let resolved = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
-            .unwrap_or_else(|error| panic!("{error}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|error| panic!("{error}"));
 
         assert_eq!(resolved.permission(), crate::config::PermissionMode::Full);
         assert_eq!(resolved.steps["shared/plain"].permission, None);
@@ -2228,7 +2283,8 @@ after-pr:
         )
         .unwrap_or_else(|error| panic!("{error}"));
 
-        let Err(error) = resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        let Err(error) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
         else {
             panic!("permission is not supported on a workflow_call site");
         };

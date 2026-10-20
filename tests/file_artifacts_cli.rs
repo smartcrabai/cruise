@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use cruise::config::WorkflowConfig;
 use cruise::workflow;
-use cruise::workflow_call::resolve_workflow_calls;
+use cruise::workflow_call::resolve_workflow_calls_with_defaults;
 use tempfile::TempDir;
 
 struct Fixture {

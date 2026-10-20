@@ -228,7 +228,9 @@ pub fn config_reloader_for_reference(
         watched_paths.push(user_defaults_path);
     }
     if let Some(defaults_dir) = &defaults_dir {
-        watched_paths.push(crate::workflow_defaults::project_defaults_path(defaults_dir));
+        watched_paths.push(crate::workflow_defaults::project_defaults_path(
+            defaults_dir,
+        ));
     }
     let last_state = Mutex::new(
         watched_paths
@@ -248,7 +250,8 @@ pub fn config_reloader_for_reference(
             return Ok(None);
         }
         let defaults = crate::workflow_defaults::WorkflowDefaults::load(defaults_dir.as_deref())?;
-        let config = crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(&path, &defaults)?;
+        let config =
+            crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(&path, &defaults)?;
         crate::config::validate_config(&config)?;
         crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
         let retry_policy = crate::retry::policy_for_config(config.retry.clone());

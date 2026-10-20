@@ -57,11 +57,11 @@ pub fn resolve_workflow_config(
 ) -> Result<crate::config::WorkflowConfig> {
     let defaults = crate::workflow_defaults::WorkflowDefaults::load(project_dir)?;
     match source.path() {
-        Some(path) => crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path, &defaults),
+        Some(path) => {
+            crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path, &defaults)
+        }
         None => crate::workflow_call::resolve_workflow_calls_from_yaml_with_defaults(
-            yaml,
-            base_dir,
-            &defaults,
+            yaml, base_dir, &defaults,
         ),
     }
 }
@@ -340,8 +340,7 @@ fn collect_candidates(
                     && path.file_name()
                         == Some(crate::workflow_defaults::DEFAULTS_FILE_NAME.as_ref());
                 let aliases_defaults = std::fs::canonicalize(path)
-                    .ok()
-                    .is_some_and(|path| canonical_defaults.contains(&path));
+                    .is_ok_and(|path| canonical_defaults.contains(&path));
                 !reserved_name && !aliases_defaults
             }
             _ => true,
@@ -1900,21 +1899,17 @@ mod tests {
     fn isolated_env() -> (
         crate::test_support::ProcessLock,
         tempfile::TempDir,
-        EnvGuard,
-        EnvGuard,
-        EnvGuard,
+        Vec<EnvGuard>,
     ) {
         let lock = lock_process();
         let home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let h = EnvGuard::set("HOME", home.path().as_os_str());
-        let x = EnvGuard::remove("XDG_CONFIG_HOME");
-        let c = EnvGuard::remove("CRUISE_CONFIG");
-        (lock, home, h, x, c)
+        let guards = crate::test_support::set_fake_home(home.path());
+        (lock, home, guards)
     }
 
     #[test]
     fn explicit_builtin_name_selects_expected_yaml() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             repo.path().join("cruise.yaml"),
@@ -1935,7 +1930,7 @@ mod tests {
 
     #[test]
     fn builtin_default_aliases_return_default_yaml() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         for value in ["__builtin__", "builtin:default"] {
             let (yaml, source) =
@@ -1947,7 +1942,7 @@ mod tests {
 
     #[test]
     fn unknown_builtin_name_is_other_error() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         for value in ["builtin:nope", "builtin:../simple", "builtin:"] {
             assert!(
@@ -1962,7 +1957,7 @@ mod tests {
 
     #[test]
     fn builtin_candidates_show_descriptions_and_keep_default_fallback() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let candidates = collect_config_candidates(repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let values: Vec<String> = candidates
@@ -1991,7 +1986,7 @@ mod tests {
 
     #[test]
     fn file_candidates_stay_ahead_of_builtins() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(
             repo.path().join("cruise.yaml"),
@@ -2024,7 +2019,7 @@ mod tests {
 
     #[test]
     fn project_default_yaml_is_not_a_workflow_candidate() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         write_yaml(&repo.path().join(".cruise/default.yaml"), "model: x\n");
         write_yaml(&repo.path().join(".cruise/foo.yaml"), WORKFLOW_BODY);
@@ -2044,7 +2039,7 @@ mod tests {
 
     #[test]
     fn user_workflows_default_yaml_remains_a_candidate() {
-        let (_lock, home, _h, _x, _c) = isolated_env();
+        let (_lock, home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         write_yaml(
             &user_workflows_dir(home.path()).join("default.yaml"),
@@ -2064,7 +2059,7 @@ mod tests {
     fn local_symlink_aliases_to_defaults_are_excluded_but_workflow_default_is_selectable() {
         use std::os::unix::fs::symlink;
 
-        let (_lock, home, _h, _x, _c) = isolated_env();
+        let (_lock, home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let project_default = repo.path().join(".cruise/default.yaml");
         let user_default = home.path().join(".config/cruise/default.yaml");
@@ -2092,13 +2087,16 @@ mod tests {
             let error = resolve_config_in_dir(alias.to_str(), repo.path())
                 .err()
                 .unwrap_or_else(|| panic!("default alias {} must be rejected", alias.display()));
-            assert!(error.to_string().contains("workflow defaults file"), "{error}");
+            assert!(
+                error.to_string().contains("workflow defaults file"),
+                "{error}"
+            );
         }
     }
 
     #[test]
     fn explicit_path_to_defaults_files_is_rejected() {
-        let (_lock, home, _h, _x, _c) = isolated_env();
+        let (_lock, home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let project = repo.path().join(".cruise/default.yaml");
         let user = home.path().join(".config/cruise/default.yaml");
@@ -2114,7 +2112,7 @@ mod tests {
 
     #[test]
     fn cruise_config_env_pointing_at_defaults_file_is_rejected() {
-        let (_lock, _home, _h, _x, _c) = isolated_env();
+        let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let project = repo.path().join(".cruise/default.yaml");
         write_yaml(&project, "model: x\n");
