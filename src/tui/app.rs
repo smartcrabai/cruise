@@ -4801,9 +4801,10 @@ mod tests {
         assert_eq!(fixture.app.tab, DetailTab::Plan);
 
         assert!(!fixture.app.handle_action(Action::NewSession));
+        assert_eq!(fixture.app.form.step, Step::Source);
         assert!(!fixture.app.handle_key(key(KeyCode::Tab)));
         assert_eq!(fixture.app.view, View::NewSession);
-        assert_eq!(fixture.app.form.step, Step::Attachments);
+        assert_eq!(fixture.app.form.step, Step::WorkingDirectory);
 
         assert!(!fixture.app.handle_action(Action::ViewSessions));
         assert_eq!(fixture.app.tab, DetailTab::Plan);
@@ -4953,12 +4954,29 @@ mod tests {
     }
 
     #[test]
-    fn new_session_shortcut_starts_the_dialogue_at_the_task_question() {
+    fn new_session_shortcut_starts_the_dialogue_at_the_source_question() {
         let mut app = app();
         app.form.step = Step::Config;
         assert!(!app.handle_action(Action::NewSession));
         assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Source);
+    }
+
+    #[test]
+    fn home_on_a_choice_rewinds_to_source_but_home_in_task_stays_in_the_editor() {
+        let mut app = app();
+        app.handle_action(Action::NewSession);
+        app.form.input.set_text("unfinished task");
+        app.form.step = Step::Workspace;
+
+        assert!(!app.handle_key(key(KeyCode::Home)));
+        assert_eq!(app.form.step, Step::Source);
+        assert_eq!(app.form.input.text(), "unfinished task");
+
+        app.form.step = Step::Task;
+        assert!(!app.handle_key(key(KeyCode::Home)));
         assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "unfinished task");
     }
 
     #[test]
@@ -4998,6 +5016,7 @@ mod tests {
     fn c_is_scoped_to_sessions_and_remains_text_or_noop_elsewhere() {
         let mut new_session = app();
         assert!(!new_session.handle_action(Action::NewSession));
+        new_session.form.step = Step::Task;
         assert!(!new_session.handle_key(key(KeyCode::Char('c'))));
         assert_eq!(new_session.form.input.text(), "c");
         assert!(new_session.modal.is_none());
@@ -5240,7 +5259,7 @@ mod tests {
         assert_eq!(app.form.input.text(), "");
         assert_eq!(app.form.attachments.text(), "");
         assert_eq!(app.form.attachment_paths(), [] as [PathBuf; 0]);
-        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.step, Step::Source);
         assert!(!app.form.dirty);
     }
 
@@ -5281,6 +5300,7 @@ mod tests {
         let mut app = TuiApp::new(application, events, logs_sender);
 
         app.view = View::NewSession;
+        app.form.step = Step::Task;
         app.form.input.set_text("first task");
         app.form.dirty = true;
         let last_change = app.form.last_change;
@@ -5326,7 +5346,7 @@ mod tests {
         app.apply_event(event);
         assert_eq!(app.view, View::Sessions);
         assert_eq!(app.form.input.text(), "");
-        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.step, Step::Source);
         assert!(!app.form.dirty);
         app.registry.shutdown().await;
     }
@@ -5509,19 +5529,29 @@ mod tests {
         app.handle_action(Action::NewSession);
         app.form.input.set_text("unsent task");
         app.form.attachments.set_text("unsent-image.png");
-        app.form.step = Step::Attachments;
+        app.form.step = Step::Task;
         app.form.dirty = true;
 
         assert!(!app.handle_key(key(KeyCode::Esc)));
-        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Source);
         assert!(!app.handle_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Sessions);
         assert!(!app.handle_key(key(KeyCode::Char('n'))));
-        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.step, Step::Source);
         assert_eq!(app.form.input.text(), "unsent task");
         assert_eq!(app.form.attachments.text(), "unsent-image.png");
-        assert!(!app.handle_key(key(KeyCode::Esc)));
+
+        assert!(app.form.advance());
+        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert!(app.form.advance());
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_action(Action::ViewSessions));
         assert!(!app.handle_key(key(KeyCode::Char('2'))));
+        assert_eq!(app.form.step, Step::Config);
         assert_eq!(app.form.input.text(), "unsent task");
         assert_eq!(app.form.attachments.text(), "unsent-image.png");
     }
@@ -5554,6 +5584,7 @@ mod tests {
         assert_eq!(app.form.config.text(), "workflow.yaml");
         assert_eq!(app.form.skipped.text(), "build, test");
         assert_eq!(app.form.source, SourceKind::GitHub);
+        assert_eq!(app.form.step, Step::Source);
         assert!(app.form.skipped_explicit);
         assert_eq!(app.form.attachments.text(), "");
         assert!(!app.form.dirty);
@@ -5589,6 +5620,11 @@ mod tests {
     fn task_question_takes_typed_text_and_enter_inserts_a_newline() {
         let mut app = app();
         app.handle_action(Action::NewSession);
+        assert_eq!(app.form.step, Step::Source);
+        for expected in [Step::WorkingDirectory, Step::Config, Step::Task] {
+            assert!(app.form.advance());
+            assert_eq!(app.form.step, expected);
+        }
         type_text(&mut app, "quit now jk");
         assert!(!app.handle_key(key(KeyCode::Enter)));
         type_text(&mut app, "second");
@@ -5602,24 +5638,39 @@ mod tests {
     fn tab_and_ctrl_enter_advance_while_shift_tab_and_escape_go_back() {
         let mut app = app();
         app.handle_action(Action::NewSession);
+        assert_eq!(app.form.step, Step::Source);
+        assert!(!app.handle_key(key(KeyCode::Tab)));
+        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Task);
         type_text(&mut app, "task");
         assert!(!app.handle_key(key(KeyCode::Tab)));
         assert_eq!(app.form.step, Step::Attachments);
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
-        assert_eq!(app.form.step, Step::Source);
-        assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert_eq!(app.form.step, Step::SkippedSteps);
         assert!(!app.handle_key(key(KeyCode::BackTab)));
-        assert_eq!(app.form.step, Step::Source);
-        assert!(!app.handle_key(key(KeyCode::Esc)));
         assert_eq!(app.form.step, Step::Attachments);
-        assert_eq!(app.view, View::NewSession);
         assert!(!app.handle_key(key(KeyCode::Esc)));
         assert_eq!(app.form.step, Step::Task);
         assert!(!app.handle_key(key(KeyCode::Esc)));
-        assert_eq!(app.view, View::Sessions, "Esc at the first question leaves");
+        assert_eq!(app.form.step, Step::Config);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::WorkingDirectory);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.form.step, Step::Source);
+        assert!(!app.handle_key(key(KeyCode::BackTab)));
+        assert_eq!(app.form.step, Step::Source);
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(
+            app.view,
+            View::Sessions,
+            "Esc at Source leaves the dialogue"
+        );
         assert!(!app.handle_key(key(KeyCode::Char('2'))));
         assert_eq!(app.view, View::NewSession);
+        assert_eq!(app.form.step, Step::Source);
         assert_eq!(app.form.input.text(), "task", "answers survive leaving");
         assert!(app.modal.is_none());
         assert!(app.registry.tasks_empty());
@@ -5629,6 +5680,10 @@ mod tests {
     fn leaving_the_image_question_requires_a_task_or_an_image() {
         let mut app = app();
         app.handle_action(Action::NewSession);
+        for expected in [Step::WorkingDirectory, Step::Config, Step::Task] {
+            assert!(app.form.advance());
+            assert_eq!(app.form.step, expected);
+        }
         assert!(!app.handle_key(key(KeyCode::Tab)));
         assert_eq!(app.form.step, Step::Attachments);
         assert!(!app.handle_key(key(KeyCode::Tab)));
@@ -5641,15 +5696,13 @@ mod tests {
         app.modal = None;
         type_text(&mut app, "shot.png");
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
-        assert_eq!(app.form.step, Step::Source);
+        assert_eq!(app.form.step, Step::SkippedSteps);
     }
 
     #[test]
     fn choosing_github_asks_for_a_repository_and_requires_one() {
         let mut app = app();
         app.handle_action(Action::NewSession);
-        app.form.input.set_text("task");
-        app.form.step = Step::Source;
         app.github_repositories = vec!["acme/cruise".to_string()];
         assert!(!app.handle_key(key(KeyCode::Char(' '))));
         assert_eq!(app.form.source, SourceKind::GitHub);
@@ -5666,6 +5719,9 @@ mod tests {
         type_text(&mut app, "acme/cruise");
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
+        assert_eq!(app.form.input.text(), "");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Task);
     }
 
     #[test]
@@ -5706,8 +5762,39 @@ mod tests {
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let first_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let second_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        write_workflow(&first_dir.path().join("cruise.yaml"), "first");
-        write_workflow(&second_dir.path().join("cruise.yaml"), "second");
+        let first_config = first_dir.path().join("cruise.yaml");
+        let second_config = second_dir.path().join("cruise.yaml");
+        std::fs::write(
+            &first_config,
+            "command: [echo]\nflags:\n  first_flag:\n    description: first flag\nsteps:\n  first_step:\n    command: echo first_step\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(
+            &second_config,
+            "command: [echo]\nflags:\n  second_flag:\n    description: second flag\nsteps:\n  second_step:\n    command: echo second_step\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let history_entry = |working_dir: &std::path::Path,
+                             config_path: &std::path::Path,
+                             skipped_step: &str| {
+            crate::new_session_history::NewSessionHistoryEntry {
+                selected_at: String::new(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: working_dir.to_string_lossy().into_owned(),
+                repo: None,
+                resolved_config_key: config_path.to_string_lossy().into_owned(),
+                skipped_steps: vec![skipped_step.to_string()],
+            }
+        };
+        crate::new_session_history::NewSessionHistory {
+            entries: vec![
+                history_entry(first_dir.path(), &first_config, "first_step"),
+                history_entry(second_dir.path(), &second_config, "second_step"),
+            ],
+        }
+        .save()
+        .unwrap_or_else(|error| panic!("{error}"));
 
         let mut app = app_without_lock();
         app.view = View::NewSession;
@@ -5719,9 +5806,29 @@ mod tests {
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert!(!app.handle_key(key(KeyCode::Down)));
+        let first_config_value = first_config.to_string_lossy().into_owned();
+        assert_eq!(app.form.config.text(), first_config_value);
+        assert!(app.config_sources.iter().any(|source| {
+            source.selection_value() == first_config_value
+        }));
         assert_eq!(
-            app.form.config.text(),
-            first_dir.path().join("cruise.yaml").to_string_lossy()
+            app.config_defaults
+                .as_ref()
+                .map(|defaults| defaults.default_skipped_steps.clone()),
+            Some(vec!["first_step".to_string()])
+        );
+        assert_eq!(app.form.selected_skipped_steps(), vec!["first_step"]);
+        assert!(app
+            .skip_choices()
+            .iter()
+            .any(|(label, _)| label == "first_step"));
+        assert_eq!(
+            app.form
+                .flag_choices
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first_flag"]
         );
 
         app.form.config.set_text("");
@@ -5732,9 +5839,32 @@ mod tests {
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert!(!app.handle_key(key(KeyCode::Down)));
+        let second_config_value = second_config.to_string_lossy().into_owned();
+        assert_eq!(app.form.config.text(), second_config_value);
+        assert!(app.config_sources.iter().any(|source| {
+            source.selection_value() == second_config_value
+        }));
+        assert!(!app.config_sources.iter().any(|source| {
+            source.selection_value() == first_config_value
+        }));
         assert_eq!(
-            app.form.config.text(),
-            second_dir.path().join("cruise.yaml").to_string_lossy()
+            app.config_defaults
+                .as_ref()
+                .map(|defaults| defaults.default_skipped_steps.clone()),
+            Some(vec!["second_step".to_string()])
+        );
+        assert_eq!(app.form.selected_skipped_steps(), vec!["second_step"]);
+        assert!(app
+            .skip_choices()
+            .iter()
+            .any(|(label, _)| label == "second_step"));
+        assert_eq!(
+            app.form
+                .flag_choices
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second_flag"]
         );
     }
 
@@ -5753,7 +5883,6 @@ mod tests {
 
         let mut app = app_without_lock();
         app.view = View::NewSession;
-        app.form.input.set_text("task");
         app.form
             .working_dir
             .set_text(&repo_dir.path().to_string_lossy());
@@ -5787,7 +5916,6 @@ mod tests {
 
         let mut app = app();
         app.view = View::NewSession;
-        app.form.input.set_text("task");
         app.form.source = SourceKind::GitHub;
         app.form.repository.set_text("acme/cruise");
         app.form
@@ -5808,22 +5936,37 @@ mod tests {
             "auto-detect must wait until the repository clone exists"
         );
         assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
+        assert!(app.form.flag_choices.is_empty());
 
-        let request = app
-            .session_request()
-            .unwrap_or_else(|| panic!("expected a valid GitHub request"));
+        let request = app.form.request();
         assert_eq!(
             request.skipped_steps,
             [] as [String; 0],
             "auto-detect must not copy skip ids from the caller-local config"
         );
+
+        app.github_repositories = vec!["acme/cruise".to_string(), "acme/other".to_string()];
+        app.form.step = Step::Repository;
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.repository.text(), "acme/other");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(
+            !app.config_sources
+                .iter()
+                .any(crate::resolver::ConfigCandidate::is_local),
+            "caller-local configs must remain omitted after changing repositories"
+        );
+        assert!(app.config_defaults.is_none());
+        assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
+        assert!(app.form.flag_choices.is_empty());
+        assert_eq!(app.form.request().skipped_steps, [] as [String; 0]);
     }
 
     #[test]
     fn invalid_config_path_blocks_leaving_config_step_and_shows_error() {
         let mut app = app();
         app.view = View::NewSession;
-        app.form.input.set_text("task");
         app.form.step = Step::Config;
         app.form.config.set_text("/path/that/does/not/exist.yaml");
         app.config_defaults = None;
@@ -5841,7 +5984,6 @@ mod tests {
         for shortcut in ['p', 'g', 'u', 's'] {
             let mut app = app();
             app.view = View::NewSession;
-            app.form.input.set_text("task");
             app.form.step = Step::Config;
             app.form.config.set_text("/path/that/does/not/exist.yaml");
 
@@ -5868,13 +6010,13 @@ mod tests {
 
         let mut app = app();
         app.view = View::NewSession;
-        app.form.input.set_text("task");
         app.form.step = Step::Config;
         app.form.config.set_text(&config_path.to_string_lossy());
         app.config_defaults = None;
 
         assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::SkippedSteps);
+        assert_eq!(app.form.step, Step::Task);
+        assert_eq!(app.form.input.text(), "");
         assert_eq!(
             app.config_defaults
                 .as_ref()

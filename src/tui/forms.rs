@@ -92,12 +92,12 @@ pub enum Step {
 
 impl Step {
     pub const ORDER: [Self; 12] = [
-        Self::Task,
-        Self::Attachments,
         Self::Source,
         Self::WorkingDirectory,
         Self::Repository,
         Self::Config,
+        Self::Task,
+        Self::Attachments,
         Self::SkippedSteps,
         Self::Flags,
         Self::Workspace,
@@ -243,7 +243,7 @@ impl NewSessionForm {
             config: Editor::new(draft.requested_config_path.as_deref().unwrap_or("")),
             attachments: Editor::default(),
             skipped: Editor::new(&draft.skipped_steps.join(", ")),
-            step: Step::Task,
+            step: Step::Source,
             source: if draft.repo.is_some() {
                 SourceKind::GitHub
             } else {
@@ -397,7 +397,7 @@ impl NewSessionForm {
         }
     }
     pub fn rewind(&mut self) {
-        self.step = Step::Task;
+        self.step = Step::Source;
     }
 
     /// Clear creation-only input after a session has been persisted.
@@ -671,6 +671,39 @@ mod tests {
     }
 
     #[test]
+    fn new_forms_begin_at_source_with_or_without_a_saved_draft() {
+        let form = NewSessionForm::default();
+        assert_eq!(form.step, Step::Source);
+
+        let draft = NewSessionDraft {
+            input: "restored task".to_string(),
+            requested_config_path: Some("workflow.yaml".to_string()),
+            working_dir: "/tmp/restored".to_string(),
+            repo: Some("acme/cruise".to_string()),
+            skipped_steps: vec!["build".to_string()],
+            updated_at: String::new(),
+        };
+        let form = NewSessionForm::from_draft(Some(&draft));
+
+        assert_eq!(form.step, Step::Source);
+        assert_eq!(form.input.text(), "restored task");
+        assert_eq!(form.working_dir.text(), "/tmp/restored");
+        assert_eq!(form.repository.text(), "acme/cruise");
+        assert_eq!(form.config.text(), "workflow.yaml");
+        assert_eq!(form.skipped.text(), "build");
+    }
+
+    #[test]
+    fn rewind_returns_to_source_from_the_last_question() {
+        let mut form = NewSessionForm::default();
+        form.step = Step::Launch;
+
+        form.rewind();
+
+        assert_eq!(form.step, Step::Source);
+    }
+
+    #[test]
     fn reset_after_creation_clears_creation_input_and_preserves_form_settings() {
         let mut form = NewSessionForm {
             step: Step::Launch,
@@ -698,7 +731,7 @@ mod tests {
         assert_eq!(form.input.text(), "");
         assert_eq!(form.attachments.text(), "");
         assert_eq!(form.attachment_paths(), [] as [PathBuf; 0]);
-        assert_eq!(form.step, Step::Task);
+        assert_eq!(form.step, Step::Source);
         assert!(!form.dirty);
         assert_eq!(form.working_dir.text(), "/tmp/project");
         assert_eq!(form.repository.text(), "acme/cruise");
@@ -741,6 +774,10 @@ mod tests {
         assert_eq!(form.last_change, preserved.2);
         assert!(!form.dirty);
 
+        for expected in [Step::WorkingDirectory, Step::Config, Step::Task] {
+            assert!(form.advance());
+            assert_eq!(form.step, expected);
+        }
         form.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(form.dirty);
         assert!(form.should_autosave(form.last_change + Duration::from_millis(500)));
@@ -1055,11 +1092,11 @@ mod tests {
         assert_eq!(
             form.steps().collect::<Vec<_>>(),
             vec![
-                Step::Task,
-                Step::Attachments,
                 Step::Source,
                 Step::WorkingDirectory,
                 Step::Config,
+                Step::Task,
+                Step::Attachments,
                 Step::SkippedSteps,
                 Step::Workspace,
                 Step::FormalSpec,
@@ -1076,6 +1113,21 @@ mod tests {
         form.choose(1);
         assert_eq!(form.workspace_mode, WorkspaceMode::CurrentBranch);
         assert!(form.applies(Step::DirtyTree));
+        assert_eq!(
+            form.steps().collect::<Vec<_>>(),
+            vec![
+                Step::Source,
+                Step::WorkingDirectory,
+                Step::Config,
+                Step::Task,
+                Step::Attachments,
+                Step::SkippedSteps,
+                Step::Workspace,
+                Step::DirtyTree,
+                Step::FormalSpec,
+                Step::Launch,
+            ]
+        );
         assert!(form.advance());
         assert_eq!(form.step, Step::DirtyTree);
         assert!(form.advance());
@@ -1096,10 +1148,27 @@ mod tests {
             WorkspaceMode::Worktree,
             "GitHub clones always run in a worktree"
         );
+        assert_eq!(
+            form.steps().collect::<Vec<_>>(),
+            vec![
+                Step::Source,
+                Step::Repository,
+                Step::Config,
+                Step::Task,
+                Step::Attachments,
+                Step::SkippedSteps,
+                Step::FormalSpec,
+                Step::Launch,
+            ]
+        );
         assert!(form.advance());
         assert_eq!(form.step, Step::Repository);
         assert!(form.advance());
         assert_eq!(form.step, Step::Config);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Task);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Attachments);
         assert!(form.advance());
         assert_eq!(form.step, Step::SkippedSteps);
         assert!(form.advance());
@@ -1113,13 +1182,70 @@ mod tests {
     #[test]
     fn retreat_walks_back_to_the_first_question_and_stops() {
         let mut form = NewSessionForm::default();
-        form.step = Step::Source;
+        assert!(!form.retreat());
+        assert_eq!(form.step, Step::Source);
+
+        for expected in [Step::WorkingDirectory, Step::Config, Step::Task] {
+            assert!(form.advance());
+            assert_eq!(form.step, expected);
+        }
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Config);
+    }
+
+    #[test]
+    fn declared_flags_stay_after_skipped_steps_and_before_workspace() {
+        let mut form = NewSessionForm::default();
+        form.set_flag_choices(vec![crate::flags::FlagChoice {
+            name: "optional_check".to_string(),
+            description: None,
+        }]);
+
+        assert_eq!(
+            form.steps().collect::<Vec<_>>(),
+            vec![
+                Step::Source,
+                Step::WorkingDirectory,
+                Step::Config,
+                Step::Task,
+                Step::Attachments,
+                Step::SkippedSteps,
+                Step::Flags,
+                Step::Workspace,
+                Step::FormalSpec,
+                Step::Launch,
+            ]
+        );
+
+        form.step = Step::Flags;
+        assert_eq!(
+            form.validate_step(),
+            Err("Set every workflow flag on or off (Space) before continuing".to_string())
+        );
+        form.toggle_flag();
+        assert!(form.validate_step().is_ok());
+
+        form.set_flag_choices(Vec::new());
+        assert!(!form.steps().any(|step| step == Step::Flags));
+    }
+
+    #[test]
+    fn config_task_and_image_skip_boundaries_follow_the_dialogue_order() {
+        let mut form = NewSessionForm::default();
+        for expected in [Step::WorkingDirectory, Step::Config, Step::Task] {
+            assert!(form.advance());
+            assert_eq!(form.step, expected);
+        }
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Config);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Task);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Attachments);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::SkippedSteps);
         assert!(form.retreat());
         assert_eq!(form.step, Step::Attachments);
-        assert!(form.retreat());
-        assert_eq!(form.step, Step::Task);
-        assert!(!form.retreat());
-        assert_eq!(form.step, Step::Task);
     }
 
     #[test]

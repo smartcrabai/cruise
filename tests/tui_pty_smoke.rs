@@ -508,6 +508,32 @@ impl Drop for PtySession {
     }
 }
 
+fn start_new_session(tui: &mut PtySession) {
+    tui.send(b"2");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+    });
+}
+
+fn advance_new_session_to_config(tui: &mut PtySession) {
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 2 of 9") && screen.contains("Which directory?")
+    });
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 3 of 9") && screen.contains("Which workflow config?")
+    });
+}
+
+fn advance_new_session_to_task(tui: &mut PtySession) {
+    advance_new_session_to_config(tui);
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 4 of 9") && screen.contains("What should cruise do?")
+    });
+}
+
 fn tui_available() -> bool {
     match Command::new("script").arg("-V").output() {
         Ok(_) => true,
@@ -536,11 +562,8 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
     write_test_workflow(&workflows_dir.join("user.yaml"), "user_step");
 
     let mut tui = fixture.start_in_directory(120, 30, true, &project);
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
-    tui.send(b"config candidate PTY test");
-    tui.send(b"\t\t\t\t");
-    tui.wait_for_output("Which workflow config?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_config(&mut tui);
     tui.wait_for_output("Auto-detect", START_TIMEOUT);
     tui.wait_for_output("./cruise.yaml", START_TIMEOUT);
 
@@ -554,6 +577,11 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"custom/workflow.yaml");
     tui.wait_for_output("custom/workflow.yaml", START_TIMEOUT);
+    tui.send(b"\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 4 of 9") && screen.contains("What should cruise do?")
+    });
+    tui.send(b"config candidate PTY test");
     tui.send(b"\x13");
     tui.wait_for_output("Saved draft", START_TIMEOUT);
     tui.send(b"q");
@@ -618,8 +646,8 @@ fn navigation_modals_validation_and_terminal_lifecycle_work() {
     let mut tui = fixture.start(120, 30, true);
     tui.wait_for_output("No sessions yet", START_TIMEOUT);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"\t");
     tui.wait_for_output("Any images to attach?", START_TIMEOUT);
     tui.send(b"\t");
@@ -627,11 +655,18 @@ fn navigation_modals_validation_and_terminal_lifecycle_work() {
         "Task description or an image attachment is required",
         START_TIMEOUT,
     );
-    // Esc closes the error, then backs out of the dialogue one question at a time.
-    for _ in 0..3 {
-        tui.send(b"\x1b");
-        thread::sleep(Duration::from_millis(100));
-    }
+    // Esc closes the error, then backs out one visible question at a time.
+    tui.send(b"\x1b");
+    tui.wait_for_output("Any images to attach?", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.wait_for_output("Which workflow config?", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.wait_for_output("Which directory?", START_TIMEOUT);
+    tui.send(b"\x1b");
+    tui.wait_for_output("Where is the code?", START_TIMEOUT);
+    tui.send(b"\x1b");
     tui.wait_for_output("No sessions yet", START_TIMEOUT);
     tui.send(b"3");
     tui.wait_for_output("PARALLELISM", START_TIMEOUT);
@@ -800,8 +835,8 @@ fn new_session_form_saves_a_draft_without_planning() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"draft created through terminal e2e");
     tui.send(b"\x13");
     tui.wait_for_output("Saved draft", START_TIMEOUT);
@@ -848,14 +883,17 @@ fn new_session_ctrl_s_clears_input_before_the_next_saved_draft() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"first draft from terminal");
     tui.send(b"\x13");
     tui.wait_for_output("Saved draft", START_TIMEOUT);
 
     tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+    });
+    advance_new_session_to_task(&mut tui);
     tui.send(b"\x13");
     tui.wait_for_output(
         "Task description or an image attachment is required",
@@ -886,12 +924,15 @@ fn new_session_ctrl_p_validates_before_starting_planning() {
     let mut tui = fixture.start(120, 30, true);
 
     tui.send(b"n");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+    });
     tui.send(b"\x10");
     tui.wait_for_output(
         "Task description or an image attachment is required",
         START_TIMEOUT,
     );
-    // First Esc closes the error, the second leaves the task question so `q` quits.
+    // First Esc closes the error, the second leaves Source so `q` quits.
     for _ in 0..2 {
         tui.send(b"\x1b");
         thread::sleep(Duration::from_millis(100));
@@ -916,11 +957,14 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"planned through terminal e2e");
-    // Task → Images → Source → Working directory → Config → Skipped steps → Workspace
-    tui.send(b"\t\t\t\t\t\t");
+    tui.send(b"\t");
+    tui.wait_for_output("Any images to attach?", START_TIMEOUT);
+    tui.send(b"\t");
+    tui.wait_for_output("Skip any workflow steps?", START_TIMEOUT);
+    tui.send(b"\t");
     tui.wait_for_output("Where should cruise execute?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\t");
@@ -956,20 +1000,23 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"first planned through terminal");
     tui.send(b"\x15");
     tui.wait_for_planned_session("first planned through terminal", START_TIMEOUT);
 
     tui.send(b"n");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+    });
     tui.send(b"\x15");
     tui.wait_for_output(
         "Task description or an image attachment is required",
         START_TIMEOUT,
     );
     tui.send(b"\x1b");
+    advance_new_session_to_task(&mut tui);
     tui.send(b"second planned through terminal");
     tui.send(b"\x15");
     tui.wait_for_planned_session("second planned through terminal", START_TIMEOUT);
@@ -1207,7 +1254,9 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
     tui.send(b"\x1b");
     thread::sleep(Duration::from_millis(100));
     tui.send(b"2");
-    tui.wait_for_output("question 1 of 9", START_TIMEOUT);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+    });
     tui.wait_for_output("Ctrl+P/G/U start now", START_TIMEOUT);
     tui.send(b"\x1b");
     thread::sleep(Duration::from_millis(100));
@@ -1227,11 +1276,13 @@ fn new_session_form_autosaves_edited_text() {
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
 
-    tui.send(b"2");
-    tui.wait_for_output("What should cruise do?", START_TIMEOUT);
+    start_new_session(&mut tui);
+    advance_new_session_to_task(&mut tui);
     tui.send(b"autosaved through terminal e2e");
-    // Esc at the first question leaves the dialogue so `q` quits instead of typing.
-    tui.send(b"\x1b");
+    // Return from Task to Source, then Esc leaves so `q` quits instead of typing.
+    for _ in 0..4 {
+        tui.send(b"\x1b");
+    }
     tui.wait_for_output("Draft autosaved", START_TIMEOUT);
     tui.send(b"q");
 

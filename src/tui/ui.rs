@@ -241,7 +241,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(session) = app.active_session() else {
         frame.render_widget(
             Paragraph::new(
-                "\n  No sessions yet\n\n  Press n, type a task, then Tab through the questions\n  or press Ctrl+P/G/U to start right away.",
+                "\n  No sessions yet\n\n  Press n, choose Source, location, and config,\n  then type a task before continuing or starting.",
             )
             .block(panel(app, " Detail ", false)),
             area,
@@ -768,7 +768,7 @@ fn step_hint(app: &TuiApp) -> String {
     const BACK: &str = "Shift-Tab/Esc back";
     match app.form.step {
         Step::Task => {
-            "Enter newline · Tab or Ctrl+Enter next · Ctrl+P/G/U start now · Esc leave".to_string()
+            "Enter newline · Tab or Ctrl+Enter next · Ctrl+P/G/U start now · Esc back".to_string()
         }
         Step::Attachments => format!("Enter newline · Tab complete path, then next · {BACK}"),
         Step::WorkingDirectory => {
@@ -797,7 +797,8 @@ fn step_hint(app: &TuiApp) -> String {
         Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
         Step::Flags => format!("↑↓ move · Space toggle on/off · Enter next · {BACK}"),
         Step::Launch => format!("↑↓ choose · Enter go · {BACK}"),
-        Step::Source | Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
+        Step::Source => "↑↓ or Space choose · Enter next · Esc leave".to_string(),
+        Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
             format!("↑↓ or Space choose · Enter next · {BACK}")
         }
     }
@@ -1136,7 +1137,7 @@ Ctrl+Enter  save multiline input in action dialogs
 Plan Ask: Enter edit/submit   Esc leave editing; Option stays modal
 Esc  close, or back one question   ?  help   q/Ctrl-C  quit
 
-Fast path: n → type the task → Ctrl+P/G/U.
+Fast path: n → Source → location → config → task → Ctrl+P/G/U.
 Keyboard-only; no mouse or child-owned TTY.";
     render_text_modal(frame, app, area, 72, 20, "Keyboard map", body);
 }
@@ -2316,46 +2317,95 @@ mod tests {
     }
 
     #[test]
-    fn minimum_new_session_layout_shows_one_question_with_the_remaining_ones_listed() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(view.contains("question 1 of 9"));
-        assert!(view.contains("What should cruise do?"));
-        for upcoming in [
-            "Images",
-            "Source",
-            "Working directory",
-            "Workflow config",
-            "Skipped steps",
-            "Workspace",
-            "Formal specification",
-            "Launch",
-        ] {
+    fn minimum_and_wide_new_session_layouts_show_source_before_task() {
+        for width in [80, 120] {
+            let view = rendered_view_with(width, 24, false, View::NewSession, |_| {});
+            assert!(view.contains("question 1 of 9"), "width {width}: {view}");
+            assert!(view.contains("Where is the code?"), "width {width}: {view}");
+            for upcoming in [
+                "Working directory",
+                "Workflow config",
+                "Task",
+                "Images",
+                "Skipped steps",
+                "Workspace",
+                "Formal specification",
+                "Launch",
+            ] {
+                assert!(
+                    view.contains(upcoming),
+                    "width {width}: missing upcoming question: {upcoming}\n{view}"
+                );
+            }
             assert!(
-                view.contains(upcoming),
-                "missing upcoming question: {upcoming}"
+                !view.contains("Repository (GitHub or GitLab)"),
+                "directory sessions do not ask for a repository"
             );
+            assert!(!view.contains("What should cruise do?"));
+            assert!(view.contains("Enter next"));
         }
-        assert!(
-            !view.contains("Repository (GitHub or GitLab)"),
-            "directory sessions do not ask for a repository"
-        );
-        assert!(view.contains("Tab or Ctrl+Enter next"));
     }
 
     #[test]
-    fn answered_questions_are_summarised_above_the_current_one() {
+    fn config_is_the_third_question_before_task_has_been_answered() {
         let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.input.set_text("add dark mode\nwith a toggle");
+            app.form.source = crate::tui::forms::SourceKind::Directory;
             app.form.working_dir.set_text("~/apps/demo");
             app.form.config.set_text("");
             app.form.step = Step::Config;
         });
-        assert!(view.contains("question 5 of 9"));
-        assert!(view.contains("✓ Task"));
-        assert!(view.contains("add dark mode …"));
+        assert!(view.contains("question 3 of 9"));
+        assert!(!view.contains("✓ Task"));
+        assert!(view.contains("    Task"));
+        assert!(view.contains("✓ Source"));
         assert!(view.contains("✓ Working directory"));
         assert!(view.contains("~/apps/demo"));
         assert!(view.contains("Which workflow config?"));
+    }
+
+    #[test]
+    fn source_and_task_hints_describe_their_escape_destinations() {
+        for width in [80, 120] {
+            let source = rendered_view_with(width, 30, false, View::NewSession, |_| {});
+            assert!(source.contains("Esc"));
+            assert!(
+                source.contains("leave") || source.contains("exit"),
+                "Source hint must explain that Esc leaves the first question: {source}"
+            );
+            assert!(!source.contains("Esc back"));
+
+            let task = rendered_view_with(width, 30, false, View::NewSession, |app| {
+                app.form.step = Step::Task;
+            });
+            assert!(task.contains("Esc"));
+            assert!(task.contains("back"));
+            assert!(!task.contains("Esc leave"));
+        }
+    }
+
+    #[test]
+    fn help_fast_path_places_source_location_and_config_before_task() {
+        let view = rendered_view_with(120, 30, false, View::NewSession, |app| {
+            app.modal = Some(Modal::Help);
+        });
+        let help = view.to_ascii_lowercase();
+        let Some((_, remainder)) = help.split_once("fast path:") else {
+            panic!("keyboard help did not show a fast path: {view}");
+        };
+        let fast_path = remainder
+            .split_once("keyboard-only")
+            .map_or(remainder, |(path, _)| path);
+        let source = fast_path.find("source");
+        let location = fast_path
+            .find("directory")
+            .or_else(|| fast_path.find("repository"))
+            .or_else(|| fast_path.find("location"));
+        let config = fast_path.find("config");
+        let task = fast_path.find("task");
+        assert!(
+            matches!((source, location, config, task), (Some(s), Some(l), Some(c), Some(t)) if s < l && l < c && c < t),
+            "fast path should order Source, location, Config, then Task: {fast_path}"
+        );
     }
 
     #[test]
